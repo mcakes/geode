@@ -1,5 +1,6 @@
 //! The label editor: a free typeahead over the classification's labels,
-//! opened on the cursor row's label cell (`enter`, `c`, a double-click).
+//! opened on the cursor row's label cell (`i`, `shift+i`, `enter`, a
+//! double-click).
 //! The text field replaces the cell's label; the ranked labels hang under
 //! it. The typed text may be a new label: a highlight is only a guess until
 //! the trader moves it (`up`/`down`, a row click) or types it out in full.

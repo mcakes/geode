@@ -51,6 +51,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
         "Classification: Import CSV\u{2026}",
     ),
     ("classifications::edit", "Classification: Set label"),
+    (
+        "classifications::edit_select",
+        "Classification: Set label (select all)",
+    ),
+    ("classifications::sort_cycle", "Classification: Sort column"),
     ("classifications::clear", "Classification: Clear label"),
     ("classifications::yank", "Classification: Copy label"),
     ("classifications::paste", "Classification: Paste label"),
@@ -103,8 +108,10 @@ pub const DEFAULT_KEYMAP: &str = r#"
 context = "classifications && mode == visual"
 [bindings.keys]
 "enter" = "classifications::edit"
-"c" = "classifications::edit"
+"i" = "classifications::edit"
+"shift+i" = "classifications::edit_select"
 "x" = "classifications::clear"
+"d" = "classifications::clear"
 "ctrl+v" = "classifications::paste"
 "p" = "classifications::paste"
 "escape" = "classifications::cancel"
@@ -113,8 +120,11 @@ context = "classifications && mode == visual"
 context = "classifications && mode == normal"
 [bindings.keys]
 "enter" = "classifications::edit"
-"c" = "classifications::edit"
+"i" = "classifications::edit"
+"shift+i" = "classifications::edit_select"
 "x" = "classifications::clear"
+"d d" = "classifications::clear"
+"s" = "classifications::sort_cycle"
 "ctrl+c" = "classifications::yank"
 "y y" = "classifications::yank"
 "ctrl+v" = "classifications::paste"
@@ -399,7 +409,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 30);
+        assert_eq!(count, 35);
         // The config-level verbs are reached from the palette and the menu.
         for unbound in [
             "new",
@@ -426,6 +436,22 @@ mod tests {
             &registry,
         );
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn c_is_unbound_and_the_aligned_keys_are_bound() {
+        let fragment = DEFAULT_KEYMAP;
+        assert!(!fragment.contains("\"c\" ="), "c is retired");
+        for key in [
+            "\"i\" =",
+            "\"shift+i\" =",
+            "\"d d\" =",
+            "\"s\" =",
+            "\"n\" =",
+            "\"shift+n\" =",
+        ] {
+            assert!(fragment.contains(key), "{key} is bound");
+        }
     }
 
     #[test]

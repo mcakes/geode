@@ -39345,6 +39345,24 @@ run_mutation "classifications: an import reads with the size limit" \
   geode-classifications \
   import_reads_the_chosen_file_with_the_size_limit
 
+# `i` opens with the caret at the end; seeding Select would make typing
+# replace the label.
+run_mutation "classifications: i keeps the label and appends" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                self.open_editor(EditCaret::End, window, cx)' \
+  '                self.open_editor(EditCaret::Select, window, cx)' \
+  geode-classifications \
+  i_puts_the_caret_at_the_end_and_shift_i_selects_the_label
+
+# A clear that removed a map-only value says so; the row leaving the grid
+# must not read as lost.
+run_mutation "classifications: a removed value is announced" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        [] => return None,' \
+  '        _ => return None,' \
+  geode-classifications \
+  d_d_removes_a_map_only_value_and_clears_one_in_the_data
+
 # A door tile shows its edit before the write: a failed write must reach it,
 # or its labels look saved.
 run_mutation "config door: a failed write refuses its origin tiles" \

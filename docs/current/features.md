@@ -1579,7 +1579,8 @@ default order is unclassified rows first, then by label. A label blank
 after trimming is unclassified everywhere: in the counts, the sort and the
 paint, including a hand-written `''`. `:sort <source|label|rows>
 [asc|desc]` orders the grid and bare `:sort` restores the default; a header
-sort control cycles desc → asc → default as every grid tile's does.
+sort control cycles desc → asc → default as every grid tile's does, and
+`s` cycles the label column's sort as its header control does.
 Unclassified labels and values not in the data sort last either way.
 Every row stays shown: `/` is vim's find, not a filter. Each keystroke
 moves the cursor to the first row at or after where the search began
@@ -1602,13 +1603,17 @@ moves the cursor there (a row inside a live selection keeps the selection)
 and opens the `⋯` menu at the pointer, as `.` opens it from the header.
 
 **Labels.** The verbs act on the selection, else the cursor's row.
-`enter`/`c` (or a double-click) open the label editor in the label cell,
-prefilled only when every target shares one label; `up`/`down` move the
+`i`, `enter` (or a double-click) open the label editor in the label cell
+with the caret at the end of the label, `I` (`shift+i`) with it selected
+so typing replaces it; it is prefilled only when every target shares one
+label, and `up`/`down` move the
 typeahead's highlight over the labels in use. Enter writes the highlighted
 label when the highlight was moved or equals the typed text ignoring case
 (Unicode lowercasing), else the typed text trimmed and never re-cased, so
-`tech` typed over an existing `Tech` takes `Tech`; blank clears. `x` clears,
-`y y` copies the cursor row's label, `p` pastes it, `u` undoes and `ctrl+r`
+`tech` typed over an existing `Tech` takes `Tech`; blank clears. `x` (`d`
+on a selection, `d d` on the cursor's row) clears — a value only the map
+holds then leaves the grid, and the notice says `removed <value>`
+(`cleared 2 labels, removed 1 value` for a mix). `y y` copies the cursor row's label, `p` pastes it, `u` undoes and `ctrl+r`
 redoes. Every write first checks the classification's source column: a
 hand-written definition over a column no classification may map is never
 written (`not saved: …`), since the door writes even when the reload then

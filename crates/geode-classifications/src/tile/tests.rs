@@ -1054,7 +1054,9 @@ fn enter_opens_the_editor_prefilled_and_enter_writes_the_whole_object(
         vcx.debug_bounds("classifications-editor-row-Europe")
             .is_some()
     );
-    // The prefill is selected: typing replaces it.
+    // `shift+i` reopens it with the prefill selected: typing replaces it.
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "shift-i");
     vcx.simulate_input("Europe");
     h.press(&mut vcx, "enter");
     assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
@@ -1076,6 +1078,84 @@ fn enter_opens_the_editor_prefilled_and_enter_writes_the_whole_object(
 }
 
 #[gpui::test]
+fn i_puts_the_caret_at_the_end_and_shift_i_selects_the_label(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "i");
+    vcx.simulate_input("X");
+    assert_eq!(h.editor(&vcx).unwrap().0, "AmericasX");
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("X");
+    assert_eq!(h.editor(&vcx).unwrap().0, "AmericasX", "enter is i");
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "shift-i");
+    vcx.simulate_input("X");
+    assert_eq!(h.editor(&vcx).unwrap().0, "X");
+    h.press(&mut vcx, "escape");
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn c_no_longer_edits(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.press(&mut vcx, "c");
+    assert_eq!(h.editor(&vcx), None);
+}
+
+#[gpui::test]
+fn d_d_removes_a_map_only_value_and_clears_one_in_the_data(cx: &mut gpui::TestAppContext) {
+    // `region` maps GHOST, which the data does not hold.
+    let dims =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\", \"GHOST\"]\n";
+    let (h, mut vcx) = shown_with(cx, dims, "region", &[("DAX", 5), ("NKY", 7)]);
+    h.goto(&mut vcx, "GHOST");
+    h.press(&mut vcx, "d d");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&region(&[("DAX", "Europe")]))]);
+    assert!(!h.shown(&vcx).contains(&"GHOST".to_string()));
+    assert_eq!(h.notices(&vcx), ["removed GHOST"]);
+    h.press(&mut vcx, "u");
+    assert!(
+        h.shown(&vcx).contains(&"GHOST".to_string()),
+        "undo puts it back"
+    );
+}
+
+#[gpui::test]
+fn a_mixed_selection_reports_both_parts_in_one_write(cx: &mut gpui::TestAppContext) {
+    let dims =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\", \"GHOST\"]\n";
+    let (h, mut vcx) = shown_with(cx, dims, "region", &[("DAX", 5), ("NKY", 7)]);
+    h.goto(&mut vcx, "DAX");
+    let at = h.shown(&vcx).iter().position(|s| s == "GHOST").unwrap();
+    let here = h.shown(&vcx).iter().position(|s| s == "DAX").unwrap();
+    assert_eq!(at, here + 1, "fixture: GHOST sorts right after DAX");
+    h.press(&mut vcx, "shift-v j d");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    assert_eq!(h.notices(&vcx), ["cleared 1 label, removed 1 value"]);
+    h.press(&mut vcx, "u");
+    assert_eq!(h.label(&vcx, "DAX").as_deref(), Some("Europe"));
+    assert_eq!(h.label(&vcx, "GHOST").as_deref(), Some("Europe"));
+}
+
+#[gpui::test]
+fn s_cycles_the_label_sort(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.press(&mut vcx, "s");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.grid.sort()),
+        Some((SortCol::Label, true))
+    );
+    h.press(&mut vcx, "s");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.grid.sort()),
+        Some((SortCol::Label, false))
+    );
+    h.press(&mut vcx, "s");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.grid.sort()), None);
+}
+
+#[gpui::test]
 fn typing_a_case_variant_of_an_existing_label_takes_the_existing_one_only_when_highlighted(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -1091,7 +1171,7 @@ fn typing_a_case_variant_of_an_existing_label_takes_the_existing_one_only_when_h
     assert!(written.contains("Tech = [\"AAPL\", \"MSFT\"]"), "{written}");
     // Typed past every label: written as typed, never re-cased.
     h.goto(&mut vcx, "AAPL");
-    h.press(&mut vcx, "enter");
+    h.press(&mut vcx, "shift-i");
     vcx.simulate_input("techx");
     h.press(&mut vcx, "enter");
     let edits = h.edits(&mut vcx);
@@ -1104,7 +1184,7 @@ fn typing_a_case_variant_of_an_existing_label_takes_the_existing_one_only_when_h
 fn an_empty_entry_clears_and_escape_cancels(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = editing(cx);
     h.goto(&mut vcx, "SPX");
-    h.press(&mut vcx, "enter backspace enter");
+    h.press(&mut vcx, "shift-i backspace enter");
     assert_eq!(
         h.edits(&mut vcx),
         [edit_of(&region(&[("SX5E", "Europe"), ("DAX", "Europe")]))]

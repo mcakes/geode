@@ -13,7 +13,9 @@ the frame's config door.
   each classification's winning layer and the ones a user copy shadows).
   `set_config` stores it and calls `config_changed` on every live tile. Also
   the tile's `TileContent` door, `ACTIONS` (category `Classifications`) and
-  the `DEFAULT_KEYMAP` fragment. New, rename, delete and revert have no
+  the `DEFAULT_KEYMAP` fragment: `i`/`enter` edit (caret at the end),
+  `shift+i` edit (label selected), `x`, `d d` (`d` on a selection) clear,
+  `s` cycles the label sort. New, rename, delete and revert have no
   default chord: the palette and the `⋯` menu reach them; Export CSV,
   Export CSV with unclassified and Import CSV likewise.
 - `core/session.rs`: the session table (`version`, `name`,
@@ -118,10 +120,14 @@ every grid tile's header does). The sort is saved in the session.
 
 ## Editing labels
 
-The verbs act on the row selection, else the cursor's row. `enter`/`c`
-(and a row double-click) open the editor, prefilled and selected; in it
-the tile is in `insert` mode, `up`/`down` move the highlight, `enter`
-writes, `escape` or a press elsewhere closes it unwritten. `x` clears,
+The verbs act on the row selection, else the cursor's row. `i`/`enter`
+(and a row double-click) open the editor prefilled with the caret at the
+end, `shift+i` with the prefill selected (`EditCaret`); in it the tile is
+in `insert` mode, `up`/`down` move the highlight, `enter` writes, `escape`
+or a press elsewhere closes it unwritten. `x` (`d d`, or `d` on a
+selection) clears; a clear that removed values only the map held says so
+(`removal_notice`: `removed GHOST`, `cleared 2 labels, removed 1 value`),
+since those rows leave the grid.
 `y y` (or `ctrl+c`) copies the cursor row's label (unclassified copies as a clear), `p`
 (or `ctrl+v`) pastes it, `u` undoes and `ctrl+r` redoes. Each write first checks the
 classification's source column (`validate_source`): a hand-written one

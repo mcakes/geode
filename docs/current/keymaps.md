@@ -367,8 +367,9 @@ difference chooser) `enter` and `escape`, its steps being the shared ones.
 Its normal-mode `escape` is `volslice::cancel`, which dismisses the footer
 notice when there is nothing else to cancel.
 The classifications fragment binds its label verbs under `mode == normal`
-(`enter`/`c` edit, `x` clear, `y y`/`ctrl+c` copy, `p`/`ctrl+v` paste, `u` undo, `ctrl+r`
-redo, `shift+r` refresh, `.` the `⋯` menu, `g c` the switcher, `v`/`shift+v`
+(`i`/`enter` edit with the caret at the end, `shift+i` edit with the label
+selected, `x`/`d d` clear, `s` cycle the label sort, `y y`/`ctrl+c` copy,
+`p`/`ctrl+v` paste, `u` undo, `ctrl+r` redo, `shift+r` refresh, `.` the `⋯` menu, `g c` the switcher, `v`/`shift+v`
 a row selection, `escape` dismissing the header's warning and danger
 notices); under `mode == visual` the verbs that act on a selection
 and `escape`; under `mode == insert` (the label editor and the New/Rename

@@ -41,9 +41,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use geode_core::classification;
 use geode_core::classification::import::{ImportPlan, MAX_IMPORT_BYTES, plan_import};
 use geode_core::classification::validate::{references, source_columns, validate_source};
+use geode_core::classification::{self, ClassRow};
 use geode_core::config::{DIMENSIONS_DOC, Layer};
 use geode_core::dimensions::DerivedDimension;
 use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
@@ -1572,19 +1572,20 @@ impl ClassificationsTile {
         validate_source(&config_dim.from, &config.schema, &config.dims)
     }
 
-    /// Write one label change through the config door: validated, recorded
+    /// Write one label change through the config door, returning whether it
+    /// queued a change: validated, recorded
     /// in the history, queued whole-object, and shown at once (the pending
     /// edit) ahead of the reload that carries it. A classification whose
     /// source column is not one a classification may map (a hand-written
     /// definition) is never written: the door would write it even when the
     /// reload then rejected it.
-    fn write(&mut self, write: Write, cx: &mut Context<Self>) {
+    fn write(&mut self, write: Write, cx: &mut Context<Self>) -> bool {
         if self.refuse_while_reverting(cx) {
-            return;
+            return false;
         }
         self.notices.outcome.clear();
         let Some(config_dim) = self.config_dim() else {
-            return;
+            return false;
         };
         let checked = self.source_writable(&config_dim);
         if let Err(why) = checked {
@@ -1592,7 +1593,7 @@ impl ClassificationsTile {
                 .outcome(Notice::danger(format!("not saved: {why}")));
             self.rebuild_chrome();
             cx.notify();
-            return;
+            return false;
         }
         let before = self.history.current(&config_dim).clone();
         let mut changed = false;
@@ -1654,12 +1655,22 @@ impl ClassificationsTile {
             self.rebuild_chrome();
         }
         cx.notify();
+        changed
     }
 
-    /// `enter`/`c`: open the label editor over the verb's targets,
-    /// prefilled with their label when they all share one, the text
-    /// selected so typing replaces it.
-    fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The shown row for `source`, if it is shown.
+    fn row_of(&self, source: &str) -> Option<&ClassRow> {
+        self.grid
+            .visible()
+            .iter()
+            .map(|&i| self.grid.row(i))
+            .find(|r| r.source == source)
+    }
+
+    /// Open the label editor over the verb's targets, prefilled with their
+    /// label when they all share one: `i`/`enter` (caret at the end),
+    /// `shift+i` (text selected, so typing replaces it).
+    fn open_editor(&mut self, caret: EditCaret, window: &mut Window, cx: &mut Context<Self>) {
         if self.refuse_while_reverting(cx) {
             return;
         }
@@ -1686,7 +1697,7 @@ impl ClassificationsTile {
         .map(str::to_string);
         let input = cx.new(|cx| InputState::new(window, cx));
         input.update(cx, |s, cx| {
-            EditCaret::Select.seed(s, prefill.clone().unwrap_or_default(), window, cx)
+            caret.seed(s, prefill.clone().unwrap_or_default(), window, cx)
         });
         // Every keystroke re-ranks; typing after a moved highlight makes
         // it a guess again. The subscription dies with the field.
@@ -2646,9 +2657,40 @@ impl ClassificationsTile {
                 }
             }
             // The label verbs act on the selection, else the cursor's row.
-            "classifications::edit" if self.menu.is_none() => self.open_editor(window, cx),
+            "classifications::edit" if self.menu.is_none() => {
+                self.open_editor(EditCaret::End, window, cx)
+            }
+            "classifications::edit_select" if self.menu.is_none() => {
+                self.open_editor(EditCaret::Select, window, cx)
+            }
+            "classifications::sort_cycle" if self.menu.is_none() => {
+                self.sort_clicked(SortCol::Label, cx)
+            }
             "classifications::clear" if self.menu.is_none() => {
-                self.write(Write::Assign(self.grid.targets(), None), cx)
+                // A value only the map holds leaves the grid once cleared:
+                // read which before the write rebuilds the rows.
+                let targets = self.grid.targets();
+                let removed: Vec<String> = targets
+                    .iter()
+                    .filter(|s| {
+                        self.row_of(s)
+                            .is_some_and(|r| !r.in_data && r.label.is_some())
+                    })
+                    .cloned()
+                    .collect();
+                let cleared = targets
+                    .iter()
+                    .filter(|s| {
+                        self.row_of(s)
+                            .is_some_and(|r| r.in_data && label_text(r).is_some())
+                    })
+                    .count();
+                let wrote = self.write(Write::Assign(targets, None), cx);
+                if wrote && let Some(text) = removal_notice(&removed, cleared) {
+                    self.notices.outcome(Notice::status(text));
+                    self.rebuild_chrome();
+                    cx.notify();
+                }
             }
             "classifications::yank" if self.menu.is_none() => {
                 if let Some(label) = self.cursor_label() {
@@ -2656,7 +2698,9 @@ impl ClassificationsTile {
                 }
             }
             "classifications::paste" if self.menu.is_none() => match self.register.clone() {
-                Some(label) => self.write(Write::Assign(self.grid.targets(), label), cx),
+                Some(label) => {
+                    self.write(Write::Assign(self.grid.targets(), label), cx);
+                }
                 None => {
                     self.notices.outcome.clear();
                     self.notices.outcome(Notice::status(NOTHING_COPIED));
@@ -2664,8 +2708,12 @@ impl ClassificationsTile {
                     cx.notify();
                 }
             },
-            "classifications::undo" if self.menu.is_none() => self.write(Write::Undo, cx),
-            "classifications::redo" if self.menu.is_none() => self.write(Write::Redo, cx),
+            "classifications::undo" if self.menu.is_none() => {
+                self.write(Write::Undo, cx);
+            }
+            "classifications::redo" if self.menu.is_none() => {
+                self.write(Write::Redo, cx);
+            }
             _ => return false,
         }
         true
@@ -3118,6 +3166,28 @@ fn set_edit(dim: &DerivedDimension) -> ConfigEdit {
     }
 }
 
+/// What a clear says when it removed map-only values: they leave the
+/// grid, which a trader must not mistake for a lost row. Clearing labels
+/// alone says nothing.
+fn removal_notice(removed: &[String], cleared: usize) -> Option<String> {
+    let removed_part = match removed {
+        [] => return None,
+        [one] if cleared == 0 => return Some(format!("removed {one}")),
+        _ => format!(
+            "removed {} value{}",
+            removed.len(),
+            if removed.len() == 1 { "" } else { "s" }
+        ),
+    };
+    Some(match cleared {
+        0 => removed_part,
+        n => format!(
+            "cleared {n} label{}, {removed_part}",
+            if n == 1 { "" } else { "s" }
+        ),
+    })
+}
+
 /// `name`'s user definition, removed.
 fn remove_edit(name: &str) -> ConfigEdit {
     ConfigEdit {
@@ -3130,3 +3200,29 @@ fn remove_edit(name: &str) -> ConfigEdit {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod notice_tests {
+    use super::removal_notice;
+
+    #[test]
+    fn the_removal_notice_names_one_and_counts_many() {
+        assert_eq!(
+            removal_notice(&["GHOST".into()], 0).as_deref(),
+            Some("removed GHOST")
+        );
+        assert_eq!(
+            removal_notice(&["A".into(), "B".into()], 0).as_deref(),
+            Some("removed 2 values")
+        );
+        assert_eq!(
+            removal_notice(&["A".into()], 2).as_deref(),
+            Some("cleared 2 labels, removed 1 value")
+        );
+        assert_eq!(
+            removal_notice(&[], 3),
+            None,
+            "clearing alone says nothing, as today"
+        );
+    }
+}
