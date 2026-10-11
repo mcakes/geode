@@ -20004,30 +20004,32 @@ run_mutation "history: a prefix coverage row covers no deeper tuple" \
 # began is answered as current.
 run_mutation "history: covers_instant trusts coverage without a row" \
   crates/geode-data/src/store/history.rs \
-  '        if !observed {' \
-  '        if false && !observed {' \
+  '            if !answered {' \
+  '            if false && !answered {' \
   geode-data \
   covers_instant_is_false_when_the_span_holds_t_but_no_row_at_or_before_it
 
 run_mutation "history: covers_instant counts a row before the span" \
   crates/geode-data/src/store/history.rs \
-  '        params.extend([Value::BigInt(micros(a)), Value::BigInt(micros(t))]);' \
-  '        params.extend([Value::BigInt(i64::MIN), Value::BigInt(micros(t))]);' \
+  '                .is_some_and(|(_, last)| from_micros(*last) >= *a); // a row at or before t, inside the span' \
+  '                .is_some_and(|(_, last)| from_micros(*last) >= DateTime::<Utc>::MIN_UTC); // a row at or before t, inside the span' \
   geode-data \
   covers_instant_is_false_when_the_span_holds_t_but_no_row_at_or_before_it
 
 run_mutation "history: covers_instant counts a row after t" \
   crates/geode-data/src/store/history.rs \
-  '        params.extend([Value::BigInt(micros(a)), Value::BigInt(micros(t))]);' \
-  '        params.extend([Value::BigInt(micros(a)), Value::BigInt(i64::MAX)]);' \
+  '        params.push(Value::BigInt(micros(t)));
+        let mut stmt = conn.prepare(&latest).map_err(sql_err(&latest))?;' \
+  '        params.push(Value::BigInt(i64::MAX));
+        let mut stmt = conn.prepare(&latest).map_err(sql_err(&latest))?;' \
   geode-data \
   covers_instant_is_false_when_the_span_holds_t_but_no_row_at_or_before_it
 
 # `t` must lie inside a span, not merely after one's start.
 run_mutation "history: covers_instant ignores the span end" \
   crates/geode-data/src/store/history.rs \
-  '        let Some(&(a, _)) = held.iter().find(|(a, b)| *a <= t && t < *b) else {' \
-  '        let Some(&(a, _)) = held.iter().find(|(a, _)| *a <= t) else {' \
+  '        match spans.iter().find(|(a, b)| *a <= t && t < *b) {' \
+  '        match spans.iter().find(|(a, _)| *a <= t) {' \
   geode-data \
   covers_instant_needs_every_tuple_and_a_point_span_counts
 
@@ -39804,7 +39806,7 @@ run_mutation "expr help: help paints over an error" \
 # answer would land after the newer tag's.
 run_mutation "history dispatch: a superseded ticket still answers" \
   crates/geode-data/src/history_dispatch.rs \
-  '        if p.answered || state.newest.get(&p.params.key) != Some(&ticket.0) {' \
+  '        if p.answered || state.newest.get(&p.answer.key()) != Some(&ticket.0) {' \
   '        if p.answered {' \
   geode-data \
   a_held_ticket_superseded_by_a_read_from_coverage_never_answers
@@ -39841,8 +39843,8 @@ run_mutation "history dispatch: a stepped answer records coverage" \
 # calls would leave it unanswered while the queue stays full.
 run_mutation "history dispatch: a full queue does not answer" \
   crates/geode-data/src/history_dispatch.rs \
-  '        if first && state.newest.get(&params.key) == Some(&ticket.0) {' \
-  '        if false && first && state.newest.get(&params.key) == Some(&ticket.0) {' \
+  '        if first && state.newest.get(&answer.key()) == Some(&ticket.0) {' \
+  '        if false && first && state.newest.get(&answer.key()) == Some(&ticket.0) {' \
   geode-data \
   a_full_history_queue_is_answered_as_a_refusal_not_a_lost_request
 
@@ -40084,12 +40086,8 @@ run_mutation "history: a read answers the oldest version" \
 # unheld member is silently missing.
 run_mutation "history: covers_instant skips an unheld tuple" \
   crates/geode-data/src/store/history.rs \
-  '        let Some(&(a, _)) = held.iter().find(|(a, b)| *a <= t && t < *b) else {
-            return Ok(false);
-        };' \
-  '        let Some(&(a, _)) = held.iter().find(|(a, b)| *a <= t && t < *b) else {
-            continue;
-        };' \
+  '            None => uncovered.push(tuple.clone()), // no span of this tuple holds t' \
+  '            None => {} // no span of this tuple holds t' \
   geode-data \
   covers_instant_needs_every_tuple_and_a_point_span_counts
 
