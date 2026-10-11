@@ -171,7 +171,7 @@ the measurement log for fixture and hardware details.
 | Line-pricer reference fill | 1,000 entries / 1,200 sheet rows, every line blank: one `fill_currencies` batch, packages folded once (folding per filled line measured 13.7 ms) | 17.4 µs |
 | Line-pricer sorted rebuild | the flat rebuild above under an `npv` descending sort over varied prices: rollup, `sort::rank`, index (heavily loaded machine; the unsorted rebuild measured 469 µs in the same run) | 549 µs |
 | Line-pricer sorted grouped rebuild | the grouped rebuild above under the same sort (the unsorted one measured 834 µs in the same run; the rank alone 102 µs) | 923 µs |
-| Classifications rebuild after an edit | 5,000 source values, half labelled, `rows` desc sort and a `/` filter active: `History::apply`, `to_toml`, `classification::rows` and the grid's relabel rebuild, before table preparation and paint (load 4.5) | 1.53 ms |
+| Classifications rebuild after an edit | 5,000 source values, half labelled, `rows` desc sort (the reference was measured with a `/` filter also active, which the grid no longer has): `History::apply`, `to_toml`, `classification::rows` and the grid's relabel rebuild, before table preparation and paint (load 4.5) | 1.53 ms |
 | Classifications rows rebuild | the same grid, rows and grid only (a values answer or a reload) | 1.21 ms |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |

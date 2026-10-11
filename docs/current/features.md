@@ -1580,8 +1580,8 @@ after trimming is unclassified everywhere: in the counts, the sort and the
 paint, including a hand-written `''`. `:sort <source|label|rows>
 [asc|desc]` orders the grid and bare `:sort` restores the default; a header
 sort control cycles desc → asc → default as every grid tile's does.
-Unclassified labels and values not in the data sort last either way. `/`
-narrows over source and label, keeping the order.
+Unclassified labels and values not in the data sort last either way.
+Every row stays shown: `/` does not narrow the grid.
 
 The shell's grid motions move a cursor held by source value, so a rebuild
 keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.

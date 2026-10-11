@@ -30,7 +30,7 @@
 //! step. Each step is bound to the classification the import began on.
 //!
 //! What paint reads is prepared in `Chrome` and the table's `Prepared`
-//! whenever the configuration, the values, the filter or the sort change,
+//! whenever the configuration, the values or the sort change,
 //! never in render.
 
 mod editor;
@@ -258,8 +258,9 @@ pub struct ClassificationsTile {
     file_dir: Option<PathBuf>,
     /// Why the values are not on screen: a refused or failed read.
     values_notice: Option<String>,
-    /// The filter in force when a `/` search began, which a cancelled
-    /// search restores; `None` while no search is open.
+    /// `Some` while a `/` search is open, from its first keystroke until it
+    /// commits or cancels: the search holds the keyboard meanwhile. The
+    /// text is unused.
     find_entry: Option<String>,
     /// The rem the table's column widths were last scaled to.
     last_rem: f32,
@@ -723,17 +724,10 @@ impl ClassificationsTile {
                 .map_or(("", ""), |a| (a.from.as_str(), a.name.as_str()));
             Rc::new(Prepared::build(&self.grid, from, name))
         });
-        let (title, help) = if self.grid.query().is_empty() {
-            (
-                "No source values",
-                "Values appear here once the source column has data.",
-            )
-        } else {
-            (
-                "No matching values",
-                "Escape restores the filter in force before the search.",
-            )
-        };
+        let (title, help) = (
+            "No source values",
+            "Values appear here once the source column has data.",
+        );
         let selected = self.grid.selected();
         let sort = self.grid.sort();
         let cursor = self.grid.cursor();
@@ -744,7 +738,7 @@ impl ClassificationsTile {
             d.set_editor(editor);
             // The table reads headings and sort marks only on a refresh,
             // which also re-lays every column: refresh only when one of
-            // them changed, never for a filter keystroke or new values.
+            // them changed, never for new values.
             let mut refresh = d.set_sort(sort);
             if let Some(prepared) = prepared {
                 refresh |= d.set(prepared);
@@ -1517,7 +1511,7 @@ impl ClassificationsTile {
         }
     }
 
-    /// Show `name`. The cursor, the filter, a selection and the label
+    /// Show `name`. The cursor, an open search, a selection and the label
     /// history belonged to the previous classification, so they are
     /// dropped; the sort is the tile's and stays.
     fn show(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -2207,32 +2201,23 @@ impl ClassificationsTile {
         }
     }
 
-    /// `/` narrows the rows as the query is typed; committing keeps it,
-    /// cancelling restores the filter in force when the search began.
+    /// A `/` search holds the keyboard while it is open and moves nothing;
+    /// a plan held meanwhile is offered once it ends.
     pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
-        let query = match event {
-            FindEvent::Changed(q) => {
-                if self.find_entry.is_none() {
-                    self.find_entry = Some(self.grid.query().to_string());
-                }
-                q
+        match event {
+            FindEvent::Changed(_) => {
+                self.find_entry.get_or_insert_default();
             }
-            FindEvent::Committed(q) => {
+            FindEvent::Committed(_) => {
                 self.find_entry = None;
                 self.offer_held_later(cx);
-                q
             }
-            FindEvent::Cancelled => match self.find_entry.take() {
-                Some(entry) => {
+            FindEvent::Cancelled => {
+                if self.find_entry.take().is_some() {
                     self.offer_held_later(cx);
-                    entry
                 }
-                None => return,
-            },
-        };
-        self.grid.set_filter(&query);
-        self.sync_table(true, cx);
-        cx.notify();
+            }
+        }
     }
 
     /// `insert` while the label editor or the prompt is open (the shell

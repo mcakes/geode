@@ -651,32 +651,6 @@ fn a_refused_or_failed_read_shows_the_map_alone_with_a_notice_and_shift_r_retrie
 }
 
 #[gpui::test]
-fn slash_filters_the_rows_and_escape_restores(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = region_with_values(cx);
-    h.find(&mut vcx, FindEvent::Changed("nk".into()));
-    assert_eq!(h.shown(&vcx), ["NKY"]);
-    h.find(&mut vcx, FindEvent::Cancelled);
-    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"], "escape restores");
-    // The label column is searched too.
-    h.find(&mut vcx, FindEvent::Changed("eur".into()));
-    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
-    h.find(&mut vcx, FindEvent::Committed("eur".into()));
-    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"], "enter keeps it");
-    // A later cancelled search restores the committed filter, not none.
-    h.find(&mut vcx, FindEvent::Changed("dax".into()));
-    assert_eq!(h.shown(&vcx), ["DAX"]);
-    h.find(&mut vcx, FindEvent::Cancelled);
-    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
-    // Painted highlights follow the filter.
-    let marks = h.tile.read_with(&vcx, |t, cx| {
-        t.table.read(cx).delegate().prepared().rows[0]
-            .label_marks
-            .clone()
-    });
-    assert_eq!(marks, [std::ops::Range { start: 0, end: 3 }]);
-}
-
-#[gpui::test]
 fn j_moves_the_cursor_and_v_selects_rows(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = region_with_values(cx);
     assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
@@ -819,12 +793,12 @@ fn a_selection_made_before_the_values_keeps_its_rows(cx: &mut gpui::TestAppConte
 
 /// A dragged column width survives what rebuilds the table: the drag is
 /// recorded in the delegate (the table's `ColumnWidthsChanged`, emitted
-/// as its resize handle does), and a filter keystroke or a values answer
-/// does not refresh the columns at all. The table's own laid-out widths
+/// as its resize handle does), and a values answer does not refresh the
+/// columns at all. The table's own laid-out widths
 /// are private, so the test reads what `column()` reports, which is what a
 /// refresh lays out, and counts the tile's refreshes.
 #[gpui::test]
-fn a_dragged_column_width_survives_filter_values_and_sort(cx: &mut gpui::TestAppContext) {
+fn a_dragged_column_width_survives_values_and_sort(cx: &mut gpui::TestAppContext) {
     use gpui_component::table::TableDelegate as _;
     let (h, mut vcx) = region_with_values(cx);
     h.draw(&mut vcx);
@@ -849,12 +823,10 @@ fn a_dragged_column_width_survives_filter_values_and_sort(cx: &mut gpui::TestApp
     assert_eq!(widths(&mut vcx)[1], before[1] + 40.0);
     let refreshes = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.refreshes);
     let at = refreshes(&vcx);
-    h.find(&mut vcx, FindEvent::Changed("e".into()));
-    h.find(&mut vcx, FindEvent::Cancelled);
     vcx.simulate_keystrokes("shift-r");
     let tag = h.distinct_requests()[0].tag;
     h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
-    assert_eq!(refreshes(&vcx), at, "no refresh for a filter or values");
+    assert_eq!(refreshes(&vcx), at, "no refresh for values");
     // A sort does refresh (its header marks), and the drag survives it.
     h.command(&mut vcx, "sort rows").unwrap();
     assert_eq!(refreshes(&vcx), at + 1);

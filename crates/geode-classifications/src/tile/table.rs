@@ -1,13 +1,13 @@
 //! The grid's `TableDelegate`, over rows the tile prepares from its
-//! `GridModel` whenever the rows, the filter or the sort change. The tile
-//! owns the truth (cursor, selection, sort); the delegate paints it and
-//! reports a row press and a header sort click as events.
+//! `GridModel` whenever the rows or the sort change. The tile owns the
+//! truth (cursor, selection, sort); the delegate paints it and reports a
+//! row press and a header sort click as events.
 
 use std::ops::Range;
 use std::rc::Rc;
 
+use geode_shell::fonts;
 use geode_shell::shell::{listrow, scale};
-use geode_shell::{fonts, palette};
 use gpui::prelude::*;
 use gpui::{
     App, Context, Div, ElementId, Entity, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
@@ -16,7 +16,7 @@ use gpui::{
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
 
-use crate::core::grid::{GridModel, LABEL_COL, SOURCE_COL, label_text};
+use crate::core::grid::{GridModel, label_text};
 use crate::core::session::SortCol;
 use crate::tile::editor::{self, EditorPaint};
 
@@ -33,7 +33,7 @@ const COLUMNS: [(SortCol, f32); 3] = [
     (SortCol::Rows, 80.0),
 ];
 
-/// One painted row: prepared text and highlight ranges.
+/// One painted row: prepared text.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PreparedRow {
     pub source: SharedString,
@@ -42,8 +42,6 @@ pub(crate) struct PreparedRow {
     /// The stored row count, blank when the value is not in the data.
     pub count: SharedString,
     pub in_data: bool,
-    pub source_marks: Vec<Range<usize>>,
-    pub label_marks: Vec<Range<usize>>,
 }
 
 /// The shown rows and the two text columns' headings: the source column
@@ -61,18 +59,13 @@ impl Prepared {
         let rows = grid
             .visible()
             .iter()
-            .enumerate()
-            .map(|(at, &i)| {
+            .map(|&i| {
                 let row = grid.row(i);
-                let marks = grid.marks(at);
-                let take = |c: usize| marks.map(|m| m.get(c).to_vec()).unwrap_or_default();
                 PreparedRow {
                     source: row.source.clone().into(),
                     label: label_text(row).map(|l| SharedString::from(l.to_string())),
                     count: row.count.map(|n| n.to_string()).unwrap_or_default().into(),
                     in_data: row.in_data,
-                    source_marks: take(SOURCE_COL),
-                    label_marks: take(LABEL_COL),
                 }
             })
             .collect();
@@ -144,6 +137,9 @@ pub(crate) struct GridDelegate {
     widths: [Option<f32>; COLUMNS.len()],
     empty_title: SharedString,
     empty_help: SharedString,
+    /// The color a find match's run paints in. Nothing paints a match yet;
+    /// the field stays so the find's cells take it from the delegate.
+    #[allow(dead_code)]
     accent: listrow::TableAccent,
     /// The open label editor, painted in its row's label cell.
     editor: Option<EditorPaint>,
@@ -219,19 +215,6 @@ impl GridDelegate {
     #[cfg(test)]
     pub(crate) fn prepared(&self) -> &Rc<Prepared> {
         &self.prepared
-    }
-
-    fn highlighted(
-        &self,
-        text: &SharedString,
-        marks: &[Range<usize>],
-        theme: &Theme,
-    ) -> gpui::AnyElement {
-        if marks.is_empty() {
-            text.clone().into_any_element()
-        } else {
-            palette::highlighted_runs(text, marks, self.accent.get(theme)).into_any_element()
-        }
     }
 }
 
@@ -380,21 +363,13 @@ impl TableDelegate for GridDelegate {
             .when(tinted, |el| el.relative().child(selection_tint(theme)));
         let muted = theme.muted_foreground;
         match COLUMNS[col_ix].0 {
-            SortCol::Source => cell.text_color(theme.foreground).child(self.highlighted(
-                &row.source,
-                &row.source_marks,
-                theme,
-            )),
+            SortCol::Source => cell.text_color(theme.foreground).child(row.source.clone()),
             SortCol::Label if let Some(e) = self.editor.as_ref().filter(|e| e.row == row_ix) => {
                 cell.child(editor::render_cell(e, cx))
             }
             SortCol::Label => {
                 let label = match &row.label {
-                    Some(l) => div().text_color(theme.foreground).child(self.highlighted(
-                        l,
-                        &row.label_marks,
-                        theme,
-                    )),
+                    Some(l) => div().text_color(theme.foreground).child(l.clone()),
                     None => div().text_color(muted).child(UNCLASSIFIED),
                 };
                 cell.child(h_flex().gap_2().child(label).when(!row.in_data, |el| {

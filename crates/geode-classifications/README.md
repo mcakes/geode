@@ -20,19 +20,16 @@ the frame's config door.
   `sort = [column, "asc" | "desc"]`, `cursor`). An unreadable key is dropped
   with a notice and the rest kept.
 - `core/grid.rs`: `GridModel`, the grid's pure state: rows from
-  `classification::rows`, the sort order, the `/` filter (`Narrow` over
-  source and label, order kept, highlights kept per row), a cursor and a
-  rows-only selection, both held by source value so a rebuild keeps them on
+  `classification::rows`, the sort order (every row is shown, in that
+  order), a cursor and a rows-only selection, both held by source value so a rebuild keeps them on
   their rows. A label blank after trimming is unclassified everywhere
   (counts, sort, paint). Unclassified labels and values not in the data
-  sort last in either direction. A sort or filter change ends a selection.
+  sort last in either direction. A sort change ends a selection.
   A restored cursor waits for the values that hold it, then is dropped once
   a successful answer arrives without it (a failed read keeps it waiting).
   A cursor nobody moved keeps its index across a rebuild; a moved one (or
-  one a selection starts from) follows its row. A filter hiding a moved
-  cursor's row rests it on the nearest shown row and returns it when the
-  row shows again; the session saves that hidden row (a waiting restored
-  cursor first). After a label verb (`relabelled`) the cursor keeps its
+  one a selection starts from) follows its row. The session saves a
+  waiting restored cursor, else the cursor's row. After a label verb (`relabelled`) the cursor keeps its
   shown index instead, so labelling the top unclassified row leaves the
   cursor on the next one; the verb ends a selection. A rebuild that removes
   the cursor's row while a selection is live ends the selection.
@@ -75,7 +72,7 @@ the frame's config door.
   header sort control `SortClicked`. The wrapper keeps window focus out of
   the table. A dragged column width is recorded in the delegate, and the
   table is refreshed only when a heading, a sort mark or the rem changes,
-  so a filter or new values never re-lay the columns. While the label
+  so new values never re-lay the columns. While the label
   editor is open the cursor row's label cell paints its field, with the
   ranked labels hung under it.
 - `tile/editor.rs`: `LabelEditor`, the free typeahead over the labels in
@@ -97,8 +94,8 @@ a failed one leaves the map's rows on screen with a header notice
 (`values not loaded: … — shift+r retries`); `Stopped` says so without the retry
 hint. Keys: the shell's grid motions, `v`/`shift+v` start a row selection,
 `escape` ends it. A row press moves the cursor, shift-press extends a
-selection, a double-click dispatches `classifications::edit`. `/` narrows
-the rows; escape restores the filter in force when the search began.
+selection, a double-click dispatches `classifications::edit`. `/` does not
+narrow the rows; an open search only holds the keyboard.
 `:sort <source|label|rows> [asc|desc]` orders the grid (bare `:sort`
 restores the default order: unclassified first, then by label); a header
 sort control cycles desc → asc → default (`SortOrder::click_cycle`, as

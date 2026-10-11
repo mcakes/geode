@@ -38849,13 +38849,6 @@ run_mutation "classifications: losing the cursor row ends a selection" \
   geode-classifications \
   a_rebuild_removing_the_cursor_row_ends_a_selection
 
-run_mutation "classifications: the session saves a filter-hidden cursor row" \
-  crates/geode-classifications/src/core/grid.rs \
-  '            .or(self.hidden.as_deref())' \
-  '            .or(None)' \
-  geode-classifications \
-  the_saved_cursor_prefers_seed_then_hidden_then_cursor
-
 # `tech` typed over `Tech` must not make a second label.
 run_mutation "classifications: a case variant takes the existing label" \
   crates/geode-classifications/src/tile/editor.rs \
@@ -38935,7 +38928,7 @@ run_mutation "classifications: a blank label counts as unclassified" \
   '        self.unclassified = rows.iter().filter(|r| label_text(r).is_none()).count();' \
   '        self.unclassified = rows.iter().filter(|r| r.label.is_none()).count();' \
   geode-classifications \
-  counts_ignore_the_filter_and_treat_a_blank_label_as_unclassified
+  counts_treat_a_blank_label_as_unclassified
 
 # Undo pops the last entry; taking the oldest reverts the wrong edit.
 run_mutation "classifications: undo reverts only the last edit" \
