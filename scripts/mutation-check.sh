@@ -39935,6 +39935,23 @@ run_mutation "demo hanweck: realized vol is not lagged" \
   geode-compose \
   realized_and_varswap_tables_have_the_declared_shapes
 
+# Nothing after the adapter's clock has been observed: a `Between` reaching
+# past now answers no future closes, and `At` a later instant answers what
+# is known now.
+run_mutation "demo hanweck: Between serves closes after now" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '                closes_between(from, to.min(through_now))' \
+  '                closes_between(from, to)' \
+  geode-compose \
+  a_weekend_has_no_point_and_overlapping_between_asks_agree
+
+run_mutation "demo hanweck: At serves an instant after now" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '            Span::At(t) => observation_at(t.min(now)).into_iter().collect(),' \
+  '            Span::At(t) => observation_at(t).into_iter().collect(),' \
+  geode-compose \
+  latest_and_at_answer_the_last_business_close_or_an_intraday_point
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

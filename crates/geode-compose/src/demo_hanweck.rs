@@ -13,7 +13,8 @@
 //! (14:30 to 21:00 UTC), where they answer a point at the last five-minute
 //! mark: that day's close nudged by a seeded per-minute draw. `Between`
 //! answers the daily closes in `[from, to)` and ignores `step`, since the
-//! simulator has one point per day.
+//! simulator has one point per day. Nothing after the adapter's clock is
+//! answered: `At` a later instant is `Latest`, and `Between` stops at now.
 //!
 //! An unknown table is an error; an unknown underlying, tenor, delta or
 //! window is a missing key and answers no rows for it. Changing the model
@@ -39,7 +40,7 @@ pub use geode_demo_data::UNDERLYINGS;
 /// The adapter name the `[hanweck_*]` demo sources select.
 pub const DEMO_HANWECK: &str = "demo_hanweck";
 pub const TENORS: [&str; 8] = ["1M", "2M", "3M", "6M", "1Y", "18M", "2Y", "3Y"];
-/// Put deltas: 0.9 is the downside wing, 0.1 the upside.
+/// Call deltas: 0.9 is the low-strike (downside) wing, 0.1 the upside.
 pub const DELTAS: [f64; 5] = [0.10, 0.25, 0.50, 0.75, 0.90];
 pub const WINDOWS: [&str; 3] = ["5D", "20D", "60D"];
 
@@ -360,10 +361,17 @@ impl HistoryQuery for DemoHistory {
         };
         let columns = key_columns(&req.table).ok_or_else(unknown)?;
         let wanted = asked_tuples(&req.table, &req.keys).ok_or_else(unknown)?;
+        // Nothing after `now` has been observed yet: a source that answered
+        // tomorrow's close would be fiction, and an unbounded `to` would
+        // walk the calendar to its end.
+        let now = (self.now)();
         let observations: Vec<Observation> = match req.span {
-            Span::Latest => observation_at((self.now)()).into_iter().collect(),
-            Span::At(t) => observation_at(t).into_iter().collect(),
-            Span::Between { from, to, .. } => closes_between(from, to),
+            Span::Latest => observation_at(now).into_iter().collect(),
+            Span::At(t) => observation_at(t.min(now)).into_iter().collect(),
+            Span::Between { from, to, .. } => {
+                let through_now = now + Duration::microseconds(1);
+                closes_between(from, to.min(through_now))
+            }
         };
         let value_arity = if req.table == "surface" { 2 } else { 1 };
         let mut rows = HistoryRows {
@@ -596,6 +604,22 @@ mod tests {
             [t("2026-01-06T21:00:00Z"), t("2026-01-07T21:00:00Z")]
         );
 
+        // Nothing after now: Tuesday's close is in after it happens, the
+        // rest of the week is not, and inside the session not even Tuesday.
+        let rest_of_week = ask(
+            "surface",
+            spx_3m_atm(),
+            between("2026-01-12T00:00:00Z", "2026-01-20T00:00:00Z"),
+        );
+        assert_eq!(
+            query(tuesday_evening, &rest_of_week).ts,
+            [t("2026-01-12T21:00:00Z"), t("2026-01-13T21:00:00Z")]
+        );
+        assert_eq!(
+            query(tuesday_session, &rest_of_week).ts,
+            [t("2026-01-12T21:00:00Z")]
+        );
+
         // A step is a hint this simulator ignores: one point per day.
         let stepped = query(
             tuesday_evening,
@@ -687,6 +711,11 @@ mod tests {
         assert!(
             at("2024-06-03T14:00:00Z").is_empty(),
             "before the first session"
+        );
+        assert_eq!(
+            at("2026-01-20T12:00:00Z").ts,
+            [t("2026-01-13T21:00:00Z")],
+            "an instant after now answers what is known now"
         );
 
         let latest =

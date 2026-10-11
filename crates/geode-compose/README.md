@@ -21,13 +21,14 @@ Current crate boundaries:
 
 | Module | Holds |
 |---|---|
-| `lib.rs` | `builtin_data_layer`: the two app datasets and, with a demo directory, the `--demo` layer. `engine_setup`/`EngineSetup`: the engine's half of `DataServiceConfig` (schema, sources, dimensions, document kinds, clock, adapters; empty views, no pricer, vol, egress or positions), infallible, with an empty schema when there is no `datasets` doc. `pin_app_datasets`: keeps `pricer_sheets` and `pricer` as builtin declares them against a differing layer redeclaration, with an error diagnostic; the app's reload path calls it too. `adapters`: the transport registry, empty without a demo directory, otherwise the five demo transports and the bus's feed. `load_config`: the collector's configuration, `builtin_data_layer` alone under the given desk and user directories. `store_path`: `db_path` with `LOCALAPPDATA` and `HOME` read from the environment; the app and the collector both call it. |
+| `lib.rs` | `builtin_data_layer`: the two app datasets and, with a demo directory, the `--demo` layer. `engine_setup`/`EngineSetup`: the engine's half of `DataServiceConfig` (schema, sources, dimensions, document kinds, clock, adapters; empty views, no pricer, vol, egress or positions), infallible, with an empty schema when there is no `datasets` doc. `pin_app_datasets`: keeps `pricer_sheets` and `pricer` as builtin declares them against a differing layer redeclaration, with an error diagnostic; the app's reload path calls it too. `adapters`: the transport registry, empty without a demo directory, otherwise the six demo transports and the bus's feed. `load_config`: the collector's configuration, `builtin_data_layer` alone under the given desk and user directories. `store_path`: `db_path` with `LOCALAPPDATA` and `HOME` read from the environment; the app and the collector both call it. |
 | `logging` | `install(prefix, stderr)`: process-wide tracing with a reloadable level filter, a stderr layer when `stderr` is true (the collector under a service manager passes false), a ring layer, and a daily `<user>/logs/<prefix>.YYYY-MM-DD.log` file (UTC dates) behind a non-blocking writer, returned as `Logging { ring, control, guard }`. The app passes `geode`, the collector `collector` or `collector-demo-<rows>`. `trim_log_files(dir, prefix, keep)` caps one prefix's `<prefix>.*.log` files (seven) at startup and, through the file writer, at the first write of each UTC day, leaving other prefixes' files in the shared directory alone (`tracing_appender`'s `max_log_files` is not used: it would match `collector-stdout.log` and the demo prefixes); `prune_files` is the shared keep-the-last-N-names helper the app's crash reports also use. |
 | `collector` | `collector_settings`/`CollectorSettings`: `[collector] memory_limit` from `app.toml`, an opt-in: unset by default, so the collector leaves DuckDB's own default, as the app does. A finite 512MB limit made DuckDB abort the collector with an internal assertion on large CSV loads (`docs/perf.md`, 2026-10-04); a value can be set once the overnight footprint measurement chooses one. A value that is not a number and a DuckDB size unit (`B`…`TB`, `KiB`…`TiB`, any case) warns at `app.collector.memory_limit` and sets no limit. |
 | `paths` | Where the store and the configuration layers live on disk: `db_path` (`data.db_path`, then the demo directory, then the platform directory), `config_dirs` (reads `GEODE_DESK_CONFIG`, `APPDATA`, `HOME`) and its pure core `user_config_dir`. |
 | `demo` | Generated inputs and builtin configuration for `--demo`: the temp directory (`demo_dir`), the emitted sources (`ensure_emitted`), the compiled-in demo config layer (`layer`, including `positions.toml`), and `DemoPositions` (`demo_positions`), the demo position system. |
 | `demo_bus` | Background document publishing for `--demo`: CVI, dividend and option-chain producers publishing through `ChannelAdapter` and the normal document writers and parsers. `spawn_default` is the bus both binaries run: the three producers over the demo underlyings, a 5 s cadence, 2 s jitter, seed 42. |
 | `demo_series` | Deterministic one-minute bars for the demo fetch sources `demo_kdb` (with a catalogue) and `demo_rest` (without). |
+| `demo_hanweck` | Demo vol history (`DemoHanweck`, `demo_hanweck`): the `surface`, `realized` and `varswap` tables behind the `hanweck_*` history sources over `vol_surface`, `realized_vol` and `varswap`. History side only; `point` is the pure daily close. |
 | `demo_refdb` | Demo mode's reference database (`DemoRefDb`, `demo_refdb`): the `underlyings` table behind the `refdb` snapshot source. Snapshot side only. |
 
 Tests that need the app's bridge or a window live in
@@ -62,6 +63,22 @@ poll count lives in the process, so each launch starts again from revision 0.
 Its `calendar` column is an exchange calendar code; no holiday dates are
 modelled. `fail_next` and the query delay exercise the degraded and slow
 paths in tests.
+
+`demo_hanweck` answers the three history datasets for the ten demo
+underlyings, eight tenors (1M to 3Y), five call deltas (0.1 to 0.9) and three
+realized windows (5D, 20D, 60D). Every value is a pure function of seed, key
+and day, so overlapping asks agree: each underlying's log vol level walks a
+mean-reverting AR(1) from 2024-06-03 with shocks on the 3rd Monday of March
+and the 2nd Monday of October; the term structure rises, the skew is steeper
+on the low-strike side, realized vol tracks the 1M implied its window ago,
+and the varswap strike sits above ATM. There is one close per weekday at
+21:00 UTC; `Between` answers those closes in `[from, to)` and ignores `step`.
+Nothing after the adapter's clock is answered: `At` a later instant answers
+as `Latest`, and `Between` stops at now.
+`Latest` and `At` answer the last close at or before the instant, or inside a
+weekday session (14:30 to 21:00 UTC) a point at the last five-minute mark
+that nudges that day's close. An unknown table is an error; an unknown
+underlying, tenor, delta or window answers no rows.
 
 ## Rules this crate pins
 
