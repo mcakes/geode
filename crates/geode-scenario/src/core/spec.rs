@@ -133,4 +133,48 @@ mod tests {
         }
         assert!(std::panic::catch_unwind(|| builtin_shape("nonesuch")).is_err());
     }
+
+    /// Every builtin shape derives a view the demo schema accepts, and the
+    /// five carry `currency` ungrouped (every demo scenario dataset has it).
+    #[test]
+    fn the_builtin_shapes_derive_views_the_demo_schema_accepts() {
+        use geode_core::config::Severity;
+        use geode_core::dimensions::DerivedDimensions;
+        use geode_core::view::ViewColumn;
+        let schema = demo_schema();
+        let (shapes, diags) = load_scenarios(
+            &merge_docs(
+                SCENARIOS_DOC,
+                &[LayerDoc::builtin(SCENARIOS_DOC, BUILTIN_SCENARIOS).unwrap()],
+            ),
+            &schema,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        for shape in &shapes {
+            let ds = schema.dataset(&shape.dataset).unwrap();
+            let view = shape.derive_view(ds);
+            assert_eq!(view.name, format!("scenario:{}", shape.kind));
+            assert_eq!(view.grouping, shape.grouping(), "{}", shape.kind);
+            let errors: Vec<_> = view
+                .validate(&schema, &DerivedDimensions::default())
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error)
+                .collect();
+            assert!(errors.is_empty(), "{}: {errors:?}", shape.kind);
+            assert!(
+                view.columns
+                    .iter()
+                    .any(|c| matches!(c, ViewColumn::Dimension { name, .. } if name == "currency")),
+                "{} carries currency",
+                shape.kind
+            );
+            let measures: Vec<&str> = view
+                .columns
+                .iter()
+                .filter(|c| matches!(c, ViewColumn::Measure { .. }))
+                .map(ViewColumn::name)
+                .collect();
+            assert_eq!(measures, shape.query_measures(), "{}", shape.kind);
+        }
+    }
 }

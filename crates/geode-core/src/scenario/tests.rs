@@ -888,3 +888,82 @@ fn a_usd_named_column_that_is_not_a_measure_is_no_twin() {
         "a dimension named theta_usd is no twin"
     );
 }
+
+/// The view a shape queries: its dataset, its axes as the grouping, and
+/// every measure and twin as a measure column, in column order. The test
+/// fixture's datasets declare no `currency`, so no dimension column rides
+/// along and the view still validates.
+#[test]
+fn a_checked_shape_derives_a_view_the_schema_accepts() {
+    use crate::dimensions::DerivedDimensions;
+    use crate::view::ViewColumn;
+    let (shapes, diags) = load(SPOT_LADDER);
+    assert!(diags.is_empty(), "{diags:?}");
+    let schema = schema();
+    let ds = schema.dataset("spot_ladder").unwrap();
+    let view = shapes[0].derive_view(ds);
+    assert_eq!(view.name, "scenario:spot_ladder");
+    assert_eq!(shapes[0].view_name(), view.name);
+    assert_eq!(view.dataset, "spot_ladder");
+    assert_eq!(view.grouping, ["spot_shift"]);
+    let names: Vec<&str> = view.columns.iter().map(ViewColumn::name).collect();
+    assert_eq!(
+        names,
+        ["npv", "npv_usd", "delta", "delta_usd", "theta"],
+        "measures and twins in column order"
+    );
+    assert_eq!(names, shapes[0].query_measures());
+    assert!(
+        view.columns
+            .iter()
+            .all(|c| matches!(c, ViewColumn::Measure { .. }))
+    );
+    let errors: Vec<_> = view
+        .validate(&schema, &DerivedDimensions::default())
+        .into_iter()
+        .filter(|d| d.severity == crate::config::Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// `currency` rides along ungrouped only as a dimension: declared as one
+/// it is the last column and the view validates; declared as a key (or
+/// not at all) it is left out, so the tile has no currency to warn about.
+#[test]
+fn a_dataset_without_a_currency_dimension_derives_no_currency_column() {
+    use crate::dimensions::DerivedDimensions;
+    use crate::view::ViewColumn;
+    let view_with = |role: &str| {
+        let datasets = format!(
+            "{DATASETS}\n[spot_ladder.columns.currency]\ntype = \"utf8\"\nrole = \"{role}\"\ngrain = \"instrument\"\n"
+        );
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", &datasets).expect("well-formed test TOML")],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{role}: {diags:?}");
+        let (shapes, diags) = load_scenarios(&builtin_doc(SPOT_LADDER), &schema);
+        assert!(diags.is_empty(), "{role}: {diags:?}");
+        let view = shapes[0].derive_view(schema.dataset("spot_ladder").unwrap());
+        let errors: Vec<_> = view
+            .validate(&schema, &DerivedDimensions::default())
+            .into_iter()
+            .filter(|d| d.severity == crate::config::Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "{role}: {errors:?}");
+        view
+    };
+    let as_dimension = view_with("dimension");
+    assert!(matches!(
+        as_dimension.columns.last(),
+        Some(ViewColumn::Dimension { name, .. }) if name == "currency"
+    ));
+    assert_eq!(as_dimension.columns.len(), 6);
+    let as_key = view_with("key");
+    assert!(
+        as_key.columns.iter().all(|c| c.name() != "currency"),
+        "a key is not carried"
+    );
+    assert_eq!(as_key.columns.len(), 5);
+}

@@ -700,6 +700,38 @@ grain = "instrument"
         );
     }
 
+    /// The scenario tile's axis domain read: one dataset, an empty scope.
+    /// The frame scope does not narrow it, so it lists every label a scoped
+    /// read of the same dataset would drop. Which labels the dataset filter
+    /// keeps is `a_dataset_filter_reads_that_dataset_alone`'s fact.
+    #[test]
+    fn a_dataset_filter_with_an_empty_scope_is_wider_than_a_scoped_one() {
+        let f = two_dataset_fixture();
+        let unscoped = DistinctParams {
+            dataset: Some("risk".into()),
+            scope: Scope::default(),
+            ..base_params()
+        };
+        let all = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &unscoped).unwrap());
+        let scoped = DistinctParams {
+            dataset: Some("risk".into()),
+            scope: book_scope("BK000"),
+            ..base_params()
+        };
+        let narrowed = f.run(&compile_distinct(f.conn(), &f.schema, &f.dims, &scoped).unwrap());
+        assert!(!narrowed.is_empty(), "the scope keeps some labels");
+        assert!(
+            narrowed.len() < all.len(),
+            "the scope narrows: {narrowed:?} vs {all:?}"
+        );
+        assert!(
+            narrowed
+                .iter()
+                .all(|(v, _)| all.iter().any(|(a, _)| a == v)),
+            "the scoped labels are a subset: {narrowed:?} vs {all:?}"
+        );
+    }
+
     /// Both fixture datasets carry `book` and `currency`; `npv` is `risk`'s
     /// alone, so `ref` is the dataset without the column.
     #[test]

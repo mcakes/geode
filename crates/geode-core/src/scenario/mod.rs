@@ -18,9 +18,11 @@ mod tests;
 
 mod check;
 mod read;
+mod view;
 
 pub use check::load_scenarios;
 pub use read::read_scenarios;
+pub use view::VIEW_PREFIX;
 
 /// The layered document shapes are read from.
 pub const SCENARIOS_DOC: &str = "scenarios";
