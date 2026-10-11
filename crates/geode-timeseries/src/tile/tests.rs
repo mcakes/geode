@@ -1,6 +1,7 @@
 use super::*;
 use crate::commands;
 use crate::content::{ACTIONS, DEFAULT_KEYMAP, TimeseriesFactory};
+use crate::core::complete::Help;
 use crate::core::model::SlotState;
 use crate::core::{Color, Model, Preset, Range};
 use crate::popup::{PickerStage, SeriesRow, Which};
@@ -680,6 +681,13 @@ impl Harness {
     fn expr_error(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
         self.tile.read_with(vcx, |t, _| match t.popup() {
             Some(Popup::Expr(f)) => f.error.as_ref().map(|e| e.to_string()),
+            _ => None,
+        })
+    }
+    /// The expression field's prepared help line, as the slot paints it.
+    fn expr_help(&self, vcx: &gpui::VisualTestContext) -> Option<Help> {
+        self.tile.read_with(vcx, |t, _| match t.popup() {
+            Some(Popup::Expr(f)) => f.help.clone(),
             _ => None,
         })
     }
@@ -2288,6 +2296,101 @@ fn the_expression_field_offers_functions_with_their_paren(cx: &mut gpui::TestApp
     assert_eq!(h.expr_candidates(&vcx)[0], "sma(");
     assert_eq!(h.expr_lit(&vcx).as_deref(), Some("sma("));
     assert!(h.is_painted(&mut vcx, &format!("ts-expr-row-{TILE}-sma(")));
+}
+
+/// A `Help` as the slot paints it: the signature's parts around the
+/// active argument, then the tail.
+fn help(before: &str, active: &str, after: &str, tail: &str) -> Option<Help> {
+    Some(Help {
+        before: before.into(),
+        active: active.into(),
+        after: after.into(),
+        tail: tail.into(),
+    })
+}
+
+const SMA_TAIL: &str = "series · mean of the last n points; blank unless all n have a value";
+
+/// The help line under the field follows typing: inside a call it shows
+/// the call's signature with the argument the caret is in marked, while
+/// a name is typed it describes the lit row, and an arrow key that moves
+/// the caret (no Change event) still moves the mark through the input
+/// observer. Closing the field drops it.
+#[gpui::test]
+fn the_help_line_marks_the_argument_at_the_caret_and_follows_arrow_keys(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add SPX.close").unwrap();
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    assert_eq!(h.expr_help(&vcx), None, "an empty field: nothing to say");
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-help-{TILE}")));
+    vcx.simulate_input("sma(");
+    assert_eq!(
+        h.expr_help(&vcx),
+        help("sma(", "series", ", n)", SMA_TAIL),
+        "after the paren the list offers every name; the call answers"
+    );
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-help-{TILE}")));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-help-active-{TILE}")));
+    vcx.simulate_input("VI");
+    assert_eq!(
+        h.expr_help(&vcx),
+        help("VIX", "", "", "series"),
+        "a name being typed: the lit row"
+    );
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-help-active-{TILE}")));
+    vcx.simulate_input("X, ");
+    assert_eq!(h.expr_help(&vcx), help("sma(series, ", "n", ")", SMA_TAIL));
+    h.keys(&mut vcx, "left left");
+    assert_eq!(
+        h.expr_help(&vcx),
+        help("sma(", "series", ", n)", SMA_TAIL),
+        "the caret moved back into the first argument without a Change"
+    );
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-help-active-{TILE}")));
+    h.keys(&mut vcx, "end");
+    vcx.simulate_input("2");
+    assert_eq!(h.expr_help(&vcx), help("sma(series, ", "n", ")", SMA_TAIL));
+    h.keys(&mut vcx, "escape");
+    assert!(h.popup_is_none(&vcx));
+    assert_eq!(h.expr_help(&vcx), None);
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-help-{TILE}")));
+}
+
+/// The one slot under the field: an error takes it from the help, and
+/// typing, which clears the error, gives the help back.
+#[gpui::test]
+fn an_error_takes_the_help_lines_slot_until_typing_clears_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.command(&mut vcx, "add VIX").unwrap();
+    h.dispatch(&mut vcx, "expr", None);
+    h.draw(&mut vcx);
+    vcx.simulate_input("mean(2) + VIX");
+    assert_eq!(h.expr_help(&vcx), help("VIX", "", "", "series"));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-help-{TILE}")));
+    assert!(!h.dispatch_handled(&mut vcx, "commit", None));
+    assert_eq!(h.expr_error(&vcx).as_deref(), Some("mean needs a series"));
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-error-{TILE}")));
+    assert!(
+        !h.is_painted(&mut vcx, &format!("ts-expr-help-{TILE}")),
+        "the error is painted, not the help"
+    );
+    vcx.simulate_input("[");
+    assert_eq!(h.expr_error(&vcx), None);
+    assert_eq!(
+        h.expr_help(&vcx),
+        help(
+            "A[k]",
+            "",
+            "",
+            "number · the point at offset k, 0 the first, from the end when k is negative"
+        )
+    );
+    assert!(h.is_painted(&mut vcx, &format!("ts-expr-help-{TILE}")));
+    assert!(!h.is_painted(&mut vcx, &format!("ts-expr-error-{TILE}")));
 }
 
 /// With nothing loaded there is nothing an expression may reference:

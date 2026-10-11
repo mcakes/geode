@@ -39494,6 +39494,26 @@ run_mutation "watchlist tile: no cursor emits nothing" \
   geode-watchlist \
   no_cursor_emits_nothing
 
+# The help line describes the innermost call the caret is inside. Answering
+# from the first open frame would describe `sma` while the caret sits in
+# `diff`'s argument.
+run_mutation "expr help: the outermost call wins" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '    let innermost = frames.iter().rev().find(|f| !matches!(f, Frame::Plain));' \
+  '    let innermost = frames.iter().find(|f| !matches!(f, Frame::Plain));' \
+  geode-timeseries \
+  the_enclosing_call_is_the_innermost_open_frame_at_the_caret
+
+# The slot under the expression field is one line shared with the inline
+# error, error first: a help line painted over the refusal would hide why
+# Enter did nothing.
+run_mutation "expr help: help paints over an error" \
+  crates/geode-timeseries/src/header.rs \
+  '    let slot = match (&f.error, &f.help) {' \
+  '    let slot = match (&f.error.clone().filter(|_| f.help.is_none()), &f.help) {' \
+  geode-timeseries \
+  an_error_takes_the_help_lines_slot_until_typing_clears_it
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

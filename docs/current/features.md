@@ -1134,6 +1134,21 @@ field's undo history. A caret moved without typing, including after a Tab,
 re-ranks on the next Tab, not before; the list itself shows the ranking from
 the last edit. A change of the desk's default source relabels an open list.
 
+One help line sits under the field, in the slot the inline error uses. While
+a name is being typed it describes the lit row: a function row shows its
+signature, result shape and one-line meaning (`sma(series, n) · series · mean
+of the last n points; blank unless all n have a value`), a series row its name and
+`series`. Otherwise it describes the innermost call the caret is inside, with
+the argument the caret is in marked (`sma(series, n)` with `n` marked after
+`sma(VIX, `), or `A[k]` inside index brackets; a bare parenthesis inside an
+argument is transparent (`sma((A + B), 3)` still shows `sma`), and at top
+level the line is blank. The error line takes the slot while it stands, and
+typing, which clears the error, gives the line back. The line follows typing,
+arrow keys and a click that moves the caret; the signature spells a series
+argument `series`, a count `n`, a pointwise argument `x`, and `min`/`max`
+their variadic `…`. Each meaning is a claim about the lowering in
+`geode-data`, including when a value is blank.
+
 A tile's session table is written with `version = 2`. A table with a missing
 version or one below 2 may name series in expression text by slot handle (`s3`), and restore
 rewrites each handle: a source slot's handle becomes its full

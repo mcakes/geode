@@ -285,7 +285,8 @@ numbers per point.
 `n` points. A rolling value is blank until each of the last `n` points has
 a value, and a value that has no honest answer (a log of a negative, a
 division by zero) is a gap rather than a number. Tab completes series and
-function names in the field.
+function names in the field. A line under the field shows the function you
+are inside, its arguments and what it gives.
 
 ### Build a pricing sheet
 
