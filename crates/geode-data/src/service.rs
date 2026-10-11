@@ -3218,13 +3218,17 @@ impl DataService {
             Ok(i) => i,
             Err(e) => return refuse(&params, format!("lookback instant: {e}")),
         };
+        // A span reaching before the representable range refuses: dropping
+        // the window ask would rank over whatever happens to be cached.
         let daily = match plan::daily_span(&params)
             .map(chrono::Duration::from_std)
             .transpose()
         {
-            Ok(span) => span
-                .and_then(|s| now.checked_sub_signed(s))
-                .map(|from| (from, now)),
+            Ok(None) => None,
+            Ok(Some(span)) => match now.checked_sub_signed(span) {
+                Some(from) => Some((from, now)),
+                None => return refuse(&params, "daily span: out of range".to_string()),
+            },
             Err(e) => return refuse(&params, format!("daily span: {e}")),
         };
         let suffixes = plan::suffixes(&params);
@@ -6350,7 +6354,19 @@ mod tests {
         ));
         service.cancel(QueryKey(1));
         drop(release);
-        assert!(no_board_within(&rx, std::time::Duration::from_secs(1)));
+        // A later board under another key answering proves the worker
+        // drained the held call: the silence above was the cancel's.
+        service.vol_board(board_ask(
+            2,
+            2,
+            &["SPX"],
+            vec![Measure::atfm("3M")],
+            vec![],
+            None,
+        ));
+        let later = board_answer(&rx, 2);
+        assert_eq!(later.key, QueryKey(2));
+        assert!(no_board_within(&rx, std::time::Duration::from_millis(300)));
     }
 
     #[test]
@@ -6390,6 +6406,11 @@ mod tests {
         assert_eq!(
             refused(4, &|p| p.realized = None),
             "realized 5D needs a realized dataset"
+        );
+        assert_eq!(
+            refused(5, &|p| p.window =
+                Some(std::time::Duration::from_secs(300_000 * 365 * 86_400))),
+            "daily span: out of range"
         );
     }
 
