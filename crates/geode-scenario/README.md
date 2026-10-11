@@ -4,9 +4,8 @@ Scenario tiles: five tile kinds that paint aggregated scenario risk (vega
 K/T, vega by maturity, spot ladder, by maturity, rho) for whatever the frame
 or a followed link group selects. The shapes are configuration
 (`scenarios.toml`, read by `geode_core::scenario`); this crate ships the
-builtin five and the pivot. The tile itself is being built: `tile`,
-`delegate`, `header`, `content` and the `core` modules `commands`,
-`session`, `readout` and `prepare` are placeholders for now.
+builtin five, the pivot and the tile. The tile's read chain is not wired
+yet: a tile asks for no data and paints an empty table.
 
 ## Module map
 
@@ -36,6 +35,30 @@ builtin five and the pivot. The tile itself is being built: `tile`,
   snapshot is grouped wrongly (or lacks `row_depth`).
   `fixtures` (behind `test-support`) builds shapes and snapshots for the
   tile's tests and the bench.
+- `content.rs`: `ScenarioFactory`, one per accepted shape (its kind is
+  the shape's name; every kind shares the `scenario` context, `ACTIONS`
+  and `DEFAULT_KEYMAP`, so the app ships the fragment from the first
+  factory only, `without_keymap` on the rest). `launch_state` opens a
+  tile on an underlying as a `[filter.dimensions]` selection.
+  `ScenarioContent` is the `TileContent` door.
+- `delegate.rs`: the `TableDelegate`. A label column pinned left, the
+  pivot's columns, Σ edges where the pivot has sums. Cells are prepared
+  into a `WindowCache` from a palette resolved once per theme signature
+  (at construction and on a theme change, never in render); `render_td`
+  only reads them. The cursor and a rows or block selection live over
+  data cells only; the selection's per-column totals are unsummable down
+  a scenario rows axis.
+- `tile/mod.rs`: `ScenarioTile`: keys (`V`/`v` selections, `y`/`ctrl+c`
+  yank as TSV, `c` currency without a requery, `p` paint, `m` diff, `.`
+  menu, and the shell's grid motions with counts), the `:` commands
+  (`filter`, `unscoped`, `asof`, `scale`; frame-wide verbs refused by
+  name), notices and the session record. `escape` peels one layer per
+  press (selection, refusal, standing notice) and is unhandled with none.
+  `tile/data.rs` holds the read chain's entry points, `tile/menu.rs` the
+  `.` menu (open and close only so far).
+- `header.rs`: the shared header strip (title and readout; mode, links,
+  health, ×), the table, and the footer (the reported notice; the
+  selection's totals or the cursor readout).
 - `lib.rs`: `CONTEXT` (`scenario`, the keymap context and action prefix)
   and `init`, which binds the keys gpui-component's DataTable would
   otherwise swallow.
