@@ -710,6 +710,13 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   no distinct query).
 - The rules popup binds its own keys only: `u`, `ctrl+r`, `shift+r`, `g w`
   and `.` act after it is closed, or from the palette.
+- `snapshot_changed` rebuilds the rows on every `WatchlistGlobal`
+  replacement, and the bridge replaces the global when any list's state
+  changes; comparing the shown entry against the last one seen
+  (`WatchlistState` is `PartialEq`) would make the rebuild change-only.
+- `set_visible` is a no-op in the watchlist tile as in classifications: a
+  hidden stack member with an open add field keeps window focus. A fix is
+  a shell-wide mechanism for every tile with an input, not one tile's.
 
 ### Display checks
 

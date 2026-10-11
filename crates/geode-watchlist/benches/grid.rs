@@ -4,8 +4,9 @@
 //! (`rows::rows` re-runs `resolve_members` over the rule names), each row
 //! takes its reference name, and the grid re-orders and re-filters with a
 //! sort and a filter active (`GridModel::after_verb`). Table preparation
-//! and painting are excluded. The budget and reference measurements are in
-//! `docs/current/performance.md`.
+//! and painting are excluded. The budget is in `docs/current/performance.md`;
+//! the reference measurements and their conditions are in the crate
+//! README's Performance section.
 
 use std::hint::black_box;
 

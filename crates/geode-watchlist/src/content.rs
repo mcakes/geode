@@ -27,8 +27,8 @@ use crate::tile::WatchlistTile;
 
 /// Registered actions and their palette titles. The palette lists every
 /// one; [`DEFAULT_KEYMAP`] binds all but the configuration-level verbs
-/// (new, clone, rename, delete, revert) and Rules…, which are reached from
-/// the palette and the `⋯` menu.
+/// (new, clone, rename, delete, revert), which are reached from the
+/// palette and the `⋯` menu; Rules… is `r`.
 pub const ACTIONS: &[(&str, &str)] = &[
     ("watchlist::add", "Watchlist: Add name"),
     ("watchlist::remove", "Watchlist: Remove name"),
@@ -180,7 +180,7 @@ impl TileContent for WatchlistContent {
             .update(cx, |t, cx| t.dispatch(action, count, window, cx))
     }
 
-    /// No `:` command yet. The configuration-level verbs are registered
+    /// `:` commands (`:sort`) go to the tile. The configuration-level verbs are registered
     /// actions, so they never act from another tile's line.
     fn command(&self, line: &str, _window: &mut Window, cx: &mut App) -> Result<(), String> {
         self.tile.update(cx, |t, cx| t.command(line, cx))
@@ -389,8 +389,8 @@ mod tests {
         }
         assert_eq!(count, 26);
         assert_eq!(bound.get("watchlist::switch"), Some(&"watchlist::switch"));
-        // The config-level verbs and Rules… are reached from the palette
-        // and the menu.
+        // The config-level verbs are reached from the palette and the
+        // menu; Rules… has `r`.
         for unbound in ["new", "clone", "rename", "delete", "revert"] {
             assert!(
                 !bound.contains(format!("watchlist::{unbound}").as_str()),

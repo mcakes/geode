@@ -376,7 +376,7 @@ thread before table preparation and paint, over 5,000 names from three
 rules with a hundred manual includes and fifty exclusions, an origin sort
 and a `/` filter active: `rows::rows` with a pending definition, then
 `GridModel::after_verb`. Reference (2026-10-10, loaded machine, load
-average 35 to 48; the same run read 6.0 and 12.9 ms under load 17 to 78):
+average 35 to 48):
 
 | Bench | Result |
 |---|---|
@@ -395,6 +395,9 @@ average 35 to 48; the same run read 6.0 and 12.9 ms under load 17 to 78):
   issues no distinct query (`mark_loading`/`deliver` are not wired); its
   hint reads `value for <column> · values not suggested here` at a value
   position for such a column.
+- A rules write leaves the header at `as of <time>` until its reload
+  lands: the resolution state comes from the snapshot, and the bridge marks
+  the list `resolving…` only when the reload re-resolves it.
 - In `rules` mode only the popup's own keys are bound: `u`, `ctrl+r`,
   `shift+r` and the member verbs act once the popup is closed (or from
   the palette, which closes it first).
