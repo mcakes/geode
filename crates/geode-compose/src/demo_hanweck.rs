@@ -8,13 +8,17 @@
 //! step per weekday, with two shocks a year (the 3rd Monday of March and
 //! the 2nd Monday of October). There is no holiday calendar.
 //!
-//! One close per weekday at 21:00 UTC. `Latest` and `At` answer the last
-//! close at or before the instant, except inside a weekday session
-//! (14:30 to 21:00 UTC), where they answer a point at the last five-minute
-//! mark: that day's close nudged by a seeded per-minute draw. `Between`
-//! answers the daily closes in `[from, to)` and ignores `step`, since the
-//! simulator has one point per day. Nothing after the adapter's clock is
-//! answered: `At` a later instant is `Latest`, and `Between` stops at now.
+//! One close per weekday at 21:00 UTC. The current business day (the
+//! adapter's clock on a weekday) also has a point at every five-minute mark
+//! from 14:30 up to now, before 21:00: that day's close with its vol nudged
+//! by a seeded per-minute draw. Past days have their close only. `Latest`
+//! and `At` answer the last observation at or before the instant, so
+//! inside today's session the last five-minute mark, and on a past day the
+//! last close. `Between` answers every observation in `[from, to)`, the
+//! closes and today's marks, so a cached `Between` answers an `At` the way
+//! the source would; it ignores `step`. Nothing after the adapter's clock
+//! is answered: `At` a later instant is `Latest`, and `Between` stops at
+//! now.
 //!
 //! An unknown table is an error; an unknown underlying, tenor, delta or
 //! window is a missing key and answers no rows for it. Changing the model
@@ -237,7 +241,8 @@ fn close(seed: u64, table: &str, tuple: &[String], walk: &[f64], index: usize) -
             vec![vol, forward]
         }
         "realized" => {
-            // Tracks the 1M implied its window ago, cycling around it.
+            // Tracks the 1M implied W weekdays ago for a window `<W>D`,
+            // cycling around it.
             let lag = tenor_days(&tuple[1]).unwrap_or(0) as usize;
             let lagged = atm(walk[index.saturating_sub(lag)], "1M");
             let phase = (fnv(seed, &tuple[0], -3) % 6283) as f64 / 1000.0;
@@ -276,10 +281,19 @@ fn on(day: NaiveDate, time: NaiveTime) -> DateTime<Utc> {
     Utc.from_utc_datetime(&day.and_time(time))
 }
 
-/// What `At(t)` answers: the last close at or before `t`, or inside a
-/// weekday session the point at the last five-minute mark. `None` before
-/// the first close.
-fn observation_at(t: DateTime<Utc>) -> Option<Observation> {
+/// The one day with intraday points: the date of `now` when it is a
+/// weekday from [`EPOCH`] on. Confining them to today keeps a `Between`
+/// bounded (at most 78 marks per tuple) while it still holds every point an
+/// `At` can answer.
+fn session_day(now: DateTime<Utc>) -> Option<NaiveDate> {
+    let day = now.date_naive();
+    (is_weekday(day) && day >= EPOCH).then_some(day)
+}
+
+/// What `At(t)` answers for `t <= now`: the last observation at or before
+/// `t`, so inside today's session the point at the last five-minute mark,
+/// otherwise the last close. `None` before the first close.
+fn observation_at(t: DateTime<Utc>, now: DateTime<Utc>) -> Option<Observation> {
     let mut day = t.date_naive();
     let time = t.time();
     if is_weekday(day) && day >= EPOCH {
@@ -290,7 +304,7 @@ fn observation_at(t: DateTime<Utc>) -> Option<Observation> {
                 intraday: false,
             });
         }
-        if time >= OPEN {
+        if time >= OPEN && session_day(now) == Some(day) {
             let mark = NaiveTime::from_hms_opt(time.hour(), time.minute() / 5 * 5, 0)?;
             return Some(Observation {
                 day,
@@ -312,6 +326,26 @@ fn observation_at(t: DateTime<Utc>) -> Option<Observation> {
             });
         }
     }
+}
+
+/// Today's five-minute marks with `from <= ts < to` and `ts <= now`.
+fn marks_between(from: DateTime<Utc>, to: DateTime<Utc>, now: DateTime<Utc>) -> Vec<Observation> {
+    let Some(day) = session_day(now) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut ts = on(day, OPEN);
+    while ts < on(day, CLOSE) && ts < to && ts <= now {
+        if ts >= from {
+            out.push(Observation {
+                day,
+                ts,
+                intraday: true,
+            });
+        }
+        ts += Duration::minutes(5);
+    }
+    out
 }
 
 /// The daily closes with `from <= ts < to`.
@@ -366,11 +400,14 @@ impl HistoryQuery for DemoHistory {
         // walk the calendar to its end.
         let now = (self.now)();
         let observations: Vec<Observation> = match req.span {
-            Span::Latest => observation_at(now).into_iter().collect(),
-            Span::At(t) => observation_at(t.min(now)).into_iter().collect(),
+            Span::Latest => observation_at(now, now).into_iter().collect(),
+            Span::At(t) => observation_at(t.min(now), now).into_iter().collect(),
             Span::Between { from, to, .. } => {
                 let through_now = now + Duration::microseconds(1);
-                closes_between(from, to.min(through_now))
+                let mut all = closes_between(from, to.min(through_now));
+                all.extend(marks_between(from, to, now));
+                all.sort_by_key(|o| o.ts);
+                all
             }
         };
         let value_arity = if req.table == "surface" { 2 } else { 1 };
@@ -402,8 +439,8 @@ impl HistoryQuery for DemoHistory {
                     let identity = format!("{}/{}", req.table, tuple.join("/"));
                     let minute = o.ts.timestamp() / 60;
                     let mut rng = StdRng::seed_from_u64(fnv(self.seed, &identity, minute));
-                    let nudge = (0.004 * step(&mut rng)).exp();
-                    values.iter_mut().for_each(|v| *v *= nudge);
+                    // The vol moves intraday; a forward beside it stays put.
+                    values[0] *= (0.004 * step(&mut rng)).exp();
                 }
                 rows.ts.push(o.ts);
                 for (c, value) in tuple.iter().enumerate() {
@@ -605,20 +642,31 @@ mod tests {
         );
 
         // Nothing after now: Tuesday's close is in after it happens, the
-        // rest of the week is not, and inside the session not even Tuesday.
+        // rest of the week is not, and inside the session not even Tuesday's
+        // close, only its five-minute marks so far. Monday, a past day, has
+        // its close alone.
         let rest_of_week = ask(
             "surface",
             spx_3m_atm(),
             between("2026-01-12T00:00:00Z", "2026-01-20T00:00:00Z"),
         );
-        assert_eq!(
-            query(tuesday_evening, &rest_of_week).ts,
-            [t("2026-01-12T21:00:00Z"), t("2026-01-13T21:00:00Z")]
-        );
-        assert_eq!(
-            query(tuesday_session, &rest_of_week).ts,
-            [t("2026-01-12T21:00:00Z")]
-        );
+        let marks = |through: &str| {
+            let mut out = Vec::new();
+            let mut m = t("2026-01-13T14:30:00Z");
+            while m <= t(through) {
+                out.push(m);
+                m += Duration::minutes(5);
+            }
+            out
+        };
+        let mut evening = vec![t("2026-01-12T21:00:00Z")];
+        evening.extend(marks("2026-01-13T20:55:00Z"));
+        evening.push(t("2026-01-13T21:00:00Z"));
+        assert_eq!(evening.len(), 2 + 78);
+        assert_eq!(query(tuesday_evening, &rest_of_week).ts, evening);
+        let mut session = vec![t("2026-01-12T21:00:00Z")];
+        session.extend(marks("2026-01-13T15:05:00Z"));
+        assert_eq!(query(tuesday_session, &rest_of_week).ts, session);
 
         // A step is a hint this simulator ignores: one point per day.
         let stepped = query(
@@ -718,11 +766,57 @@ mod tests {
             "an instant after now answers what is known now"
         );
 
+        // A past day has its close only: inside its session, `At` answers
+        // the close before it, and after its close that close.
+        let wednesday = || t("2026-01-14T22:00:00Z");
+        let past = |s: &str| query(wednesday, &ask("surface", spx_3m_atm(), Span::At(t(s))));
+        assert_eq!(past("2026-01-13T15:00:00Z").ts, [t("2026-01-12T21:00:00Z")]);
+        assert_eq!(past("2026-01-13T15:00:00Z").values[0][0], monday[0]);
+        assert_eq!(past("2026-01-13T22:00:00Z").ts, [t("2026-01-13T21:00:00Z")]);
+        assert_eq!(past("2026-01-13T22:00:00Z").values[0][0], tuesday[0]);
+
         let latest =
             |now: fn() -> DateTime<Utc>| query(now, &ask("surface", spx_3m_atm(), Span::Latest));
         assert_eq!(latest(tuesday_evening).ts, [t("2026-01-13T21:00:00Z")]);
         assert_eq!(latest(tuesday_evening).values[0][0], tuesday[0]);
         assert_eq!(latest(tuesday_session).ts, [t("2026-01-13T15:05:00Z")]);
+    }
+
+    #[test]
+    fn a_between_over_today_holds_the_point_at_and_latest_answer() {
+        let close = point(42, "surface", &["SPX", "3M", "0.5"], day(2026, 1, 13)).unwrap();
+        let instant = t("2026-01-13T15:03:00Z");
+        let at = query(
+            tuesday_session,
+            &ask("surface", spx_3m_atm(), Span::At(instant)),
+        );
+        assert_eq!(at.ts, [t("2026-01-13T15:00:00Z")]);
+        assert_eq!(at.values[1][0], close[1], "the forward is not nudged");
+        let span = Span::Between {
+            from: instant - Duration::days(1),
+            to: tuesday_session(),
+            step: None,
+        };
+        let cached = query(tuesday_session, &ask("surface", spx_3m_atm(), span));
+        let i = cached
+            .ts
+            .iter()
+            .position(|ts| *ts == at.ts[0])
+            .expect("the Between holds the point At answers");
+        assert_eq!(
+            (cached.values[0][i], cached.values[1][i]),
+            (at.values[0][0], at.values[1][0])
+        );
+        // What a cache holding this Between answers for At: the last row at
+        // or before the instant, which must be the source's own answer.
+        let last_before = (0..cached.len())
+            .filter(|&j| cached.ts[j] <= instant)
+            .max_by_key(|&j| cached.ts[j])
+            .unwrap();
+        assert_eq!(cached.ts[last_before], at.ts[0]);
+        let latest = query(tuesday_session, &ask("surface", spx_3m_atm(), Span::Latest));
+        assert_eq!(cached.ts.last(), latest.ts.first());
+        assert_eq!(cached.values[0].last(), latest.values[0].first());
     }
 
     #[test]

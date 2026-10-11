@@ -39915,12 +39915,12 @@ run_mutation "demo hanweck: a symmetric smile" \
   geode-compose \
   the_put_wing_is_above_atm_and_the_call_wing_below_and_the_term_rises
 
-# Inside a weekday session `At` and `Latest` answer an intraday point at
+# Inside today's session `At` and `Latest` answer an intraday point at
 # the last five-minute mark, not the previous close.
 run_mutation "demo hanweck: no intraday point in session" \
   crates/geode-compose/src/demo_hanweck.rs \
-  '        if time >= OPEN {' \
-  '        if false && time >= OPEN {' \
+  '        if time >= OPEN && session_day(now) == Some(day) {' \
+  '        if false && time >= OPEN && session_day(now) == Some(day) {' \
   geode-compose \
   latest_and_at_answer_the_last_business_close_or_an_intraday_point
 
@@ -39946,15 +39946,50 @@ run_mutation "demo hanweck: realized vol is not lagged" \
 # is known now.
 run_mutation "demo hanweck: Between serves closes after now" \
   crates/geode-compose/src/demo_hanweck.rs \
-  '                closes_between(from, to.min(through_now))' \
-  '                closes_between(from, to)' \
+  '                let mut all = closes_between(from, to.min(through_now));' \
+  '                let mut all = closes_between(from, to);' \
   geode-compose \
   a_weekend_has_no_point_and_overlapping_between_asks_agree
 
+# Only today has intraday points. Mutated to give a past day's session
+# marks too, `At` there answers a point no `Between` holds, and a cached
+# answer differs from the source's.
+run_mutation "demo hanweck: a past day answers intraday points" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '        if time >= OPEN && session_day(now) == Some(day) {' \
+  '        if time >= OPEN {' \
+  geode-compose \
+  latest_and_at_answer_the_last_business_close_or_an_intraday_point
+
+# A Between holds today's five-minute marks beside the closes. Without
+# them, a cached Between answers an in-session `At` with the previous close
+# where the source answers the mark.
+run_mutation "demo hanweck: Between omits today's marks" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '                all.extend(marks_between(from, to, now));' \
+  '                let _ = marks_between;' \
+  geode-compose \
+  a_between_over_today_holds_the_point_at_and_latest_answer
+
+run_mutation "demo hanweck: Between serves marks after now" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '    while ts < on(day, CLOSE) && ts < to && ts <= now {' \
+  '    while ts < on(day, CLOSE) && ts < to {' \
+  geode-compose \
+  a_weekend_has_no_point_and_overlapping_between_asks_agree
+
+# The intraday nudge moves the vol only; a forward is not a vol.
+run_mutation "demo hanweck: the forward is nudged" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '                    values[0] *= (0.004 * step(&mut rng)).exp();' \
+  '                    let n = (0.004 * step(&mut rng)).exp(); values.iter_mut().for_each(|v| *v *= n);' \
+  geode-compose \
+  a_between_over_today_holds_the_point_at_and_latest_answer
+
 run_mutation "demo hanweck: At serves an instant after now" \
   crates/geode-compose/src/demo_hanweck.rs \
-  '            Span::At(t) => observation_at(t.min(now)).into_iter().collect(),' \
-  '            Span::At(t) => observation_at(t).into_iter().collect(),' \
+  '            Span::At(t) => observation_at(t.min(now), now).into_iter().collect(),' \
+  '            Span::At(t) => observation_at(t, now).into_iter().collect(),' \
   geode-compose \
   latest_and_at_answer_the_last_business_close_or_an_intraday_point
 

@@ -70,15 +70,18 @@ realized windows (5D, 20D, 60D). Every value is a pure function of seed, key
 and day, so overlapping asks agree: each underlying's log vol level walks a
 mean-reverting AR(1) from 2024-06-03 with shocks on the 3rd Monday of March
 and the 2nd Monday of October; the term structure rises, the skew is steeper
-on the low-strike side, realized vol tracks the 1M implied its window ago,
-and the varswap strike sits above ATM. There is one close per weekday at
-21:00 UTC; `Between` answers those closes in `[from, to)` and ignores `step`.
-Nothing after the adapter's clock is answered: `At` a later instant answers
-as `Latest`, and `Between` stops at now.
-`Latest` and `At` answer the last close at or before the instant, or inside a
-weekday session (14:30 to 21:00 UTC) a point at the last five-minute mark
-that nudges that day's close. An unknown table is an error; an unknown
-underlying, tenor, delta or window answers no rows.
+on the low-strike side, realized vol for a window `<W>D` tracks the 1M
+implied W weekdays ago, and the varswap strike sits above ATM. There is one
+close per weekday at 21:00 UTC. The current business day (the adapter's clock
+on a weekday) also has a point at every five-minute mark from 14:30 up to
+now, before 21:00: that day's close with its vol (not its forward) nudged.
+Past days have their close only. `Latest` and `At` answer the last
+observation at or before the instant; `Between` answers every observation in
+`[from, to)`, closes and today's marks, and ignores `step`. So a cached
+`Between` answers an `At` exactly as the source does. Nothing after the
+adapter's clock is answered: `At` a later instant answers as `Latest`, and
+`Between` stops at now. An unknown table is an error; an unknown underlying,
+tenor, delta or window answers no rows.
 
 ## Rules this crate pins
 

@@ -311,9 +311,10 @@ Nothing in the app asks for them yet; the data path answers and drops.
 (`demo_hanweck`), behind the demo layer's `hanweck_surface`,
 `hanweck_realized` and `hanweck_varswap` sources. Every value is a pure
 function of seed, key and day: one close per weekday at 21:00 UTC from
-2024-06-03, a five-minute intraday point inside the 14:30 to 21:00 UTC
-session for `Latest` and `At`, no holidays, and nothing after the adapter's
-clock. Ten underlyings, tenors 1M to 3Y, call deltas 0.1 to 0.9, realized
+2024-06-03, plus five-minute intraday points from 14:30 UTC up to now on the
+current business day only (answered by `Latest`, `At` and `Between` alike,
+so a cached span answers as the source would), no holidays, and nothing
+after the adapter's clock. Ten underlyings, tenors 1M to 3Y, call deltas 0.1 to 0.9, realized
 windows 5D, 20D and 60D. Enabled by `--demo`.
 
 **Seam:** implement `HistoryQuery` and return it from `Adapter::history()`:
@@ -548,5 +549,5 @@ demo directory) and restart.
   each handoff gap.
 - Nemo URL shapes are provisional.
 - No KDB history client exists; `demo_hanweck` answers one close per
-  weekday, so `step` and intraday history are untested against a real
-  source.
+  weekday and intraday points for the current day only, so `step` and
+  intraday history are untested against a real source.
