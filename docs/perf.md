@@ -2945,8 +2945,10 @@ numbers. Two benches.
 three history datasets for 25 members (`M00`..`M24`): `vol_surface`
 (8 tenors × 5 deltas, values `vol` and `forward`), `realized_vol`
 (windows `5D`, `20D`, `60D`) and `varswap` (8 tenors), one 21:00 UTC close
-per weekday over the last 400 calendar days (about 286 closes: 286,000
-surface rows, 21,450 realized, 57,200 varswap). The seed appends in
+per weekday from 399 days back to yesterday (285 closes on the run date:
+285,000 surface rows, 21,375 realized, 57,000 varswap). Starting a day
+inside the datasets' `history = "400d"` keeps the oldest close clear of
+the sweep cutoff at any time of day. The seed appends in
 20-day chunks with coverage recorded per member prefix, so lookbacks and
 the window read from the cache. Setup appends outside timing. The
 service cases run `DataService` with 4 query workers over a fake
@@ -2955,8 +2957,8 @@ so a fetched `Latest` appends rows equal to the cache (all deduped). The
 Changes view is `Forward(1M)`, ATFM at the 8 tenors, `Skew(3M)` and
 `Slope(1Y, 1M)`, D1 lookback and a 30-day 3M ATFM sparkline: 10 surface
 tuples per member (vol and forward share `[1M, 0.5]`; skew reads the
-`0.25` and `0.75` 3M deltas), 250 in all, about 71,500 rows across the
-400 days. The Rich/cheap view is 3M ATFM, realized 5D and 20D, IV−RV,
+`0.25` and `0.75` 3M deltas), 250 in all, about 71,250 rows across the
+285 closes. The Rich/cheap view is 3M ATFM, realized 5D and 20D, IV−RV,
 varswap, VS spread, skew and slope with a 365-day percentile window.
 Cases are Criterion medians, 20 samples each.
 
@@ -2982,10 +2984,10 @@ upper bounds; the service round trips carry the widest spread
 | `board_read/changes_view_25` (the read alone: SQL projection plus reduce, one connection) | 18.0 ms | |
 | `board_read/rich_cheap_view_25` (the read alone, 365-day percentile window) | 51.4 ms | |
 | `append/between_400d_prefix_answer_deduped` (one member's 400-day surface prefix answer, about 11,400 rows all equal to live, into the full table: dedupe scan plus coverage coalescing) | 20.5 ms | |
-| `validate/286k_rows_vs_25_prefix` (`HistoryRows::validate_against`, 286,000 rows against a 25-member prefix ask) | 82.4 ms | |
-| `validate/71k_rows_vs_250_exact` (71,500 rows against 250 exact tuples) | 47.6 ms | |
-| `vol_board/changes_view_25` (`DataService::vol_board` to its `DataEvent::VolBoard`: three prefix `Latest` fetches appended, the D1 `At` from coverage, the read) | 645 ms | |
-| `vol_board/rich_cheap_view_25` (the same round trip with the 365-day window `Between` per dataset) | 1.50 s | |
+| `validate/286k_rows_vs_25_prefix` (`HistoryRows::validate_against`, 285,000 rows against a 25-member prefix ask) | 82.4 ms | |
+| `validate/71k_rows_vs_250_exact` (71,250 rows against 250 exact tuples) | 47.6 ms | |
+| `vol_board/changes_view_25` (`DataService::vol_board` to its `DataEvent::VolBoard`: one prefix `Latest` (surface, the only dataset the view reads), the D1 exact `At` from coverage, the 30-day sparkline exact `Between` over the 250 tuples (`missing_by_key` plus a tail fetch every iteration), the read) | 645 ms | |
+| `vol_board/rich_cheap_view_25` (three prefix `Latest`, one per dataset; the 365-day window exact `Between` per dataset (`missing_by_key` plus a tail fetch every iteration); no lookback; the read) | 1.50 s | |
 | `history/prefix_latest_25` (a prefix `Latest` over the 25 members: fetch, append, read) | 111 ms | |
 | `history/prefix_at_25_always_fetches` (a prefix `At` at yesterday's end of day; a prefix `At` never reads from coverage) | 146 ms | |
 | `history/exact_at_250_from_coverage` (an exact `At` over the 250 Changes tuples, answered locally) | 304 ms | |
@@ -2996,21 +2998,26 @@ upper bounds; the service round trips carry the widest spread
 | `demo_hanweck/exact_at_100` (an exact `At` over the ten surface points per underlying the Changes view reads) | 2.35 ms | |
 
 `board_read/changes_view_25` is inside the 50 ms requery target by a
-factor of almost three; `board_read/rich_cheap_view_25` sits at the
-target (51.4 ms, 3% over under this load), its cost being the 365-day
+factor of almost three; `board_read/rich_cheap_view_25` is just over the
+target (51.4 ms) under this load and is re-measured on a quiet machine
+with the after-numbers; its cost is the 365-day
 daily projection per input tuple across three datasets.
 `history/exact_at_250_from_coverage` costs 304 ms, about 1.2 ms per
-tuple: the request is answered from the cache, so nearly all of it is
+tuple: the request is answered from the cache, so most of it is likely
 the per-tuple `covers_instant` check (two statements per tuple), which
-the batched check is to remove. `history/exact_between_30d_250_from_coverage`
+the batched check is to remove (its after-number tests this). `history/exact_between_30d_250_from_coverage`
 costs 700 ms, about 2.8 ms per tuple. It is not a pure cache read: the
 dispatch clips `to` to now and coverage ends `HISTORY_SETTLE` (30 min)
-before the fetch that recorded it, so every iteration still fetches and
-appends the recent tail for all 250 tuples; and its `missing_by_key`
-coverage check is also one statement per tuple (`store/history.rs`),
-which this part does not fix. In the round trips, `vol_board/*` pay that
-per-tuple cost several times over (the D1 `At` and, for Rich/cheap, the
-window `Between` per dataset) plus three deduped prefix appends.
+before the fetch that recorded it, so every iteration still fetches the
+recent tail (normally no rows) for all 250 tuples and records its
+coverage; and its `missing_by_key` coverage check is also one statement
+per tuple (`store/history.rs`), which this part does not fix. The round
+trips pay these per-tuple costs more than once: `vol_board/changes_view_25`
+is one deduped prefix `Latest` (surface), the D1 exact `At` from coverage
+and the 30-day sparkline exact `Between` (`missing_by_key` plus a tail
+fetch every iteration) before the read; `vol_board/rich_cheap_view_25` is
+three deduped prefix `Latest` and the 365-day window exact `Between` per
+dataset, each with its own `missing_by_key` and tail fetch.
 
 On the demo adapter, one prefix call over ten underlyings costs 2.0 ms
 against 3.3 ms for ten single-member calls: splitting a prefix buys

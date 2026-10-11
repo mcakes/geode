@@ -1,6 +1,6 @@
 //! Board request costs over a cache of 25 members × 8 tenors × 5 deltas
 //! (surface), 3 windows (realized) and 8 tenors (varswap), one close per
-//! weekday over the last 400 calendar days (about 286 closes), with
+//! weekday over the last 399 calendar days (about 285 closes), with
 //! coverage recorded per member prefix so lookbacks and the window read
 //! from the cache. Setup appends outside timing.
 //!
@@ -167,9 +167,12 @@ fn value(table: &str, tuple: &[String], day: i64) -> Vec<f64> {
     }
 }
 
-/// Weekdays from `now − DAYS_BACK` up to yesterday, oldest first.
+/// Weekdays from `now − (DAYS_BACK − 1)` days up to yesterday, oldest
+/// first. Starting a day inside the datasets' 400-day history keeps the
+/// oldest 21:00 close inside the sweep cutoff whatever the time of day the
+/// bench runs, so no case appends rows the sweep then removes.
 fn closes(now: DateTime<Utc>) -> Vec<NaiveDate> {
-    let mut day = (now - Duration::days(DAYS_BACK)).date_naive();
+    let mut day = (now - Duration::days(DAYS_BACK - 1)).date_naive();
     let last = (now - Duration::days(1)).date_naive();
     let mut out = Vec::new();
     while day <= last {
@@ -442,11 +445,10 @@ fn plan(params: VolBoardParams, now: DateTime<Utc>) -> BoardPlan {
 
 fn board_trip(svc: &DataService, rx: &Receiver<DataEvent>, p: &VolBoardParams) -> usize {
     svc.vol_board(p.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
-        match rx
-            .recv_timeout(std::time::Duration::from_secs(120))
-            .expect("no board")
-        {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left).expect("no board within 120 s") {
             DataEvent::VolBoard(o) if o.tag == p.tag => {
                 return o.result.expect("board failed").rows.len();
             }
@@ -457,11 +459,10 @@ fn board_trip(svc: &DataService, rx: &Receiver<DataEvent>, p: &VolBoardParams) -
 
 fn history_trip(svc: &DataService, rx: &Receiver<DataEvent>, p: &HistoryParams) -> usize {
     svc.history(p.clone());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     loop {
-        match rx
-            .recv_timeout(std::time::Duration::from_secs(120))
-            .expect("no history")
-        {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match rx.recv_timeout(left).expect("no history within 120 s") {
             DataEvent::History(o) if o.tag == p.tag => {
                 return o.result.expect("history failed").rows.len();
             }
