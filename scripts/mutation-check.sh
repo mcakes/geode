@@ -40362,6 +40362,43 @@ run_mutation "volboard: the board read shares the requester's pool key" \
   geode-data \
   board_pool_key_differs_from_the_requester_and_round_trips
 
+# A surface read error is the board's Err: the surface is the board.
+# Mutated to fall through, the surface's failure lands in dataset_errors
+# and the board answers Ok with every row blank and no reason on the tile.
+run_mutation "volboard: a surface read error joins dataset_errors" \
+  crates/geode-data/src/query/volboard.rs \
+  '            Err(e) if role == Role::Surface => return Err(e),' \
+  '            Err(e) if false => return Err(e),' \
+  geode-data \
+  a_surface_read_error_is_the_boards_error
+
+# A dataset whose calls already failed is not read again: its failure is
+# the reason, and a second read would append a second, different one.
+run_mutation "volboard: the read retries a dataset already in dataset_errors" \
+  crates/geode-data/src/query/volboard.rs \
+  '        if board.dataset_errors.iter().any(|(d, _)| d == name) {' \
+  '        if false {' \
+  geode-data \
+  a_dataset_already_in_dataset_errors_is_not_read_again
+
+# The percentile ranks over the window's days only. Mutated to every
+# cached day, a day the sparkline span fetched before the window counts.
+run_mutation "volboard: the rank ignores the window's first day" \
+  crates/geode-core/src/volboard/reduce.rs \
+  '        .range(from_day..)' \
+  '        .range(..)' \
+  geode-core \
+  the_window_day_restricts_the_rank_and_a_day_before_it_is_ignored
+
+# The current is the latest live observation. Mutated to ascending, the
+# current is the earliest cached row and every change is measured from it.
+run_mutation "volboard: the current is the earliest observation" \
+  crates/geode-data/src/query/volboard.rs \
+  '                 select *, row_number() over (partition by {key_list} order by ts desc) as rn from live' \
+  '                 select *, row_number() over (partition by {key_list} order by ts asc) as rn from live' \
+  geode-data \
+  the_board_reads_current_changes_rank_spark_and_lists_the_missing_member
+
 # A tuple no span holds is uncovered; treating it as covered would read a
 # stale or absent row as the answer.
 run_mutation "history: a tuple no coverage span holds is read locally" \
