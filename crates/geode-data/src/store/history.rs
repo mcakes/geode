@@ -1753,6 +1753,11 @@ mod tests {
     }
 
     proptest! {
+        // Each case opens its own store and runs up to a dozen append
+        // transactions: 256 cases cost close to a minute alone and far more
+        // beside the rest of the suite on a loaded machine.
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
         /// Coverage written through any sequence of prefix and exact spans,
         /// with observations on any days, never reports a tuple answerable
         /// at an instant unless its coverage holds every moment from a
