@@ -745,6 +745,105 @@ fn a_split_package_refuses_edits_with_the_split_footer(cx: &mut gpui::TestAppCon
     );
 }
 
+/// `V` from the top to the bottom over a grouping that splits a package
+/// selects both its split rows: a split package row stands for the legs
+/// it paints under its own node, so a typed strike writes every line —
+/// never refused whole, each leg once.
+#[gpui::test]
+fn a_selection_over_split_package_rows_edits_every_leg(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    assert_eq!(
+        split_rows(&h, &vcx).len(),
+        2,
+        "fixture: the calendar splits"
+    );
+    goto_column(&h, &mut vcx, "strike");
+    h.motion(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "bottom", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4500");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 4 cells"));
+    let lines = line_texts(&h, &vcx);
+    assert!(
+        lines.iter().all(|l| l.contains(" 4500 ")),
+        "every line and leg: {lines:?}"
+    );
+}
+
+/// The same sweep under a quantity reaches every leg of the split
+/// package, so it takes the quantity whole, through its weights; a
+/// selection holding only one of its rows reaches part of it, and a
+/// quantity skips it as refused while the bare lines take the value.
+#[gpui::test]
+fn a_selection_qty_sets_a_wholly_reached_split_package_and_skips_a_part(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let pkg = 1;
+    let before = leg_qtys(&h, &vcx, pkg);
+    goto_column(&h, &mut vcx, "qty");
+    h.motion(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "bottom", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    let weighted: Vec<i64> = before.iter().map(|q| q.signum() * 3).collect();
+    assert_eq!(leg_qtys(&h, &vcx, pkg), weighted, "through the weights");
+    // Only the first split row and the line above it.
+    let splits = split_rows(&h, &vcx);
+    h.motion(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    cursor_to_row(&h, &mut vcx, splits[0]);
+    h.motion(&mut vcx, "up", None);
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "2");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(leg_qtys(&h, &vcx, pkg), weighted, "a part is skipped");
+    assert_eq!(
+        edit_notice(&h, &vcx).as_deref(),
+        Some("set 1 cell, skipped 1 (1 refused)")
+    );
+}
+
+/// With the cursor on a split package row under a live selection, `i`
+/// opens the editor and commits over the selection; without a selection
+/// the row still refuses on its own.
+#[gpui::test]
+fn i_on_a_split_package_row_under_a_selection_commits_over_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    goto_column(&h, &mut vcx, "strike");
+    h.motion(&mut vcx, "top", None);
+    h.dispatch(&mut vcx, "visual_rows", None);
+    let split = split_rows(&h, &vcx)[0];
+    cursor_to_row(&h, &mut vcx, split);
+    h.dispatch(&mut vcx, "edit", None);
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.editor.is_some()),
+        "the editor opens: {:?}",
+        h.footer(&vcx)
+    );
+    set_editor(&h, &mut vcx, "4500");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 2 cells"));
+    let split = split_rows(&h, &vcx)[0];
+    cursor_to_row(&h, &mut vcx, split);
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(SPLIT_TEXT));
+}
+
 /// A grouping row has no line behind it for a structural verb: `d d`,
 /// `g p`, `g u` and `:package` refuse with the grouping-row footer, as
 /// does a `V` selection reaching one; `y y` yanks its lines' shorthand.

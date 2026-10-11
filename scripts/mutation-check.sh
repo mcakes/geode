@@ -30447,26 +30447,47 @@ run_mutation "pricer scope: a hidden cursor falls back by index" \
   '        if true {' \
   geode-pricer the_cursor_on_a_hidden_leg_moves_to_a_visible_row
 
-# A partly hidden package row is read-only: the editor never opens on it.
+# A partly hidden package row is read-only on its own: the editor never
+# opens on it without a selection.
 run_mutation "pricer scope: the editor opens on a partly hidden package" \
   crates/geode-pricer/src/tile.rs \
-  $'                if let Some(why) = self.read_only(row) {\n                    self.footer = Some(why.into());\n                    return;\n                }' \
-  $'                if let Some(why) = None::<&str> {\n                    self.footer = Some(why.into());\n                    return;\n                }' \
+  '                    Some(_) if self.selection.is_some() => {' \
+  '                    Some(_) if true => {' \
   geode-pricer an_edit_on_a_partly_hidden_package_row_is_refused_with_the_footer
 
-# A selected package stands for every leg, hidden ones too: a typed
-# commit over it refuses whole.
-run_mutation "pricer scope: a selection commit writes a partly hidden package" \
+# A selected partial package row stands for the legs it paints: its
+# scope-hidden leg is never written.
+run_mutation "pricer scope: a selected partial package row writes its hidden leg" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        if let Some(why) = self.selection_read_only() {\n            self.footer = Some(why.into());\n            self.sync_editor(cx);' \
-  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            self.sync_editor(cx);' \
-  geode-pricer a_selection_commit_over_a_partly_hidden_package_is_refused
+  '                .filter(|&l| self.sheet.is_line(l) && self.visibility.is_shown(l));' \
+  '                .filter(|&l| self.sheet.is_line(l));' \
+  geode-pricer a_selection_step_over_a_partly_hidden_package_steps_its_shown_leg
 
-run_mutation "pricer scope: a selection step moves a partly hidden package" \
+# A selected partial package row is not a whole package: a quantity skips
+# it rather than rescaling legs the row does not paint.
+run_mutation "pricer scope: a selected partial package row takes the qty whole" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        if let Some(why) = self.selection_read_only() {\n            self.footer = Some(why.into());\n            self.rebuild_chrome();' \
-  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            self.rebuild_chrome();' \
-  geode-pricer a_selection_step_over_a_partly_hidden_package_is_refused
+  '                    if self.read_only(row).is_some() {' \
+  '                    if false {' \
+  geode-pricer a_selection_qty_over_a_partly_hidden_package_skips_it
+
+run_mutation "pricer select: a selection over split package rows writes nothing" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                        partial.push((g, row));' \
+  '                        return Some(Default::default());' \
+  geode-pricer a_selection_over_split_package_rows_edits_every_leg
+
+run_mutation "pricer select: a split package reached in part takes the qty" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    if self.read_only(row).is_some() {' \
+  '                    if false {' \
+  geode-pricer a_selection_qty_sets_a_wholly_reached_split_package_and_skips_a_part
+
+run_mutation "pricer select: i on a split package row under a selection refuses" \
+  crates/geode-pricer/src/tile.rs \
+  '                    Some(_) if self.selection.is_some() => {' \
+  '                    Some(_) if false => {' \
+  geode-pricer i_on_a_split_package_row_under_a_selection_commits_over_it
 
 # Selection totals over a partly hidden package count its shown legs, as
 # its row paints them.
@@ -30731,8 +30752,8 @@ run_mutation "pricer group edit: i refuses on a group row" \
 
 run_mutation "pricer group edit: a selected group row stands for nothing" \
   crates/geode-pricer/src/tile/select.rs \
-  '        let grouped: Vec<usize> = groups.iter().flat_map(|p| self.group_lines(p)).collect();' \
-  '        let grouped: Vec<usize> = Vec::new();' \
+  '        let mut grouped: Vec<usize> = groups.iter().flat_map(|p| self.group_lines(p)).collect();' \
+  '        let mut grouped: Vec<usize> = Vec::new();' \
   geode-pricer a_selection_over_a_closed_group_edits_its_lines_too
 
 run_mutation "pricer group edit: a line under a selected group is written twice" \
@@ -32343,14 +32364,6 @@ run_mutation "visual commit: marketdata untouched choice keeps the selection" \
             self.end_selection_on_commit(cx);' \
   '            self.close_popup_with_window(window, cx);' \
   geode-marketdata an_untouched_choice_commit_over_a_selection_writes_nothing
-
-# A selection's edit never refuses over a group row: the group stands for
-# the shown lines beneath it.
-run_mutation "pricer selection: a group row refuses the edit" \
-  crates/geode-pricer/src/tile/select.rs \
-  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n' \
-  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n        if self.selection_holds_group() {\n            return Some(GROUP_ROW);\n        }\n' \
-  geode-pricer a_selection_across_groups_edits_its_lines
 
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \

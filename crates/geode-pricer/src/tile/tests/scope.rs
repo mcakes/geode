@@ -233,11 +233,12 @@ fn an_edit_on_a_partly_hidden_package_row_is_refused_with_the_footer(
     assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
 }
 
-/// A typed commit over a `V` selection that includes the partly hidden
-/// package would write its hidden leg too (a package stands for all its
-/// legs): refused whole, nothing written.
+/// A typed quantity over a `V` selection that includes the partly hidden
+/// package writes the selected line and skips the package as refused:
+/// through its weights it would rescale the hidden leg too. Its hidden
+/// leg counts once, as that refusal.
 #[gpui::test]
-fn a_selection_commit_over_a_partly_hidden_package_is_refused(cx: &mut gpui::TestAppContext) {
+fn a_selection_qty_over_a_partly_hidden_package_skips_it(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     set_expr(&h, &mut vcx, "strike != 5200");
     h.motion(&mut vcx, "down", None);
@@ -248,21 +249,28 @@ fn a_selection_commit_over_a_partly_hidden_package_is_refused(cx: &mut gpui::Tes
     assert_eq!(h.mode(&mut vcx), "insert", "A's own cell opens");
     set_editor(&h, &mut vcx, "3");
     h.dispatch(&mut vcx, "commit", None);
-    footer_is_partly_hidden(&h, &vcx);
+    assert_eq!(h.footer(&vcx), None);
     let (a, legs) = h.tile.read_with(&vcx, |t, _| {
         (
             t.sheet.qty(0),
             (2..4).map(|r| t.sheet.qty(r)).collect::<Vec<_>>(),
         )
     });
-    assert_eq!(a, 1, "A unwritten");
+    assert_eq!(a, 3, "A written");
     assert_eq!(legs, [-5, 5], "no leg written");
-    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.notice.as_ref().map(|n| n.to_string())),
+        Some("set 1 cell, skipped 1 (1 refused)".to_string())
+    );
 }
 
-/// The live step over the same selection: refused, nothing stepped.
+/// The live step over the same selection steps the lines the selection
+/// paints — A and the package's shown leg — and leaves the hidden leg.
 #[gpui::test]
-fn a_selection_step_over_a_partly_hidden_package_is_refused(cx: &mut gpui::TestAppContext) {
+fn a_selection_step_over_a_partly_hidden_package_steps_its_shown_leg(
+    cx: &mut gpui::TestAppContext,
+) {
     let (h, mut vcx) = open_seeded(cx, &BOOK);
     set_expr(&h, &mut vcx, "strike != 5200");
     h.motion(&mut vcx, "down", None);
@@ -271,10 +279,11 @@ fn a_selection_step_over_a_partly_hidden_package_is_refused(cx: &mut gpui::TestA
     h.motion(&mut vcx, "up", None);
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_up", None);
-    footer_is_partly_hidden(&h, &vcx);
+    assert_eq!(h.footer(&vcx), None);
     let shorthand = |r: usize| h.tile.read_with(&vcx, |t, _| t.sheet.shorthand(r));
-    assert_eq!(shorthand(0), "SPX Z26 5000 C", "A unstepped");
-    assert_eq!(shorthand(1), "-5 SPX Z26 4800/5200 CS", "no leg stepped");
+    assert_eq!(shorthand(0), "SPX Z26 5001 C", "A stepped");
+    assert_eq!(shorthand(2), "-5 SPX Z26 4801 C", "the shown leg stepped");
+    assert_eq!(shorthand(3), "5 SPX Z26 5200 C", "the hidden leg left");
 }
 
 /// A `V` selection over the partly hidden package totals what its row

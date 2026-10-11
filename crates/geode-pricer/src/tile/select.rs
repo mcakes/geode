@@ -253,23 +253,6 @@ impl PricerTile {
             .collect()
     }
 
-    /// Why the selection is read-only, if it is: it holds a package row
-    /// that is split ([`SPLIT`]) or that the scope partly hides
-    /// ([`PARTLY_HIDDEN`]). A selected package stands for every leg
-    /// (`lines_of`), those another node paints or the scope hides too, so
-    /// a bulk write through it would reach legs its row does not show: the
-    /// whole write refuses. A grouping row, open or closed, never refuses:
-    /// it stands for the shown lines beneath it ([`Self::edit_targets`]),
-    /// and a package it holds only part of is skipped by a quantity, not
-    /// refused whole.
-    pub(crate) fn selection_read_only(&self) -> Option<&'static str> {
-        first_refusal(
-            self.selected_sheet_rows()
-                .into_iter()
-                .map(|r| self.read_only(r)),
-        )
-    }
-
     /// Whether the resolved selection reaches a grouping row.
     fn selection_holds_group(&self) -> bool {
         self.resolved
@@ -355,28 +338,45 @@ impl PricerTile {
     }
 
     /// What [`Self::edit_targets`] reads from the grid as it is now:
-    /// `(selected rows, grouping rows' shown lines, their hidden lines)`.
+    /// `(selected rows, the shown lines grouping rows and partial package
+    /// rows stand for, their hidden lines)`.
+    ///
+    /// A selected package row the grouping splits, or the scope partly
+    /// hides, stands for the legs it paints, as a grouping row stands for
+    /// its lines: a write through it as a package would reach legs another
+    /// node paints or the scope hides. Its legs join the grouped lines, so
+    /// [`targets`] writes each once and a quantity skips the package unless
+    /// the selection reaches every leg.
     fn live_targets(&self) -> Option<(Vec<usize>, Vec<usize>, Vec<usize>)> {
-        let (direct, groups) = if self.selection.is_some() {
+        let (direct, groups, partial) = if self.selection.is_some() {
             let Some(r) = &self.resolved else {
                 return Some(Default::default());
             };
-            let groups: Vec<Path> = r
-                .rows
-                .clone()
-                .filter_map(|g| self.model.path(g).cloned())
-                .collect();
-            (self.selected_sheet_rows(), groups)
+            let mut direct = Vec::new();
+            let mut groups: Vec<Path> = Vec::new();
+            let mut partial: Vec<(usize, usize)> = Vec::new();
+            for g in r.rows.clone() {
+                if let Some(path) = self.model.path(g) {
+                    groups.push(path.clone());
+                } else if let Some(row) = self.model.sheet_row(g) {
+                    if self.read_only(row).is_some() {
+                        partial.push((g, row));
+                    } else {
+                        direct.push(row);
+                    }
+                }
+            }
+            (direct, groups, partial)
         } else if self.cursor_on_group() {
             let Some(At::Group(path)) = &self.cursor.at else {
                 return None;
             };
-            (Vec::new(), vec![path.clone()])
+            (Vec::new(), vec![path.clone()], Vec::new())
         } else {
             return None;
         };
-        let grouped: Vec<usize> = groups.iter().flat_map(|p| self.group_lines(p)).collect();
-        let hidden = rollup::hidden_under(
+        let mut grouped: Vec<usize> = groups.iter().flat_map(|p| self.group_lines(p)).collect();
+        let mut hidden = rollup::hidden_under(
             &self.sheet,
             &self.visibility,
             &self.chain,
@@ -384,6 +384,27 @@ impl PricerTile {
             self.clock,
             &groups,
         );
+        for (g, package) in partial {
+            let painted = self
+                .grid_rows_under(g)
+                .into_iter()
+                .flat_map(|r| {
+                    if self.sheet.is_package(r) {
+                        self.sheet.children(r)
+                    } else {
+                        r..r + 1
+                    }
+                })
+                .filter(|&l| self.sheet.is_line(l) && self.visibility.is_shown(l));
+            grouped.extend(painted);
+            hidden.extend(
+                self.sheet
+                    .children(package)
+                    .filter(|&l| self.sheet.is_line(l) && !self.visibility.is_shown(l)),
+            );
+        }
+        hidden.sort_unstable();
+        hidden.dedup();
         Some((direct, grouped, hidden))
     }
 
@@ -494,13 +515,6 @@ impl PricerTile {
     ) -> bool {
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
-            self.rebuild_chrome();
-            cx.notify();
-            return false;
-        }
-        if let Some(why) = self.selection_read_only() {
-            self.footer = Some(why.into());
-            self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
             return false;
@@ -952,15 +966,6 @@ impl PricerTile {
         // sign of it in the field.
         if !self.cursor_on_editor(&on, kind) {
             return None;
-        }
-        // Refused here rather than answered `None`: the single-field
-        // nudge would then step the editor's text, which the commit would
-        // refuse anyway.
-        if let Some(why) = self.selection_read_only() {
-            self.footer = Some(why.into());
-            self.rebuild_chrome();
-            cx.notify();
-            return Some(());
         }
         let et = self.edit_targets()?;
         let mut edits: Vec<Edit> = Vec::new();

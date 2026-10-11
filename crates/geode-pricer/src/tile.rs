@@ -2310,11 +2310,30 @@ impl PricerTile {
                 let Some(row) = self.cursor_sheet_row() else {
                     return;
                 };
-                if let Some(why) = self.read_only(row) {
-                    self.footer = Some(why.into());
-                    return;
-                }
-                let opening = cell::editor_for(&self.sheet, row, kind, &planned.format);
+                let opening = match self.read_only(row) {
+                    // Under a selection a split or partly hidden package
+                    // row stands for the legs it paints, so the editor
+                    // opens over the selection's lines as a grouping row's
+                    // does; alone, it would write the package through its
+                    // weights or `/` parts, legs it does not show included.
+                    Some(_) if self.selection.is_some() => {
+                        let lines = self
+                            .edit_targets()
+                            .map(|et| et.targets.lines)
+                            .unwrap_or_default();
+                        crate::core::select::group_editor(
+                            &self.sheet,
+                            &lines,
+                            kind,
+                            &planned.format,
+                        )
+                    }
+                    Some(why) => {
+                        self.footer = Some(why.into());
+                        return;
+                    }
+                    None => cell::editor_for(&self.sheet, row, kind, &planned.format),
+                };
                 (EditOn::Line(self.sheet.id(row)), Some(row), opening)
             }
         };
