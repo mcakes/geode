@@ -49,7 +49,7 @@ pub fn layout(
 ) -> SparkMarks {
     scratch.points.clear();
     let (w, h) = (rect.w - 2.0 * inset, rect.h - 2.0 * inset);
-    if !(w > 0.0 && h > 0.0) || !values.iter().any(|v| v.is_finite()) {
+    if !(w > 0.0 && h > 0.0 && values.iter().any(|v| v.is_finite())) {
         return SparkMarks::default();
     }
     let Some((lo, hi)) = range.or_else(|| shared_range([values])) else {
