@@ -38829,8 +38829,10 @@ run_mutation "classifications: a verb works over the pending object" \
 # The label loop: the cursor keeps its shown index after a verb.
 run_mutation "classifications: a relabel keeps the cursor index (grid)" \
   crates/geode-classifications/src/core/grid.rs \
-  '            self.place(at.min(self.visible.len() - 1));' \
-  '            let _ = at;' \
+  '        {
+            self.place(at.min(self.visible.len() - 1));' \
+  '        {
+            let _ = at;' \
   geode-classifications \
   a_relabel_rebuild_keeps_the_cursor_index_even_when_put
 
@@ -39111,9 +39113,9 @@ run_mutation "classifications: a landing plan never displaces an open edit" \
 run_mutation "classifications: a landing plan waits for the focused tile" \
   crates/geode-classifications/src/tile/mod.rs \
   '        if !self.focused
-            || self.find_entry.is_some()' \
+            || self.searching' \
   '        if false
-            || self.find_entry.is_some()' \
+            || self.searching' \
   geode-classifications \
   a_plan_landing_on_an_unfocused_tile_is_held_until_focused
 
@@ -39121,11 +39123,27 @@ run_mutation "classifications: a landing plan waits for the focused tile" \
 # into it must not answer the import.
 run_mutation "classifications: a landing plan waits for a search to end" \
   crates/geode-classifications/src/tile/mod.rs \
-  '            || self.find_entry.is_some()
+  '            || self.searching
             || self.editor.is_some()' \
   '            || self.editor.is_some()' \
   geode-classifications \
   a_plan_landing_during_a_search_is_held
+
+# Cancelling `/` returns the cursor to where the search began.
+run_mutation "classifications: a cancelled find returns to its origin" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                        && !self.grid.put_on(origin)' \
+  '                        && false' \
+  geode-classifications \
+  slash_moves_the_cursor_to_a_match_and_keeps_every_row
+
+# `n` past the last match wraps to the first.
+run_mutation "classifications: n wraps" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                FindDirection::Forward => (at + 1) % len,' \
+  '                FindDirection::Forward => (at + 1).min(len - 1),' \
+  geode-classifications \
+  n_and_shift_n_repeat_the_committed_find_and_wrap
 
 # A shell input (palette, command line) holds the keys over the focused
 # tile; the tile sees only that focus is not on the shell root or within it.

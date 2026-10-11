@@ -1581,7 +1581,13 @@ paint, including a hand-written `''`. `:sort <source|label|rows>
 [asc|desc]` orders the grid and bare `:sort` restores the default; a header
 sort control cycles desc → asc → default as every grid tile's does.
 Unclassified labels and values not in the data sort last either way.
-Every row stays shown: `/` does not narrow the grid.
+Every row stays shown: `/` is vim's find, not a filter. Each keystroke
+moves the cursor to the first row at or after where the search began
+whose source or label contains the query (ignoring case, wrapping);
+`enter` keeps the query and `escape` returns the cursor to where it began.
+`n`/`shift+n` step the kept query from the cursor, wrapping, with a count.
+`escape` in normal mode ends a selection first, then the kept find, then
+dismisses the header's notices.
 
 The shell's grid motions move a cursor held by source value, so a rebuild
 keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.

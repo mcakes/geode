@@ -2939,6 +2939,64 @@ fn a_plan_landing_during_a_search_is_held(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
 }
 
+/// `/` moves the cursor to the first match at or after where the search
+/// began, over source and label, and narrows nothing; escape returns.
+#[gpui::test]
+fn slash_moves_the_cursor_to_a_match_and_keeps_every_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.find(&mut vcx, FindEvent::Changed("sx".into()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"], "nothing narrows");
+    // The label is searched too; each keystroke searches from the origin.
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(
+        h.cursor(&vcx).as_deref(),
+        Some("NKY"),
+        "escape returns to the origin"
+    );
+}
+
+/// `n` and `shift+n` step the committed query from the cursor, wrapping.
+#[gpui::test]
+fn n_and_shift_n_repeat_the_committed_find_and_wrap(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    // Nothing committed: n does nothing.
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    h.find(&mut vcx, FindEvent::Committed("eur".into()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"), "wraps");
+    vcx.simulate_keystrokes("shift-n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"), "wraps back");
+    // A query nothing matches moves nothing.
+    h.find(&mut vcx, FindEvent::Changed("zzz".into()));
+    h.find(&mut vcx, FindEvent::Committed("zzz".into()));
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+}
+
+/// Escape ends a row selection first, then the committed find.
+#[gpui::test]
+fn escape_ends_a_selection_then_the_find_then_the_notices(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    h.find(&mut vcx, FindEvent::Committed("eur".into()));
+    vcx.simulate_keystrokes("shift-v");
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    vcx.simulate_keystrokes("escape");
+    // The find is gone: n no longer moves.
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+}
+
 /// A plan landing while another tile is focused is held until this one is
 /// focused again; only then does it take the keyboard.
 #[gpui::test]

@@ -56,6 +56,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("classifications::paste", "Classification: Paste label"),
     ("classifications::undo", "Classification: Undo"),
     ("classifications::redo", "Classification: Redo"),
+    ("classifications::find_next", "Classification: Find next"),
+    (
+        "classifications::find_prev",
+        "Classification: Find previous",
+    ),
     ("classifications::menu", "Classification: Actions"),
     // The popup and field verbs: registered beside the rest so the
     // fragment binds them and the palette lists them.
@@ -121,8 +126,10 @@ context = "classifications && mode == normal"
 "g c" = "classifications::switch"
 "shift+v" = "classifications::visual_rows"
 "v" = "classifications::visual_rows"
-# Nothing to cancel in normal mode but the header's notices: `escape`
-# dismisses the warning and danger ones, and does nothing otherwise.
+"n" = "classifications::find_next"
+"shift+n" = "classifications::find_prev"
+# In normal mode `escape` ends a committed `/` find, else dismisses the
+# header's warning and danger notices, and does nothing otherwise.
 "escape" = "classifications::cancel"
 
 [[bindings]]
@@ -380,7 +387,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 28);
+        assert_eq!(count, 30);
         // The config-level verbs are reached from the palette and the menu.
         for unbound in [
             "new",

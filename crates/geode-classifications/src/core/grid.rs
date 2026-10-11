@@ -48,6 +48,8 @@ pub struct GridModel {
     order: Vec<usize>,
     /// The shown rows: `order`, rebuilt with it.
     visible: Vec<usize>,
+    /// What `/` searches, one per shown row, rebuilt with the order.
+    search: Vec<String>,
     /// Index into `visible`; `None` while nothing is shown.
     cursor: Option<usize>,
     /// The row under the cursor, by identity. Kept while nothing is shown,
@@ -141,6 +143,30 @@ impl GridModel {
 
     pub fn row(&self, i: usize) -> &ClassRow {
         &self.rows[i]
+    }
+
+    /// What `/` searches, one entry per shown row: source, tab, label.
+    pub fn search_text(&self) -> &[String] {
+        &self.search
+    }
+
+    /// Put the cursor on `source`'s row, as a press would; `false` when it
+    /// is not shown. Ends no selection.
+    pub fn put_on(&mut self, source: &str) -> bool {
+        match self.position(source) {
+            Some(at) => {
+                self.place(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Put the cursor on shown row `at`, clamped.
+    pub fn put_at(&mut self, at: usize) {
+        if !self.visible.is_empty() {
+            self.place(at.min(self.visible.len() - 1));
+        }
     }
 
     /// The cursor's index into [`GridModel::visible`].
@@ -292,6 +318,11 @@ impl GridModel {
     fn reseat(&mut self) {
         self.visible.clear();
         self.visible.extend(self.order.iter().copied());
+        self.search.clear();
+        self.search.extend(self.visible.iter().map(|&i| {
+            let row = &self.rows[i];
+            format!("{}\t{}", row.source, label_text(row).unwrap_or(""))
+        }));
         let lost = |s: Option<&str>| s.is_none_or(|s| self.position(s).is_none());
         if self.anchor.is_some()
             && (lost(self.anchor.as_deref()) || lost(self.cursor_source.as_deref()))
@@ -652,5 +683,27 @@ mod tests {
         g.start_selection();
         assert!(g.targets().is_empty());
         assert_eq!(g.counts(), (0, 0));
+    }
+
+    #[test]
+    fn search_text_follows_the_order_and_blanks_unclassified_labels() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![
+            row("NKY", None, Some(7)),
+            row("DAX", Some("Europe"), Some(5)),
+        ]);
+        assert_eq!(g.search_text(), ["NKY\t", "DAX\tEurope"]);
+        g.set_sort(Some((SortCol::Source, false)));
+        assert_eq!(g.search_text(), ["DAX\tEurope", "NKY\t"]);
+    }
+
+    #[test]
+    fn put_on_places_the_cursor_on_a_shown_source() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![row("A", None, Some(3)), row("B", None, Some(2))]);
+        assert!(g.put_on("B"));
+        assert_eq!(g.cursor_source(), Some("B"));
+        assert!(!g.put_on("Z"));
+        assert_eq!(g.cursor_source(), Some("B"));
     }
 }

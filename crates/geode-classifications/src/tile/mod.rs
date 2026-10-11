@@ -57,6 +57,7 @@ use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
+use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::edit::EditCaret;
@@ -222,6 +223,14 @@ struct Asked {
     from: String,
 }
 
+/// A `/` search: the source the cursor was on when it began, where cancel
+/// returns it (`None` once the search has ended), and the query `n` and
+/// `shift+n` repeat (`None` until one commits).
+struct FindState {
+    origin: Option<String>,
+    committed: Option<String>,
+}
+
 pub struct ClassificationsTile {
     id: TileId,
     frame: FrameRef,
@@ -258,10 +267,12 @@ pub struct ClassificationsTile {
     file_dir: Option<PathBuf>,
     /// Why the values are not on screen: a refused or failed read.
     values_notice: Option<String>,
-    /// `Some` while a `/` search is open, from its first keystroke until it
-    /// commits or cancels: the search holds the keyboard meanwhile. The
-    /// text is unused.
-    find_entry: Option<String>,
+    /// The `/` search: where it began (the cursor's source then) and the
+    /// last committed query `n`/`shift+n` repeat. `None` with no search.
+    find: Option<FindState>,
+    /// A `/` prompt is open (between its first change and its commit or
+    /// cancel): it holds the keyboard, so a held import waits.
+    searching: bool,
     /// The rem the table's column widths were last scaled to.
     last_rem: f32,
     menu: Option<(MenuKind, Menu<Pick>)>,
@@ -401,7 +412,8 @@ impl ClassificationsTile {
             file_tag: 0,
             file_dir: None,
             values_notice: None,
-            find_entry: None,
+            find: None,
+            searching: false,
             last_rem: 0.0,
             menu: None,
             menu_at: None,
@@ -1344,7 +1356,7 @@ impl ClassificationsTile {
     /// outside it does (focus is on the shell root or within the tile).
     fn keyboard_free(&self, window: &Window, cx: &mut Context<Self>) -> bool {
         if !self.focused
-            || self.find_entry.is_some()
+            || self.searching
             || self.editor.is_some()
             || self.prompt.is_some()
             || self.confirm.is_some()
@@ -1520,7 +1532,8 @@ impl ClassificationsTile {
             self.state.cursor = None;
             self.grid = GridModel::new();
             self.grid.set_sort(self.state.sort);
-            self.find_entry = None;
+            self.find = None;
+            self.searching = false;
             self.history.forget();
             self.notices.outcome.clear();
         }
@@ -2201,23 +2214,95 @@ impl ClassificationsTile {
         }
     }
 
-    /// A `/` search holds the keyboard while it is open and moves nothing;
-    /// a plan held meanwhile is offered once it ends.
+    /// `/`: each change searches forward from where the search began
+    /// (vim's incsearch) over source and label, wrapping, and a hit moves
+    /// the cursor. Commit keeps the query for `n`; cancel returns the cursor
+    /// to the origin row and keeps an earlier committed query. A plan held
+    /// while the search was open is offered once it ends.
     pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
         match event {
-            FindEvent::Changed(_) => {
-                self.find_entry.get_or_insert_default();
+            FindEvent::Changed(query) => {
+                // A new search (none open) takes the cursor's row as its
+                // origin; later changes in the same search keep it.
+                if !self.searching {
+                    self.searching = true;
+                    let committed = self.find.take().and_then(|f| f.committed);
+                    self.find = Some(FindState {
+                        origin: self.grid.cursor_source().map(str::to_string),
+                        committed,
+                    });
+                }
+                // Every change searches from the origin, not from where the
+                // last one landed: a lengthening query walks forward and a
+                // shortened one walks back.
+                let grid = &self.grid;
+                let from = self
+                    .find
+                    .as_ref()
+                    .and_then(|f| f.origin.as_deref())
+                    .and_then(|s| grid.visible().iter().position(|&i| grid.row(i).source == s))
+                    .unwrap_or(0);
+                if let Some(at) = find_match(
+                    self.grid.search_text(),
+                    from,
+                    FindDirection::Forward,
+                    &query,
+                ) {
+                    self.grid.put_at(at);
+                }
             }
-            FindEvent::Committed(_) => {
-                self.find_entry = None;
+            FindEvent::Committed(query) => {
+                self.searching = false;
+                if let Some(f) = self.find.as_mut()
+                    && !query.is_empty()
+                {
+                    f.committed = Some(query);
+                }
                 self.offer_held_later(cx);
             }
             FindEvent::Cancelled => {
-                if self.find_entry.take().is_some() {
-                    self.offer_held_later(cx);
+                self.searching = false;
+                if let Some(f) = self.find.take() {
+                    if let Some(origin) = f.origin.as_deref()
+                        && !self.grid.put_on(origin)
+                    {
+                        self.grid.put_at(0);
+                    }
+                    self.find = f.committed.map(|q| FindState {
+                        origin: None,
+                        committed: Some(q),
+                    });
                 }
+                self.offer_held_later(cx);
             }
         }
+        self.sync_table(false, cx);
+        cx.notify();
+    }
+
+    /// `n`/`shift+n`, counted: the committed query stepped from the cursor,
+    /// wrapping, as market data's repeat does. Nothing committed, or no
+    /// match: the cursor stays.
+    fn repeat_find(&mut self, dir: FindDirection, count: Option<u32>) {
+        let Some(query) = self.find.as_ref().and_then(|f| f.committed.clone()) else {
+            return;
+        };
+        let len = self.grid.search_text().len();
+        if len == 0 {
+            return;
+        }
+        let mut at = self.grid.cursor().unwrap_or(0);
+        for _ in 0..count.unwrap_or(1).max(1) {
+            let start = match dir {
+                FindDirection::Forward => (at + 1) % len,
+                FindDirection::Backward => (at + len - 1) % len,
+            };
+            match find_match(self.grid.search_text(), start, dir, &query) {
+                Some(row) => at = row,
+                None => return,
+            }
+        }
+        self.grid.put_at(at);
     }
 
     /// `insert` while the label editor or the prompt is open (the shell
@@ -2351,6 +2436,10 @@ impl ClassificationsTile {
                 self.sync_table(false, cx);
                 cx.notify();
             }
+            "classifications::cancel" if self.find.is_some() => {
+                self.find = None;
+                cx.notify();
+            }
             // Last in line: nothing above had anything to cancel, so
             // `escape` dismisses every warning and danger notice showing,
             // each as a click on it would. Nothing to dismiss: unhandled.
@@ -2363,6 +2452,16 @@ impl ClassificationsTile {
                 if !any {
                     return false;
                 }
+                cx.notify();
+            }
+            "classifications::find_next" | "classifications::find_prev" if self.menu.is_none() => {
+                let dir = if action.0 == "classifications::find_next" {
+                    FindDirection::Forward
+                } else {
+                    FindDirection::Backward
+                };
+                self.repeat_find(dir, count);
+                self.sync_table(false, cx);
                 cx.notify();
             }
             "classifications::visual_rows" if self.menu.is_none() => {
