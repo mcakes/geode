@@ -419,6 +419,19 @@ run_mutation "ctrl copy/paste: the guide binds ctrl+c to copy" \
   geode-app \
   the_production_keymap_binds_ctrl_c_and_ctrl_v_beside_y_and_p
 
+# The child-process fixture exercises Windows-only Velopack startup. Keep it
+# in cross-platform anchor checks, but execute the mutation only on Windows.
+if (( anchors_only )) || [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
+run_mutation "packaging: installer callbacks bypass application startup (Windows)" \
+  crates/geode-app/src/main.rs \
+  '    velopack::VelopackApp::build()
+        .set_auto_apply_on_startup(false)
+        .run();' \
+  '    std::thread::yield_now();' \
+  geode-app:velopack_startup \
+  installer_hooks_exit_before_application_startup
+fi
+
 run_mutation "guide: startup registers the guide tile" \
   crates/geode-app/src/main.rs \
   '    roster.add(Box::new(geode_guide::GuideFactory));' \

@@ -30,6 +30,8 @@ Current documentation is authoritative:
   values, and known gaps.
 - `docs/current/real-sources.md` — where vendor clients plug in, what each
   simulator stands in for, and which feed shapes are guessed.
+- `docs/current/packaging.md` — Windows installer builds, staged DLLs, and
+  the current limits of Velopack integration.
 - `docs/agent-practices.md` — how work is run, reviewed, verified, and merged,
   and hazards that have cost time.
 - `docs/open-items.md` — open follow-ups and owed display checks; remove an

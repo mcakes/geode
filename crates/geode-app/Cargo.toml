@@ -10,6 +10,11 @@ name = "geode"
 path = "src/main.rs"
 bench = false
 
+[[test]]
+name = "velopack_startup"
+path = "tests/velopack_startup.rs"
+bench = false
+
 [features]
 # Enable the shell's GPUI profiler integration. Off by default.
 profiling = ["geode-shell/profiling"]
@@ -65,6 +70,10 @@ tracing.workspace = true
 # hosting contract, geode-shell::module); the production-roster tests read
 # a factory's launch state through it.
 toml = "1.1.4"
+
+[target.'cfg(windows)'.dependencies]
+# Match the repository-local vpk tool in .config/dotnet-tools.json.
+velopack = "=1.2.161"
 
 [dev-dependencies]
 # The demo tests build documents through the concrete kinds and check the

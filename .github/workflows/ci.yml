@@ -28,6 +28,10 @@ jobs:
       - name: Mutation anchors
         if: runner.os != 'Windows'
         run: zsh scripts/mutation-check.sh --anchors-only
+      - name: Windows package script tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test-package-windows.ps1
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

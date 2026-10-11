@@ -24,12 +24,13 @@ Start with the documents that describe Geode **as it works now**:
 | [Feature modules](current/features.md) | Blotter, documents, timeseries, vol slice, diagnostics, user guide, pricing, and demo behavior |
 | [Crate READMEs](../crates/) | Local module maps and crate contracts |
 | [Performance](current/performance.md) | Budgets, instrumentation, reference values, and known gaps |
+| [Windows packaging](current/packaging.md) | Per-user Velopack installer builds, DLL staging, artifacts, and current update limitations |
 | [Measurement log](perf.md) | Chronological benchmark results and investigations |
 
 For future deployment work, see [Windows packaging planning](windows-packaging.md):
 per-user installation, frequent intranet updates, bundled DLLs, the Velopack
-candidate, and the Windows validation still needed. Packaging is not yet
-implemented.
+candidate, and the Windows validation still needed. The current packaging
+guide above describes the implemented foundation.
 
 `modules.md` is an undated feature-ideas inventory, not a current capability
 reference or committed roadmap.
