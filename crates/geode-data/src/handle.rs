@@ -21,8 +21,8 @@ use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     AsOf, CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams,
-    HistoryOutcome, HistoryParams, QueryKey, QueryOutcome, ReferenceOutcome, ReferenceParams, Span,
-    WatchlistOutcome, WatchlistParams,
+    HistoryKeysOutcome, HistoryKeysParams, HistoryOutcome, HistoryParams, QueryKey, QueryOutcome,
+    ReferenceOutcome, ReferenceParams, Span, WatchlistOutcome, WatchlistParams,
 };
 use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::textfile::{TextFileOp, TextFileOutcome, TextFileParams, TextFileResult};
@@ -77,6 +77,9 @@ pub enum Request {
     Watchlist(WatchlistParams),
     /// Keyed history, answered with DataEvent::History.
     History(HistoryParams),
+    /// A history key column's listed values, answered at once from the
+    /// service thread with DataEvent::HistoryKeys.
+    HistoryKeys(HistoryKeysParams),
     /// Poll the snapshot source filling `dataset` now. No answer: the
     /// poll reports through Polled, Health and Published like any other.
     Poll {
@@ -405,6 +408,14 @@ impl DataHandle {
         self.send(Request::History(params))
     }
 
+    /// Queue a history key listing request. `Err(Busy)` means the queue
+    /// was full and a later submission can succeed; `Err(Stopped)` means
+    /// the service can no longer serve and no outcome is owed. Answered
+    /// from what the source listed at open, `None` when it listed nothing.
+    pub fn history_keys(&self, params: HistoryKeysParams) -> Result<(), Refusal> {
+        self.send(Request::HistoryKeys(params))
+    }
+
     /// Queue an identity refresh. `Err(Busy)` means the queue was full and a
     /// later submission can succeed; `Err(Stopped)` means the service can no
     /// longer serve and no outcome is owed.
@@ -708,6 +719,12 @@ enum PanicAnswer {
         dataset: String,
         span: Span,
     },
+    HistoryKeys {
+        key: QueryKey,
+        tag: u64,
+        dataset: String,
+        column: String,
+    },
     Price {
         key: QueryKey,
         tag: u64,
@@ -820,6 +837,15 @@ impl PanicAnswer {
                     submitted: p.submitted,
                     dataset: p.dataset.clone(),
                     span: p.span,
+                },
+            ),
+            Request::HistoryKeys(p) => (
+                "history keys",
+                PanicAnswer::HistoryKeys {
+                    key: p.key,
+                    tag: p.tag,
+                    dataset: p.dataset.clone(),
+                    column: p.column.clone(),
                 },
             ),
             Request::Price(p) => (
@@ -971,6 +997,21 @@ impl PanicAnswer {
                     dataset,
                     span,
                     result: Err(reason),
+                }));
+            }
+            // The listing is unavailable, read as an unknown column reads.
+            PanicAnswer::HistoryKeys {
+                key,
+                tag,
+                dataset,
+                column,
+            } => {
+                let _ = sink(DataEvent::HistoryKeys(HistoryKeysOutcome {
+                    key,
+                    tag,
+                    dataset,
+                    column,
+                    values: None,
                 }));
             }
             PanicAnswer::Price {
@@ -1290,6 +1331,11 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
             }
         }
         Request::History(params) => service.history(params),
+        Request::HistoryKeys(params) => {
+            let _ = sink(DataEvent::HistoryKeys(
+                service.history_keys_outcome(&params),
+            ));
+        }
         Request::Poll { dataset } => service.poll(&dataset),
         Request::Price(params) => service.price(params),
         Request::VolSlices(params) => service.vol_slices(params),
@@ -2495,6 +2541,7 @@ mod tests {
             Request::Reference(p) => p.key == MARKED,
             Request::Watchlist(p) => p.key == MARKED,
             Request::History(p) => p.key == MARKED,
+            Request::HistoryKeys(p) => p.key == MARKED,
             Request::Poll { dataset } => dataset == "marked",
             Request::Price(p) => p.key == MARKED,
             Request::VolSlices(p) => p.key == MARKED,
@@ -2699,6 +2746,48 @@ mod tests {
             seen.iter().any(|e| matches!(e, DataEvent::History(o)
             if o.key == QueryKey(12) && o.tag == 3
                 && o.result.as_ref().is_err_and(|r| r.contains("not a history dataset")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_history_keys_request_is_answered_once_under_its_key_and_tag() {
+        let (_d, h, rx) = probed(|_| {});
+        h.history_keys(HistoryKeysParams {
+            key: QueryKey(21),
+            tag: 3,
+            dataset: "vol_surface".into(),
+            column: "tenor".into(),
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        let answers = seen
+            .iter()
+            .filter(
+                |e| matches!(e, DataEvent::HistoryKeys(o) if o.key == QueryKey(21) && o.tag == 3),
+            )
+            .count();
+        assert_eq!(
+            answers, 1,
+            "one DataEvent::HistoryKeys under the key and tag: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_history_keys_request_is_answered_on_its_key_and_tag() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.history_keys(HistoryKeysParams {
+            key: MARKED,
+            tag: 5,
+            dataset: "vol_surface".into(),
+            column: "tenor".into(),
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::HistoryKeys(o)
+            if o.key == MARKED && o.tag == 5 && o.dataset == "vol_surface"
+                && o.column == "tenor" && o.values.is_none())),
             "{seen:?}"
         );
     }

@@ -285,6 +285,28 @@ pub struct HistoryOutcome {
     pub result: Result<HistoryTable, String>,
 }
 
+/// Ask for a history key column's distinct values as the source listed
+/// them at open (typeahead, the tenor set).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryKeysParams {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub dataset: String,
+    pub column: String,
+}
+
+/// The history key listing's answer, addressed to the key that asked.
+/// `values` is `None` before the source answered, when it cannot
+/// enumerate, or when the dataset or column is unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryKeysOutcome {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub dataset: String,
+    pub column: String,
+    pub values: Option<Vec<String>>,
+}
+
 /// One key value as stored and compared: text keys trimmed, f64 keys parsed
 /// and re-formatted with `{}` so `0.50` and `0.5` are one key (and `-0`
 /// and `0`). `Err` names

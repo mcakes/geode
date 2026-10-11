@@ -733,6 +733,15 @@ impl Events {
             DataEvent::History(outcome) => {
                 tracing::debug!(target: TARGET, "history for '{}' answered; ignored", outcome.dataset);
             }
+            // Nor for a history key listing.
+            DataEvent::HistoryKeys(outcome) => {
+                tracing::debug!(
+                    target: TARGET,
+                    "history keys for '{}' column '{}' answered; ignored",
+                    outcome.dataset,
+                    outcome.column
+                );
+            }
             // Logged by the loop once it knows whether an app explains it.
             DataEvent::ThreadStopped { thread, reason } => {
                 self.stops

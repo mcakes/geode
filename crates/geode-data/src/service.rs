@@ -42,9 +42,9 @@ use geode_core::egress_config::EgressSpec;
 use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
-    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, HistoryOutcome,
-    HistoryParams, QueryKey, QueryOutcome, ReferenceOutcome, ReferenceParams, Span,
-    WatchlistOutcome, WatchlistParams,
+    CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams,
+    HistoryKeysOutcome, HistoryKeysParams, HistoryOutcome, HistoryParams, QueryKey, QueryOutcome,
+    ReferenceOutcome, ReferenceParams, Span, WatchlistOutcome, WatchlistParams,
 };
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
@@ -141,6 +141,9 @@ pub enum DataEvent {
     /// One history request answered, addressed by the requester's key and
     /// tag.
     History(HistoryOutcome),
+    /// A history key column's listed values, addressed by the requester's
+    /// key and tag.
+    HistoryKeys(HistoryKeysOutcome),
     /// Pricing result, addressed by the requesting tile's key.
     Price(PriceOutcome),
     /// Vol slice batch result, addressed by the requesting tile's key.
@@ -3140,6 +3143,18 @@ impl DataService {
             .cloned()
     }
 
+    /// One history key column's listed values, for `Request::HistoryKeys`.
+    /// Reads what the source listed at open; never waits on the source.
+    pub fn history_keys_outcome(&self, params: &HistoryKeysParams) -> HistoryKeysOutcome {
+        HistoryKeysOutcome {
+            key: params.key,
+            tag: params.tag,
+            dataset: params.dataset.clone(),
+            column: params.column.clone(),
+            values: self.history_keys(&params.dataset, &params.column),
+        }
+    }
+
     /// Poll the snapshot source filling `dataset` now; the source reader
     /// admits at most one per reference dataset. Keyed by dataset because
     /// that is what the asking page shows; never blocks, and a poll already
@@ -5414,6 +5429,51 @@ mod tests {
             service.history_keys("vol_surface", "tenor"),
             Some(vec!["1M".into(), "3M".into()]),
             "keys were asked at open"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_history_keys_request_answers_from_what_the_source_listed() {
+        let (_dir, _calls, service, rx) =
+            history_service(5, Some(vec!["3M".into(), "1M".into(), "18M".into()]), false);
+        // The listing is queued at open ahead of any query: once a history
+        // ask has answered, the listing has landed (the neighbouring test
+        // relies on the same order).
+        service.history(history_ask(
+            1,
+            1,
+            KeySet::Prefix(vec![tuple(&["SPX"])]),
+            Span::Latest,
+        ));
+        history_answer(&rx, 1);
+        assert!(
+            service.history_keys("vol_surface", "tenor").is_some(),
+            "the source's tenor listing never arrived"
+        );
+        let ask = |dataset: &str, column: &str| HistoryKeysParams {
+            key: QueryKey(4),
+            tag: 9,
+            dataset: dataset.into(),
+            column: column.into(),
+        };
+        let out = service.history_keys_outcome(&ask("vol_surface", "tenor"));
+        assert_eq!(out.key, QueryKey(4));
+        assert_eq!(out.tag, 9);
+        assert_eq!(
+            out.values,
+            Some(vec!["1M".to_string(), "3M".into(), "18M".into()]),
+            "tenor order"
+        );
+        assert_eq!(
+            service
+                .history_keys_outcome(&ask("vol_surface", "nope"))
+                .values,
+            None
+        );
+        assert_eq!(
+            service.history_keys_outcome(&ask("nope", "tenor")).values,
+            None
         );
         service.shutdown();
     }
