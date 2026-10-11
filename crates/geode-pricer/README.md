@@ -580,8 +580,9 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   These samples are not numeric limits: an overflowing right-aligned value
   can still lose leading digits.
 
-- A selection is anchored by `LineId` and the plan column's vocabulary
-  name and re-resolved in `sync_cursor`, which every cursor move and every
+- A selection is anchored by an `At` (a `LineId` within its group path, or
+  a grouping row's path) and the plan column's vocabulary name, and is
+  re-resolved in `sync_cursor`, which every cursor move and every
   model install (a delivery, an edit, a reload) runs; render and the
   delegate only read the prepared `resolved`, extent and totals. A lost
   anchor clears it with a footer notice; a sheet replace (`:e`, `:new`, a

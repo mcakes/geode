@@ -28344,6 +28344,13 @@ run_mutation "pricer select: an unpriced row counts as zero in the totals" \
   '                _ => *s,' \
   geode-pricer risk_totals_are_position_totals_and_refuse_an_incomplete_column
 
+# `v`/`V` anchor on a grouping row's path as on a line.
+run_mutation "pricer select: a selection refuses to start on a group row" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                let at = self.cursor_row().and_then(|g| self.at_of_row(g));' \
+  $'                let at = self\n                    .cursor_row()\n                    .and_then(|g| self.at_of_row(g))\n                    .filter(|at| matches!(at, At::Line { .. }));' \
+  geode-pricer a_selection_starts_on_a_group_row
+
 # An incomplete total paints as a refused dash, not a number.
 run_mutation "pricer select: an incomplete total paints as zero" \
   crates/geode-pricer/src/tile/select.rs \
@@ -30999,8 +31006,8 @@ run_mutation "pricer grouping: a NULL path segment reads as empty" \
 # package's second row, it stays there.
 run_mutation "pricer grouping: a split anchor resolves to the package's first row" \
   crates/geode-pricer/src/tile/select.rs \
-  '                    .filter(|at| matches!(at, At::Line { .. }));' \
-  $'                    .filter(|at| matches!(at, At::Line { .. }))\n                    .map(|at| match at {\n                        At::Line { id, .. } => At::Line { id, within: None },\n                        g => g,\n                    });' \
+  '                let at = self.cursor_row().and_then(|g| self.at_of_row(g));' \
+  $'                let at = self.cursor_row().and_then(|g| self.at_of_row(g)).map(|at| match at {\n                    At::Line { id, .. } => At::Line { id, within: None },\n                    g => g,\n                });' \
   geode-pricer a_selection_anchored_on_a_split_packages_second_row_stays_there
 
 # A split package's cursor whose node a regroup removed lands on the

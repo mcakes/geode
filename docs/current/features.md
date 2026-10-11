@@ -2712,8 +2712,12 @@ lines under a group, edit as usual.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
 are selected too. `y y` or `V y` on a split package row yanks that row's
-legs, as its cells show them, not the whole package. A selection cannot start on a group row (`select from a
-line or package row`), though its moving end can rest on one. `o`,
+legs, as its cells show them, not the whole package. A selection can start
+on a group row as on a line: it anchors on the group's path, and clears with
+`selection cleared: anchor row no longer shown` once that path stops
+painting (a regroup, its last line leaving it, a closed ancestor). With the
+cursor on a group row, `i` still refuses; a typed commit edits from a line
+cell. `o`,
 `shift+o` and `p` / `shift+p` with the cursor on a group row have no line to
 land beside: the bar's label reads `at end`, and a put lands at the end of the sheet with `put at
 the end of the sheet` in the footer. `g m` on a group row opens the plain

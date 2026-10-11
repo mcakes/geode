@@ -35,8 +35,9 @@ fn first_refusal(reasons: impl Iterator<Item = Option<&'static str>>) -> Option<
     out
 }
 
-/// The refusal for `v`/`V` on a row with no line behind it.
-const NO_ANCHOR: &str = "select from a line or package row";
+/// The refusal for `v`/`V` with no row or column under the cursor: an
+/// empty sheet or a view with no plan columns.
+const NO_ANCHOR: &str = "nothing to select";
 
 /// Whether a column's cells step under the arrows: the kinds `cell::nudge`
 /// steps. A live step opens only on one of these.
@@ -63,20 +64,20 @@ impl PricerTile {
                 }
             }
             None => {
-                // A line or package row, with its node's group path: a
-                // split package paints once per node under one id.
-                let line = self
-                    .cursor_row()
-                    .and_then(|g| self.at_of_row(g))
-                    .filter(|at| matches!(at, At::Line { .. }));
+                // A line or package row, with its node's group path (a
+                // split package paints once per node under one id), or a
+                // grouping row's path. A group anchor is lost when its path
+                // stops painting — a regroup, its last line leaving it, a
+                // closed ancestor — and the selection clears with a notice.
+                let at = self.cursor_row().and_then(|g| self.at_of_row(g));
                 let col = self.plan.columns.get(self.cursor.col).map(|c| c.def.name);
-                let (Some(line), Some(col)) = (line, col) else {
+                let (Some(at), Some(col)) = (at, col) else {
                     self.footer = Some(NO_ANCHOR.into());
                     return;
                 };
                 self.selection = Some(Selection {
                     kind,
-                    anchor_row: line,
+                    anchor_row: at,
                     anchor_col: col,
                 });
                 // Under a sort the rows hold this painted order while the

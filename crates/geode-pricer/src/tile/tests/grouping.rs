@@ -854,6 +854,91 @@ fn totals_count_a_group_row_and_its_descendant_once(cx: &mut gpui::TestAppContex
     assert_eq!(npv_total(&h, &vcx), Some(format!("{:.2}", group + ndx)));
 }
 
+/// `V` and `v` start on a grouping row: the selection anchors on the
+/// group's path, totals and yanks its lines, and extends from there.
+#[gpui::test]
+fn a_selection_starts_on_a_group_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    price_distinctly(&h, &mut vcx);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    let group = npv(&h, &vcx, 1);
+    for verb in ["visual_rows", "visual_block"] {
+        h.dispatch(&mut vcx, verb, None);
+        assert_eq!(h.mode(&mut vcx), "visual", "{verb}");
+        assert_eq!(h.footer(&vcx), None, "{verb}: no refusal");
+        assert_eq!(npv_total(&h, &vcx), Some(format!("{group:.2}")), "{verb}");
+        h.dispatch(&mut vcx, "escape", None);
+    }
+    h.dispatch(&mut vcx, "visual_rows", None);
+    h.motion(&mut vcx, "up", None); // and NDX
+    let ndx = npv(&h, &vcx, 0);
+    assert_eq!(npv_total(&h, &vcx), Some(format!("{:.2}", group + ndx)));
+    h.motion(&mut vcx, "down", None);
+    h.dispatch(&mut vcx, "yank", None);
+    assert_eq!(
+        clipboard(&mut vcx).as_deref(),
+        Some("SPX Z26 5000 C\n-5 SPX Z26 4800/5200 CS"),
+        "the group's lines"
+    );
+}
+
+/// A selection anchored on a group row edits the lines it paints once
+/// the cursor rests on one; on the group row itself `i` refuses with the
+/// grouping-row footer, and `d` refuses whole.
+#[gpui::test]
+fn a_selection_from_a_group_row_edits_its_lines(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let len = h.sheet_len(&vcx);
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    assert_eq!(h.mode(&mut vcx), "visual");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some(GROUP_TEXT),
+        "i on the group"
+    );
+    h.dispatch(&mut vcx, "delete", None);
+    assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_TEXT), "V d");
+    assert_eq!(h.sheet_len(&vcx), len);
+    assert_eq!(
+        h.mode(&mut vcx),
+        "visual",
+        "the refusals keep the selection"
+    );
+    cursor_to(&h, &mut vcx, "SPX Z26 5000 C");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4500");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    let tree = h.tree(&vcx);
+    assert!(tree.iter().any(|t| t == "SPX Z26 4500 C"), "{tree:?}");
+    assert!(tree.iter().any(|t| t == "NDX Z26 4000 P"), "{tree:?}");
+    assert_eq!(h.mode(&mut vcx), "normal", "the commit ends the selection");
+}
+
+/// A group anchor whose row no longer paints — a regroup removed its
+/// path — clears the selection and says so, never moving onto a
+/// neighbour.
+#[gpui::test]
+fn a_regroup_that_removes_the_anchor_group_clears_the_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    assert_eq!(h.mode(&mut vcx), "visual");
+    h.command(&mut vcx, "group expiry").unwrap();
+    assert!(h.tile.read_with(&vcx, |t, _| t.selection.is_none()));
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("selection cleared: anchor row no longer shown")
+    );
+}
+
 /// A calendar split across two expiry nodes, both of its rows selected
 /// with everything else: each leg counts once, so the total is the two
 /// dates' sums — never the package's whole fold once per node.
