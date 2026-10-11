@@ -17,7 +17,7 @@
 
 use gpui::prelude::*;
 use gpui::{AnyElement, App, Context, Entity, MouseButton, SharedString, Window, div, px};
-use gpui_component::{ActiveTheme as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, h_flex};
 
 use geode_core::named::NamedExpressions;
 use geode_core::scope::Scope;
@@ -27,7 +27,7 @@ use crate::dialogmode::{self, DialogMode};
 use crate::keymap::{Keystroke, Modifiers};
 
 use super::saved::{self, SavedId, SavedKind, SavedRow};
-use super::screen::Zone;
+use super::screen::{SEPARATOR_AND_FILTER, Zone};
 use super::state::{After, Layer, Step};
 use super::view::{ScopeDialogState, edit_lane};
 use crate::shell::control::{self, PointerStates as _};
@@ -88,6 +88,9 @@ fn section_of(id: &SavedId) -> Section {
 
 /// One row's painted strings, prepared when the rows derive.
 pub(crate) struct SavedDisplay {
+    /// The row's element id, from its domain identity (`SavedId`), so a
+    /// row keeps its element state when the filter or a re-derive moves it.
+    pub key: SharedString,
     pub glyph: Option<&'static str>,
     pub name: SharedString,
     /// A scope's summary, an expression's text, or a broken definition's
@@ -101,8 +104,14 @@ pub(crate) struct SavedDisplay {
 
 impl SavedDisplay {
     fn of(row: &SavedRow) -> Self {
+        let key: SharedString = match &row.id {
+            SavedId::Scope(name) => format!("scope:{name}"),
+            SavedId::Expression(name) => format!("expr:{name}"),
+        }
+        .into();
         match &row.kind {
             SavedKind::Scope { summary } => SavedDisplay {
+                key,
                 glyph: None,
                 name: row.name.clone().into(),
                 detail: summary.clone().into(),
@@ -115,6 +124,7 @@ impl SavedDisplay {
                 applied,
                 broken,
             } => SavedDisplay {
+                key,
                 glyph: Some(EXPRESSION_GLYPH),
                 name: row.name.clone().into(),
                 detail: broken.clone().unwrap_or_else(|| text.clone()).into(),
@@ -301,8 +311,6 @@ impl SavedScreen {
 
     /// Children each section paints under its header: its stops, or its
     /// empty row (painted under a filter too, though not a stop there).
-    // Read by scrolling the list to the cursor, which lands next.
-    #[allow(dead_code)]
     pub(crate) fn painted_counts(&self) -> [usize; 2] {
         [Section::Scopes, Section::Expressions].map(|section| {
             if self.section_is_empty(section) {
@@ -318,8 +326,6 @@ impl SavedScreen {
 
     /// The cursor's section index (Scopes 0, Expressions 1) and its index
     /// among that section's painted children.
-    // Read by scrolling the list to the cursor, which lands next.
-    #[allow(dead_code)]
     pub(crate) fn cursor_within(&self) -> Option<(usize, usize)> {
         let stop = self.cursor_stop()?;
         let section = self.stop_section(stop);
@@ -624,13 +630,16 @@ fn section_names(section: Section) -> SectionNames {
 /// The saved group, painted under the current sections: a hairline
 /// separator, the filter row (frozen in Normal mode, live in Filter), then
 /// the saved scopes and the saved expressions. The order is
-/// `screen::child_index`'s: it must change with it.
+/// `screen::child_index`'s: it must change with it. Each element is a
+/// direct child of the screen's scroll list, so the list can scroll to any
+/// of them; a section the filter emptied paints its header alone, an empty
+/// section its header and empty row (`SavedScreen::painted_counts`).
 pub(super) fn group(
     shell: &ShellView,
     state: &ScopeDialogState,
     entity: &Entity<ShellView>,
     cx: &App,
-) -> AnyElement {
+) -> Vec<AnyElement> {
     let screen = &state.saved;
     let theme = cx.theme();
     let paint = crate::shell::listrow::row_paint(theme);
@@ -654,29 +663,33 @@ pub(super) fn group(
     // The highlight follows the cursor's group: a saved stop shows it only
     // while the cursor rests in this group.
     let cursor = (state.zone == Zone::Saved).then_some(screen.cursor);
-    let mut list = v_flex()
-        .id("scope-saved-rows")
-        .w_full()
-        .gap_0p5()
-        .debug_selector(|| "scope-saved".to_string())
-        // A hairline: one pixel, not a size the rem scale owns.
-        .child(
-            div()
-                .h(px(1.))
-                .w_full()
-                .bg(border)
-                .debug_selector(|| "scope-saved-separator".to_string()),
-        )
-        .child(
-            div()
-                .debug_selector(|| "scope-saved-filter".to_string())
-                .child(dialog::filter_row(&shell.dialog_input, frozen, cx)),
-        );
+    // The separator and filter, two headers, and at most one child per stop
+    // or empty row.
+    let mut list: Vec<AnyElement> =
+        Vec::with_capacity(SEPARATOR_AND_FILTER + 4 + screen.stops.len());
+    // A hairline: one pixel, not a size the rem scale owns. `scope-saved`
+    // marks the group as painted: the separator paints exactly when it does.
+    list.push(
+        div()
+            .flex_shrink_0()
+            .h(px(1.))
+            .w_full()
+            .bg(border)
+            .debug_selector(|| "scope-saved".to_string())
+            .into_any_element(),
+    );
+    list.push(
+        div()
+            .flex_shrink_0()
+            .debug_selector(|| "scope-saved-filter".to_string())
+            .child(dialog::filter_row(&shell.dialog_input, frozen, cx))
+            .into_any_element(),
+    );
     let mut row_i = 0usize;
     for section in [Section::Scopes, Section::Expressions] {
         let names = section_names(section);
         let slug = names.slug;
-        list = list.child(
+        list.push(
             h_flex()
                 .flex_shrink_0()
                 .px_2()
@@ -692,12 +705,14 @@ pub(super) fn group(
                     div()
                         .debug_selector(move || format!("scope-saved-note-{slug}"))
                         .child(names.note),
-                ),
+                )
+                .into_any_element(),
         );
         if screen.section_is_empty(section) {
             let highlighted =
                 cursor.and_then(|c| screen.stops.get(c).copied()) == Some(Stop::Empty(section));
             let empty = div()
+                .flex_shrink_0()
                 .px_2()
                 .h(scale::design(ROW_HEIGHT))
                 .flex()
@@ -710,7 +725,7 @@ pub(super) fn group(
             // A press on the Expressions one starts a new expression,
             // as `n` and `enter` there do; the Scopes one is a cursor
             // stop only.
-            list = if section == Section::Expressions {
+            list.push(if section == Section::Expressions {
                 let click = entity.clone();
                 let el = empty.id("scope-saved-empty-expressions").on_mouse_down(
                     MouseButton::Left,
@@ -718,19 +733,19 @@ pub(super) fn group(
                         click.update(cx, |shell, cx| press_new_expression(shell, window, cx));
                     },
                 );
-                list.child(if highlighted {
-                    crate::shell::listrow::paint_row(el, paint, true)
+                if highlighted {
+                    crate::shell::listrow::paint_row(el, paint, true).into_any_element()
                 } else {
-                    el.pointer_states(empty_states)
-                })
+                    el.pointer_states(empty_states).into_any_element()
+                }
             } else {
                 let el = empty.id("scope-saved-empty-scopes");
-                list.child(if highlighted {
-                    crate::shell::listrow::paint_row(el, paint, true)
+                if highlighted {
+                    crate::shell::listrow::paint_row(el, paint, true).into_any_element()
                 } else {
-                    el
-                })
-            };
+                    el.into_any_element()
+                }
+            });
             continue;
         }
         for (s, &stop) in screen.stops.iter().enumerate() {
@@ -743,7 +758,7 @@ pub(super) fn group(
             row_i += 1;
             let shown = &screen.display[row_ix];
             let el = h_flex()
-                .id(("scope-saved-row", i))
+                .id(gpui::ElementId::Name(screen.display[row_ix].key.clone()))
                 .w_full()
                 .h(scale::design(ROW_HEIGHT))
                 .flex_shrink_0()
@@ -802,11 +817,10 @@ pub(super) fn group(
                     press_row(shell, s, event.click_count, window, cx)
                 });
             });
-            list = list.child(el);
+            list.push(el.into_any_element());
         }
     }
-
-    list.into_any_element()
+    list
 }
 
 /// The saved scopes' config doc, as `Config::layered_docs` keys it.

@@ -29,6 +29,9 @@ use crate::shell::{ShellView, dialog, scale};
 
 pub(super) const WIDTH: f32 = 560.0;
 const ROW_HEIGHT: f32 = 28.0;
+/// The list's height cap, sixteen rows: the current scope and the head of
+/// the saved list fit without scrolling on the reference display.
+const LIST_MAX_HEIGHT: f32 = 16.0 * ROW_HEIGHT;
 /// The glyph column: wide enough for one glyph, so labels line up by kind.
 const GLYPH_WIDTH: f32 = 16.0;
 
@@ -58,6 +61,9 @@ const TEXT_GLYPH: &str = "⌕";
 /// One row's painted strings, prepared when the rows derive so `build`
 /// only clones them instead of formatting on every frame.
 pub(crate) struct RowDisplay {
+    /// The row's element id, from its domain identity (`RowId`), so a row
+    /// keeps its element state when rows above it come or go.
+    pub key: SharedString,
     pub glyph: &'static str,
     pub label: SharedString,
     pub detail: SharedString,
@@ -69,8 +75,16 @@ pub(crate) struct RowDisplay {
 
 impl RowDisplay {
     fn of(row: &Row) -> Self {
+        let key: SharedString = match &row.id {
+            RowId::Dimension(column) => format!("dim:{column}"),
+            RowId::Term(text, n) => format!("term:{n}:{text}"),
+            RowId::Named(name) => format!("named:{name}"),
+            RowId::Text => "text".to_string(),
+        }
+        .into();
         match &row.kind {
             RowKind::Dimension { column, values } => RowDisplay {
+                key,
                 glyph: DIMENSION_GLYPH,
                 label: column.clone().into(),
                 detail: values.join(", ").into(),
@@ -78,6 +92,7 @@ impl RowDisplay {
                 broken: false,
             },
             RowKind::Term { text, .. } => RowDisplay {
+                key,
                 glyph: TERM_GLYPH,
                 label: text.clone().into(),
                 detail: TERM_DETAIL.into(),
@@ -91,6 +106,7 @@ impl RowDisplay {
                     NamedState::Missing => (format!("'{name}' is not defined"), true),
                 };
                 RowDisplay {
+                    key,
                     glyph: NAMED_GLYPH,
                     label: name.clone().into(),
                     detail: detail.into(),
@@ -99,6 +115,7 @@ impl RowDisplay {
                 }
             }
             RowKind::Text { text } => RowDisplay {
+                key,
                 glyph: TEXT_GLYPH,
                 label: format!("\"{text}\"").into(),
                 detail: TEXT_DETAIL.into(),
@@ -341,8 +358,60 @@ fn jump_saved(view: &mut ShellView, section: super::saved_view::Section, cx: &Ap
     follow_cursor(view);
 }
 
-/// Scroll the list to the cursor; Task 3 fills this in.
-fn follow_cursor(_view: &mut ShellView) {}
+/// Scroll the list so the cursor's row is in view. Called after every key
+/// the screen claims and every door that places the cursor; never from
+/// `build`. The child index comes from `screen::child_index`, which must
+/// agree with `build`'s paint order; a step drawn over the screen paints the
+/// current sections alone, which leaves every current index unchanged.
+pub(crate) fn follow_cursor(shell: &mut ShellView) {
+    let Some(state) = shell.scope_dialog.as_ref() else {
+        return;
+    };
+    let layout = super::screen::Layout {
+        contradiction: state.rows.contradiction,
+        current: [Section::Dimensions, Section::Expressions, Section::Text].map(|section| {
+            state
+                .rows
+                .rows
+                .iter()
+                .filter(|r| r.section == section)
+                .count()
+                .max(1)
+        }),
+        saved: state.saved.painted_counts(),
+    };
+    let at = match state.zone {
+        Zone::Current => state.rows.rows.get(state.cursor).map(|row| {
+            let section = match row.section {
+                Section::Dimensions => 0,
+                Section::Expressions => 1,
+                Section::Text => 2,
+            };
+            let within = state.rows.rows[..state.cursor]
+                .iter()
+                .filter(|r| r.section == row.section)
+                .count();
+            super::screen::At {
+                zone: Zone::Current,
+                section,
+                within,
+            }
+        }),
+        Zone::Saved => state
+            .saved
+            .cursor_within()
+            .map(|(section, within)| super::screen::At {
+                zone: Zone::Saved,
+                section,
+                within,
+            }),
+    };
+    if let Some(at) = at {
+        shell
+            .scope_dialog_scroll
+            .scroll_to_item(super::screen::child_index(&layout, &at));
+    }
+}
 
 /// The one-shot save door (the scope bar's save chip,
 /// `scope::save_current`): the save prompt alone, so its commit or `escape`
@@ -988,14 +1057,21 @@ fn build(
     let radius = theme.radius;
     let mono = crate::fonts::MONO;
 
+    // One scroll list: every header, row, empty row, the separator and the
+    // filter row are its direct children, in `screen::child_index`'s order,
+    // so `follow_cursor` can scroll to the cursor's child.
     let mut list = v_flex()
-        .id("scope-dialog-rows")
+        .id("scope-dialog-scroll")
         .w_full()
         .gap_0p5()
-        .debug_selector(|| "scope-dialog".to_string());
+        .max_h(scale::design(LIST_MAX_HEIGHT))
+        .overflow_y_scroll()
+        .track_scroll(&shell.scope_dialog_scroll)
+        .debug_selector(|| "scope-dialog-scroll".to_string());
     if state.rows.contradiction {
         list = list.child(
             div()
+                .flex_shrink_0()
                 .px_2()
                 .py_1()
                 .text_sm()
@@ -1021,7 +1097,16 @@ fn build(
                 .text_xs()
                 .text_color(muted)
                 .debug_selector(move || format!("scope-dialog-section-{slug}"))
-                .child(names.title)
+                // `scope-dialog` marks the current sections as painted: the
+                // Dimensions header always paints with them. An element has
+                // one selector, so it sits on the header's title.
+                .child(
+                    div()
+                        .when(section == Section::Dimensions, |el| {
+                            el.debug_selector(|| "scope-dialog".to_string())
+                        })
+                        .child(names.title),
+                )
                 .child(
                     div()
                         .id(names.add_id)
@@ -1050,6 +1135,7 @@ fn build(
             list = list.child(
                 div()
                     .id(names.empty_id)
+                    .flex_shrink_0()
                     .px_2()
                     .h(scale::design(ROW_HEIGHT))
                     .flex()
@@ -1072,7 +1158,7 @@ fn build(
             }
             let highlighted = state.zone == Zone::Current && i == state.cursor;
             let el = h_flex()
-                .id(("scope-dialog-row", i))
+                .id(gpui::ElementId::Name(state.display[i].key.clone()))
                 .w_full()
                 .h(scale::design(ROW_HEIGHT))
                 .flex_shrink_0()
@@ -1167,7 +1253,7 @@ fn build(
     // The saved group shares the screen; a step drawn here (the text step,
     // the save prompt) previews the current sections only.
     if state.on_screen() {
-        list = list.child(super::saved_view::group(shell, state, entity, cx));
+        list = list.children(super::saved_view::group(shell, state, entity, cx));
     }
 
     let mut body = v_flex().gap_2().w(scale::design(WIDTH));

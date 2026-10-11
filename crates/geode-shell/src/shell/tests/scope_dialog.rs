@@ -806,6 +806,72 @@ fn a_chosen_saved_position_survives_an_add(cx: &mut gpui::TestAppContext) {
     assert_eq!(zone(&shell, &vcx), Some(Zone::Saved));
 }
 
+/// The forced rest in Saved (an empty scope) ends when the user moves
+/// within the group: a `j` there is a chosen position, which an add keeps.
+#[gpui::test]
+fn a_move_within_a_forced_saved_rest_survives_an_add(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Saved), "nothing current");
+    vcx.simulate_keystrokes("j");
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Saved));
+    vcx.simulate_keystrokes("t");
+    vcx.simulate_input("spx");
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(lane_scope(&shell, &vcx).text.as_deref(), Some("spx"));
+    assert_eq!(
+        zone(&shell, &vcx),
+        Some(Zone::Saved),
+        "the chosen place holds"
+    );
+}
+
+/// Loading a saved scope from a forced Saved rest uses the group: the
+/// cursor stays on the scope it loaded, not on the rows the load added.
+#[gpui::test]
+fn loading_from_a_forced_saved_rest_keeps_the_cursor_on_the_scope(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Saved), "nothing current");
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(
+        lane_scope(&shell, &vcx).sole("book"),
+        Some("BK001"),
+        "eu loaded"
+    );
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Saved));
+    let at = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog
+            .as_ref()
+            .and_then(|d| d.saved.cursor_row().map(|r| r.name.clone()))
+    });
+    assert_eq!(at.as_deref(), Some("eu"));
+}
+
+/// `follow_cursor`'s child index for a current row is the painted row's:
+/// scrolling to it moves nothing when the row is already in view. The
+/// contradiction line is off here; `rich_scope` has dimensions, terms, a
+/// named reference and text.
+#[gpui::test]
+fn the_cursor_child_index_matches_the_painted_row(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, rich_scope());
+    vcx.simulate_keystrokes("j j j");
+    draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("scope-dialog-row-3")
+        .expect("row 3 paints");
+    let highlighted = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.cursor));
+    assert_eq!(highlighted, Some(3));
+    shell.update(&mut vcx, |s, _| {
+        crate::shell::scopedialog::view::follow_cursor(s)
+    });
+    draw(&mut vcx);
+    let after = vcx
+        .debug_bounds("scope-dialog-row-3")
+        .expect("row 3 paints");
+    assert_eq!(row.top(), after.top(), "already in view: no scroll");
+}
+
 #[gpui::test]
 fn keys_current_claims_type_into_the_text_step(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_on(cx, rich_scope());

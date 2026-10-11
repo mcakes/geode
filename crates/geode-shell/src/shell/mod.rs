@@ -825,6 +825,10 @@ pub struct ShellView {
     /// Scroll handle for the as-of rows. Navigation and refresh use
     /// `asof_rows::child_index_of` to keep the highlighted row visible.
     as_of_scroll: ScrollHandle,
+    /// Scroll handle for the Scope dialog's one list (current sections,
+    /// separator, filter row, saved sections). `scopedialog::view::follow_cursor`
+    /// keeps the cursor's row in view after every claimed key and door.
+    pub(crate) scope_dialog_scroll: ScrollHandle,
     /// The frame data version used to build the open as-of dialog's rows.
     /// `on_frame_changed` refreshes them only when this version changes. Set on
     /// open and unused while the dialog is closed.
@@ -1072,8 +1076,8 @@ impl ShellView {
                 Some(dialog::DialogKind::Scope) => {
                     if let Some(state) = view.scope_dialog.as_mut() {
                         // The text step, the definition step and a name
-                        // prompt type their draft; the Saved screen filters
-                        // while in filter mode; Current ignores it.
+                        // prompt type their draft; the saved group filters
+                        // while in filter mode; the screen ignores it.
                         scopedialog::view::on_query_changed(state, &query);
                     }
                 }
@@ -1081,6 +1085,12 @@ impl ShellView {
             }
             // Typing changed the top dialog's query: re-rank its prepared rows.
             view.refresh_dialog_rows(cx);
+            // A re-filtered saved group may have moved the Scope dialog's
+            // cursor (and `normalize_zone` its group): follow it after the
+            // re-derive, not before.
+            if view.top_kind() == Some(dialog::DialogKind::Scope) {
+                scopedialog::view::follow_cursor(view);
+            }
             cx.notify();
         })
         .detach();
@@ -1644,6 +1654,7 @@ impl ShellView {
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             as_of_scroll: ScrollHandle::new(),
+            scope_dialog_scroll: ScrollHandle::new(),
             as_of_data_version: 0,
             scope_expr_dialog: None,
             scope_dialog: None,

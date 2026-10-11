@@ -65,15 +65,11 @@ pub(crate) fn next_jump(zone: Zone, on_scopes: bool, current_len: usize) -> Jump
 }
 
 /// The separator and the filter row, painted between the two groups.
-// Read by scrolling the list to the cursor, which lands next.
-#[allow(dead_code)]
 pub(crate) const SEPARATOR_AND_FILTER: usize = 2;
 
 /// What `view::build` paints into the scroll list, as child counts. Each
 /// section paints its header, then its body: its rows, or one empty row.
 /// A saved section the filter emptied paints its header alone (0).
-// Read by scrolling the list to the cursor, which lands next.
-#[allow(dead_code)]
 pub(crate) struct Layout {
     pub contradiction: bool,
     pub current: [usize; 3],
@@ -82,8 +78,6 @@ pub(crate) struct Layout {
 
 /// The cursor's place: its group, its section's index in paint order, and
 /// its index among that section's body children.
-// Read by scrolling the list to the cursor, which lands next.
-#[allow(dead_code)]
 pub(crate) struct At {
     pub zone: Zone,
     pub section: usize,
@@ -94,8 +88,6 @@ pub(crate) struct At {
 /// agree with `view::build`'s paint order: the contradiction line, each
 /// current section (header, body), the separator, the filter row, each
 /// saved section (header, body).
-// Read by scrolling the list to the cursor, which lands next.
-#[allow(dead_code)]
 pub(crate) fn child_index(layout: &Layout, at: &At) -> usize {
     let block = |bodies: &[usize]| bodies.iter().map(|n| 1 + n).sum::<usize>();
     let mut ix = usize::from(layout.contradiction);

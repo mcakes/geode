@@ -12,6 +12,14 @@ use super::scope_dialog::{draw, frame_of};
 /// and `asia` (book BK002); expressions `liq` (`npv > 0`) and `big`
 /// (`npv > 100`).
 fn services() -> ShellServices {
+    services_with_scopes(
+        "[eu]\n[eu.dimensions]\nbook = [\"BK001\"]\n\
+         [asia]\n[asia.dimensions]\nbook = [\"BK002\"]\n",
+    )
+}
+
+/// `services()` with `scopes_toml` as the builtin saved scopes.
+fn services_with_scopes(scopes_toml: &str) -> ShellServices {
     let mut services = test_services();
     (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
@@ -23,12 +31,7 @@ fn services() -> ShellServices {
                  [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
             )
             .unwrap(),
-            LayerDoc::builtin(
-                "scopes",
-                "[eu]\n[eu.dimensions]\nbook = [\"BK001\"]\n\
-                 [asia]\n[asia.dimensions]\nbook = [\"BK002\"]\n",
-            )
-            .unwrap(),
+            LayerDoc::builtin("scopes", scopes_toml).unwrap(),
             LayerDoc::builtin(
                 "expressions",
                 "[liq]\nexpression = \"npv > 0\"\n[big]\nexpression = \"npv > 100\"\n",
@@ -2199,4 +2202,35 @@ fn a_definition_deleted_under_the_step_refuses_and_writes_nothing(cx: &mut gpui:
     assert_eq!(f.top(), definition_step(Some("mine")));
     assert!(!f.queued(), "nothing queued");
     assert_eq!(f.named_text("mine"), None);
+}
+
+/// Forty saved scopes: the last is far below the list's height.
+#[gpui::test]
+fn the_list_scrolls_to_a_saved_row_below_the_fold(cx: &mut gpui::TestAppContext) {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&scopes));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    // From s00: `o` to the first expression (`big`), `k` back to s39.
+    vcx.simulate_keystrokes("o k");
+    draw(&mut vcx);
+    let at = shell.read_with(&vcx, |s, _| {
+        let d = s.scope_dialog.as_ref().expect("dialog open");
+        d.saved.cursor_row().map(|r| r.name.clone())
+    });
+    assert_eq!(at.as_deref(), Some("s39"));
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(&mut vcx, "scope-saved-row-39".to_string()).expect("the row paints");
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "{row:?} inside {list:?}"
+    );
 }
