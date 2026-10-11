@@ -54,15 +54,26 @@ pub fn srgb_to_oklab(rgb: Rgb) -> Lab {
 }
 
 /// Unclipped: a saturated OKLab colour can land outside `0..=1`.
-#[allow(clippy::excessive_precision)]
 pub fn oklab_to_srgb(lab: Lab) -> Rgb {
+    encode(oklab_to_linear(lab))
+}
+
+/// Linear-light sRGB channels of an OKLab colour, before the transfer
+/// curve. Unclipped.
+#[allow(clippy::excessive_precision)]
+fn oklab_to_linear(lab: Lab) -> [f32; 3] {
     let l_ = lab.l + 0.396_337_777_4 * lab.a + 0.215_803_757_3 * lab.b;
     let m_ = lab.l - 0.105_561_345_8 * lab.a - 0.063_854_172_8 * lab.b;
     let s_ = lab.l - 0.089_484_177_5 * lab.a - 1.291_485_548_0 * lab.b;
     let (l, m, s) = (l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_);
-    let r = 4.076_741_662_1 * l - 3.307_711_591_3 * m + 0.230_969_929_2 * s;
-    let g = -1.268_438_004_6 * l + 2.609_757_401_1 * m - 0.341_319_396_5 * s;
-    let b = -0.004_196_086_3 * l - 0.703_418_614_7 * m + 1.707_614_701_0 * s;
+    [
+        4.076_741_662_1 * l - 3.307_711_591_3 * m + 0.230_969_929_2 * s,
+        -1.268_438_004_6 * l + 2.609_757_401_1 * m - 0.341_319_396_5 * s,
+        -0.004_196_086_3 * l - 0.703_418_614_7 * m + 1.707_614_701_0 * s,
+    ]
+}
+
+fn encode([r, g, b]: [f32; 3]) -> Rgb {
     Rgb {
         r: to_srgb_channel(r),
         g: to_srgb_channel(g),
@@ -84,9 +95,30 @@ pub fn lch_to_lab(lch: Lch) -> Lab {
     }
 }
 
-fn in_gamut(rgb: Rgb) -> bool {
-    let ok = |c: f32| (-0.0005..=1.0005).contains(&c);
-    ok(rgb.r) && ok(rgb.g) && ok(rgb.b)
+/// The encoded channel range a colour may occupy and still count as in
+/// gamut: a little slack either side of `0..=1` absorbs conversion noise.
+const GAMUT: std::ops::RangeInclusive<f32> = -0.0005..=1.0005;
+
+/// Whether a linear-light channel encodes into [`GAMUT`], skipping the
+/// transfer curve's `powf` wherever the answer is already certain. The
+/// curve is monotonic: encoded -0.0005 is linear -0.0005 / 12.92 ≈ -3.870e-5,
+/// and encoded 1.0005 is linear (1.0555 / 1.055)^2.4 ≈ 1.001138. A channel
+/// clear of both edges by far more than the curve's f32 rounding has the
+/// answer encoding it would give; inside the narrow bands around the edges
+/// it is encoded exactly as before. So the answer never differs from
+/// testing the encoded value; NaN is out either way.
+fn channel_in_gamut(linear: f32) -> bool {
+    if linear > -3.8e-5 && linear < 1.0011 {
+        true
+    } else if !(-3.95e-5..=1.0012).contains(&linear) {
+        false
+    } else {
+        GAMUT.contains(&to_srgb_channel(linear))
+    }
+}
+
+fn linear_in_gamut(linear: [f32; 3]) -> bool {
+    linear.into_iter().all(channel_in_gamut)
 }
 
 fn clamp01(rgb: Rgb) -> Rgb {
@@ -102,25 +134,68 @@ fn clamp01(rgb: Rgb) -> Rgb {
 /// never lightness or hue: the trader asked for a hue at a lightness, and
 /// a channel clamp would shift both.
 pub fn to_srgb_in_gamut(lch: Lch) -> Rgb {
-    let direct = oklab_to_srgb(lch_to_lab(lch));
-    if in_gamut(direct) {
-        return clamp01(direct);
+    in_gamut_at(lch.l, lch.c, lch.h.cos(), lch.h.sin())
+}
+
+/// [`to_srgb_in_gamut`] with the hue's cosine and sine computed by the
+/// caller, so a search that holds the hue fixed pays for them once. The
+/// bisection tests the gamut on linear channels and encodes only the
+/// result. `lch_to_lab` computes `c * cos(h)` and `c * sin(h)` the same
+/// way, so every intermediate value is the one the encoded test saw.
+pub(super) fn in_gamut_at(l: f32, c: f32, cos_h: f32, sin_h: f32) -> Rgb {
+    let lab = |c: f32| Lab {
+        l,
+        a: c * cos_h,
+        b: c * sin_h,
+    };
+    let direct = oklab_to_linear(lab(c));
+    if linear_in_gamut(direct) {
+        return clamp01(encode(direct));
     }
-    let (mut lo, mut hi) = (0.0_f32, lch.c);
+    let (mut lo, mut hi) = (0.0_f32, c);
     for _ in 0..16 {
         let mid = (lo + hi) / 2.0;
-        if in_gamut(oklab_to_srgb(lch_to_lab(Lch { c: mid, ..lch }))) {
+        if linear_in_gamut(oklab_to_linear(lab(mid))) {
             lo = mid
         } else {
             hi = mid
         }
     }
-    clamp01(oklab_to_srgb(lch_to_lab(Lch { c: lo, ..lch })))
+    clamp01(encode(oklab_to_linear(lab(lo))))
 }
 
 /// WCAG relative luminance of an sRGB colour.
 pub fn relative_luminance(rgb: Rgb) -> f32 {
     0.2126 * to_linear(rgb.r) + 0.7152 * to_linear(rgb.g) + 0.0722 * to_linear(rgb.b)
+}
+
+/// The gamut clip as written before the linear-space test: the oracle
+/// that `in_gamut_at` and the contrast search are held equal to.
+#[cfg(test)]
+pub(super) mod oracle {
+    use super::*;
+
+    fn in_gamut(rgb: Rgb) -> bool {
+        let ok = |c: f32| (-0.0005..=1.0005).contains(&c);
+        ok(rgb.r) && ok(rgb.g) && ok(rgb.b)
+    }
+
+    pub fn to_srgb_in_gamut(lch: Lch) -> Rgb {
+        let direct = oklab_to_srgb(lch_to_lab(lch));
+        if in_gamut(direct) {
+            return clamp01(direct);
+        }
+        let (mut lo, mut hi) = (0.0_f32, lch.c);
+        for _ in 0..16 {
+            let mid = (lo + hi) / 2.0;
+            if in_gamut(oklab_to_srgb(lch_to_lab(Lch { c: mid, ..lch }))) {
+                lo = mid
+            } else {
+                hi = mid
+            }
+        }
+        clamp01(oklab_to_srgb(lch_to_lab(Lch { c: lo, ..lch })))
+    }
 }
 
 #[cfg(test)]
@@ -225,6 +300,50 @@ mod tests {
         assert!(close(got.l, 0.7), "lightness kept: {got:?}");
         assert!((got.h - 0.5).abs() < 0.02, "hue kept: {got:?}");
         assert!(got.c < 0.5, "chroma pulled in: {got:?}");
+    }
+
+    /// Every f32 across both bands around the gamut edges, with margin on
+    /// each side, gets the answer the encoded test gives: the linear
+    /// shortcut's two decision constants sit inside these sweeps.
+    #[test]
+    fn the_linear_gamut_test_agrees_with_the_encoded_one_at_both_edges() {
+        for (from, to) in [(-4.5e-5_f32, -3.3e-5_f32), (1.0008_f32, 1.0015_f32)] {
+            let mut x = from;
+            while x <= to {
+                assert_eq!(
+                    channel_in_gamut(x),
+                    GAMUT.contains(&to_srgb_channel(x)),
+                    "linear {x:e}"
+                );
+                x = x.next_up();
+            }
+        }
+        for x in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -0.0, 1.0] {
+            assert_eq!(channel_in_gamut(x), GAMUT.contains(&to_srgb_channel(x)));
+        }
+    }
+
+    /// The gamut clip returns, bit for bit, what the encoded-space clip
+    /// returned, over lightness × chroma × hue reaching far out of gamut.
+    #[test]
+    fn the_gamut_clip_matches_the_encoded_oracle_bit_for_bit() {
+        let bits = |c: Rgb| [c.r.to_bits(), c.g.to_bits(), c.b.to_bits()];
+        for li in 0..=40 {
+            for ci in 0..=24 {
+                for hi in 0..72 {
+                    let lch = Lch {
+                        l: li as f32 / 40.0,
+                        c: ci as f32 * 0.02,
+                        h: hi as f32 * std::f32::consts::TAU / 72.0,
+                    };
+                    assert_eq!(
+                        bits(to_srgb_in_gamut(lch)),
+                        bits(oracle::to_srgb_in_gamut(lch)),
+                        "{lch:?}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
