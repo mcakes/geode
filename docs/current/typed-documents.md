@@ -20,10 +20,11 @@ parsed as a dataset. An omitted family defaults to `measures`.
 | `document` | A nonempty ordered key identifies a document; nonempty ordered axes identify its rows. Key columns must be grainless utf8 dimensions. At least one value is required. Invalid identity or row shape removes the dataset. |
 | `series` | Storage implies `source`, `series_id`, `ts`, `received_at`, and `value`. Declared columns are dropped and nonempty key/axes arrays cleared with errors. Invalid retention windows report errors and become unbounded. |
 | `reference` | One keyed table replaced whole per snapshot. A nonempty `key` of grainless utf8 dimensions identifies a row; every other column is a grainless attribute of utf8, f64, i64, date, or bool. `axes`, timestamp columns, and the storage names `batch`, `book`, `source_file_id`, `gen_id`, and `source_time` are refused. Any failure removes the dataset, because a half-understood mapping table would place rows wrongly. Storage order is the key columns, then the rest in declared order. A reference dataset offers no grouping vocabulary and is neither a document-kind nor an egress target. |
+| `history` | Keyed timestamped rows, cached per key from an on-demand source. A nonempty `key` of distinct grainless utf8 or f64 dimensions identifies an observation's key tuple, and at least one f64 `value` column holds what was observed. No other role is accepted, every dimension must be in the key, and `axes`, timestamp columns, and the storage names `ts`, `received_at`, `source`, `batch`, `source_file_id`, `gen_id`, and `source_time` are refused. Any failure removes the dataset: a key the cache cannot ask by would file rows under keys no request covers. `history` and `retention` windows are read as for series. Storage order is the key columns, `ts`, `received_at`, then the values. A history dataset offers no grouping vocabulary. |
 
 Unknown family strings or malformed key/axes arrays drop a dataset before
 family validation. A columnless measure dataset remains in the schema but
-owns no grain table. A columnless document or reference dataset is omitted. Series validation can
+owns no grain table. A columnless document, reference or history dataset is omitted. Series validation can
 retain a corrected dataset even while reporting errors.
 
 Document payload axes, values, and attributes support f64, i64, utf8, and
@@ -38,11 +39,22 @@ that every accepted schema can be stored successfully.
 other families it reports an error and resets to false. Source declarations
 cannot feed a local dataset.
 
-Series `retention` limits superseded rows by receipt time; `history` limits
-all rows by observation time. Both accept duration strings and default to
-unbounded. Values too large for signed microseconds also become unbounded
+Series and history `retention` limits superseded rows by receipt time;
+`history` limits all rows by observation time. Both accept duration strings
+and default to unbounded. Values too large for signed microseconds also become unbounded
 with an error. Actual pruning and storage behavior are described in the
 [data-path guide](data-path.md).
+
+A dimension column may set `order = "lexical"` (the default) or
+`order = "tenor"`; it orders that column's values wherever they are listed,
+such as a history key column's enumerated values. Tenor order reads
+`<n>D|W|M|Y` in any case as a length in days (D = 1, W = 7, M = 30,
+Y = 365), so `18M` sorts between `1Y` and `2Y`; equal lengths and
+unparsable values (`ON`, `spot`) sort lexically, the unparsable ones after
+every tenor. Values stay distinct: `12M` (360 days) and `1Y` (365 days) are
+two keys, not two spellings of one. An unknown order, or `order` on a column
+that is not a dimension, drops the column with an error at
+`datasets.<dataset>.columns.<column>.order`.
 
 A column's `source_name` maps its schema name to a different source-file
 name. Categorical defaults apply to utf8 dimensions. Explicit

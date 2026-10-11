@@ -88,7 +88,7 @@ The main configuration documents have distinct owners:
 | `app.toml` | Theme, primary modifier, UI settings, logging, time zone, link groups, pricing, vol model, and timeseries settings |
 | `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, and `computed` |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
-| `sources.toml` | File, subscription, fetch, and reference snapshot sources with readiness and adapter settings |
+| `sources.toml` | File, subscription, fetch, reference snapshot, and history sources with readiness and adapter settings |
 | `egress.toml` | Upload targets: adapter and a per-document address template |
 | `positions.toml` | The one position service: the adapter that takes position commands such as Move LHU |
 | `panels.toml` | Market-data panels: the dataset, document kind, layout, formats, and kind actions of each panel tile kind |
@@ -126,6 +126,9 @@ typed values. Series datasets describe identities and time/value columns.
 Reference datasets (`family = "reference"`) declare a utf8 `key` and plain
 attributes for a whole table a snapshot source replaces on each poll; their
 rules are in [dataset families](typed-documents.md#dataset-families-and-validation).
+History datasets (`family = "history"`) declare a `key` of utf8 or f64
+dimensions and f64 values for timestamped observations a history source
+answers per key on demand; the rules are in the same section.
 Views refer to those declarations and may narrow presentation without changing
 the underlying dataset.
 
@@ -272,6 +275,7 @@ dataset family select its runtime path:
 | Subscription | Another adapter over a document dataset, with a `document` kind and nonempty `topics`. |
 | Fetch | Another adapter over a series dataset. No document kind or topic list is needed. |
 | Snapshot | Another adapter over a reference dataset, with a nonempty `table` the adapter reads whole on each poll. A directory source over a reference dataset is rejected. |
+| History | Another adapter over a history dataset. `table` names the adapter-side table and defaults to the dataset name. A directory source over a history dataset is rejected. |
 
 The shared reader returns usable sources plus diagnostics addressed to
 `sources.<name>.<field>`. Missing/unknown datasets, local datasets, incompatible
@@ -319,12 +323,22 @@ whole table as one partition, so two sources would replace each other's rows
 on every poll. The second source in file order over a dataset already filled
 is rejected at `sources.<name>.dataset`, naming the first.
 
+A history source is asked per key on demand, so it has no poll: a
+`poll_interval` on one warns and is ignored, as every other setting that
+does not apply to its shape does. A `table` that is empty or not a string
+warns and falls back to the dataset name. `priority` is accepted without a
+warning but orders nothing: the runner takes history ahead of every file. A
+history dataset has at most one source, because coverage is kept per key and
+not per source: a second source would answer asks the first already covered,
+and a read could not say whose rows it returned. The second in file order is
+rejected at `sources.<name>.dataset`, naming the first.
+
 Topic patterns use `/`-separated levels. A whole `*` matches one level; a
 final `>` matches one or more trailing levels. Empty patterns, empty pattern
 levels, and a non-final `>` level reject the source. Other text is literal.
 Directory-only settings warn and are ignored on adapter-backed sources, except
 `poll_interval` on a snapshot source; subscription-only settings warn and are
-ignored on directory, fetch and snapshot sources. Parsed directory paths are
+ignored on directory, fetch, snapshot and history sources. Parsed directory paths are
 cleared on adapter-backed sources.
 
 Duration strings accept nonnegative integers with `ms`, `s`, `m`, `h`, `d`,

@@ -2,7 +2,7 @@
 
 This guide describes the current data path: how data enters Geode, becomes
 queryable, and reaches a tile. It covers the contracts shared by file,
-document, series, and reference snapshot sources. The [geode-data crate README](../../crates/geode-data/README.md)
+document, series, reference snapshot, and history sources. The [geode-data crate README](../../crates/geode-data/README.md)
 maps these contracts to modules.
 
 ## Boundary and flow
@@ -14,7 +14,7 @@ thread and gives the app one place to enforce backpressure, health, and
 delivery semantics.
 
 ```text
-file / subscribed document / fetched series / reference snapshot
+file / subscribed document / fetched series / queried history / reference snapshot
                 │
                 ▼
      discovery or adapter worker
@@ -29,7 +29,8 @@ tile ─► DataHandle ─► DataService ─► read pool
 
 Geode serializes publication on one writer connection. Independent read
 connections serve queries. The ingest runner gives parsed documents priority
-over fetched series, then reference snapshots, then queued files. It finishes
+over fetched series, then fetched history, then reference snapshots, then
+queued files. It finishes
 the current operation before taking another job. This prioritizes interactive
 data without attempting concurrent writes; sustained traffic in an earlier
 queue can starve later queues.
@@ -55,17 +56,18 @@ The ingestion boundaries have different capacity and replacement rules:
 | Adapter message sink | Bounded; refused messages are counted, dropped, and reported as `<source>:queue` health. |
 | Subscription coalescer | One pending document per key; newer documents replace it without moving its release deadline. Already submitted jobs are unaffected. |
 | Fetch worker | Up to 64 waiting requests per source; a refused fetch is reported as an outcome. |
+| History worker | Up to 64 waiting adapter calls per source. A request whose call is refused is answered at once with `the history queue for '<source>' is full`; its calls already queued still run and fill the cache but answer nothing more. The bound counts calls, not requests, so a request planning several calls can be refused while the queue still has room for some. |
 | Snapshot worker | No queue: one poll runs at a time, and any number of poll-now asks made while it runs become one follow-up poll. |
 | Egress worker | Up to 8 waiting uploads per target, behind the one in flight; queue refusal emits an upload error naming the target. |
 | File worker | Up to 4 waiting text file requests behind the one in flight; a full queue answers `file worker busy` at once as that request's error outcome. |
 | Position worker | Up to 8 waiting commands behind the one in flight; a full queue is refused `position service busy` at once, answered as a command outcome. |
-| Ingest runner | No fixed capacity. Documents, series and reference snapshots are FIFO within their queues; files deduplicate by path, size, and source time. A source with more than 64 queued documents, series and snapshots reports `<source>:backlog` health; its `N` is the count at the last crossing (65, 129, …), held while the queue drains until the clear. |
+| Ingest runner | No fixed capacity. Documents, series, history and reference snapshots are FIFO within their queues; files deduplicate by path, size, and source time. A source with more than 64 queued documents, series, history and snapshots reports `<source>:backlog` health; its `N` is the count at the last crossing (65, 129, …), held while the queue drains until the clear. |
 
 For queued files, resubmission can promote priority without adding another
 job. A catalog check immediately before loading skips work that has already
 been published, without starting progress. Within a file priority, newer
 source times run first. The runner finishes each operation before selecting
-another, in the order documents, series, reference snapshots, files; sustained
+another, in the order documents, series, history, reference snapshots, files; sustained
 traffic in one queue can starve every queue after it. Coalescing reduces
 repeated documents but does not bound the writer backlog or the number of
 distinct document keys. Fixed staging-table names also require serialized file
@@ -77,8 +79,9 @@ scheduling can delay release. The coalescer retains release timestamps for
 observed keys without eviction. Unknown-element warning deduplication stops
 growing at 256 paths per source; further unremembered paths can warn repeatedly.
 
-Shutdown stops producers before the ingest writer. Fetch workers drain their
-accepted requests and join. Snapshot workers finish a poll in flight, which
+Shutdown stops producers before the ingest writer. Fetch and history
+workers drain their accepted requests and join; a history request whose
+append is then dropped by the runner is never answered. Snapshot workers finish a poll in flight, which
 has no deadline, deliver its outcome, and join without polling again; they are
 stopped on the service thread, never by a drop on the UI thread. Subscription
 workers unsubscribe, set a stop flag, and join without flushing documents
@@ -87,7 +90,7 @@ without a report, and its unjudged replies are dropped. Discovery stops polling;
 finishes its current operation, then runs the queued local writes
 (`local`-source publishes and forgets) in queue order, each answering its
 writer as usual, and exits. Every other queued job — feed documents, series,
-reference snapshots, files — is dropped; its source resends it after a
+history, reference snapshots, files — is dropped; its source resends it after a
 restart. The local writes are the user's last edits (the pricer saves every
 unsaved sheet at window close and at quit, before the data service is told
 to stop), which nothing would resend. Submission to the runner itself has no shutdown refusal, so
@@ -110,8 +113,8 @@ delay joins; panic containment does not cancel them. See
 `DataHandle::release(drain)` stops the service to hand the store to another
 process, where `shutdown` stops it for process exit. Producers stop in the
 same order, but subscription workers submit what their coalescers hold before
-they join, and the ingest runner keeps running queued documents, series and
-reference snapshots until those queues are empty or `drain` has passed since
+they join, and the ingest runner keeps running queued documents, series,
+history and reference snapshots until those queues are empty or `drain` has passed since
 the call; queued files are left for the next owner's discovery. See
 [release](#release).
 
@@ -128,7 +131,7 @@ Every long-lived data thread is spawned through
 request loop (`geode-data`), the ingest writer (`geode-ingest`), discovery
 (`geode-discovery`), each read-pool worker (`geode-query-N`), pricing
 (`geode-pricing`), the vol worker (`geode-vol`), and one thread per fetch
-source (`geode-fetch-<source>`),
+source (`geode-fetch-<source>`), history source (`geode-history-<source>`),
 subscribed source (`geode-subscribe-<source>`), and egress target
 (`geode-egress-<target>`), plus the position worker (`geode-positions`) and
 the text file worker (`geode-files`). A
@@ -162,13 +165,14 @@ success, and the loop goes on to the next request:
 | Query, document | `Query` error for its key and tag |
 | Distinct values | `Distinct` error for its key, tag, and column |
 | Series | `Series` error for its key and tag |
+| History | `History` error for its key and tag |
 | Catalog | `Catalog` error for its key and tag |
 | Watchlist | `Watchlist` error for its key, tag, and list name |
 | Pricing | `Price` outcome with the error on every submitted line |
 | Upload | `Upload` error for its key, tag, and target |
 | Text file | `TextFile` error for its key and tag: a failed write for a write, a failed read for a read |
 | Move LHU | `Command` outcome with the error for its tag |
-| History fetch | The pair's load lane reports `Failed`, then `SeriesFetched` carries the error |
+| Series fetch | The pair's load lane reports `Failed`, then `SeriesFetched` carries the error |
 | Local publish | Error diagnostic and `LocalPublishFailed` |
 | Local forget | Error diagnostic and `ForgetFailed` |
 | Identity refresh, cancellation | One error diagnostic |
@@ -325,8 +329,8 @@ it. In order:
 
 1. The runner stops taking queued files; a file load already running
    finishes.
-2. The file, egress and position workers, then the fetch and snapshot
-   workers, stop as at `shutdown`.
+2. The file, egress and position workers, then the fetch, history and
+   snapshot workers, stop as at `shutdown`.
 3. Each subscription worker sets its flush flag, then unsubscribes: its
    receiver handles the messages already queued to it and submits every
    document its coalescer holds, with current contents and ignoring its
@@ -335,10 +339,10 @@ it. In order:
    flushes.
 4. Discovery stops, so no poll submits files the drain would only drop.
 5. The ingest runner, after its current operation, runs queued documents,
-   series and reference snapshots in the usual priority order until those
-   queues are empty or the deadline passes. What is left is dropped with one
-   warning, `release: dropped N documents, N series, N snapshots at the
-   deadline`; queued files are logged at debug (`release: N queued files left
+   series, history and reference snapshots in the usual priority order until
+   those queues are empty or the deadline passes. What is left is dropped
+   with one warning, `release: dropped N documents, N series, N history, N
+   snapshots at the deadline`; queued files are logged at debug (`release: N queued files left
    for the next discovery`) and left for the next owner's discovery, whose
    stale check skips any already published. Queued local writes always run,
    as at `shutdown`, even past the deadline.
@@ -579,8 +583,9 @@ Measures are split by declared grain during ingest. The query compiler
 aggregates each measure at its own grain before joining grouped results. This
 is the central protection against multiplying a coarser measure by the number
 of finer rows. Document datasets use their own live/archive table pair;
-fetched series use bitemporal append and coverage records instead of replacing
-whole file partitions. See [`publish.rs`](../../crates/geode-data/src/store/publish.rs),
+fetched series and history use bitemporal append and coverage records
+instead of replacing whole file partitions (see [history storage](#history-storage)).
+See [`publish.rs`](../../crates/geode-data/src/store/publish.rs),
 [`split.rs`](../../crates/geode-data/src/ingest/split.rs), and
 [`series.rs`](../../crates/geode-data/src/store/series.rs).
 
@@ -731,6 +736,87 @@ reader like the catalog, and answers `DataEvent::Reference` under the
 request's key and tag. An undeclared or non-reference dataset answers
 `dataset '<name>' is not a declared reference dataset`; a drifted one answers
 the drift. The app mailbox passes reference answers through uncoalesced.
+
+## History storage
+
+A history dataset caches keyed observations a history source answers on
+demand. It owns two tables, `{dataset}_history` and
+`{dataset}_history_coverage`, built in
+[`store/history.rs`](../../crates/geode-data/src/store/history.rs), and no
+live/archive pair, generations or catalog rows. The payload holds the key
+columns typed as declared, `ts`, `received_at`, then the values as DOUBLE,
+keyed by `(key…, ts, received_at)`. Both timestamps are UTC, bound and read
+as epoch microseconds so a session time zone cannot shift them.
+
+**Versions.** A row is one observation of a key tuple at `ts`. A correction
+appends a new version under a later `received_at`, and the live value of
+`(key, ts)` is the version with the greatest `received_at`. An append drops
+a staged row equal in every value column to the live version of its
+`(key, ts)`, so refetching an overlapping span grows nothing; a row differing
+in any value column is a new version, and the old one survives until
+retention. Every append from one answer shares one `received_at`.
+
+**Keys.** Keys are normalized to one spelling per declared type before they
+are compared, stored, or read: a utf8 key is trimmed, and an f64 key is
+parsed and written back in its shortest round-trip form, so `0.50` and
+`0.5` are one key, on the ask and on the answer alike. A blank key, or an
+f64 key that does not parse or is not finite, would file rows under a key no
+request can name: it refuses the request when asked, and the whole answer
+when answered.
+
+**Coverage.** Coverage records which asked key was fetched over which span,
+whether or not any row came back, so an empty answer is not asked for again.
+An exact tuple is stored as asked; a prefix (the leading key columns only)
+is stored with NULLs in its trailing columns. A coverage row covers an
+asked tuple when every non-NULL column equals the tuple's value there, so a
+prefix row covers every deeper tuple under it, but a deeper row never covers
+a prefix: one member's fetch must not make the whole prefix look fetched.
+What an answer establishes depends on its span:
+
+| Answer | Coverage recorded per asked tuple |
+|---|---|
+| `Between { step: None }` | The call's whole `[from, to)` |
+| `Between { step: Some(_) }` | Nothing: the answer may be thinned, so it must never stand in for a full one later |
+| `At(t)`, exact tuple with rows | `[last row's ts, t + 1µs)`: the source asserts nothing lies between |
+| `At(t)`, otherwise | `[t, t + 1µs)` |
+| `Latest` | `[ts, ts + 1µs)` at the tuple's latest answered row, and nothing for a tuple with none |
+
+Rows, coverage and the retention sweep commit in one writer transaction, so
+a span read as covered is a span whose rows are readable. Calls into
+`append_history` share the fixed `staging_history` table, so only the ingest
+writer runs them. An answer the worker refused (below) leaves the store
+exactly as it was, coverage included.
+
+### History sources
+
+A source whose dataset is of the history family is a history source. Its
+adapter must have a history side; a missing adapter or one without that side
+fails the source on the discovery lane at open and nothing asks it. Each
+served source gets one supervised
+[`HistoryWorker`](../../crates/geode-data/src/ingest/history.rs) that makes
+the adapter's blocking calls, one at a time, inside a panic boundary. At
+open the worker asks the source to enumerate each key column;
+`DataService::history_keys(dataset, column)` returns the last answer in the
+column's declared order, or `None` before an answer or when the source cannot
+enumerate. A panicking listing is an error diagnostic naming the dataset,
+column and source.
+
+The worker normalizes an answer's keys, then checks it against the ask, then
+drops rows with a non-finite value. Normalizing first means a source spelling
+`0.50` for an asked `0.5` is not refused. The check refuses the whole answer
+for ragged columns, the wrong number of key or value columns, a repeated
+`(key, ts)` (which value wins is the source's question), or a row whose key
+is not inside the ask; such a row would land under a key whose coverage the
+request never established. Dropped non-finite rows earn one load-note
+warning per source and dataset per run, at `datasets.<dataset>`, before the
+answer they explain.
+
+| Outcome | Lane | Effect |
+|---|---|---|
+| Worker spawned at open | Discovery | `Ok` |
+| Adapter error, panic, or refused answer | Load, keyed `<dataset>@<source>` | `Failed` with the reason; that call fails its request |
+| Appended (zero rows included) | Load, keyed `<dataset>@<source>` | `Ok`; `LoadEnded` |
+| Append failed (shape, SQL, drift) | Load, keyed `<dataset>@<source>` | `Failed` with the reason; that call fails its request |
 
 ## Source discovery and adapters
 
@@ -1352,6 +1438,61 @@ builders mark their columns false; custom builders must supply the flag
 explicitly. Selection totals require this flag and additive contributing
 values. Attribution alone cannot justify a total of maxima or ratios.
 
+### History requests
+
+`DataHandle::history(HistoryParams)` asks a history dataset for the
+observations of a `KeySet` over a `Span`. `KeySet::Exact` names whole key
+tuples; `KeySet::Prefix` names leading key columns; every tuple in one
+request has one arity. `Span::Latest` is each key's newest observation,
+`At(t)` the last at or before `t`, and `Between { from, to, step }` every
+observation in `[from, to)`. `step` asks the source for at most one
+observation per step and is a hint only: a read from the cache returns every
+cached row in the span.
+
+The service first refuses, as that request's `DataEvent::History` error, a
+drifted dataset, a dataset that is not of the history family or has no
+source, a key set of the wrong arity, a zero `step`, and a key that does not
+normalize (see [history storage](#history-storage)). It then normalizes the
+asked keys, removes repeats, and plans adapter calls against coverage:
+
+- `Latest` always asks the source: only it knows whether a newer
+  observation exists.
+- `At(t)` is answered from the cache only when every asked tuple is exact,
+  `t` lies inside a merged coverage span `[a, b)` of that tuple, and the
+  cache holds a row of it with `a <= ts <= t`. Otherwise one call asks for
+  the whole set. A prefix `At` therefore always reaches the source: a member
+  the cache never held is invisible to it, and a member with no row in
+  `[a, t]` would be answered stale.
+- `Between` is first clipped to the dataset's `history` window (`from`
+  rises to now less the window): retention would delete what an older span
+  fetched, and the next ask would fetch it again forever. A span left empty
+  by the clip, wholly expired, is read from the cache without an adapter
+  call. Otherwise each tuple's coverage gaps are asked for; tuples with the
+  same gaps share calls, one per gap.
+
+With no call needed, the request is read at once on the query pool.
+Otherwise it waits in the data layer, never on the UI thread, on a ticket
+for its calls: each call's append (or failure) finishes one part, and the
+last one answers the request, with every failure's reason joined as its
+error, or else with a read on the pool under the requester's key and tag.
+The answer is a `HistoryTable`: the key and value column names, then rows
+ordered by key then `ts`, keys in their normalized spelling. A failed call
+also reports `Failed` on the source's `<dataset>@<source>` load lane.
+
+Every request is recorded as the newest for its key, whatever path it
+takes. A newer request for the same key supersedes an older one: when the
+older's calls finish it answers nothing, because its read would replace the
+newer one's at the pool, which keeps the latest submission per key, and its
+answer would arrive after the newer tag's. An older read already submitted
+to the pool when the newer request arrives still answers, before the newer
+one. `DataHandle::cancel(key)` supersedes in the same way. Because the pool
+coalesces and cancels per key, a history request must use a `QueryKey` no
+other pool request uses; a refusal also cancels what the pool holds for its
+key.
+
+`DataEvent::History` has no UI consumer yet: the app bridge and the
+collector log each answer at debug level and drop it.
+
 ### Ungrouped dimension columns
 
 A view may show a `dimension` column it does not group by — `strike` or
@@ -1545,7 +1686,11 @@ every forget a caller submitted answers exactly once. A forget has no
 progress or health lane.
 
 Series retention is separate and runs for the affected `(source, identity)`
-pair inside each append transaction. See
+pair inside each append transaction. History retention runs for the whole
+dataset inside each history append: `retention` deletes superseded versions
+received before its cutoff (the live version of every `(key, ts)` survives
+whatever its age), and `history` deletes rows observed before its cutoff and
+coverage spans ending at or before it. See
 [`retention.rs`](../../crates/geode-data/src/store/retention.rs) and
 [`series.rs`](../../crates/geode-data/src/store/series.rs).
 
@@ -1684,7 +1829,7 @@ tile's health chip under the source's own name.
 | Payload schema drift at open | discovery | every source of the dataset | `Failed` | `schema drift in '<dataset>': <diff>; delete the table or fix the dataset` | a restart after the table is deleted or the dataset fixed |
 | A subscription's receiver dropping messages | load | `<source>:queue` | `Degraded` | `N messages dropped since HH:MM:SS` | 60 s pass with no new drop |
 | A subscription's recovery request failing, or a window ending with no reply at all while an asked topic had no NOTIFY since its start | load | `<source>:recovery` | `Degraded` | `recovery failed: <error>`, `recovery: no replies for N topics` | a later recovery window reports `Ok` (see [recovery on subscribe](#recovery-on-subscribe)) |
-| A source's documents and series queued past 64 | load | `<source>:backlog` | `Degraded` | `ingest backlog N` (re-reported at each further 64; `N` is the count at the last crossing, not a live count, and holds while draining) | that source's queue falls below 64 |
+| A source's documents, series, history and snapshots queued past 64 | load | `<source>:backlog` | `Degraded` | `ingest backlog N` (re-reported at each further 64; `N` is the count at the last crossing, not a live count, and holds while draining) | that source's queue falls below 64 |
 
 `N` counts from the episode's first drop, and the time is when the receiver
 first observed it, on the display clock captured at open (within one receive
@@ -1697,9 +1842,9 @@ open episode with `Ok` as it exits: with no receiver there are no drops.
 
 A drifted dataset is refused, not guessed at: its sources are not started (a
 running poll would clear the discovery lane), the ingest runner refuses every
-document, series, file and forget into it before any `INSERT`, and the data
-service refuses a view, document, series or distinct read of it — or a fetch
-for its source — with the same reason, before compiling anything. A drifted
+document, series, history, file and forget into it before any `INSERT`, and
+the data service refuses a view, document, series, history or distinct read
+of it — or a fetch for its source — with the same reason, before compiling anything. A drifted
 dataset reached through an optional join refuses the whole view, where an
 ordinary optional-join failure warns and is skipped: dropping the join would
 answer with a plausible but narrower result, so the refusal is deliberate.
@@ -1712,6 +1857,14 @@ Open skips rebuilding a drifted dataset's generation summary. See
 - Historical as-of depends on retained generations. Measure and feed-published
   document archives currently have no automatic retention sweep; local
   documents keep 200 archived generations each.
+- A prefix history ask fans out to one adapter call per distinct gap list,
+  with no cap on their number; a stepped `Between` and a prefix `At` reach
+  the source on every ask, since neither can be answered from the cache; and
+  each history append's dedupe and retention scan the dataset's whole
+  payload table. None is measured yet.
+- History coverage recorded from an answer is not clipped at the time it
+  was fetched, so a `Between` reaching past now marks the future covered and
+  a later `Between` over that span does not ask for what arrived since.
 - Maintained budgets and known gaps are in
   [performance.md](performance.md); raw conditions and runs are in the
   measurement log.

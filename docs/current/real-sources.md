@@ -19,6 +19,7 @@ trait and nothing else:
 | Connect, authenticate, subscribe to topic patterns, report connection state | Topic recording, recovery windows, health lanes |
 | Hand over each message as topic + arrival time + whole body bytes | Parsing (`DocumentKind`), validation, source-time stamping, coalescing, publication |
 | Answer a history request with timestamp/value arrays | Coverage bookkeeping, bitemporal append, queries |
+| Answer a keyed history request with key, timestamp and value columns | Key normalization, ask checking, coverage per key, bitemporal append, reads |
 | Answer a table read with named columns | Conforming to the declaration, unchanged detection, publication |
 | Send encoded bytes to an address | Encoding (`DocumentKind::write`), confirm, echo comparison |
 | Bound its own calls with timeouts | Panic containment, supervision, refusal reporting |
@@ -41,6 +42,7 @@ config-declared column map today:
 | XML element names and nesting | Rust constants in `geode-documents` (`SLICE_VALUES`, `TAGS`, the path matchers) | Code: one module per kind |
 | Reference column names | Must equal the declared column names; `TableRows::conform` matches by `name`, not `source_name` | The shim or a database view |
 | Series identity spelling | Adapter-defined string; expression grammar limits the characters | The shim |
+| History key values and table names | Key values in `underlying_ref` spelling; `table` names the vendor table | The shim; `sources.toml` `table` |
 
 ## Seams at a glance
 
@@ -55,6 +57,7 @@ method returns a fresh handle per call, or `None` when the adapter lacks it.
 | Uploads | `egress()` → `Egress` | One egress worker per target (`egress.rs`) | `egress.toml` | `ChannelAdapter` `demo_bus` (publishes back onto the bus) |
 | History series | `fetch()` → `Fetch` | `FetchWorker` (`ingest/fetch.rs`), one per source | `sources.toml` over a `series` dataset | `DemoSeries` (`demo_kdb`, `demo_rest`) |
 | Reference tables | `snapshot()` → `SnapshotQuery` | `SnapshotWorker` (`ingest/snapshot.rs`), one per source | `sources.toml` (`table`, `poll_interval`) | `DemoRefDb` (`demo_refdb`) |
+| Keyed history | `history()` → `HistoryQuery` | `HistoryWorker` (`ingest/history.rs`), one per source | `sources.toml` (`table`) over a `history` dataset | `DemoHanweck` (`demo_hanweck`) |
 | Position commands | `positions()` → `PositionCommands` | `PositionWorker` (`positions.rs`) | `positions.toml` | `DemoPositions` (`demo_positions`) |
 | Risk files | none: built-in directory discovery, `adapter = "csv_dir"` | Discovery scheduler (`source/discovery.rs`) | `sources.toml` (`paths`, readiness) | `geode-demo-data` CSV emitter |
 
@@ -296,6 +299,72 @@ no `topics`); `datasets.toml` `family = "series"` with `retention`;
 - That one source answers one value per timestamp (no bid/ask/OHLC
   columns).
 
+### Vol surface history (Hanweck)
+
+**For:** constant-maturity implied-vol surface points, realized vol and
+variance-swap strikes per underlying, asked per key on demand and cached in
+`history` datasets (`vol_surface`, `realized_vol`, `varswap` in the demo).
+Nothing in the app asks for them yet; the data path answers and drops.
+
+**Simulator:** `DemoHanweck` in
+[`demo_hanweck.rs`](../../crates/geode-compose/src/demo_hanweck.rs)
+(`demo_hanweck`), behind the demo layer's `hanweck_surface`,
+`hanweck_realized` and `hanweck_varswap` sources. Every value is a pure
+function of seed, key and day: one close per weekday at 21:00 UTC from
+2024-06-03, a five-minute intraday point inside the 14:30 to 21:00 UTC
+session for `Latest` and `At`, no holidays, and nothing after the adapter's
+clock. Ten underlyings, tenors 1M to 3Y, call deltas 0.1 to 0.9, realized
+windows 5D, 20D and 60D. Enabled by `--demo`.
+
+**Seam:** implement `HistoryQuery` and return it from `Adapter::history()`:
+
+- `query(&HistoryRequest { table, keys, span })` returns `HistoryRows`:
+  `ts`, one column per key column and one per value column in declared
+  order, equal lengths. `table` is the configured name. `keys` is a
+  `KeySet`: `Exact` whole tuples or `Prefix` leading values; every row
+  returned must equal an exact tuple or start with a prefix, or the whole
+  answer is refused. `span` is `Latest` (each key's newest point), `At(t)`
+  (the last at or before `t`, an `aj` on `(key, ts <= t)` in q terms), or
+  `Between { from, to, step }` over `from <= ts < to`, with `step` a
+  downsampling hint the source may honor (at most one point per step, the
+  last in each) or ignore.
+- Keys may come back in any spelling of the same value (`0.50` for `0.5`);
+  the worker normalizes them before checking. A repeated `(key, ts)` is
+  refused; non-finite values are dropped with a load-note warning.
+- `keys(table, column)` returns a key column's distinct values for
+  typeahead and the tenor set, or `None` when the source cannot enumerate.
+  Asked once per key column at open.
+- Both are blocking and need the shim's own timeouts: the worker has no
+  deadline or cancellation and drains its queue at shutdown.
+
+Keys are `underlying_ref` values, Geode's own ticker spelling: the shim owns
+the map to the vendor's symbols, as it does for series identities.
+
+**Config:** `sources.toml` source over a `history` dataset with `table`
+(default the dataset name), at most one per dataset; `datasets.toml`
+`family = "history"` with `key`, f64 values, `history` and `retention`
+windows, and `order = "tenor"` on a tenor or window key column.
+
+| Demo table | Dataset | Key | Values |
+|---|---|---|---|
+| `surface` | `vol_surface` | `underlying_ref`, `tenor`, `delta` | `vol`, `forward` |
+| `realized` | `realized_vol` | `underlying_ref`, `window` | `vol` |
+| `varswap` | `varswap` | `underlying_ref`, `tenor` | `strike` |
+
+**Guessed:**
+
+- The KDB table names and their column names.
+- Delta convention: call delta as an f64 (0.9 is the low-strike wing),
+  not put deltas or `25P`/`25C` labels.
+- Tenor labels (`1M`, `18M`, `1Y`) as `<n>D|W|M|Y`; a vendor spelling
+  `12M` and `1Y` for the same point would be two keys.
+- That realized vol and varswap strikes are precomputed upstream, not
+  derived here from prices.
+- One observation per key per timestamp, and that history once answered
+  does not change: a covered span is never asked again, so a later vendor
+  correction reaches the cache only through an ask the cache cannot answer
+  (`Latest`, or `At` at an uncovered instant).
+
 ### Reference data
 
 **For:** the `underlyings` table (vendor tickers, currency, calendar,
@@ -419,15 +488,16 @@ they are constants in that crate, not config.
    both binaries.
 4. **Names.** `Adapter::name()` is what `sources.toml`, `egress.toml` and
    `positions.toml` select. Real names must differ from `demo_bus`,
-   `demo_kdb`, `demo_rest`, `demo_refdb` and `demo_positions`; a duplicate
+   `demo_kdb`, `demo_rest`, `demo_refdb`, `demo_hanweck` and
+   `demo_positions`; a duplicate
    registration replaces the earlier one with a warning.
 5. **Credentials.** Read secrets from the environment. Config may name the
    variable, never hold the secret (see
    [credentials](configuration.md#credentials)).
 6. **Contract checklist.** Fresh handle per capability call. `subscribe`
    and `recover` return promptly. Health callbacks are quick and never
-   panic. Every blocking call (`fetch`, `catalogue`, `query`, `upload`,
-   `move_lhu`) has its own timeout. Vendor callback threads are the shim's;
+   panic. Every blocking call (`fetch`, `catalogue`, `query`, `keys`,
+   `upload`, `move_lhu`) has its own timeout. Vendor callback threads are the shim's;
    Geode does not supervise them. Errors are `AdapterError { message }`
    worded for a trader.
 7. **Keeping the simulator.** Sources, datasets and egress targets replace
@@ -477,3 +547,6 @@ demo directory) and restart.
   on subscribe is the only gap filler, and with it recovery still covers
   each handoff gap.
 - Nemo URL shapes are provisional.
+- No KDB history client exists; `demo_hanweck` answers one close per
+  weekday, so `step` and intraday history are untested against a real
+  source.

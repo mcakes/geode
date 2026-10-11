@@ -166,8 +166,9 @@ may still use separately configured `CC`/`CXX` wrappers.
   (`geode-collector uninstall --demo <rows>`); a running one holds the store.
 - Any change to the store's DDL — its own tables (catalog, generations
   summary, provenance, `subscription_topics`, `geode_meta`) or the payload
-  table builders in `store/ddl.rs` and `store/series.rs` (series payload and
-  coverage) — bumps `geode_data::STORE_FORMAT`. Staging tables are exempt.
+  table builders in `store/ddl.rs`, `store/series.rs` (series payload and
+  coverage) and `store/history.rs` (history payload and coverage) — bumps
+  `geode_data::STORE_FORMAT`. Staging tables are exempt.
 - Displayed times use `geode_core::clock::Clock`; do not use `chrono::Local`.
 
 ## Performance and tests

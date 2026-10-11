@@ -634,6 +634,21 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The subscription shutdown test in `subscribe.rs` is timing-based (125 ms); adopt
   the deterministic form (unsubscribe, wait for the thread to exit on
   `Disconnected`) if it flakes.
+- History family: `DataEvent::History` has no consumer, so the app bridge and
+  the collector log and drop it. `Delivery::History` and its first consumer
+  (the vol watchlist tile) land together in Part 4 of the vol watchlist.
+- History family, for the Part 2 bench: measure the prefix fan-out (one
+  adapter call per distinct gap list, uncapped), a prefix `At` always reaching
+  the source, a stepped `Between` never recording coverage, and each append's
+  dedupe and retention scanning the whole payload table (filtering to the
+  staged keys is the likely lever).
+
+### Display checks
+
+- History sources in the demo: delete `$TMPDIR/geode-demo/1000-42/`, run
+  `cargo run -p geode-app -- --demo 1000`, and confirm `hanweck_surface`,
+  `hanweck_realized` and `hanweck_varswap` read healthy in the diagnostics
+  page's Sources section.
 
 ## Reference data and classifications
 
@@ -679,6 +694,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   reserve; add that refusal when Part 2 registers the actions.
 - The tile's `shift+r` refresh trigger (spec §4.3) arrives with the tile in
   Part 2; the cache has no caller for a manual refresh yet.
+- The vol watchlist spec's `europe_risk` member the demo surface lacks (so the
+  tile can show a muted missing member) is not in `watchlists.toml` yet; it
+  lands with the vol watchlist tile in Part 4.
 - A release-profile median for the publish-triggered watchlist resolution:
   the recorded 44.8 ms is one dev-profile sample on a loaded machine
   (`docs/perf.md`, 2026-10-10).

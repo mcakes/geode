@@ -37,6 +37,7 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Catalog | `Catalog`, read on the service thread and addressed by key/tag. |
 | Reference table | `Reference`, read on the service thread and addressed by key/tag, with the dataset and as-of. |
 | Watchlist | `Watchlist`, addressed by key/tag with the list's name, including a drift refusal. Each list resolves under its own key, since the pool coalesces and cancels per key and the mailbox keys these answers per key too. A rule that fails to compile or run is named by index inside a successful answer; the other rules still answer. |
+| History | `History`, addressed by key/tag with the dataset and span, refusals included; a request superseded by a newer one for its key, or cancelled, answers nothing unless its read had already reached the pool, in which case it answers before the newer one. Use a key no other pool request uses: the pool coalesces and cancels per key. No UI consumer reads it yet; the bridge drops it. See [history requests](data-path.md#history-requests). |
 | Snapshot poll-now | No dedicated reply. The source reports ordinary poll, health, and publication events; an unchanged snapshot has no publication. |
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
 | Vol slices | `VolSlices`, addressed by key/tag, one result per job in job order; a full vol queue answers every job `the vol queue is full; resubmit`. |
@@ -112,7 +113,7 @@ The service then stops its workers in dependency order, the ingest writer
 last. The writer runs its queued local writes (the app's own publishes and
 forgets) in order, each answering as usual, and drops every other queued job:
 feed documents, series, reference snapshots and files are resent by their
-sources after a restart. It is not a flush beyond that. Egress workers drain already queued uploads
+sources after a restart; fetched history is dropped with its request unanswered. It is not a flush beyond that. Egress workers drain already queued uploads
 before joining, with no transport timeout. The position worker also drains
 accepted commands. Fetch calls, snapshot polls, discovery, publication,
 uploads, and position commands can therefore delay joining. Final-handle drop
@@ -130,7 +131,7 @@ delivery, not applied to a window.
 
 | Event | Pending-state rule |
 |---|---|
-| Query, series, distinct, watchlist, catalog, price, vol slices | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
+| Query, series, distinct, watchlist, history, catalog, price, vol slices | One entry per event kind and request key; a lower tag cannot replace a higher one. Equal tags replace. |
 | Upload outcome | One entry per tile key and upload tag. Different uploads from one tile remain distinct; duplicate outcomes for the same pair replace. |
 | Text file outcome | Keyed like an upload, on tile key and tag: a failed export followed by an import from the same tile both arrive, so the failure is not coalesced away behind the later answer. |
 | Publication | One entry per dataset/batch; union affected books and retain the greatest generation ID. |
