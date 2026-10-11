@@ -68,7 +68,7 @@ const ANCHOR: NaiveDate = match NaiveDate::from_ymd_opt(2026, 1, 5) {
 const OPEN_MINUTE: i64 = 14 * 60 + 30;
 const BARS_PER_DAY: i64 = 390;
 
-fn fnv(seed: u64, identity: &str, day: i64) -> u64 {
+pub(crate) fn fnv(seed: u64, identity: &str, day: i64) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325 ^ seed;
     for b in identity.bytes().chain(day.to_le_bytes()) {
         h ^= b as u64;
@@ -79,18 +79,18 @@ fn fnv(seed: u64, identity: &str, day: i64) -> u64 {
 
 /// An approximately normal step: twelve independent uniforms summed and
 /// centered to give mean zero and unit variance.
-fn step(rng: &mut StdRng) -> f64 {
+pub(crate) fn step(rng: &mut StdRng) -> f64 {
     (0..12).map(|_| rng.random::<f64>()).sum::<f64>() - 6.0
 }
 
-fn is_weekday(d: NaiveDate) -> bool {
+pub(crate) fn is_weekday(d: NaiveDate) -> bool {
     !matches!(d.weekday(), Weekday::Sat | Weekday::Sun)
 }
 
 /// Weekdays in `[from, to)` — exactly the days [`open_level`]'s walk
 /// applies `drift` on when it reaches `to`. Whole weeks are counted
 /// arithmetically and only the ragged tail is stepped.
-fn weekdays_between(from: NaiveDate, to: NaiveDate) -> i64 {
+pub(crate) fn weekdays_between(from: NaiveDate, to: NaiveDate) -> i64 {
     if to <= from {
         return 0;
     }

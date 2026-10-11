@@ -236,7 +236,9 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// catalogue and the latter requires entered identities. The position
 /// service is `demo_positions`, which rewrites the risk CSVs in place.
 /// `refdb` polls the `underlyings` reference table from `demo_refdb` every
-/// 30 s.
+/// 30 s. `hanweck_surface`, `hanweck_realized` and `hanweck_varswap` answer
+/// the `vol_surface`, `realized_vol` and `varswap` history datasets from
+/// `demo_hanweck`'s `surface`, `realized` and `varswap` tables.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
@@ -254,7 +256,13 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
          [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n\
          [refdb]\nadapter = \"demo_refdb\"\ndataset = \"underlyings\"\n\
-         table = \"underlyings\"\npoll_interval = \"30s\"\n",
+         table = \"underlyings\"\npoll_interval = \"30s\"\n\
+         [hanweck_surface]\nadapter = \"demo_hanweck\"\ndataset = \"vol_surface\"\n\
+         table = \"surface\"\n\
+         [hanweck_realized]\nadapter = \"demo_hanweck\"\ndataset = \"realized_vol\"\n\
+         table = \"realized\"\n\
+         [hanweck_varswap]\nadapter = \"demo_hanweck\"\ndataset = \"varswap\"\n\
+         table = \"varswap\"\n",
         source_dir.join("*.csv").to_string_lossy()
     );
     // The `sophis` target publishes both document kinds through the same
@@ -486,7 +494,7 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 7);
+        assert_eq!(sources.len(), 10);
     }
 
     /// The dividend source declares its document kind, topic, coalescing,
@@ -517,8 +525,9 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            7,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb"
+            10,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+             hanweck_realized, hanweck_varswap"
         );
         assert!(sources.iter().any(|s| s.name == "dividend"));
     }
@@ -551,8 +560,9 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            7,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb"
+            10,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+             hanweck_realized, hanweck_varswap"
         );
         assert!(sources.iter().any(|s| s.name == "opra_sim"));
     }
@@ -593,7 +603,7 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 7);
+        assert_eq!(sources.len(), 10);
         let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
         let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
         assert_eq!(
@@ -604,6 +614,47 @@ mod tests {
             rest.shape(&schema),
             geode_core::source_config::SourceShape::Fetch
         );
+    }
+
+    /// The three Hanweck sources resolve to the history shape over their
+    /// datasets, each reading its own `demo_hanweck` table, and the
+    /// adapter answers every table they name.
+    #[test]
+    fn the_demo_layer_declares_the_three_history_sources() {
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(d.is_empty(), "{d:?}");
+        let adapter = crate::demo_hanweck::DemoHanweck::new(42);
+        for (name, dataset, table) in [
+            ("hanweck_surface", "vol_surface", "surface"),
+            ("hanweck_realized", "realized_vol", "realized"),
+            ("hanweck_varswap", "varswap", "varswap"),
+        ] {
+            let source = sources.iter().find(|s| s.name == name).unwrap();
+            assert_eq!(
+                source.shape(&schema),
+                geode_core::source_config::SourceShape::History,
+                "{name}"
+            );
+            assert_eq!(source.adapter, crate::demo_hanweck::DEMO_HANWECK);
+            assert_eq!(source.dataset, dataset);
+            assert_eq!(source.table.as_deref(), Some(table));
+            let ds = schema.dataset(dataset).unwrap();
+            let mut history = adapter.history().unwrap();
+            for column in &ds.key {
+                assert!(
+                    history.keys(table, column).is_some(),
+                    "{table} enumerates its key column {column}"
+                );
+            }
+        }
     }
 
     /// The `refdb` source resolves to the snapshot shape over the

@@ -300,10 +300,11 @@ mod demo_config_integration {
         assert_eq!(names, vec!["tree", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "the wide view has 100 columns");
-        // All seven source definitions survive setup: risk CSVs, the CVI,
+        // All ten source definitions survive setup: risk CSVs, the CVI,
         // dividend and option-chain subscriptions, the two timeseries fetch
-        // adapters, and the reference snapshot.
-        assert_eq!(setup.config.sources.len(), 7);
+        // adapters, the reference snapshot, and the three Hanweck history
+        // sources.
+        assert_eq!(setup.config.sources.len(), 10);
         // Setup must carry the resolved egress target into the service config.
         assert_eq!(setup.config.egress.len(), 1);
         assert_eq!(setup.config.egress[0].name, "sophis");

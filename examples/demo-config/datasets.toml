@@ -458,6 +458,66 @@ role = "attribute"                # RFC 3339 text: document columns cannot be ti
 family = "series"
 retention = "7d"
 
+# ---- Constant-maturity implied-vol surface points, realized vol and varswap
+# strikes, as a Hanweck/KDB history source would answer them. Served by
+# `geode_compose::demo_hanweck` through the `[hanweck_*]` history sources.
+[vol_surface]
+family = "history"
+key = ["underlying_ref", "tenor", "delta"]
+history = "400d"
+retention = "7d"
+[vol_surface.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[vol_surface.columns.tenor]
+type = "utf8"
+role = "dimension"
+order = "tenor"
+[vol_surface.columns.delta]
+type = "f64"
+role = "dimension"
+[vol_surface.columns.vol]
+type = "f64"
+role = "value"
+[vol_surface.columns.forward]
+type = "f64"
+role = "value"
+
+[realized_vol]
+family = "history"
+key = ["underlying_ref", "window"]
+history = "400d"
+retention = "7d"
+[realized_vol.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[realized_vol.columns.window]
+type = "utf8"
+role = "dimension"
+order = "tenor"
+[realized_vol.columns.vol]
+type = "f64"
+role = "value"
+
+[varswap]
+family = "history"
+key = ["underlying_ref", "tenor"]
+history = "400d"
+retention = "7d"
+[varswap.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[varswap.columns.tenor]
+type = "utf8"
+role = "dimension"
+order = "tenor"
+[varswap.columns.strike]
+type = "f64"
+role = "value"
+
 # ---- Underlying reference data. ----
 # One row per underlying: system ticker to vendor tickers and static
 # attributes. `geode_compose::demo_refdb` serves it through the generated

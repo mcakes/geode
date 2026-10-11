@@ -8,7 +8,7 @@ mod generate;
 mod model;
 
 pub use emit::{EmitOptions, EmittedDirectory, EmittedFile, emit_directory};
-pub use generate::{GeneratorConfig, demo_underlyings, generate};
+pub use generate::{GeneratorConfig, UNDERLYINGS, demo_underlyings, generate};
 pub use model::RiskBatch;
 
 #[cfg(test)]

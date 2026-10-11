@@ -28,7 +28,8 @@ impl Default for GeneratorConfig {
     }
 }
 
-const UNDERLYINGS: &[&str] = &[
+/// The demo underlyings, in the order every demo generator lists them.
+pub const UNDERLYINGS: [&str; 10] = [
     "SPX", "SX5E", "NKY", "UKX", "NDX", "RTY", "DAX", "SMI", "HSI", "KOSPI2",
 ];
 

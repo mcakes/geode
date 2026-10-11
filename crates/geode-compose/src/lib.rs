@@ -5,6 +5,7 @@
 pub mod collector;
 pub mod demo;
 pub mod demo_bus;
+pub mod demo_hanweck;
 pub mod demo_refdb;
 pub mod demo_series;
 pub mod logging;
@@ -32,8 +33,9 @@ use std::time::Duration;
 
 /// The transport registry both binaries build. Without a demo directory it
 /// is empty (real adapters register here when they exist); with one it
-/// holds the demo bus, the two demo series transports, the demo reference
-/// database and the demo position service, and returns the bus's feed for
+/// holds the demo bus, the two demo series transports, the demo Hanweck
+/// history service, the demo reference database and the demo position
+/// service, and returns the bus's feed for
 /// whoever runs the demo producers.
 pub fn adapters(demo_root: Option<&Path>) -> (AdapterRegistry, Option<ChannelFeed>) {
     let Some(root) = demo_root else {
@@ -46,6 +48,8 @@ pub fn adapters(demo_root: Option<&Path>) -> (AdapterRegistry, Option<ChannelFee
     // catalogue and manual-identity discovery.
     adapters.register(demo_series::DemoSeries::new("demo_kdb", 42, true));
     adapters.register(demo_series::DemoSeries::new("demo_rest", 42, false));
+    // The demo vol history behind the `[hanweck_*]` history sources.
+    adapters.register(demo_hanweck::DemoHanweck::new(42));
     // The demo reference database behind the `refdb` snapshot source.
     adapters.register(demo_refdb::DemoRefDb::new(Duration::ZERO));
     // The demo position service rewrites the risk CSVs the demo source
@@ -323,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn a_demo_build_registers_the_five_demo_transports_and_returns_the_bus_feed() {
+    fn a_demo_build_registers_the_six_demo_transports_and_returns_the_bus_feed() {
         let dir = tempfile::tempdir().unwrap();
         let (registry, feed) = adapters(Some(dir.path()));
         let mut names = registry.names();
@@ -332,6 +336,7 @@ mod tests {
             names,
             [
                 "demo_bus",
+                "demo_hanweck",
                 "demo_kdb",
                 "demo_positions",
                 "demo_refdb",
