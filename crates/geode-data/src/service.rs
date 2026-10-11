@@ -3278,7 +3278,15 @@ impl DataService {
                             .into_iter()
                             .map(|r| (source.clone(), r, ds.history_values().len())),
                     ),
-                    Err(e) => return refuse(&params, format!("reading coverage: {e}")),
+                    Err(e) => {
+                        return refuse(
+                            &params,
+                            format!(
+                                "reading coverage: {}",
+                                crate::query::volboard::board_error_text(&e)
+                            ),
+                        );
+                    }
                 }
             }
         }

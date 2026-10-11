@@ -484,10 +484,15 @@ pub(crate) fn run_one(
             .run(conn)
             .map(Payload::History)
             .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
+        // `ToSqlConversionFailure` displays its inner error verbatim, so the
+        // board's `Err` is the bare message rather than "Invalid parameter
+        // name: …"; the board text also drops the statement.
         Work::VolBoard(read) => read
             .run(conn)
             .map(|b| Payload::VolBoard(Box::new(b)))
-            .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
+            .map_err(|e| {
+                duckdb::Error::ToSqlConversionFailure(super::volboard::board_error_text(&e).into())
+            }),
     }
 }
 

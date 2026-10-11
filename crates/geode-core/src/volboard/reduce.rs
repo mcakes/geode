@@ -234,10 +234,7 @@ pub fn reduce(params: &VolBoardParams, obs: &Observations, clock: &Clock) -> Red
                 (Some(_), Some(first)) => {
                     format!("{ds}: history starts {}", clock.today(*first))
                 }
-                _ => format!(
-                    "{ds}: no observation at or before {}",
-                    clock.today(instant)
-                ),
+                _ => format!("{ds}: no observation at or before {}", clock.today(instant)),
             },
         )
         .collect();

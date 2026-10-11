@@ -1597,6 +1597,13 @@ one key supersede each other's pending tickets, but at the pool they run
 under different keys, so a read of the other kind already submitted still
 answers. A requester asking both uses two keys.
 
+A read failure, the board's `Err` for the surface or a `dataset_errors`
+entry for another dataset, carries DuckDB's own message without the
+statement (`query::volboard::board_error_text`): the statement lists every
+asked tuple, kilobytes at a few hundred members. The coverage refusal
+(`reading coverage: …`) is trimmed the same way. A failure while fetching
+or appending, before the read, keeps the history request's text.
+
 The read is one SQL statement per dataset that projects the cached live
 rows of the asked tuples to observations: the latest, the last at or before
 each lookback instant, the last of each UTC day inside the daily span, and

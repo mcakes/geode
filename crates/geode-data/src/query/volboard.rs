@@ -346,6 +346,16 @@ fn read_role(
     Ok(())
 }
 
+/// A board failure as the tile shows it: a SQL error's own message
+/// without the statement (which lists every asked tuple, kilobytes at a
+/// few hundred members), any other error as it displays.
+pub fn board_error_text(e: &StoreError) -> String {
+    match e {
+        StoreError::Sql { source, .. } => source.to_string(),
+        e => e.to_string(),
+    }
+}
+
 /// Read every dataset the plan names (skipping `dataset_errors`), project
 /// each to observations and reduce. A surface read error is the board's
 /// `Err`; another dataset's read error joins `dataset_errors`.
@@ -388,7 +398,9 @@ pub fn read_board(
             // `StoreError::History` displays as `history: <message>`; the
             // dataset error carries the message alone.
             Err(StoreError::History(m)) => board.dataset_errors.push((name.to_string(), m)),
-            Err(e) => board.dataset_errors.push((name.to_string(), e.to_string())),
+            Err(e) => board
+                .dataset_errors
+                .push((name.to_string(), board_error_text(&e))),
         }
     }
     let reduced = reduce(params, &obs, &plan.clock);
@@ -870,5 +882,63 @@ role = "value"
             .unwrap_err()
             .to_string();
         assert!(err.contains("has no value column 'forward'"), "{err}");
+    }
+
+    /// A board's error texts name the failure, not the statement: the
+    /// statement carries every asked tuple (kilobytes at 250 members) and
+    /// would bury the reason on the tile.
+    #[test]
+    fn a_failing_dataset_read_names_the_error_without_the_statement() {
+        let (_dir, store, mut schema) = seeded();
+        with_realized(&store, &mut schema);
+        store
+            .writer()
+            .execute_batch(&format!("drop table {}", history_table("realized_vol")))
+            .unwrap();
+        let mut p = plan(
+            vec![
+                Measure::atfm("3M"),
+                Measure::Realized {
+                    window: "20D".into(),
+                },
+            ],
+            None,
+            None,
+        );
+        p.params.realized = Some("realized_vol".into());
+        let board = read_board(store.writer(), &schema, &p).unwrap();
+        let [(dataset, message)] = &board.dataset_errors[..] else {
+            panic!("one dataset error: {:?}", board.dataset_errors);
+        };
+        assert_eq!(dataset, "realized_vol");
+        assert!(message.contains("does not exist"), "{message}");
+        assert!(!message.to_lowercase().contains("select"), "{message}");
+    }
+
+    #[test]
+    fn a_surface_read_failure_through_the_pool_carries_the_bare_message() {
+        use crate::query::pool::{QueryRequest, RequestKind, ViewId, Work, run_one};
+        let (_dir, store, schema) = seeded();
+        store
+            .writer()
+            .execute_batch(&format!("drop table {}", history_table("vol_surface")))
+            .unwrap();
+        let p = plan(vec![Measure::atfm("3M")], None, None);
+        let req = QueryRequest {
+            key: board_pool_key(p.params.key),
+            tag: p.params.tag,
+            submitted: p.params.submitted,
+            view: ViewId("volboard:vol_surface".into()),
+            grouping: Vec::new(),
+            provenance: Default::default(),
+            kind: RequestKind::VolBoard {
+                requester: p.params.key,
+            },
+            work: Work::VolBoard(Box::new(BoardRead::new(Arc::new(schema), p))),
+        };
+        let err = run_one(store.writer(), &req).unwrap_err().to_string();
+        assert!(err.contains("does not exist"), "{err}");
+        assert!(!err.starts_with("Invalid parameter name"), "{err}");
+        assert!(!err.to_lowercase().contains("select"), "{err}");
     }
 }
