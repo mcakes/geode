@@ -304,7 +304,9 @@ no `topics`); `datasets.toml` `family = "series"` with `retention`;
 **For:** constant-maturity implied-vol surface points, realized vol and
 variance-swap strikes per underlying, asked per key on demand and cached in
 `history` datasets (`vol_surface`, `realized_vol`, `varswap` in the demo).
-Nothing in the app asks for them yet; the data path answers and drops.
+The vol board request reads them (see
+[board requests](data-path.md#board-requests)); no UI consumer shows the
+board until the vol watchlist tile lands in Part 4.
 
 **Simulator:** `DemoHanweck` in
 [`demo_hanweck.rs`](../../crates/geode-compose/src/demo_hanweck.rs)
@@ -370,6 +372,15 @@ windows, and `order = "tenor"` on a tenor or window key column.
   call, so anything stamped earlier but published later than that is never
   asked for again. A vendor whose closes arrive later needs a longer
   margin (an open item).
+- That a full-resolution window is affordable: the board's window
+  `Between` asks without a `step`, so coverage can record it and later
+  refreshes ask only the recent tail. A vendor holding intraday history for
+  a year would answer many rows for that first ask; a daily table name
+  (one close per day) would be the lever.
+- That one `Latest` prefix call per dataset per refresh, with no per-call
+  size cap, is acceptable. On the demo adapter one prefix call over ten
+  underlyings is cheaper than ten single-member calls (`docs/perf.md`); a
+  real adapter with a size limit splits inside its shim.
 
 ### Reference data
 

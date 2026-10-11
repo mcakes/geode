@@ -6,7 +6,9 @@
 //!
 //! Cases: the board read alone (SQL projection plus reduce) for the
 //! Changes and Rich/cheap views; the board round trip through the service
-//! (one `Latest` prefix fetch per dataset, appended, then the read); the
+//! (a `Latest` prefix fetch per dataset the view reads, the lookback `At`
+//! from coverage, the window or sparkline exact `Between` with its
+//! coverage check and recent-tail fetch, then the read); the
 //! history request shapes the ledger owes (a prefix `Latest`, a prefix
 //! `At` that always fetches, an exact `At` over 250 tuples served from
 //! coverage, an exact 30-day `Between` from coverage); an append of a

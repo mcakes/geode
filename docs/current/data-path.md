@@ -166,6 +166,8 @@ success, and the loop goes on to the next request:
 | Distinct values | `Distinct` error for its key, tag, and column |
 | Series | `Series` error for its key and tag |
 | History | `History` error for its key and tag |
+| VolBoard | `VolBoard` error for its key and tag |
+| HistoryKeys | `HistoryKeys` with `values: None` |
 | Catalog | `Catalog` error for its key and tag |
 | Watchlist | `Watchlist` error for its key, tag, and list name |
 | Pricing | `Price` outcome with the error on every submitted line |
@@ -818,7 +820,8 @@ the adapter's blocking calls, one at a time, inside a panic boundary. At
 open the worker asks the source to enumerate each key column;
 `DataService::history_keys(dataset, column)` returns the last answer in the
 column's declared order, or `None` before an answer or when the source cannot
-enumerate. A panicking listing is an error diagnostic naming the dataset,
+enumerate; `Request::HistoryKeys` answers the same as an event (see
+[history keys](#history-keys)). A panicking listing is an error diagnostic naming the dataset,
 column and source.
 
 The worker normalizes an answer's keys, then checks it against the ask, then
@@ -1481,14 +1484,17 @@ removes repeats, and plans adapter calls against coverage:
 
 - `Latest` always asks the source: only it knows whether a newer
   observation exists.
-- `At(t)` is answered from the cache only when every asked tuple names
-  every key column, `t` lies inside a merged coverage span `[a, b)` of that
-  tuple, and the cache holds a row of it with `a <= ts <= t`. Otherwise one
-  call asks for the whole set. An `At` with a tuple naming fewer key columns
-  therefore always reaches the source: a member the cache never held is
-  invisible to it, and a member with no row in `[a, t]` would be answered
-  stale. A `Prefix` tuple of full arity names every key column and counts
-  as whole here.
+- `At(t)` answers a tuple from the cache when the tuple names every key
+  column, `t` lies inside a merged coverage span `[a, b)` of it (its own
+  rows or a prefix's), and the cache holds a row of it with
+  `a <= ts <= t`. An exact ask reads the tuples the cache can answer and
+  asks the source, in one call, for the rest only (`uncovered_at`, two
+  statements for any number of tuples); with none left it reads at once.
+  A `Prefix` ask with a tuple naming fewer key columns always reaches the
+  source, whole: a member the cache never held is invisible to it, and a
+  member with no row in `[a, t]` would be answered stale. A `Prefix` ask
+  whose tuples all name every key column is read from the cache only when
+  every tuple is answered; otherwise one call asks for the whole set.
 - `Between` is first clipped to the dataset's `history` window (`from`
   rises to now less the window): retention would delete what an older span
   fetched, and the next ask would fetch it again forever. Its `to` is
@@ -1525,8 +1531,103 @@ key. `DataHandle::cancel(key)` supersedes the older request and cancels its
 read in the pool. Because the pool coalesces and cancels per key, a history
 request must use a `QueryKey` no other pool request uses.
 
-`DataEvent::History` has no UI consumer yet: the app bridge and the
-collector log each answer at debug level and drop it.
+`DataEvent::History`, `DataEvent::VolBoard` and `DataEvent::HistoryKeys`
+have no UI consumer yet: the app bridge and the collector log each answer
+at debug level and drop it. The vol watchlist tile consumes them in Part 4.
+
+### Board requests
+
+`DataHandle::vol_board(VolBoardParams)` asks for one vol board: a row per
+watchlist member, a cell per measure, each cell with its current value, a
+change per lookback (`D1`, `W1`, `M1`: one, five and twenty-one business
+days), an optional rank percentile over a window, and an optional daily
+sparkline for one measure. The measures and their arithmetic are
+`geode_core::volboard::Measure`: points, forwards and realized and varswap
+levels read one tuple; skew, wing skew, slope, IV−RV and the varswap
+spread are first input minus second (`Skew` is the 25Δ put minus the 25Δ
+call, call deltas 0.75 and 0.25).
+
+The service fixes `now` and the lookback instants once at submission, then
+plans these asks per dataset the measures (and the sparkline) touch:
+
+- One `Latest` over `Prefix(members)`. It always fetches; one call per
+  dataset per refresh.
+- One exact-key `At` at each lookback instant, over the members times the
+  key suffixes the measures read. Exact, so coverage answers it after the
+  first fetch and only uncovered tuples go to the source.
+- With a window or a sparkline, one exact-key `Between` over the longer of
+  the two spans, ending now, with `step: None`: a stepped `Between` records
+  no coverage, so a stepped ask would refetch the whole window on every
+  refresh. The board SQL thins to one observation per day instead.
+
+The lookback instant is the end of the calendar day (23:59:59.999999 in the
+clock's zone) `n` business days back from the clock's today; a weekend
+today steps back from Friday. The clock's `eod` (18:00 by default) is a
+display boundary, not a close: a 21:00 UTC close would fall after it, so
+it is not used. On Monday morning `D1` therefore compares with Friday's
+close and reads zero until Monday's first mark.
+
+The service refuses, as the request's `DataEvent::VolBoard` error, before
+any call: what `VolBoardParams::validate` refuses (no member, a blank
+member, no measure, a measure whose dataset the request does not name, a
+zero window or sparkline span, a window shorter than a lookback's calendar
+reach of 4, 8 or 31 days); a dataset not declared as history
+(`'<name>' is not a declared history dataset`); a dataset of the wrong shape (the surface needs a
+three-column key and value columns `vol` and `forward`, realized a
+two-column key and `vol`, varswap a two-column key and `strike`: `'x' has
+no value column 'forward'`); `'<name>' is not a history dataset with a
+source`; a drifted dataset; a member or suffix that does not normalize; a
+lookback instant the clock cannot resolve (`lookback instant: …`); a daily
+span reaching before the representable range (`daily span: out of
+range`); and a coverage read that fails (`reading coverage: …`).
+
+The calls coverage lacks, across every dataset, run under one ticket, as a
+history request's do. When the last finishes, a failure of the surface is
+the request's `Err` (the surface is the board); another dataset's failure
+blanks that dataset's cells and lands in `dataset_errors`, and the board is
+otherwise answered. A source's full history queue refuses the request at
+once. With no call needed the board is read at once.
+
+The read runs on the query pool under `board_pool_key(key)`, the
+requester's key with bit 63 flipped, and the answer is addressed to `key`:
+the pool coalesces and cancels per key, and the tile's own view queries
+(Part 4's vega query) under its key must not replace the board read.
+`DataHandle::cancel(key)` cancels both. A board and a history request under
+one key supersede each other's pending tickets, but at the pool they run
+under different keys, so a read of the other kind already submitted still
+answers. A requester asking both uses two keys.
+
+The read is one SQL statement per dataset that projects the cached live
+rows of the asked tuples to observations: the latest, the last at or before
+each lookback instant, the last of each UTC day inside the daily span, and
+the earliest cached. Pure `geode_core::volboard::reduce` computes every
+cell from those: a change is current minus the last observation at or
+before the instant; a rank is the share of the window's daily values
+strictly below the current, carried with their count (fewer than 60 still
+answers; muting is the tile's); a derived measure is combined pointwise
+over the days all its inputs hold. The read itself skips a member or suffix
+that does not normalize (it names no stored row), so such a member shows
+only as missing.
+
+Rows come one per member in request order. A member with no current
+observation among the request's surface inputs keeps its row (`as_of:
+None`, its surface cells `None`) and is named in `missing`; its realized or
+varswap cells may still be filled. A board that reads no surface input
+counts any input instead. `notes` carries one line per dataset whose
+lookback found nothing for some tuple: `<dataset>: history starts <date>`
+when a window was asked (it holds every lookback, so the window `Between`
+cached the dataset's true start), else `<dataset>: no observation at or
+before <date>`. Daily buckets are UTC days: a session straddling UTC
+midnight would split into two buckets. The demo and the Hanweck closes do
+not.
+
+### History keys
+
+`DataHandle::history_keys(HistoryKeysParams)` answers at once, on the
+service thread, with `DataEvent::HistoryKeys`: the values the source listed
+at open for one history key column, in the column's declared order, or
+`None` when it listed nothing or the dataset or column is unknown. It never
+waits on the source. No consumer reads it yet.
 
 ### Ungrouped dimension columns
 
@@ -1895,9 +1996,28 @@ Open skips rebuilding a drifted dataset's generation summary. See
   documents keep 200 archived generations each.
 - A prefix history ask fans out to one adapter call per distinct gap list,
   with no cap on their number; a stepped `Between`, and an `At` with a
-  tuple naming fewer key columns, reach the source on every ask, since neither can be answered from the cache; and
-  each history append's dedupe and retention scan the dataset's whole
-  payload table. None is measured yet.
+  tuple naming fewer key columns, reach the source on every ask, since
+  neither can be answered from the cache. Each history append's dedupe
+  groups only the staged keys' live rows, but its retention sweep still
+  scans the dataset's whole payload table.
+- A board's `At` asks are exact-key, so coverage answers them after the
+  first fetch, and an exact `At` asks only the tuples coverage cannot
+  answer. A tuple the source never answers (a member the surface lacks)
+  costs one small `At` call per lookback per dataset per refresh: an absent
+  tuple's recorded point span never gains the row a local answer needs.
+- A board's `Latest` prefix asks fetch on every refresh, one call per
+  dataset, uncapped in answer size. On the demo adapter one call over ten
+  underlyings costs less than ten single-member calls (see
+  [performance.md](performance.md)), so a prefix is not split; a real
+  adapter with a size limit splits inside its shim.
+- `missing_by_key` on the `Between` path reads coverage one statement per
+  asked tuple, on the service thread. A board's window `Between` over 250
+  exact tuples pays it on every refresh (the measured cost is in
+  [performance.md](performance.md)).
+- `uncovered_at` builds one `OR` term per asked tuple in each of its two
+  statements. It is tested to 250 tuples; far above that (about 1,000) the
+  expression depth may reach DuckDB's limit, and a `VALUES` join is the
+  lever.
 - Maintained budgets and known gaps are in
   [performance.md](performance.md); raw conditions and runs are in the
   measurement log.

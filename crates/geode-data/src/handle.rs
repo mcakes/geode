@@ -424,9 +424,12 @@ impl DataHandle {
     /// no longer serve and no outcome is owed. An admitted request is
     /// answered by one keyed/tagged DataEvent::VolBoard, refusals
     /// included, unless a newer request or a cancel for its key supersedes
-    /// it first. The board's own pool read runs under
-    /// `query::volboard::board_pool_key(key)`, so the tile's key stays free
-    /// for its view queries.
+    /// it first; a newer history request under the same key supersedes it
+    /// too, and it a pending history request. The board's own pool read
+    /// runs under `query::volboard::board_pool_key(key)`, so the tile's key
+    /// stays free for its view queries; a history read already in the pool
+    /// under `key` is not replaced by it and still answers, so a requester
+    /// asking both uses two keys.
     pub fn vol_board(&self, params: VolBoardParams) -> Result<(), Refusal> {
         self.send(Request::VolBoard(params))
     }

@@ -41,7 +41,8 @@ ownership. Typed interpretation and merging are I/O-free; its configuration
 loader reads disk documents through `Config::read_docs` and `Config::load`.
 Types shared across a forbidden dependency boundary live there: scopes,
 link groups, schema, query outcomes, snapshots, health, document rows, series
-requests, pricing requests, vol-slice requests, and text file requests and
+requests, pricing requests, vol-slice requests, vol board requests, their
+measure arithmetic and reduction (`volboard`), and text file requests and
 outcomes (`textfile`). `geode_core::classification` is the pure editing model
 for a classification (a derived dimension a person edits): grid rows, edits
 that return the whole next object with an undo entry, CSV import and export

@@ -31,6 +31,13 @@ Current crate boundaries:
 | `demo_hanweck` | Demo vol history (`DemoHanweck`, `demo_hanweck`): the `surface`, `realized` and `varswap` tables behind the `hanweck_*` history sources over `vol_surface`, `realized_vol` and `varswap`. History side only; `point` is the pure daily close. |
 | `demo_refdb` | Demo mode's reference database (`DemoRefDb`, `demo_refdb`): the `underlyings` table behind the `refdb` snapshot source. Snapshot side only. |
 
+The `demo_hanweck` bench (`cargo bench -p geode-compose`) calls the demo
+Hanweck adapter's history side directly: one prefix `Latest` over ten
+underlyings against ten single-member calls, a 400-day prefix `Between` and
+an exact `At`. It answers whether a board should split its member prefix
+into several calls (it should not: one call is cheaper than ten; see
+`docs/perf.md`).
+
 Tests that need the app's bridge or a window live in
 `geode-app/src/demo_tests.rs`.
 

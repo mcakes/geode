@@ -40253,6 +40253,181 @@ run_mutation "schema/history: a coverage column name is accepted" \
   geode-core \
   storage_names_and_timestamps_are_refused_on_a_history_dataset
 
+# ---- Vol board (Part 2) ----
+
+# The rank is the share strictly below the current; at-or-below would
+# rank a new high as 100 and a flat series as 100 too.
+run_mutation "volboard: rank counts at or below the current" \
+  crates/geode-core/src/volboard/reduce.rs \
+  '        if v < current {' \
+  '        if v <= current {' \
+  geode-core \
+  rank_counts_strictly_below_and_carries_the_count
+
+# Every derived measure is first minus second; a sum would read a skew as
+# a level.
+run_mutation "volboard: a derived measure adds its inputs" \
+  crates/geode-core/src/volboard/measure.rs \
+  '            _ => v[0] - v[1],' \
+  '            _ => v[0] + v[1],' \
+  geode-core \
+  combine_is_identity_for_a_point_and_first_minus_second_for_every_derived_measure
+
+# A member is present when the surface answered a current for it (a
+# board reading no surface input falls back to any input). Mutated to
+# count any input, a member with realized rows but no surface rows is
+# never named in `missing` and the tile shows it as live.
+run_mutation "volboard: a member the surface lacks is not listed as missing" \
+  crates/geode-core/src/volboard/reduce.rs \
+  '        let present = as_of.is_some() || (!reads_surface && any_current);' \
+  '        let present = any_current;' \
+  geode-core \
+  a_member_the_surface_answered_nothing_for_is_missing_though_realized_answered
+
+# A derived measure ranks over the days every input holds, never padding
+# a missing input.
+run_mutation "volboard: a derived measure ranks over any input's days" \
+  crates/geode-core/src/volboard/reduce.rs \
+  '                found.iter().map(|o| o.daily.get(day).copied()).collect();' \
+  '                found.iter().map(|o| o.daily.get(day).copied().or(Some(0.0))).collect();' \
+  geode-core \
+  a_derived_cell_combines_inputs_pointwise_and_ranks_over_the_days_both_hold
+
+# The lookback instant is the end of the calendar day, not the clock's
+# display eod: a 21:00 close falls after 18:00.
+run_mutation "volboard: the lookback instant is the clock's eod" \
+  crates/geode-core/src/volboard/plan.rs \
+  '    clock.resolve_local(day, END_OF_DAY)' \
+  '    clock.eod_of(day)' \
+  geode-core \
+  the_clocks_eod_is_not_the_lookback_boundary
+
+# Lookbacks count business days: Monday's D1 is Friday.
+run_mutation "volboard: a lookback counts calendar days" \
+  crates/geode-core/src/volboard/plan.rs \
+  '    let day = business_days_back(clock.today(now), lb.business_days());' \
+  '    let day = clock.today(now) - chrono::Days::new(u64::from(lb.business_days()));' \
+  geode-core \
+  a_lookback_ends_at_the_end_of_the_business_day_n_back_in_the_clocks_zone
+
+# A window shorter than a lookback would blank every change it cannot reach.
+run_mutation "volboard: a window shorter than a lookback is accepted" \
+  crates/geode-core/src/volboard/mod.rs \
+  '                .find(|lb| u64::from(lb.calendar_days()) > days)' \
+  '                .find(|_| false)' \
+  geode-core \
+  a_well_formed_request_validates_and_each_refusal_names_its_rule
+
+# The at-lookback projection reads at or before the instant.
+run_mutation "volboard: the board SQL reads At strictly before the instant" \
+  crates/geode-data/src/query/volboard.rs \
+  '                 from live where ts <= make_timestamp(?)' \
+  '                 from live where ts < make_timestamp(?)' \
+  geode-data \
+  an_instant_equal_to_an_observation_includes_it
+
+# The daily bucket keeps the last mark of the day.
+run_mutation "volboard: the daily bucket takes the first mark of the day" \
+  crates/geode-data/src/query/volboard.rs \
+  '                 select *, row_number() over (partition by {key_list}, epoch_us(ts) // {DAY_US} order by ts desc) as rn' \
+  '                 select *, row_number() over (partition by {key_list}, epoch_us(ts) // {DAY_US} order by ts asc) as rn' \
+  geode-data \
+  the_daily_bucket_keeps_the_last_mark_of_the_day
+
+# The board reads the live version of every (key, ts).
+run_mutation "volboard: a superseded version wins the board read" \
+  crates/geode-data/src/query/volboard.rs \
+  '        |c| format!("arg_max({0}, received_at) as {0}", quote(&c.name)),' \
+  '        |c| format!("arg_min({0}, received_at) as {0}", quote(&c.name)),' \
+  geode-data \
+  the_live_version_wins
+
+# Only the surface's failure is the board's; another dataset's blanks its
+# cells. The partition is rustfmt-wrapped; the anchor is its deciding line.
+run_mutation "volboard: a failed realized fails the board" \
+  crates/geode-data/src/history_dispatch.rs \
+  '                    .into_iter()
+                    .partition(|(ds, _)| *ds == plan.params.surface);' \
+  '                    .into_iter()
+                    .partition(|(_, _)| true);' \
+  geode-data \
+  a_failing_realized_blanks_its_cells_and_names_itself_once
+
+# The board read runs under a derived key so the tile's own queries never
+# replace it at the pool.
+run_mutation "volboard: the board read shares the requester's pool key" \
+  crates/geode-data/src/query/volboard.rs \
+  '    QueryKey(requester.0 ^ (1 << 63))' \
+  '    requester' \
+  geode-data \
+  board_pool_key_differs_from_the_requester_and_round_trips
+
+# A tuple no span holds is uncovered; treating it as covered would read a
+# stale or absent row as the answer.
+run_mutation "history: a tuple no coverage span holds is read locally" \
+  crates/geode-data/src/store/history.rs \
+  '            None => uncovered.push(tuple.clone()), // no span of this tuple holds t' \
+  '            None => {}' \
+  geode-data \
+  uncovered_at_names_the_tuples_the_cache_cannot_answer
+
+# A covered tuple whose last row lies before its span is uncovered.
+run_mutation "history: a covered tuple without a row in its span is read locally" \
+  crates/geode-data/src/store/history.rs \
+  '                .is_some_and(|(_, last)| from_micros(*last) >= *a); // a row at or before t, inside the span' \
+  '                .is_some_and(|(_, _)| true); // a row at or before t, inside the span' \
+  geode-data \
+  uncovered_at_names_the_tuples_the_cache_cannot_answer
+
+# The coverage read fetches a tuple's prefix rows too (trailing NULLs).
+# Mutated to equal keys only, a prefix fetch never covers its members and
+# every exact At refetches what the cache holds.
+run_mutation "history: uncovered_at reads no prefix coverage row" \
+  crates/geode-data/src/store/history.rs \
+  '            format!("({col} = CAST(? AS {ty}) OR {col} IS NULL)")' \
+  '            format!("({col} = CAST(? AS {ty}))")' \
+  geode-data \
+  covers_instant_reads_a_prefix_coverage_row_for_an_exact_tuple
+
+# The per-tuple re-filter lets a NULL key column (a prefix row) match any
+# value. Mutated to require a value, the prefix row is read and then
+# dropped, and the tuple reads as uncovered.
+run_mutation "history: uncovered_at's re-filter drops a prefix row" \
+  crates/geode-data/src/store/history.rs \
+  '.all(|(k, v)| k.as_ref().is_none_or(|k| k == v))' \
+  '.all(|(k, v)| k.as_ref().is_some_and(|k| k == v))' \
+  geode-data \
+  covers_instant_reads_a_prefix_coverage_row_for_an_exact_tuple
+
+# An exact At asks only the uncovered tuples; asking the whole set refetches
+# every member whenever one is absent at the source.
+run_mutation "history: an exact At asks the whole set when one tuple is uncovered" \
+  crates/geode-data/src/history_dispatch.rs \
+  '                    Ok(vec![call(KeySet::Exact(uncovered), span)])' \
+  '                    Ok(vec![call(keys.clone(), span)])' \
+  geode-data \
+  an_exact_at_asks_only_the_tuples_coverage_cannot_answer
+
+# The hashed membership test refuses a row outside an exact ask. (A
+# `starts_with` mutant is equivalent here, P22: the shape check fixes row
+# arity to the key's.)
+run_mutation "history: validate_against accepts every row under an exact ask" \
+  crates/geode-data/src/adapter/mod.rs \
+  '                KeySet::Exact(_) => asked_set.contains(key.as_slice()),' \
+  '                KeySet::Exact(_) => true,' \
+  geode-data \
+  an_exact_ask_refuses_a_row_that_only_starts_with_a_tuple
+
+# The dedupe groups only the staged keys' live rows. Mutated to match no
+# staged key, live is empty, nothing is dropped as unchanged and an
+# overlapping refetch appends every row again.
+run_mutation "history: the dedupe's staged-key filter matches nothing" \
+  crates/geode-data/src/store/history.rs \
+  'where exists (select 1 from {STAGING_TABLE} s2 where {staged_match})' \
+  'where exists (select 1 from {STAGING_TABLE} s2 where false)' \
+  geode-data \
+  an_overlapping_refetch_with_equal_values_appends_nothing_but_records_coverage
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

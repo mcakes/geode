@@ -10,6 +10,7 @@ columnar; hot paths avoid per-frame allocation and repeated formatting.
 |---|---|
 | Pure UI action | Under 8 ms |
 | View requery at one million rows | Under 50 ms |
+| Vol board read (SQL projection plus reduce) at 25 members over a 400-day cache | Under 50 ms |
 | Chart cache miss at the 500,000-point cap into 1,600 columns | Under 2 ms |
 | Ingest and source work | Never blocks the UI or drops a foreground outcome |
 | Store handoff, background collector to app (`acquire_app` to an open store) | Under 500 ms typical; the cap is the 2 s release drain plus the checkpoint |
@@ -114,6 +115,7 @@ Release and benchmark profiles retain debug symbols for external profiling.
 ```sh
 cargo bench -p geode-shell
 cargo bench -p geode-data
+cargo bench -p geode-compose
 cargo bench -p geode-blotter
 cargo bench -p geode-documents
 cargo bench -p geode-marketdata
@@ -326,6 +328,14 @@ joined on the unique source value, if the idle figure stays over budget.
 - Large module tables use virtualization or prepared visible rows.
 
 ## Known gaps
+
+- The vol board's history path pays per-tuple costs on the service thread:
+  `missing_by_key` reads coverage one statement per asked tuple, so a
+  board's window `Between` over 250 exact tuples is the largest part of a
+  refresh, and `validate_against` still allocates a key per row
+  (`key_at`). The board read's `live` CTE groups every version of the
+  asked tuples on every read; a materialized latest-version table is the
+  lever if a desk's cache grows past the bench's.
 
 - The Diagnostics Log's fuzzy narrowing over a full tail exceeds the 8 ms UI
   budget for phrase queries (6 to 12 ms on the reference machine, loaded, and

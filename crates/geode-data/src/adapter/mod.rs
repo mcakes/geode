@@ -405,8 +405,11 @@ impl HistoryRows {
         self.check_shape(key_arity, value_arity).map_err(err)?;
         let n = self.ts.len();
         // Membership in O(1) per row: the asked tuples hashed once. A
-        // prefix ask of arity `a` matches a row by its first `a` values
-        // (`KeySet::validate` holds every tuple in one set to one arity).
+        // prefix ask of arity `a` matches a row by its first `a` values.
+        // Every tuple in one set has one arity because every caller
+        // validates or builds a uniform set: a history request passes
+        // `KeySet::validate`, and the vol board builds `Prefix(members)` of
+        // arity one and exact tuples of the full key.
         let arity = asked.arity().unwrap_or(0);
         let asked_set: HashSet<&[String]> = asked.tuples().iter().map(Vec::as_slice).collect();
         let mut seen = HashSet::with_capacity(n);

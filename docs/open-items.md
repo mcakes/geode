@@ -634,18 +634,38 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The subscription shutdown test in `subscribe.rs` is timing-based (125 ms); adopt
   the deterministic form (unsubscribe, wait for the thread to exit on
   `Disconnected`) if it flakes.
-- History family: `DataEvent::History` has no consumer, so the app bridge and
-  the collector log and drop it. `Delivery::History` and its first consumer
+- History family: `DataEvent::History` and `DataEvent::HistoryKeys` have no
+  consumer, so the app bridge and the collector log and drop them.
+  `Delivery::History` and `Delivery::HistoryKeys` and their first consumer
   (the vol watchlist tile) land together in Part 4 of the vol watchlist.
-- History family, for the Part 2 bench: measure the prefix fan-out (one
-  adapter call per distinct gap list, uncapped), a prefix `At` always reaching
-  the source, a stepped `Between` never recording coverage, each append's
-  dedupe and retention scanning the whole payload table (filtering to the
-  staged keys is the likely lever), the coverage coalescing on append (one
-  select, delete and insert per touched tuple), and `validate_against` in the
-  history worker, which is O(rows x tuples) with two allocations per row (a
-  400-day prefix answer for 25 members is about 400k rows against 25
-  tuples).
+- Vol board (Part 2): `DataEvent::VolBoard` has no consumer; the app bridge
+  and the collector log and drop it. `Delivery::VolBoard` lands with the
+  tile in Part 4, which submits its vega `Request::Query` under the tile key
+  (the board read runs under `board_pool_key`, so they do not coalesce).
+- Vol board: daily buckets are UTC days (a session straddling UTC midnight
+  would split into two buckets).
+- History family: `missing_by_key` reads coverage one statement per asked
+  tuple on the service thread (`store/history.rs`); a board's window
+  `Between` over 250 exact tuples measured 700 ms per refresh on a loaded machine
+  (`history/exact_between_30d_250_from_coverage`); batch it as `uncovered_at`
+  is batched.
+- History family: an exact tuple the source never answers refetches on every
+  `At` (one small call per lookback per dataset per refresh); recording an
+  exact `At` absence distinctly from a `Between` span would let the cache
+  answer it.
+- History family: `uncovered_at` builds one `OR` term per asked tuple in each
+  of its two statements; untested above 250 tuples, it may reach DuckDB's
+  expression depth limit near 1,000. A `VALUES` join is the lever.
+- History family: `validate_against` is O(rows) since the asked tuples are
+  hashed once, but `key_at` still allocates a key per row (about 285,000 for
+  a 400-day prefix answer over 25 members).
+- History family: each append's retention sweep still scans the dataset's
+  whole payload table (the dedupe now groups the staged keys only), and a
+  prefix ask still fans out to one adapter call per distinct gap list,
+  uncapped. Neither is on the board's path; measure before acting.
+- Vol board: the board read's `live` CTE groups every version of the asked
+  tuples on every read. A materialized latest-version table is the lever if
+  a desk's cache grows past the bench's 400 days of closes.
 - History family: `HISTORY_SETTLE` (30 minutes) is a guess at the vendors'
   publication lag. Tune it against the real Hanweck and KDB sources once they
   are reachable: too short and a late-published observation is lost behind
