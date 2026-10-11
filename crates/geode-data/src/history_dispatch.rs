@@ -785,6 +785,7 @@ mod tests {
             },
             now: settled(),
             instants: vec![],
+            clock: geode_core::clock::Clock::utc(),
             dataset_errors: vec![],
         };
         let board = Answer::Board(Box::new(plan));

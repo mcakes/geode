@@ -11,6 +11,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use duckdb::types::Value;
+use geode_core::clock::Clock;
 use geode_core::query::{QueryKey, normalize_key};
 use geode_core::schema::{ColumnSpec, ColumnType, DatasetSpec, SchemaSpec};
 use geode_core::volboard::plan::{daily_span, day_index};
@@ -29,6 +30,8 @@ pub struct BoardPlan {
     pub params: VolBoardParams,
     pub now: DateTime<Utc>,
     pub instants: Vec<DateTime<Utc>>,
+    /// The service's clock: the notes name dates on its calendar.
+    pub clock: Clock,
     pub dataset_errors: Vec<(String, String)>,
 }
 
@@ -388,7 +391,7 @@ pub fn read_board(
             Err(e) => board.dataset_errors.push((name.to_string(), e.to_string())),
         }
     }
-    let reduced = reduce(params, &obs);
+    let reduced = reduce(params, &obs, &plan.clock);
     board.rows = reduced.rows;
     board.missing = reduced.missing;
     board.notes = reduced.notes;
@@ -554,6 +557,7 @@ mod tests {
                 ts("2026-01-09T23:59:59.999999Z"),
                 ts("2025-12-11T23:59:59.999999Z"),
             ],
+            clock: Clock::utc(),
             dataset_errors: Vec::new(),
         }
     }

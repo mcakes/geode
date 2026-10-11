@@ -1617,9 +1617,11 @@ counts any input instead. `notes` carries one line per dataset whose
 lookback found nothing for some tuple: `<dataset>: history starts <date>`
 when a window was asked (it holds every lookback, so the window `Between`
 cached the dataset's true start), else `<dataset>: no observation at or
-before <date>`. Daily buckets are UTC days: a session straddling UTC
-midnight would split into two buckets. The demo and the Hanweck closes do
-not.
+before <date>`. Both dates are the clock's local date (`Clock::today`): a
+lookback instant is the end of a business day in the clock's zone, which
+in New York is already the next UTC day. Daily buckets are UTC days: a
+session straddling UTC midnight would split into two buckets. The demo and
+the Hanweck closes do not.
 
 ### History keys
 

@@ -3181,6 +3181,7 @@ impl DataService {
                 params: params.clone(),
                 now: Utc::now(),
                 instants: Vec::new(),
+                clock: self.config.clock,
                 dataset_errors: Vec::new(),
             };
             self.history.refuse(&Answer::Board(Box::new(plan)), reason);
@@ -3285,6 +3286,7 @@ impl DataService {
             params,
             now,
             instants,
+            clock: self.config.clock,
             dataset_errors: Vec::new(),
         };
         if calls.is_empty() {

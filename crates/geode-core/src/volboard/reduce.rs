@@ -7,6 +7,7 @@
 //! hold.
 
 use super::{Cell, Change, Input, Role, VolBoardParams, VolRow};
+use crate::clock::Clock;
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap};
 
@@ -149,7 +150,7 @@ fn cell(
     }
 }
 
-pub fn reduce(params: &VolBoardParams, obs: &Observations) -> Reduced {
+pub fn reduce(params: &VolBoardParams, obs: &Observations, clock: &Clock) -> Reduced {
     let mut out = Reduced::default();
     let all_inputs: Vec<Input> = params
         .measures
@@ -204,7 +205,9 @@ pub fn reduce(params: &VolBoardParams, obs: &Observations) -> Reduced {
     // With a window the cache holds the dataset's true start (the window
     // Between covers every lookback, by validation): "history starts".
     // Without one the cache holds point rows only, whose earliest says
-    // nothing about where history starts: name the failing instant.
+    // nothing about where history starts: name the failing instant. Both
+    // dates are the clock's local date: a lookback instant is the end of a
+    // business day in the clock's zone, often already the next UTC day.
     let mut starts: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
     let mut failed_at: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
     for ((_, input), o) in &obs.by_input {
@@ -229,11 +232,11 @@ pub fn reduce(params: &VolBoardParams, obs: &Observations) -> Reduced {
         .map(
             |(ds, instant)| match (obs.window_from_day, starts.get(&ds)) {
                 (Some(_), Some(first)) => {
-                    format!("{ds}: history starts {}", first.format("%Y-%m-%d"))
+                    format!("{ds}: history starts {}", clock.today(*first))
                 }
                 _ => format!(
                     "{ds}: no observation at or before {}",
-                    instant.format("%Y-%m-%d")
+                    clock.today(instant)
                 ),
             },
         )
@@ -314,7 +317,7 @@ mod tests {
         };
         obs.by_input
             .insert(("SPX".into(), point("3M", "0.5", "vol")), observed_atfm());
-        let r = reduce(&p, &obs);
+        let r = reduce(&p, &obs, &Clock::utc());
         assert_eq!(
             r.rows.len(),
             2,
@@ -380,7 +383,7 @@ mod tests {
                 first: Some(ts("2026-01-09T20:00:00Z")),
             },
         );
-        let r = reduce(&p, &obs);
+        let r = reduce(&p, &obs, &Clock::utc());
         let cell = &r.rows[0].cells[0];
         assert!((cell.current.unwrap() - 0.05).abs() < 1e-12);
         let d1 = cell.changes[0].as_ref().unwrap();
@@ -424,7 +427,7 @@ mod tests {
         obs.by_input
             .insert(("SPX".into(), point("3M", "0.25", "vol")), observed_atfm());
         // No 0.75 point (the 25Δ put leg): skew cannot be formed.
-        let r = reduce(&p, &obs);
+        let r = reduce(&p, &obs, &Clock::utc());
         assert_eq!(r.rows[0].cells[0].current, Some(0.20));
         assert_eq!(r.rows[0].cells[1].current, None);
         assert_eq!(r.rows[0].cells[1].changes, vec![None, None]);
@@ -449,7 +452,7 @@ mod tests {
         };
         obs.by_input
             .insert(("SPX".into(), point("3M", "0.5", "vol")), observed_atfm());
-        let cell = &reduce(&p, &obs).rows[0].cells[0];
+        let cell = &reduce(&p, &obs, &Clock::utc()).rows[0].cells[0];
         assert_eq!(cell.pctl, Some((0.5, 2)));
     }
 
@@ -486,7 +489,7 @@ mod tests {
         };
         obs.by_input
             .insert(("SPX".into(), realized_20d()), observed_realized());
-        let r = reduce(&p, &obs);
+        let r = reduce(&p, &obs, &Clock::utc());
         assert_eq!(
             r.missing,
             vec!["SPX", "ZZZ"],
@@ -517,7 +520,7 @@ mod tests {
         };
         obs.by_input
             .insert(("SPX".into(), realized_20d()), observed_realized());
-        let r = reduce(&p, &obs);
+        let r = reduce(&p, &obs, &Clock::utc());
         assert_eq!(
             r.missing,
             vec!["ZZZ"],
@@ -525,5 +528,44 @@ mod tests {
         );
         assert_eq!(r.rows[0].cells[0].current, Some(0.15));
         assert_eq!(r.rows[0].as_of, None);
+    }
+
+    /// The notes name dates on the clock's calendar: a lookback instant is
+    /// the end of a business day in the clock's zone, which in New York is
+    /// already the next UTC day, and the earliest observation's date is the
+    /// desk's, not UTC's.
+    #[test]
+    fn notes_name_the_clocks_local_date() {
+        let ny = Clock::in_zone_named("America/New_York");
+        let p = params(vec![Measure::atfm("3M")]);
+        let observed = Observed {
+            current: Some((ts("2026-01-13T21:00:00Z"), 0.20)),
+            at: vec![None, None],
+            daily: BTreeMap::new(),
+            // 22:00 on Thursday the 8th in New York.
+            first: Some(ts("2026-01-09T03:00:00Z")),
+        };
+        // The end of Monday the 12th and of Friday Dec 12 in New York.
+        let ny_instants = vec![
+            ts("2026-01-13T04:59:59.999999Z"),
+            ts("2025-12-13T04:59:59.999999Z"),
+        ];
+        let mut obs = Observations {
+            window_from_day: None,
+            spark_from_day: None,
+            instants: ny_instants,
+            ..Default::default()
+        };
+        obs.by_input
+            .insert(("SPX".into(), point("3M", "0.5", "vol")), observed);
+        assert_eq!(
+            reduce(&p, &obs, &ny).notes,
+            vec!["vol_surface: no observation at or before 2025-12-12"]
+        );
+        obs.window_from_day = Some(20_000);
+        assert_eq!(
+            reduce(&p, &obs, &ny).notes,
+            vec!["vol_surface: history starts 2026-01-08"]
+        );
     }
 }

@@ -441,6 +441,7 @@ fn plan(params: VolBoardParams, now: DateTime<Utc>) -> BoardPlan {
         params,
         now,
         instants,
+        clock,
         dataset_errors: Vec::new(),
     }
 }
