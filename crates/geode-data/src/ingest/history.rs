@@ -278,10 +278,26 @@ pub(crate) mod tests {
         cvar: std::sync::Condvar,
     }
 
+    pub(crate) struct ReleaseOnDrop(Arc<Hold>);
+
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.set(true);
+        }
+    }
+
     impl Hold {
         pub(crate) fn set(&self, released: bool) {
             *self.released.lock().unwrap_or_else(|e| e.into_inner()) = released;
             self.cvar.notify_all();
+        }
+
+        /// Releases the hold when dropped. Bind it after the worker or
+        /// service so it drops first, on a failing assertion's unwind too:
+        /// a worker queued behind a hold that is never released would make
+        /// the drop's join wait out every queued query's bounded wait.
+        pub(crate) fn release_on_drop(self: &Arc<Self>) -> ReleaseOnDrop {
+            ReleaseOnDrop(Arc::clone(self))
         }
 
         fn wait(&self) {
@@ -569,6 +585,7 @@ pub(crate) mod tests {
             hold: Some(hold.clone()),
             ..Default::default()
         }));
+        let _release = hold.release_on_drop();
         let query = |n: u64| HistoryWork::Query {
             ticket: Ticket(n),
             request: between(spx()),

@@ -5592,6 +5592,7 @@ mod tests {
     fn a_ticket_finishing_after_a_newer_request_for_its_key_is_dropped() {
         let hold = Arc::new(crate::ingest::history::tests::Hold::default());
         let (_dir, calls, service, rx) = held_history_service(&hold);
+        let _release = hold.release_on_drop();
         // Tag 1 is held in the source; tag 2 queues behind it.
         service.history(history_ask(9, 1, spx(), Span::Latest));
         wait_for_calls(&calls, 1);
@@ -5622,6 +5623,7 @@ mod tests {
         let hold = Arc::new(crate::ingest::history::tests::Hold::default());
         hold.set(true);
         let (_dir, calls, service, rx) = held_history_service(&hold);
+        let _release = hold.release_on_drop();
         service.history(history_ask(5, 1, spx(), jan("05", "10")));
         history_answer(&rx, 1).result.unwrap();
         hold.set(false);
@@ -5644,6 +5646,7 @@ mod tests {
     fn a_full_history_queue_is_answered_as_a_refusal_not_a_lost_request() {
         let hold = Arc::new(crate::ingest::history::tests::Hold::default());
         let (_dir, _calls, service, rx) = held_history_service(&hold);
+        let _release = hold.release_on_drop();
         let n = crate::ingest::history::HISTORY_BOUND as u64 + 2;
         for i in 0..n {
             let keys = KeySet::Prefix(vec![tuple(&[&format!("S{i}")])]);
