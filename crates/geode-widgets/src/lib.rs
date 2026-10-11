@@ -5,4 +5,5 @@
 //! The date field uses `SharedString` for prepared display text. Hosts can cache
 //! that text between edits and pass it to the painter without reformatting.
 
+pub mod cell;
 pub mod datefield;
