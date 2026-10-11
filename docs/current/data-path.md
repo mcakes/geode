@@ -777,8 +777,8 @@ What an answer establishes depends on its span:
 |---|---|
 | `Between { step: None }` | The call's whole `[from, to)` |
 | `Between { step: Some(_) }` | Nothing: the answer may be thinned, so it must never stand in for a full one later |
-| `At(t)`, exact tuple with rows | `[last row's ts, t + 1µs)`: the source asserts nothing lies between |
-| `At(t)`, otherwise | `[t, t + 1µs)` |
+| `At(t)`, a `KeySet::Exact` ask, tuple with rows | `[last row's ts, t + 1µs)`: the source asserts nothing lies between |
+| `At(t)`, otherwise (a `Prefix` ask, or no rows) | `[t, t + 1µs)` |
 | `Latest` | `[ts, ts + 1µs)` at the tuple's latest answered row, and nothing for a tuple with none |
 
 Rows, coverage and the retention sweep commit in one writer transaction, so
@@ -814,9 +814,9 @@ answer they explain.
 | Outcome | Lane | Effect |
 |---|---|---|
 | Worker spawned at open | Discovery | `Ok` |
-| Adapter error, panic, or refused answer | Load, keyed `<dataset>@<source>` | `Failed` with the reason; that call fails its request |
-| Appended (zero rows included) | Load, keyed `<dataset>@<source>` | `Ok`; `LoadEnded` |
-| Append failed (shape, SQL, drift) | Load, keyed `<dataset>@<source>` | `Failed` with the reason; that call fails its request |
+| Adapter error, panic, or refused answer | Load, keyed `<dataset>@<source>` | `Failed` with the reason; that call fails its request; no `LoadEnded`, since nothing reached the runner |
+| Appended (zero rows included) | Load, keyed `<dataset>@<source>` | `Ok`, then that call finishes its request, then `LoadEnded` |
+| Append failed (shape, SQL, drift) | Load, keyed `<dataset>@<source>` | `Failed` with the reason, then that call fails its request, then `LoadEnded` |
 
 ## Source discovery and adapters
 
@@ -1451,18 +1451,21 @@ cached row in the span.
 
 The service first refuses, as that request's `DataEvent::History` error, a
 drifted dataset, a dataset that is not of the history family or has no
-source, a key set of the wrong arity, a zero `step`, and a key that does not
-normalize (see [history storage](#history-storage)). It then normalizes the
-asked keys, removes repeats, and plans adapter calls against coverage:
+source, a key set of the wrong arity, a zero `step`, a key that does not
+normalize (see [history storage](#history-storage)), and a coverage read
+that fails (`reading coverage: <error>`). It then normalizes the asked keys,
+removes repeats, and plans adapter calls against coverage:
 
 - `Latest` always asks the source: only it knows whether a newer
   observation exists.
-- `At(t)` is answered from the cache only when every asked tuple is exact,
-  `t` lies inside a merged coverage span `[a, b)` of that tuple, and the
-  cache holds a row of it with `a <= ts <= t`. Otherwise one call asks for
-  the whole set. A prefix `At` therefore always reaches the source: a member
-  the cache never held is invisible to it, and a member with no row in
-  `[a, t]` would be answered stale.
+- `At(t)` is answered from the cache only when every asked tuple names
+  every key column, `t` lies inside a merged coverage span `[a, b)` of that
+  tuple, and the cache holds a row of it with `a <= ts <= t`. Otherwise one
+  call asks for the whole set. An `At` with a tuple naming fewer key columns
+  therefore always reaches the source: a member the cache never held is
+  invisible to it, and a member with no row in `[a, t]` would be answered
+  stale. A `Prefix` tuple of full arity names every key column and counts
+  as whole here.
 - `Between` is first clipped to the dataset's `history` window (`from`
   rises to now less the window): retention would delete what an older span
   fetched, and the next ask would fetch it again forever. A span left empty
@@ -1480,15 +1483,18 @@ ordered by key then `ts`, keys in their normalized spelling. A failed call
 also reports `Failed` on the source's `<dataset>@<source>` load lane.
 
 Every request is recorded as the newest for its key, whatever path it
-takes. A newer request for the same key supersedes an older one: when the
-older's calls finish it answers nothing, because its read would replace the
-newer one's at the pool, which keeps the latest submission per key, and its
-answer would arrive after the newer tag's. An older read already submitted
-to the pool when the newer request arrives still answers, before the newer
-one. `DataHandle::cancel(key)` supersedes in the same way. Because the pool
-coalesces and cancels per key, a history request must use a `QueryKey` no
-other pool request uses; a refusal also cancels what the pool holds for its
-key.
+takes. A newer request for the same key supersedes an older one, and the
+older answers nothing, with one exception. Calls the older still waits on
+finish without answering, because its read would replace the newer one's at
+the pool, which keeps the latest submission per key, and its answer would
+arrive after the newer tag's. A read the older already submitted to the pool
+still answers, before the newer one, only while the newer request is waiting
+on adapter calls. A newer request that reaches the pool at once, read from
+the cache, replaces that read or interrupts it and its result is dropped as
+stale; a newer request that is refused cancels what the pool holds for the
+key. `DataHandle::cancel(key)` supersedes the older request and cancels its
+read in the pool. Because the pool coalesces and cancels per key, a history
+request must use a `QueryKey` no other pool request uses.
 
 `DataEvent::History` has no UI consumer yet: the app bridge and the
 collector log each answer at debug level and drop it.
@@ -1690,7 +1696,8 @@ pair inside each append transaction. History retention runs for the whole
 dataset inside each history append: `retention` deletes superseded versions
 received before its cutoff (the live version of every `(key, ts)` survives
 whatever its age), and `history` deletes rows observed before its cutoff and
-coverage spans ending at or before it. See
+coverage spans ending at or before it (`sweep_history` in
+[`store/history.rs`](../../crates/geode-data/src/store/history.rs)). See
 [`retention.rs`](../../crates/geode-data/src/store/retention.rs) and
 [`series.rs`](../../crates/geode-data/src/store/series.rs).
 
@@ -1858,8 +1865,8 @@ Open skips rebuilding a drifted dataset's generation summary. See
   document archives currently have no automatic retention sweep; local
   documents keep 200 archived generations each.
 - A prefix history ask fans out to one adapter call per distinct gap list,
-  with no cap on their number; a stepped `Between` and a prefix `At` reach
-  the source on every ask, since neither can be answered from the cache; and
+  with no cap on their number; a stepped `Between`, and an `At` with a
+  tuple naming fewer key columns, reach the source on every ask, since neither can be answered from the cache; and
   each history append's dedupe and retention scan the dataset's whole
   payload table. None is measured yet.
 - History coverage recorded from an answer is not clipped at the time it

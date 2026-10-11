@@ -37,7 +37,7 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Catalog | `Catalog`, read on the service thread and addressed by key/tag. |
 | Reference table | `Reference`, read on the service thread and addressed by key/tag, with the dataset and as-of. |
 | Watchlist | `Watchlist`, addressed by key/tag with the list's name, including a drift refusal. Each list resolves under its own key, since the pool coalesces and cancels per key and the mailbox keys these answers per key too. A rule that fails to compile or run is named by index inside a successful answer; the other rules still answer. |
-| History | `History`, addressed by key/tag with the dataset and span, refusals included; a request superseded by a newer one for its key, or cancelled, answers nothing unless its read had already reached the pool, in which case it answers before the newer one. Use a key no other pool request uses: the pool coalesces and cancels per key. No UI consumer reads it yet; the bridge drops it. See [history requests](data-path.md#history-requests). |
+| History | `History`, addressed by key/tag with the dataset and span, refusals included; a request superseded by a newer one for its key, or cancelled, answers nothing, except that a read it already submitted to the pool still answers, before the newer one, while the newer request waits on adapter calls; a newer request read from the cache at once replaces or interrupts that read, and a refusal or a cancel cancels it. Use a key no other pool request uses: the pool coalesces and cancels per key. No UI consumer reads it yet; the bridge drops it. See [history requests](data-path.md#history-requests). |
 | Snapshot poll-now | No dedicated reply. The source reports ordinary poll, health, and publication events; an unchanged snapshot has no publication. |
 | Pricing | `Price`, addressed by key/tag; downstream queue refusal produces per-line errors. |
 | Vol slices | `VolSlices`, addressed by key/tag, one result per job in job order; a full vol queue answers every job `the vol queue is full; resubmit`. |
@@ -46,7 +46,7 @@ cancellation can suppress query outcomes, and UI delivery may coalesce them.
 | Document upload | `Upload`, addressed by tile key and upload tag; target validation and target-queue refusal (from the service thread), and encoding and transport results (from the target's worker) use the same outcome. |
 | Text file read or write | `TextFile`, addressed by tile key and tag. A full or stopped file queue answers at once with an error outcome, as does a contained panic (a write's as a failed write, a read's as a failed read). |
 | Move LHU | `Command`, addressed by command tag. Service/worker-queue refusal and the position adapter's answer use the same outcome. Acceptance by the position system does not update the grid; a later source snapshot carries the move. |
-| History fetch | `SeriesFetched` identifies the source/identity pair, including zero-row completion. |
+| Series fetch | `SeriesFetched` identifies the source/identity pair, including zero-row completion. |
 | Identity refresh | Updates a cache read by a later catalog request; worker refusal is logged, with no dedicated completion event. |
 
 Tiles word a refusal by its kind, for example `query refused: the data

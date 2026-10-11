@@ -252,14 +252,15 @@ pub fn missing_by_key(
         .collect()
 }
 
-/// Whether the cache can answer an as-of `t` for every asked tuple: each is
-/// an exact tuple (one value per key column), `t` lies inside a merged
-/// coverage span `[a, b)` of it, and a stored observation of that tuple has
-/// `a <= ts <= t`. Coverage alone is not enough: a span can hold `t` while
+/// Whether the cache can answer an as-of `t` for every asked tuple: each
+/// names every key column (an exact tuple, or a prefix of full arity), `t`
+/// lies inside a merged coverage span `[a, b)` of it, and a stored
+/// observation of that tuple has `a <= ts <= t`. Coverage alone is not enough: a span can hold `t` while
 /// the tuple's last observation at or before `t` lies before the span, never
-/// fetched; and a prefix names members the cache cannot enumerate, so one
-/// missing member would be invisible. Either way a stale or missing member
-/// would be answered as current, so any prefix tuple makes this false.
+/// fetched; and a tuple naming fewer key columns names members the cache
+/// cannot enumerate, so one missing member would be invisible. Either way a
+/// stale or missing member would be answered as current, so any such tuple
+/// makes this false.
 pub fn covers_instant(
     conn: &Connection,
     ds: &DatasetSpec,
