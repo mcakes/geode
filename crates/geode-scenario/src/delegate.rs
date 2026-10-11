@@ -9,7 +9,7 @@ use crate::core::pivot::{Head, Pivot};
 use crate::core::prepare::{self, CellColor, Inputs, Layout, Palette, PreparedCell};
 use crate::core::readout::head_text;
 use geode_core::colour::scale::Diverging;
-use geode_core::colour::{Anchors, NamedColours, Rgb, Tokens};
+use geode_core::colour::{Anchors, NamedColours, Rgb, Sign, Tokens};
 use geode_core::grid::selection::{self, Accumulator, Resolved, SelectKind, Selection, describe};
 use geode_core::view::Scale;
 use geode_shell::colfit::{FitMetrics, FittedWidths};
@@ -124,13 +124,15 @@ impl ScenarioDelegate {
     }
 
     /// Resolve named colors against `colours` from now on. New definitions
-    /// drop every resolved name, so none of the old mapping paints.
+    /// drop every resolved name and re-prepare the window, so none of the
+    /// old mapping paints.
     pub fn set_colours(&mut self, colours: Arc<NamedColours>) {
         if Arc::ptr_eq(&self.colours, &colours) {
             return;
         }
         self.colours = colours;
         self.named = ColourCache::new();
+        self.invalidate_cells();
     }
 
     /// A new picture: keep the cursor where it was if it still exists,
@@ -214,8 +216,17 @@ impl ScenarioDelegate {
             heat: self.heat,
         };
         let cols = self.layout.cols();
-        self.cache
-            .set_window(window, cols, |row, col| prepare::cell(&inputs, row, col));
+        let (named, colours) = (&mut self.named, &self.colours);
+        // A named color resolves here, once per prepared cell, so the cache
+        // holds only fixed colors and render never runs the contrast search.
+        self.cache.set_window(window, cols, |row, col| {
+            let mut cell = prepare::cell(&inputs, row, col)?;
+            if let CellColor::Named { name, sign } = &cell.color {
+                let rgb = resolve_named(named, colours, theme, name, *sign, cell.fill);
+                cell.color = CellColor::Fixed(rgb);
+            }
+            Some(cell)
+        });
     }
 
     fn clamp_cursor(&mut self) {
@@ -420,28 +431,6 @@ impl ScenarioDelegate {
                     .map(|column| head_text(&column.head))
             })
             .unwrap_or_default()
-    }
-
-    /// A cell's text color: a fixed one as prepared, a named one resolved
-    /// against the live theme (`foreground` when the name is undefined) and
-    /// made readable over the cell's `fill`.
-    fn text_color(&mut self, color: &CellColor, fill: Option<Rgb>, foreground: Hsla) -> Hsla {
-        match color {
-            CellColor::Fixed(rgb) => to_hsla(*rgb),
-            CellColor::Named { name, sign } => {
-                let Some(inputs) = &self.theme else {
-                    return foreground;
-                };
-                let resolved = self
-                    .named
-                    .get(&self.colours, name, &inputs.anchors, &inputs.tokens);
-                let hsla = resolved.map_or(foreground, |r| r.for_sign(*sign));
-                match fill {
-                    Some(fill) => to_hsla(Diverging::text_over(fill, to_rgb(hsla))),
-                    None => hsla,
-                }
-            }
-        }
     }
 
     /// The two-level header's groups: consecutive columns sharing an outer
@@ -700,21 +689,19 @@ impl TableDelegate for ScenarioDelegate {
                 .as_ref()
                 .is_some_and(|s| s.kind == SelectKind::Block && s.contains(r, c))
         });
-        // Copied out of the cache (Arc clones, no allocation) so a named
-        // color can resolve through `&mut self`.
+        // `fill_window` resolved every named color, so a cached cell's color
+        // is fixed; the Arc clone does not allocate.
         let (text, fill, color) = match self.cache.get(row_ix, col_ix) {
             Some(c) => (
                 SharedString::from(c.text.clone()),
-                c.fill,
-                Some(c.color.clone()),
+                c.fill.map(to_hsla),
+                match c.color {
+                    CellColor::Fixed(rgb) => to_hsla(rgb),
+                    CellColor::Named { .. } => theme.foreground,
+                },
             ),
-            None => (SharedString::default(), None, None),
+            None => (SharedString::default(), None, theme.foreground),
         };
-        let color = match &color {
-            Some(color) => self.text_color(color, fill, theme.foreground),
-            None => theme.foreground,
-        };
-        let fill = fill.map(to_hsla);
         let el = div()
             .size_full()
             .flex()
@@ -741,6 +728,26 @@ impl TableDelegate for ScenarioDelegate {
             el
         };
         el.child(text)
+    }
+}
+
+/// A named cell color as it paints: the definition resolved against the
+/// theme (the theme's foreground when the name is undefined), its sign's
+/// variant, then made readable over the cell's `fill` when it has one.
+fn resolve_named(
+    named: &mut ColourCache,
+    colours: &NamedColours,
+    theme: &ThemeInputs,
+    name: &str,
+    sign: Option<Sign>,
+    fill: Option<Rgb>,
+) -> Rgb {
+    let base = named
+        .get(colours, name, &theme.anchors, &theme.tokens)
+        .map_or(theme.tokens.foreground, |r| to_rgb(r.for_sign(sign)));
+    match fill {
+        Some(fill) => Diverging::text_over(fill, base),
+        None => base,
     }
 }
 
@@ -779,30 +786,96 @@ mod tests {
             },
             ..Theme::default()
         });
-        let named = CellColor::Named {
-            name: "delta".into(),
-            sign: Some(geode_core::format::Sign::Positive),
-        };
-        let fg = gpui::black();
-        assert_eq!(d.text_color(&named, None, fg), fg, "undefined: foreground");
+        d.set_paint(false, None);
+        d.set_picture(Some(Arc::new(named_picture())));
+        let fg = d.theme.as_ref().unwrap().tokens.foreground;
+        assert_eq!(
+            cell_color(&d),
+            CellColor::Fixed(fg),
+            "undefined: foreground"
+        );
         let colours = |token| {
             let mut c = NamedColours::default();
             c.insert("delta".into(), Definition::token(token));
             Arc::new(c)
         };
         let info = colours(Token::Info);
+        // `set_colours` alone re-prepares the window.
         d.set_colours(info.clone());
-        let resolved = d.text_color(&named, None, fg);
-        assert_ne!(resolved, fg, "the reloaded definition paints");
-        d.set_colours(info);
-        assert_eq!(
-            d.text_color(&named, None, fg),
+        let resolved = cell_color(&d);
+        assert_ne!(
             resolved,
-            "the same definitions"
+            CellColor::Fixed(fg),
+            "the reloaded definition paints"
         );
+        d.set_colours(info);
+        assert_eq!(cell_color(&d), resolved, "the same definitions");
         d.set_colours(colours(Token::Danger));
-        let danger = d.text_color(&named, None, fg);
+        let danger = cell_color(&d);
         assert_ne!(danger, resolved, "nothing of the old mapping paints");
+    }
+
+    /// A Vega K/T picture whose value column carries the named color
+    /// `delta`.
+    fn named_picture() -> Pivot {
+        use crate::core::pivot::fixtures::{vega_kt, vega_main};
+        use crate::core::pivot::{AxisDomains, Currency, Mode};
+        use geode_core::scenario::MeasureColumn;
+        use geode_core::view::{Colour, ColumnFormat};
+        let mut shape = vega_kt();
+        shape.value = shape.value.map(|v| MeasureColumn {
+            format: ColumnFormat {
+                colour: Colour::Named("delta".into()),
+                ..ColumnFormat::MEASURE
+            },
+            ..v
+        });
+        Pivot::build(
+            &vega_main().snapshot("vega_buckets", Some(1)),
+            None,
+            &shape,
+            Mode {
+                currency: Currency::Native,
+                diff: false,
+            },
+            &AxisDomains::default(),
+        )
+        .unwrap()
+    }
+
+    /// The first data cell's prepared color.
+    fn cell_color(d: &ScenarioDelegate) -> CellColor {
+        d.cache.get(0, 1).expect("a prepared cell").color.clone()
+    }
+
+    /// A named color is resolved and made readable over its heat fill when
+    /// the window is prepared, so render reads a fixed color and never runs
+    /// the contrast search.
+    #[test]
+    fn a_named_color_arrives_in_the_cache_fixed_and_readable_over_its_fill() {
+        use geode_core::colour::{Definition, TEXT_READABLE_RATIO, Token, contrast_ratio};
+        use gpui_component::Theme;
+        let mut colours = NamedColours::default();
+        colours.insert("delta".into(), Definition::token(Token::Info));
+        let mut d = ScenarioDelegate::new("tenor", false, Arc::new(colours));
+        d.ensure_palette(&Theme::default());
+        d.set_picture(Some(Arc::new(named_picture())));
+        let mut cells = 0;
+        for row in 0..d.layout.rows() {
+            for col in 0..d.layout.cols() {
+                let Some(cell) = d.cache.get(row, col) else {
+                    continue;
+                };
+                let CellColor::Fixed(rgb) = cell.color else {
+                    panic!("({row}, {col}) is still named: {:?}", cell.color);
+                };
+                if let Some(fill) = cell.fill {
+                    assert!(contrast_ratio(rgb, fill) >= TEXT_READABLE_RATIO);
+                    cells += 1;
+                }
+            }
+        }
+        assert!(cells > 0, "the fixture paints heat under the named color");
     }
 
     #[test]
@@ -878,9 +951,16 @@ mod tests {
     #[test]
     fn the_scale_override_is_kept_and_unchanged_paint_is_a_no_op() {
         let mut d = ladder();
+        d.ensure_palette(&gpui_component::Theme::default());
+        d.set_picture(Some(Arc::new(named_picture())));
         d.set_paint(true, Some(Scale::Thousands));
         assert_eq!(d.scale, Some(Scale::Thousands));
+        // A blanked cell survives an identical call: nothing is re-prepared.
+        d.cache.refill_cell(0, 1, || None);
+        d.set_paint(true, Some(Scale::Thousands));
+        assert!(d.cache.get(0, 1).is_none(), "unchanged paint re-prepared");
         d.set_paint(false, Some(Scale::Thousands));
         assert!(!d.heat);
+        assert!(d.cache.get(0, 1).is_some(), "a change re-prepares");
     }
 }
