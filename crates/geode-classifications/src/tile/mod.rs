@@ -2218,8 +2218,10 @@ impl ClassificationsTile {
     /// (vim's incsearch) over source and label, wrapping, and a hit moves
     /// the cursor. Commit keeps the query for `n`; cancel returns the cursor
     /// to the origin row and keeps an earlier committed query. A plan held
-    /// while the search was open is offered once it ends.
+    /// while the search was open is offered once it ends. An open menu
+    /// closes first, as every tile's popups do at `/`.
     pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
+        self.close_menu(cx);
         match event {
             FindEvent::Changed(query) => {
                 // A new search (none open) takes the cursor's row as its
@@ -2253,16 +2255,21 @@ impl ClassificationsTile {
             }
             FindEvent::Committed(query) => {
                 self.searching = false;
-                if let Some(f) = self.find.as_mut()
-                    && !query.is_empty()
-                {
-                    f.committed = Some(query);
+                // The search has ended: its origin is spent, so a later
+                // cancel with nothing typed has nowhere to return to.
+                if let Some(f) = self.find.as_mut() {
+                    f.origin = None;
+                    if !query.is_empty() {
+                        f.committed = Some(query);
+                    }
                 }
                 self.offer_held_later(cx);
             }
+            // The shell cancels on escape and on a blur with empty text
+            // even when nothing was typed: only an open search returns.
             FindEvent::Cancelled => {
-                self.searching = false;
-                if let Some(f) = self.find.take() {
+                let was_searching = std::mem::replace(&mut self.searching, false);
+                if was_searching && let Some(f) = self.find.take() {
                     if let Some(origin) = f.origin.as_deref()
                         && !self.grid.put_on(origin)
                     {

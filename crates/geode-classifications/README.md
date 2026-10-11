@@ -98,8 +98,10 @@ selection, a double-click dispatches `classifications::edit`. `/` is vim's
 find over `GridModel::search_text` (`source\tlabel` per shown row, rebuilt
 with the order) through `geode_shell::vimfind::find_match`, as market
 data's is: each change moves the cursor to the first match at or after the
-search's origin row, commit keeps the query, cancel puts the cursor back on
-the origin. `n`/`shift+n` (`classifications::find_next`/`find_prev`)
+search's origin row, commit keeps the query and spends the origin, cancel
+of an open search puts the cursor back on the origin (the shell's cancel of
+a `/` with nothing typed moves nothing). `/` closes an open menu first.
+`n`/`shift+n` (`classifications::find_next`/`find_prev`)
 repeat the kept query from the cursor, counted and wrapping. Nothing is
 narrowed; an open search holds the keyboard (`searching`).
 `:sort <source|label|rows> [asc|desc]` orders the grid (bare `:sort`

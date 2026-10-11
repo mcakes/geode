@@ -2982,6 +2982,39 @@ fn n_and_shift_n_repeat_the_committed_find_and_wrap(cx: &mut gpui::TestAppContex
     assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
 }
 
+/// A `/` closed with nothing typed (escape, or blur with empty text) after
+/// a finished search moves nothing: the old search's origin is spent.
+#[gpui::test]
+fn cancelling_an_empty_search_after_a_committed_one_moves_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    // Begin on DAX, not row 0, so a restore to the origin and the row-0
+    // fallback both differ from where the cursor ends up.
+    vcx.simulate_keystrokes("j");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    h.find(&mut vcx, FindEvent::Changed("sx".into()));
+    h.find(&mut vcx, FindEvent::Committed("sx".into()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    vcx.simulate_keystrokes("k");
+    vcx.simulate_keystrokes("k");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    // The committed query survives for `n`.
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+}
+
+/// `/` closes an open menu first, as it does every tile's popups.
+#[gpui::test]
+fn a_search_closes_an_open_menu(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    vcx.simulate_keystrokes(".");
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_some()));
+    h.find(&mut vcx, FindEvent::Changed("sx".into()));
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_none()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+}
+
 /// Escape ends a row selection first, then the committed find.
 #[gpui::test]
 fn escape_ends_a_selection_then_the_find_then_the_notices(cx: &mut gpui::TestAppContext) {
