@@ -642,6 +642,36 @@ fn a_matrix_over_a_scenario_columns_axis_has_no_column_sum() {
     assert_eq!(shapes[0].totals_grouping(), Some(vec!["spot_shift".into()]));
 }
 
+/// Only a shape the builtin layer supplies, over a dataset the schema does
+/// not declare, is listed; a declared one and a user shape over an
+/// undeclared dataset are not.
+#[test]
+fn builtin_without_dataset_lists_only_builtin_shapes_over_undeclared_datasets() {
+    let schema = schema();
+    let builtin = format!(
+        "{VEGA_KT}\n{}",
+        with(RHO, "dataset = \"rho_curves\"", "dataset = \"nonesuch\"")
+    );
+    let doc = builtin_doc(&builtin);
+    assert_eq!(
+        builtin_without_dataset(&doc, &schema),
+        [("rho".to_string(), "nonesuch".to_string())]
+    );
+    let user = with(
+        VEGA_KT,
+        "dataset = \"vega_buckets\"",
+        "dataset = \"nonesuch\"",
+    );
+    let doc = merge_docs(
+        SCENARIOS_DOC,
+        &[
+            LayerDoc::builtin(SCENARIOS_DOC, VEGA_KT).unwrap(),
+            layer_doc(Layer::User, &user),
+        ],
+    );
+    assert!(builtin_without_dataset(&doc, &schema).is_empty());
+}
+
 #[test]
 fn schema_refusals_name_their_field() {
     for (from, to, at) in [

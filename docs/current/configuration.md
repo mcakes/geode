@@ -654,7 +654,10 @@ supplied it, when:
   empty `measures = []`, lists a measure not in `columns` or twice, or its
   `base` is neither a finite number nor a string;
 - `paint` is anything but `heat` or `plain`;
-- `dataset` is not declared, or is not a measures dataset with `axes`;
+- `dataset` is not declared, or is not a measures dataset with `axes` (a
+  builtin shape over an undeclared dataset — every builtin shape when the
+  demo layer is absent — is instead withheld without an Error: it logs at
+  info level and its kind does not appear);
 - `rows` or a `columns` axis is not an axis of the dataset, or an axis of
   the dataset is laid out nowhere (it would be summed across silently);
 - `value` or a ladder measure is not a measure of the dataset;

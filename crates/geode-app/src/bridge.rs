@@ -144,7 +144,8 @@ fn load_panels_from_config(
 }
 
 /// The accepted shapes, in `scenarios` document order, and an Error per
-/// refused one. Loaded after the panels: a shape named like another
+/// refused one (a builtin shape over an undeclared dataset is withheld
+/// without one). Loaded after the panels: a shape named like another
 /// module's kind or an accepted panel is refused (the later document
 /// loses), and so is one whose derived view name a configured view
 /// already takes (the service answers the first view of a name).
@@ -155,11 +156,33 @@ fn load_scenarios_from_config(
     panel_kinds: &[&str],
     views: &[ViewSpec],
 ) -> (Vec<ShapeSpec>, Vec<Diagnostic>) {
-    use geode_core::scenario::{SCENARIOS_DOC, load_scenarios, refusal};
+    use geode_core::scenario::{SCENARIOS_DOC, builtin_without_dataset, load_scenarios, refusal};
     let Some(doc) = config.doc(SCENARIOS_DOC) else {
         return (Vec::new(), Vec::new());
     };
+    // The builtin shapes read demo-layer datasets: without that layer each
+    // would be refused with an Error on every launch. A builtin shape over
+    // an undeclared dataset is withheld instead, said at info level and
+    // counted nowhere; any other refusal, and a desk or user shape over an
+    // undeclared dataset, stays an Error.
+    let withheld = builtin_without_dataset(doc, schema);
+    for (kind, dataset) in &withheld {
+        tracing::info!(
+            target: "geode::config",
+            "builtin scenario shape '{kind}' is withheld: dataset '{dataset}' is not declared"
+        );
+    }
     let (shapes, mut diags) = load_scenarios(doc, schema);
+    diags.retain(|d| {
+        !withheld.iter().any(|(kind, _)| {
+            d.path.as_deref().is_some_and(|p| {
+                p.strip_prefix(SCENARIOS_DOC)
+                    .and_then(|p| p.strip_prefix('.'))
+                    .and_then(|p| p.strip_prefix(kind.as_str()))
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+            })
+        })
+    });
     let mut accepted = Vec::with_capacity(shapes.len());
     for shape in shapes {
         let kind = shape.kind.as_str();
@@ -178,7 +201,7 @@ fn load_scenarios_from_config(
                 doc,
                 kind,
                 "",
-                &format!("view '{view}' is already configured"),
+                &format!("view '{view}' is already configured; remove it and restart"),
             ));
             continue;
         }
@@ -8038,6 +8061,11 @@ grain = "underlying"
         });
         assert_eq!(warned.len(), 1, "{warned:?}");
         assert_eq!(warned[0].severity, Severity::Warning);
+        assert_eq!(
+            bridge.factory.view_names(),
+            ["tree"],
+            "the blotter never lists a view the service answers with the derived one"
+        );
         assert!(
             bridge
                 .scenario_cells

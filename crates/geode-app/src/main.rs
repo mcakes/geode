@@ -1241,6 +1241,64 @@ label = "skew"
         bridge.handle.shutdown();
     }
 
+    /// T10-1: without the demo layer the builtin shapes' datasets are
+    /// undeclared; the shapes are withheld with no Error and no kind, while
+    /// a user shape over an undeclared dataset is still refused.
+    #[gpui::test]
+    fn without_the_demo_layer_the_builtin_shapes_are_withheld_quietly(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("scenarios.toml"),
+            "config_version = 1\n\n[mine]\ntitle = \"M\"\ndataset = \"nonesuch\"\nrows = \"tenor\"\ncolumns = { axis = \"moneyness\" }\nvalue = \"vega\"\npaint = \"heat\"\n",
+        )
+        .unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(None),
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .expect("the builtin pricer layer declares datasets and views");
+        let paths: Vec<&str> = setup
+            .scenario_diagnostics
+            .iter()
+            .filter_map(|d| d.path.as_deref())
+            .collect();
+        assert_eq!(paths, ["scenarios.mine.dataset"], "only the user's shape");
+        assert!(setup.scenarios.is_empty());
+        assert!(
+            !setup
+                .config
+                .views
+                .iter()
+                .any(|v| v.name.starts_with("scenario:"))
+        );
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        add_bridge_modules(&mut roster, &bridge);
+        for kind in [
+            "vega_kt",
+            "vega_spot",
+            "spot_ladder",
+            "by_maturity",
+            "rho",
+            "mine",
+        ] {
+            assert!(!roster.kinds().contains(&kind), "{kind}");
+        }
+        bridge.handle.shutdown();
+    }
+
     /// P3-i: a shape named like another module's kind, or like an accepted
     /// panel, is refused with one Error and never becomes a kind; the
     /// panel keeps its kind.
@@ -1310,7 +1368,8 @@ label = "skew"
         assert!(
             messages
                 .iter()
-                .any(|m| m.contains("view 'scenario:rho' is already configured")),
+                .any(|m| m
+                    .contains("view 'scenario:rho' is already configured; remove it and restart")),
             "{messages:?}"
         );
         assert!(!services.roster.kinds().contains(&"rho"));

@@ -5,7 +5,7 @@
 //! summed across silently.
 
 use super::{AxisInfo, Columns, DiffBase, MeasureColumn, ShapeSpec, read_scenarios, refusal};
-use crate::config::{Diagnostic, MergedDoc};
+use crate::config::{Diagnostic, Layer, MergedDoc};
 use crate::panel::read::Refusal;
 use crate::schema::{ColumnRole, DatasetSpec, Grain, SchemaSpec};
 
@@ -24,6 +24,22 @@ pub fn load_scenarios(doc: &MergedDoc, schema: &SchemaSpec) -> (Vec<ShapeSpec>, 
         }
     }
     (accepted, diags)
+}
+
+/// The shapes the builtin layer supplies (no desk or user entry replaced
+/// them) whose dataset `schema` does not declare, as `(kind, dataset)`, in
+/// document order. The builtin shapes read demo-layer datasets, so a launch
+/// without that layer would otherwise refuse each with an Error; the app
+/// withholds these instead. A desk or user shape over an undeclared dataset
+/// is not listed: its refusal is the author's to see.
+pub fn builtin_without_dataset(doc: &MergedDoc, schema: &SchemaSpec) -> Vec<(String, String)> {
+    read_scenarios(doc)
+        .0
+        .into_iter()
+        .filter(|s| doc.provenance.get(&s.kind) == Some(&Layer::Builtin))
+        .filter(|s| schema.dataset(&s.dataset).is_none())
+        .map(|s| (s.kind, s.dataset))
+        .collect()
 }
 
 fn check_shape(spec: &mut ShapeSpec, schema: &SchemaSpec) -> Result<(), Refusal> {

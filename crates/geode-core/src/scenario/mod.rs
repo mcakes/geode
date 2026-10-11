@@ -20,7 +20,7 @@ mod check;
 mod read;
 mod view;
 
-pub use check::load_scenarios;
+pub use check::{builtin_without_dataset, load_scenarios};
 pub use read::read_scenarios;
 pub use view::VIEW_PREFIX;
 

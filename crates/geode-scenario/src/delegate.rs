@@ -123,8 +123,6 @@ impl ScenarioDelegate {
         }
     }
 
-    /// A new picture: keep the cursor where it was if it still exists,
-    /// re-resolve the selection, refill the window.
     /// Resolve named colors against `colours` from now on. New definitions
     /// drop every resolved name, so none of the old mapping paints.
     pub fn set_colours(&mut self, colours: Arc<NamedColours>) {
@@ -135,6 +133,8 @@ impl ScenarioDelegate {
         self.named = ColourCache::new();
     }
 
+    /// A new picture: keep the cursor where it was if it still exists,
+    /// re-resolve the selection, refill the window.
     pub fn set_picture(&mut self, pivot: Option<Arc<Pivot>>) {
         self.layout = pivot.as_deref().map(Layout::of).unwrap_or(EMPTY);
         self.pivot = pivot;
