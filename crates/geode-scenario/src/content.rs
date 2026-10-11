@@ -132,7 +132,7 @@ impl ScenarioFactory {
     }
 
     /// The age past which a dataset time reads stale, shared with every
-    /// tile this factory built.
+    /// tile this factory built: each reads it when it next arms its timer.
     pub fn set_stale_after(&self, after: Duration) {
         self.stale_after.set(after);
     }
@@ -203,6 +203,7 @@ impl ModuleFactory for ScenarioFactory {
                 frame,
                 self.data.clone(),
                 diagnostics,
+                self.stale_after.clone(),
                 self.schema.clone(),
                 self.dims.clone(),
                 self.colours.clone(),

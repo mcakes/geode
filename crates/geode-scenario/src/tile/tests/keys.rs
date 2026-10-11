@@ -75,7 +75,6 @@ fn the_key_context_names_the_mode_and_the_selection_kind(cx: &mut gpui::TestAppC
 }
 
 #[gpui::test]
-#[ignore = "needs the read chain's show_picture"]
 fn grid_motions_move_the_cursor_cell_and_counts_multiply(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.show_picture(&mut vcx);
@@ -102,12 +101,13 @@ fn grid_motions_move_the_cursor_cell_and_counts_multiply(cx: &mut gpui::TestAppC
 /// A motion past the viewport scrolls the cursor cell into view, so the
 /// cursor (and the footer's readout of it) never leaves the screen.
 #[gpui::test]
-#[ignore = "needs the read chain's show_picture"]
 fn a_motion_past_the_viewport_scrolls_the_cursor_into_view(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.show_picture(&mut vcx);
-    // Short enough that the last data row starts out of view.
-    vcx.simulate_resize(gpui::size(gpui::px(320.0), gpui::px(64.0)));
+    // Short enough that the last data row starts out of view, tall
+    // enough for two rows: gpui-component keeps the last range when the
+    // list shows only one.
+    vcx.simulate_resize(gpui::size(gpui::px(320.0), gpui::px(120.0)));
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
     });
@@ -122,10 +122,12 @@ fn a_motion_past_the_viewport_scrolls_the_cursor_into_view(cx: &mut gpui::TestAp
     });
     assert_eq!(h.delegate(&vcx, |d| d.cursor.0), 3);
     assert!(visible(&vcx).contains(&3), "{:?}", visible(&vcx));
-    assert!(
+    // 5Y is a domain label with no rows in scope: its cells are blank.
+    assert_eq!(
         h.tile
             .read_with(&vcx, |t, cx| t.cursor_readout(cx))
-            .is_some_and(|r| !r.ends_with("· —")),
+            .as_deref(),
+        Some("5Y × 90.0 · —"),
         "the readout reads the cursor cell"
     );
 }
@@ -200,7 +202,6 @@ fn escape_peels_the_selection_then_the_refusal_then_reports_unhandled(
 }
 
 #[gpui::test]
-#[ignore = "needs the read chain's show_picture"]
 fn escape_peels_the_selection_then_the_notice(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.show_picture(&mut vcx);
@@ -227,13 +228,13 @@ fn escape_peels_the_selection_then_the_notice(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-#[ignore = "needs the read chain's show_picture"]
 fn yank_copies_the_cursor_cell_then_a_block_as_tsv(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
     h.show_picture(&mut vcx);
     vcx.simulate_keystrokes("y");
     let one = vcx.read_from_clipboard().and_then(|i| i.text()).unwrap();
-    assert_eq!(one, "tenor\t90.0\n1Y\t10\n");
+    // A twinned measure starts in USD: 1Y × 90.0 is 12 (10 native).
+    assert_eq!(one, "tenor\t90.0\n1Y\t12\n");
     vcx.simulate_keystrokes("v j l y");
     let block = vcx.read_from_clipboard().and_then(|i| i.text()).unwrap();
     assert_eq!(block.lines().count(), 3, "{block}");

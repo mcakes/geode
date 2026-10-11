@@ -17,6 +17,7 @@ use geode_core::clock::Clock;
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::grid::selection::SelectKind;
+use geode_core::link::Group;
 use geode_core::query::{AsOf, QueryKey, parse_as_of};
 use geode_core::scenario::{Paint, ShapeSpec};
 use geode_core::schema::SchemaSpec;
@@ -28,19 +29,22 @@ use geode_shell::colfit::{
     FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
 };
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::FrameRef;
+use geode_shell::frame::{FrameRef, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::tiling::TileId;
+use geode_tile::following::FollowingQuery;
 use geode_tile::header::HealthWatch;
 use geode_tile::notice::{Dismissals, Notice};
+use geode_tile::stale::StaleTimer;
 use gpui::prelude::*;
 use gpui::{App, ClipboardItem, Context, Entity, SharedString, Window};
 use gpui_component::ActiveTheme as _;
 use gpui_component::table::TableState;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub struct ScenarioTile {
     pub(crate) tile: TileId,
@@ -56,12 +60,31 @@ pub struct ScenarioTile {
     last_rem: f32,
     /// The transient notice (a refused key or command); cleared by the next verb.
     pub(crate) refusal: Option<String>,
-    /// The one standing notice: a query error, the missing diff base, no data yet.
+    /// A query error or refused submission: it stands until a picture
+    /// installs, whatever `c` or `m` rebuild meanwhile (spec §7).
+    pub(crate) error: Option<Notice>,
+    /// The notice the picture carries: the missing diff base, no data yet,
+    /// a snapshot that does not fit. Recomputed with every pivot.
     pub(crate) standing: Option<Notice>,
     pub(crate) dismissed: Dismissals,
     pub(crate) menu: Option<menu::MenuState>,
     pub(crate) stack: Option<StackHandle>,
     pub(crate) close: Option<CloseHandle>,
+    /// The age past which a dataset time reads stale, shared with the
+    /// factory so a reload reaches every tile.
+    pub(crate) stale_after: Rc<Cell<Duration>>,
+    pub(crate) stale_timer: StaleTimer,
+    /// The painted picture's source times, which the stale timer arms on.
+    pub(crate) times: Vec<chrono::DateTime<chrono::Utc>>,
+    pub(crate) following: FollowingQuery<Arc<data::Fetched>>,
+    pub(crate) fetch: data::Fetch,
+    pub(crate) domains: data::Domains,
+    /// The last chain's answer; `c` and `m` rebuild the pivot over it.
+    pub(crate) picture: Option<Arc<data::Fetched>>,
+    /// The publication watch on the shape's dataset: the `data` counter.
+    pub(crate) watches: Vec<PublicationWatch>,
+    pub(crate) last_following: Option<Group>,
+    pub(crate) visible: bool,
     #[cfg(test)]
     pub(crate) dispatch_log: Vec<ActionId>,
 }
@@ -95,6 +118,7 @@ impl ScenarioTile {
         frame: FrameRef,
         data: DataHandle,
         diagnostics: Entity<Diagnostics>,
+        stale_after: Rc<Cell<Duration>>,
         schema: Rc<RefCell<SchemaSpec>>,
         dims: Rc<RefCell<DerivedDimensions>>,
         colours: NamedColours,
@@ -127,6 +151,12 @@ impl ScenarioTile {
             .detach();
         cx.observe(frame.entity(), |this, _, cx| this.on_frame_changed(cx))
             .detach();
+        // Registered before any read, so the first chain's `data` is the
+        // counter every later comparison starts from.
+        let watch = frame
+            .entity()
+            .update(cx, |f, _| f.watch_publications(&shape.dataset, None));
+        let last_following = frame.read(cx).following();
         let mut health = HealthWatch::new(diagnostics.clone(), tile);
         let dataset = shape.dataset.clone();
         health.reask(cx, |d| d.health_for_datasets(&[dataset.as_str()]));
@@ -163,11 +193,22 @@ impl ScenarioTile {
             last_rem: 0.0,
             // A malformed record's first dropped key is the opening notice.
             refusal: notices.into_iter().next(),
+            error: None,
             standing: None,
             dismissed: Dismissals::default(),
             menu: None,
             stack: None,
             close: None,
+            stale_after,
+            stale_timer: StaleTimer::new(),
+            times: Vec::new(),
+            following: FollowingQuery::new(),
+            fetch: data::Fetch::Idle,
+            domains: data::Domains::default(),
+            picture: None,
+            watches: vec![watch],
+            last_following,
+            visible: false,
             #[cfg(test)]
             dispatch_log: Vec::new(),
         }
@@ -331,14 +372,16 @@ impl ScenarioTile {
         true
     }
 
-    /// The notices as the footer reports them: the transient refusal first
-    /// (danger, dismissable), else the standing one.
+    /// The notices as the footer reports them, most urgent first: the
+    /// transient refusal (danger, dismissable), the query error, then the
+    /// picture's own notice.
     pub(crate) fn reported_notices(&self) -> Vec<Notice> {
-        match (&self.refusal, &self.standing) {
-            (Some(r), _) => vec![Notice::danger(r.clone())],
-            (None, Some(n)) => vec![n.clone()],
-            (None, None) => Vec::new(),
-        }
+        self.refusal
+            .iter()
+            .map(|r| Notice::danger(r.clone()))
+            .chain(self.error.iter().cloned())
+            .chain(self.standing.iter().cloned())
+            .collect()
     }
 
     /// A press on a reported notice: the refusal clears, a standing notice

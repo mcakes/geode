@@ -4,8 +4,7 @@ Scenario tiles: five tile kinds that paint aggregated scenario risk (vega
 K/T, vega by maturity, spot ladder, by maturity, rho) for whatever the frame
 or a followed link group selects. The shapes are configuration
 (`scenarios.toml`, read by `geode_core::scenario`); this crate ships the
-builtin five, the pivot and the tile. The tile's read chain is not wired
-yet: a tile asks for no data and paints an empty table.
+builtin five, the pivot and the tile.
 
 ## Module map
 
@@ -56,8 +55,25 @@ yet: a tile asks for no data and paints an empty table.
   and a live refusal (every verb clears the refusal); with neither it
   dismisses the standing notice, and with nothing to clear it is
   unhandled. Motions and presses scroll the cursor cell into view.
-  `tile/data.rs` holds the read chain's entry points, `tile/menu.rs` the
+  The footer reports the refusal, then a query error, then the picture's
+  own notice; a query error stands until a picture installs, so `c` and
+  `m` (which rebuild the pivot) never hide it. `tile/menu.rs` holds the
   `.` menu (open and close only so far).
+- `tile/data.rs`: the read chain. The axis domains (one distinct per
+  axis, unscoped, restricted to the shape's dataset, read again only when
+  a publication on the dataset or the as-of moved), the main query at full
+  depth (`max_depth` = every level, so the Σ rows ride along) and, for a
+  matrix with a Σ row, the totals query, all in sequence under one
+  `FollowingQuery` tag and the tile's key: the trio is one barrier
+  arrival. The tile follows the scope (unless `:unscoped`), the as-of
+  (unless pinned by `:asof`), its dataset's publications and config, never
+  the frame's grouping. A followed-group change drops the picture and asks
+  again. Hiding keeps the chain in flight; closing cancels by key and
+  answers an open barrier through the deferred door. A refused submission
+  or an unresolved named expression is a danger notice and answers the
+  barrier. The picture's notices: diff with no base row in scope, and no
+  data yet (no leaf and no generation); an empty scope under a generation
+  is an empty grid with the domains painted and no notice.
 - `header.rs`: the shared header strip (title and readout; mode, links,
   health, ×), the table, and the footer (the reported notice; the
   selection's totals or the cursor readout).

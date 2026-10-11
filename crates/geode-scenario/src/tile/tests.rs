@@ -2,6 +2,7 @@
 //! stand-in that routes keys through the production keymap, and driven
 //! only through the shell's doors.
 
+mod data;
 mod keys;
 
 use super::*;
@@ -132,8 +133,8 @@ struct Built {
     shell_focus: gpui::FocusHandle,
 }
 
-// Every shell door is kept, so each test file drives the same set; the
-// key tests use only some of them.
+// Every shell door is kept, so each test file drives the same set;
+// `factory` and `diagnostics` are read only by the chrome tests.
 #[allow(dead_code)]
 struct Harness {
     tile: Entity<ScenarioTile>,
@@ -268,15 +269,7 @@ fn open_framed(
     )
 }
 
-#[allow(dead_code)]
 impl Harness {
-    /// Show the tile and answer its reads with a 4 × 3 vega K/T picture.
-    /// The read chain is not wired yet, so the tests that need a picture
-    /// are ignored and this is never reached.
-    fn show_picture(&self, _vcx: &mut gpui::VisualTestContext) {
-        unimplemented!("the read chain supplies the picture")
-    }
-
     /// Deliver visibility and focus as the shell does: from inside its
     /// render, on the next draw.
     fn in_draw(
