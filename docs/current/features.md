@@ -1587,7 +1587,10 @@ whose source or label contains the query (ignoring case, wrapping);
 `enter` keeps the query and `escape` returns the cursor to where it began.
 `n`/`shift+n` step the kept query from the cursor, wrapping, with a count.
 `escape` in normal mode ends a selection first, then the kept find, then
-dismisses the header's notices.
+dismisses the header's notices. Under `[ui] find_style = "fzf"`, `/` opens
+a results table in the grid's columns over every shown row, searched by
+source and label; a pick puts the cursor on its row and keeps the query
+for `n`.
 
 The shell's grid motions move a cursor held by source value, so a rebuild
 keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.

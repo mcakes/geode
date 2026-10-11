@@ -3361,3 +3361,72 @@ fn escape_ends_a_selection_before_it_dismisses_a_notice(cx: &mut gpui::TestAppCo
     h.press(&mut vcx, "escape");
     assert!(!painted(&h, &mut vcx, NOTICE));
 }
+
+#[gpui::test]
+fn fzf_find_lists_every_row_and_reveal_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = region_with_values(cx);
+    let results = vcx.new(|_| FuzzyFind::default());
+    assert!(vcx.update(|window, cx| h.content.start_fuzzy_find(results.downgrade(), window, cx)));
+    results.update(&mut vcx, |r, cx| r.set_query("eur".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        results.read_with(&vcx, |r, _| r.result_count()),
+        2,
+        "matched by label"
+    );
+    let item = results.read_with(&vcx, |r, _| r.selected_item().unwrap());
+    vcx.update(|window, cx| item.reveal("eur", window, cx))
+        .unwrap();
+    assert!(matches!(
+        h.cursor(&vcx).as_deref(),
+        Some("DAX") | Some("SX5E")
+    ));
+    // The committed query is what n repeats.
+    let before = h.cursor(&vcx);
+    h.press(&mut vcx, "n");
+    assert_ne!(h.cursor(&vcx), before);
+}
+
+/// A fzf pick with nothing typed keeps the query an earlier find
+/// committed, as an empty vim commit does.
+#[gpui::test]
+fn an_empty_fzf_pick_keeps_the_committed_query(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = region_with_values(cx);
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    h.find(&mut vcx, FindEvent::Committed("eur".into()));
+    let results = vcx.new(|_| FuzzyFind::default());
+    assert!(vcx.update(|window, cx| h.content.start_fuzzy_find(results.downgrade(), window, cx)));
+    vcx.run_until_parked();
+    // Empty query: every shown row, the first (unclassified NKY) selected.
+    let nky = results.read_with(&vcx, |r, _| {
+        assert_eq!(r.result_count(), 3);
+        r.selected_item().unwrap()
+    });
+    vcx.update(|window, cx| nky.reveal("", window, cx)).unwrap();
+    let at = h.cursor(&vcx);
+    h.press(&mut vcx, "n");
+    assert!(
+        matches!(h.cursor(&vcx).as_deref(), Some("DAX") | Some("SX5E")),
+        "n repeats eur from {at:?}"
+    );
+}
+
+/// The fzf results paint in the grid's place while the session is open,
+/// and the grid comes back once the session ends.
+#[gpui::test]
+fn fzf_results_replace_the_grid_until_the_session_ends(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    const TABLE: &str = "classifications-table-7";
+    let (h, mut vcx) = region_with_values(cx);
+    assert!(painted(&h, &mut vcx, TABLE));
+    let results = vcx.new(|_| FuzzyFind::default());
+    assert!(vcx.update(|window, cx| h.content.start_fuzzy_find(results.downgrade(), window, cx)));
+    results.update(&mut vcx, |r, cx| r.set_query("sx".into(), cx));
+    assert!(painted(&h, &mut vcx, "find-result-0"), "the results paint");
+    assert!(!painted(&h, &mut vcx, TABLE), "in the grid's place");
+    results.update(&mut vcx, |r, cx| r.close(cx));
+    assert!(painted(&h, &mut vcx, TABLE), "the grid returns");
+    assert!(!painted(&h, &mut vcx, "find-result-0"));
+}

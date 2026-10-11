@@ -10,8 +10,8 @@ use geode_shell::fonts;
 use geode_shell::shell::{listrow, scale};
 use gpui::prelude::*;
 use gpui::{
-    App, Context, Div, ElementId, Entity, MouseButton, MouseDownEvent, Pixels, Point, SharedString,
-    Stateful, TextAlign, Window, div, px,
+    AnyElement, App, Context, Div, ElementId, Entity, MouseButton, MouseDownEvent, Pixels, Point,
+    SharedString, Stateful, TextAlign, Window, div, px,
 };
 use gpui_component::table::{Column, ColumnSort, DataTable, TableDelegate, TableState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex, v_flex};
@@ -137,9 +137,8 @@ pub(crate) struct GridDelegate {
     widths: [Option<f32>; COLUMNS.len()],
     empty_title: SharedString,
     empty_help: SharedString,
-    /// The color a find match's run paints in. Nothing paints a match yet;
-    /// the field stays so the find's cells take it from the delegate.
-    #[allow(dead_code)]
+    /// The color a fzf find match's run paints in, in the results' source
+    /// cells.
     accent: listrow::TableAccent,
     /// The open label editor, painted in its row's label cell.
     editor: Option<EditorPaint>,
@@ -210,6 +209,71 @@ impl GridDelegate {
     /// `column()` cannot read itself.
     pub(crate) fn set_rem(&mut self, rem_px: f32) {
         self.rem_px = rem_px;
+    }
+
+    /// The shown rows, shared: the fzf results index them by source row.
+    pub(crate) fn prepared_rc(&self) -> Rc<Prepared> {
+        self.prepared.clone()
+    }
+
+    /// One cell of the fzf results table: the row of `prepared` (the rows
+    /// the results were built from) the result names, in the grid's paint,
+    /// with the source's match run marked.
+    pub(crate) fn render_find_cell(
+        &self,
+        prepared: &Prepared,
+        find: &geode_shell::fuzzyfind::FindRow<'_>,
+        col: usize,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let Some(row) = prepared.rows.get(find.source_row()) else {
+            return div().into_any_element();
+        };
+        let cell = div()
+            .size_full()
+            .flex()
+            .items_center()
+            .font_family(fonts::MONO)
+            .whitespace_nowrap()
+            .overflow_hidden();
+        let muted = theme.muted_foreground;
+        match COLUMNS[col].0 {
+            SortCol::Source => {
+                // The searched text is the source then the label; only the
+                // source's share of the match run paints here.
+                let len = row.source.chars().count();
+                let indices: Vec<usize> = find
+                    .indices()
+                    .iter()
+                    .copied()
+                    .filter(|i| *i < len)
+                    .collect();
+                cell.text_color(theme.foreground)
+                    .child(find.gutter(cx))
+                    .child(geode_shell::palette::highlighted_title(
+                        &row.source,
+                        &indices,
+                        self.accent.get(theme),
+                    ))
+                    .into_any_element()
+            }
+            SortCol::Label => {
+                let label = match &row.label {
+                    Some(l) => div().text_color(theme.foreground).child(l.clone()),
+                    None => div().text_color(muted).child(UNCLASSIFIED),
+                };
+                cell.child(h_flex().gap_2().child(label).when(!row.in_data, |el| {
+                    el.child(div().text_xs().text_color(muted).child(NOT_IN_DATA))
+                }))
+                .into_any_element()
+            }
+            SortCol::Rows => cell
+                .justify_end()
+                .text_color(theme.foreground)
+                .child(row.count.clone())
+                .into_any_element(),
+        }
     }
 
     #[cfg(test)]

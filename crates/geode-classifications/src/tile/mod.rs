@@ -70,7 +70,7 @@ use gpui::{
     Pixels, Point, SharedString, Window, anchored, div,
 };
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::table::{TableEvent, TableState};
+use gpui_component::table::{TableDelegate as _, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::{ClassificationsConfig, Shared, action_title};
@@ -273,6 +273,9 @@ pub struct ClassificationsTile {
     /// A `/` prompt is open (between its first change and its commit or
     /// cancel): it holds the keyboard, so a held import waits.
     searching: bool,
+    /// The open fzf `/` results, painted in the grid's place while active.
+    /// Weak: the shell owns the session, and closing its prompt ends it.
+    fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
     /// The rem the table's column widths were last scaled to.
     last_rem: f32,
     menu: Option<(MenuKind, Menu<Pick>)>,
@@ -414,6 +417,7 @@ impl ClassificationsTile {
             values_notice: None,
             find: None,
             searching: false,
+            fuzzy_find: None,
             last_rem: 0.0,
             menu: None,
             menu_at: None,
@@ -2287,6 +2291,106 @@ impl ClassificationsTile {
         cx.notify();
     }
 
+    /// `/` under `find_style = "fzf"`: every shown row as a result,
+    /// searched by source and label, painted in the grid's own columns. A
+    /// pick puts the cursor on its row by source value and keeps the query
+    /// for `n`. The results paint in the grid's place while the session is
+    /// open; its end repaints the grid and offers a held import.
+    pub(crate) fn start_fuzzy_find(
+        &mut self,
+        results: gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_menu(cx);
+        self.fuzzy_find = Some(results.clone());
+        if let Some(results) = results.upgrade() {
+            cx.observe(&results, |t, results, cx| {
+                if !results.read(cx).is_active() {
+                    t.offer_held_later(cx);
+                    cx.notify();
+                }
+            })
+            .detach();
+            cx.observe_release(&results, |_, _, cx| cx.notify())
+                .detach();
+        }
+        cx.notify();
+        let (prepared, columns) = {
+            let d = self.table.read(cx).delegate();
+            let columns = (0..d.columns_count(cx))
+                .map(|ix| d.column(ix, cx))
+                .collect();
+            (d.prepared_rc(), columns)
+        };
+        let header = self.table.clone();
+        let cells = self.table.clone();
+        // The results paint the rows their items were built from, even if
+        // a later delivery re-prepares the grid while the session is open.
+        let shown = prepared.clone();
+        let _ = results.update(cx, |r, cx| {
+            r.set_table(
+                columns,
+                move |col, window, cx| {
+                    header.update(cx, |t, cx| {
+                        t.delegate_mut()
+                            .render_th(col, window, cx)
+                            .into_any_element()
+                    })
+                },
+                move |row, col, cx| {
+                    cells
+                        .read(cx)
+                        .delegate()
+                        .render_find_cell(&shown, row, col, cx)
+                },
+                |_, _| {},
+                window,
+                cx,
+            )
+        });
+        // Item order is the prepared rows' order: a result's source row
+        // indexes the `prepared.rows` that `render_find_cell` is handed.
+        let items = prepared
+            .rows
+            .iter()
+            .map(|r| {
+                let source = r.source.to_string();
+                let label = r.label.as_ref().map(|l| l.to_string()).unwrap_or_default();
+                let tile = cx.entity().downgrade();
+                let pick = source.clone();
+                geode_shell::fuzzyfind::FindItem::new(
+                    source.clone(),
+                    source,
+                    label,
+                    move |query, _, cx| {
+                        tile.update(cx, |t, cx| {
+                            if !t.grid.put_on(&pick) {
+                                return Err(
+                                    "This value is no longer shown. Search again.".to_string()
+                                );
+                            }
+                            // A pick with nothing typed keeps an earlier
+                            // committed query, as an empty vim commit does.
+                            let earlier = t.find.take().and_then(|f| f.committed);
+                            t.find = Some(FindState {
+                                origin: None,
+                                committed: (!query.is_empty())
+                                    .then(|| query.to_string())
+                                    .or(earlier),
+                            });
+                            t.sync_table(false, cx);
+                            cx.notify();
+                            Ok(())
+                        })
+                        .map_err(|_| "The tile is closed".to_string())?
+                    },
+                )
+            })
+            .collect();
+        let _ = results.update(cx, |r, cx| r.replace_items(items, cx));
+    }
+
     /// `n`/`shift+n`, counted: the committed query stepped from the cursor,
     /// wrapping, as market data's repeat does. Nothing committed, or no
     /// match: the cursor stays.
@@ -2844,10 +2948,22 @@ impl Render for ClassificationsTile {
                         .debug_selector(move || format!("classifications-empty-{id}"))
                         .child(text.clone()),
                 ),
-            None => v_flex()
-                .flex_1()
-                .min_h_0()
-                .child(table::table_el(&self.table, id)),
+            None => {
+                let search = self
+                    .fuzzy_find
+                    .as_ref()
+                    .and_then(|r| r.upgrade())
+                    .filter(|r| r.read(cx).is_active());
+                v_flex().flex_1().min_h_0().child(match search {
+                    Some(results) => div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(results)
+                        .into_any_element(),
+                    None => table::table_el(&self.table, id).into_any_element(),
+                })
+            }
         };
         let root = v_flex()
             .size_full()

@@ -204,9 +204,21 @@ impl TileContent for ClassificationsContent {
         self.tile.read(cx).completions(line, cursor)
     }
 
-    /// `/` narrows the grid's rows over source and label.
+    /// `/` (vim style) finds over source and label; a hit moves the cursor.
     fn find(&self, event: FindEvent, _window: &mut Window, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.find(event, cx))
+    }
+
+    /// `/` under `find_style = "fzf"`: every shown row as a result.
+    fn start_fuzzy_find(
+        &self,
+        results: gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        self.tile
+            .update(cx, |t, cx| t.start_fuzzy_find(results, window, cx));
+        true
     }
 
     fn deliver(&self, delivery: Delivery, window: &mut Window, cx: &mut App) {

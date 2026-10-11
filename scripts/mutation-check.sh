@@ -39145,6 +39145,32 @@ run_mutation "classifications: n wraps" \
   geode-classifications \
   n_and_shift_n_repeat_the_committed_find_and_wrap
 
+# A fzf pick moves the cursor to its row by source value.
+run_mutation "classifications: a fzf pick moves the cursor" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                            if !t.grid.put_on(&pick) {' \
+  '                            if false {' \
+  geode-classifications \
+  fzf_find_lists_every_row_and_reveal_moves_the_cursor
+
+# A fzf pick with nothing typed keeps the query an earlier find committed.
+run_mutation "classifications: an empty fzf pick keeps the committed query" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                                    .or(earlier),' \
+  '                                    .or(None::<String>.and(earlier)),' \
+  geode-classifications \
+  an_empty_fzf_pick_keeps_the_committed_query
+
+# The fzf results paint in the grid's place only while the session is open.
+run_mutation "classifications: fzf results replace the grid" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                    .filter(|r| r.read(cx).is_active());
+                v_flex()' \
+  '                    .filter(|_| false);
+                v_flex()' \
+  geode-classifications \
+  fzf_results_replace_the_grid_until_the_session_ends
+
 # A shell input (palette, command line) holds the keys over the focused
 # tile; the tile sees only that focus is not on the shell root or within it.
 run_mutation "classifications: a landing plan waits for a shell input" \

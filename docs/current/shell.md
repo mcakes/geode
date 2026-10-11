@@ -515,8 +515,8 @@ matching branches. Enter or a row click reveals the selected row in the tree, an
 or leaving the tile cancels without moving the tree. No matches keeps the
 prompt open. The table virtualizes results and scrolls to keyboard selection.
 
-Blotter, pricer, and market-data implement Fzf search. Tree searches include
-collapsed descendants within the current scope. The blotter requests the full
+Blotter, pricer, market-data and classifications implement Fzf search. Tree
+searches include collapsed descendants within the current scope. The blotter requests the full
 grouping depth when necessary. Every loaded parent and leaf is displayed together
 in full tree order, using labels prepared only for visible rows. Search text is
 indexed on a worker; completing that index does not change the empty-query

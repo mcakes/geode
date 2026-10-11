@@ -103,7 +103,14 @@ of an open search puts the cursor back on the origin (the shell's cancel of
 a `/` with nothing typed moves nothing). `/` closes an open menu first.
 `n`/`shift+n` (`classifications::find_next`/`find_prev`)
 repeat the kept query from the cursor, counted and wrapping. Nothing is
-narrowed; an open search holds the keyboard (`searching`).
+narrowed; an open search holds the keyboard (`searching`). Under
+`find_style = "fzf"`, `start_fuzzy_find` hands the shell one `FindItem` per
+shown row (label the source, path the label) and a results table in the
+grid's columns (`GridDelegate::render_find_cell`, painting the `Prepared`
+rows the items were built from), shown in the grid's place while the
+session is active. A pick resolves its row by source value (`put_on`; a
+value no longer shown is refused), keeps the query for `n` and spends any
+origin; the session's end repaints the grid and offers a held import.
 `:sort <source|label|rows> [asc|desc]` orders the grid (bare `:sort`
 restores the default order: unclassified first, then by label); a header
 sort control cycles desc → asc → default (`SortOrder::click_cycle`, as
