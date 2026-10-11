@@ -798,12 +798,16 @@ fn a_selection_qty_sets_a_wholly_reached_split_package_and_skips_a_part(
     assert_eq!(h.footer(&vcx), None);
     let weighted: Vec<i64> = before.iter().map(|q| q.signum() * 3).collect();
     assert_eq!(leg_qtys(&h, &vcx, pkg), weighted, "through the weights");
-    // Only the first split row and the line above it.
+    // Only the first split row and the line above it: no grouping row,
+    // so the package is reached through its split row alone.
     let splits = split_rows(&h, &vcx);
-    h.motion(&mut vcx, "top", None);
-    h.dispatch(&mut vcx, "visual_rows", None);
     cursor_to_row(&h, &mut vcx, splits[0]);
+    h.dispatch(&mut vcx, "visual_rows", None);
     h.motion(&mut vcx, "up", None);
+    assert!(
+        h.tile.read_with(&vcx, |t, _| !t.cursor_on_group()),
+        "fixture: the line above the split row"
+    );
     h.dispatch(&mut vcx, "edit", None);
     set_editor(&h, &mut vcx, "2");
     h.dispatch(&mut vcx, "commit", None);
