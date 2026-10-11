@@ -44,6 +44,27 @@ pub(crate) enum After {
     Close,
 }
 
+/// Which door opened the dialog. A load or toggle on a saved row closes the
+/// dialog when the saved door opened it (the load glyph,
+/// `frame::scope_saved`, `config::scopes`, `config::expressions`): that door
+/// is one-shot. Opened any other way, the commit stays on the screen, so a
+/// visit from `mod+o` sees what it changed in the current sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// Wired in by the one-screen routing; remove with Layer::Saved.
+#[allow(dead_code)]
+pub(crate) enum Opener {
+    Scope,
+    Saved,
+}
+
+impl Opener {
+    // Wired in by the one-screen routing; remove with Layer::Saved.
+    #[allow(dead_code)]
+    pub(crate) fn closes_on_saved_commit(self) -> bool {
+        self == Opener::Saved
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Layers {
     /// Never empty while the dialog is open.
@@ -112,6 +133,12 @@ mod tests {
 
     fn text() -> Layer {
         Layer::Step(Step::Text)
+    }
+
+    #[test]
+    fn only_the_saved_door_closes_on_a_saved_commit() {
+        assert!(Opener::Saved.closes_on_saved_commit());
+        assert!(!Opener::Scope.closes_on_saved_commit());
     }
 
     #[test]

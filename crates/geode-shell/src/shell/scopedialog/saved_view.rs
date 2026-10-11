@@ -263,6 +263,92 @@ impl SavedScreen {
         self.cursor_id = self.cursor_stop().map(|stop| self.stop_id(stop));
     }
 
+    // Wired in by the one-screen routing; remove with Layer::Saved.
+    #[allow(dead_code)]
+    pub(crate) fn stop_count(&self) -> usize {
+        self.stops.len()
+    }
+
+    /// Rest the cursor on stop `at` (clamped) and take its identity.
+    // Wired in by the one-screen routing; remove with Layer::Saved.
+    #[allow(dead_code)]
+    pub(crate) fn set_cursor(&mut self, at: usize) {
+        self.cursor = at.min(self.stops.len().saturating_sub(1));
+        self.cursor_id = self.cursor_stop().map(|stop| self.stop_id(stop));
+    }
+
+    // Wired in by the one-screen routing; remove with Layer::Saved.
+    #[allow(dead_code)]
+    fn stop_section(&self, stop: Stop) -> Section {
+        match stop {
+            Stop::Row(i) => section_of(&self.rows[i].id),
+            Stop::Empty(section) => section,
+        }
+    }
+
+    // Wired in by the one-screen routing; remove with Layer::Saved.
+    #[allow(dead_code)]
+    pub(crate) fn cursor_section(&self) -> Option<Section> {
+        self.cursor_stop().map(|stop| self.stop_section(stop))
+    }
+
+    /// Put the cursor on `section`'s row named `prefer` when it is a stop,
+    /// else on the section's first stop. False, with the cursor unmoved, when
+    /// the section has no stop (a filter hid every row).
+    // Wired in by the one-screen routing; remove with Layer::Saved.
+    #[allow(dead_code)]
+    pub(crate) fn jump_to(&mut self, section: Section, prefer: Option<&str>) -> bool {
+        let named = prefer.and_then(|name| {
+            self.stops.iter().position(|&stop| {
+                matches!(stop, Stop::Row(i)
+                    if section_of(&self.rows[i].id) == section && self.rows[i].name == name)
+            })
+        });
+        let first = || {
+            self.stops
+                .iter()
+                .position(|&stop| self.stop_section(stop) == section)
+        };
+        match named.or_else(first) {
+            Some(at) => {
+                self.set_cursor(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Children each section paints under its header: its stops, or its
+    /// empty row (painted under a filter too, though not a stop there).
+    // Wired in by the one-screen routing; remove with Layer::Saved.
+    #[allow(dead_code)]
+    pub(crate) fn painted_counts(&self) -> [usize; 2] {
+        [Section::Scopes, Section::Expressions].map(|section| {
+            if self.section_is_empty(section) {
+                1
+            } else {
+                self.stops
+                    .iter()
+                    .filter(|&&stop| self.stop_section(stop) == section)
+                    .count()
+            }
+        })
+    }
+
+    /// The cursor's section index (Scopes 0, Expressions 1) and its index
+    /// among that section's painted children.
+    // Wired in by the one-screen routing; remove with Layer::Saved.
+    #[allow(dead_code)]
+    pub(crate) fn cursor_within(&self) -> Option<(usize, usize)> {
+        let stop = self.cursor_stop()?;
+        let section = self.stop_section(stop);
+        let within = self.stops[..self.cursor]
+            .iter()
+            .filter(|&&s| self.stop_section(s) == section)
+            .count();
+        Some((usize::from(section == Section::Expressions), within))
+    }
+
     fn section_is_empty(&self, section: Section) -> bool {
         !self.rows.iter().any(|r| section_of(&r.id) == section)
     }
@@ -898,4 +984,83 @@ pub(crate) fn named_expression_users(shell: &ShellView, name: &str, cx: &App) ->
         .iter()
         .any(|n| n == name);
     super::saved::used_by_sentence(users, frame)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geode_core::scope::Scope;
+
+    fn named(text: &str) -> NamedExpressions {
+        use geode_core::config::{EXPRESSIONS_DOC, LayerDoc, merge_docs};
+        let doc = LayerDoc::builtin(EXPRESSIONS_DOC, text).unwrap();
+        NamedExpressions::from_doc(
+            &merge_docs(EXPRESSIONS_DOC, &[doc]),
+            &geode_core::scope::complete::ExprVocab::default(),
+        )
+        .0
+    }
+
+    /// Scopes `asia`, `eu`, `us`; expressions `big`, `liq`.
+    fn screen() -> SavedScreen {
+        let mut saved = SavedScopes::new();
+        for (name, book) in [("asia", "BK2"), ("eu", "BK1"), ("us", "BK3")] {
+            saved.insert(name.into(), Scope::one("book", book));
+        }
+        let defs = named("[liq]\nexpression = \"npv > 0\"\n[big]\nexpression = \"npv > 100\"\n");
+        let mut s = SavedScreen::new();
+        s.refresh(&saved, &defs, &Scope::default(), (1, 1));
+        s
+    }
+
+    fn cursor_name(s: &SavedScreen) -> Option<String> {
+        s.cursor_row().map(|r| r.name.clone())
+    }
+
+    #[test]
+    fn jump_prefers_the_named_scope_else_the_section_start() {
+        let mut s = screen();
+        assert!(s.jump_to(Section::Scopes, Some("eu")));
+        assert_eq!(cursor_name(&s).as_deref(), Some("eu"));
+        assert!(s.jump_to(Section::Scopes, Some("gone")));
+        assert_eq!(cursor_name(&s).as_deref(), Some("asia"));
+        assert!(s.jump_to(Section::Expressions, None));
+        assert_eq!(cursor_name(&s).as_deref(), Some("big"));
+        assert_eq!(s.cursor_section(), Some(Section::Expressions));
+    }
+
+    #[test]
+    fn jump_into_a_section_the_filter_emptied_refuses_and_keeps_the_cursor() {
+        let mut s = screen();
+        s.set_query("liq");
+        assert!(s.jump_to(Section::Expressions, None));
+        assert!(!s.jump_to(Section::Scopes, None));
+        assert_eq!(cursor_name(&s).as_deref(), Some("liq"));
+    }
+
+    #[test]
+    fn painted_counts_and_cursor_within_follow_the_filter() {
+        let mut s = screen();
+        assert_eq!(s.painted_counts(), [3, 2]);
+        assert_eq!(s.stop_count(), 5);
+        s.set_cursor(4);
+        assert_eq!(s.cursor_within(), Some((1, 1)));
+        // Only `us` holds a `u` followed by an `s` in its name and summary.
+        s.set_query("us");
+        assert_eq!(s.painted_counts(), [1, 0]);
+        assert_eq!(s.cursor_within(), Some((0, 0)));
+    }
+
+    #[test]
+    fn an_empty_section_counts_its_empty_row_even_under_a_filter() {
+        let defs = named("");
+        let mut s = SavedScreen::new();
+        s.refresh(&SavedScopes::new(), &defs, &Scope::default(), (1, 1));
+        assert_eq!(s.painted_counts(), [1, 1]);
+        assert_eq!(s.stop_count(), 2, "both empty rows are stops unfiltered");
+        s.set_query("x");
+        assert_eq!(s.painted_counts(), [1, 1], "still painted");
+        assert_eq!(s.stop_count(), 0, "but no longer stops");
+        assert_eq!(s.cursor_within(), None);
+    }
 }

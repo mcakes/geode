@@ -9,5 +9,8 @@ pub(crate) mod prompt;
 pub(crate) mod rows;
 pub(crate) mod saved;
 pub(crate) mod saved_view;
+// Wired in by the one-screen routing; remove with Layer::Saved.
+#[allow(dead_code)]
+pub(crate) mod screen;
 pub(crate) mod state;
 pub(crate) mod view;
