@@ -40173,6 +40173,34 @@ run_mutation "history key: -0 is a key of its own" \
   geode-core \
   a_negative_zero_f64_key_is_the_zero_key
 
+
+# An append coalesces the coverage rows of every tuple it touched. Left
+# out, a refreshing board adds a point row per tuple per ask and every
+# lookup scans them all on the service loop.
+run_mutation "history: coverage rows are not coalesced" \
+  crates/geode-data/src/store/history.rs \
+  '    coalesce_coverage(conn, &coverage, keys, covers)?;' \
+  '    let _ = covers;' \
+  geode-data \
+  repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
+
+# Coalescing rewrites exactly the touched tuple. Matched loosely, a
+# prefix's row is folded into a member's and the prefix loses its coverage.
+run_mutation "history: coalescing takes another tuple's rows" \
+  crates/geode-data/src/store/history.rs \
+  '                "{} IS NOT DISTINCT FROM CAST(? AS {})",' \
+  '                "({} IS NOT DISTINCT FROM CAST(? AS {}) OR true)",' \
+  geode-data \
+  repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
+
+# A coalesced row carries the newest received_at of the rows it replaces.
+run_mutation "history: coalesced coverage keeps the oldest received_at" \
+  crates/geode-data/src/store/history.rs \
+  '        let Some(newest) = held.iter().map(|h| h.2).max() else {' \
+  '        let Some(newest) = held.iter().map(|h| h.2).min() else {' \
+  geode-data \
+  repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

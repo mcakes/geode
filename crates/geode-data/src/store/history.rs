@@ -551,11 +551,88 @@ fn append_in_transaction(
         conn.execute(&cover, duckdb::params_from_iter(params))
             .map_err(sql_err(&cover))?;
     }
+    coalesce_coverage(conn, &coverage, keys, covers)?;
 
     // Bound the dataset's history in the same transaction as rows and
     // coverage.
     let swept = sweep_history(conn, req.dataset, req.received_at)?;
     Ok(HistoryAppended { appended, swept })
+}
+
+/// Rewrite the coverage rows of every tuple in `touched` (exactly that
+/// tuple, trailing NULLs included, never a deeper or shallower one) as its
+/// merged spans, each under the newest `received_at` among the rows it
+/// replaces. Without it a refreshing board adds a point row per tuple per
+/// ask, and every lookup scans them all on the service loop. Lookups merge
+/// a tuple's spans with its prefixes' anyway, so they answer the same.
+fn coalesce_coverage(
+    conn: &Connection,
+    coverage: &str,
+    keys: &[&ColumnSpec],
+    touched: &[Vec<Option<String>>],
+) -> Result<(), StoreError> {
+    let same = joined(
+        keys,
+        |c| {
+            format!(
+                "{} IS NOT DISTINCT FROM CAST(? AS {})",
+                quote(&c.name),
+                c.ty.sql()
+            )
+        },
+        " and ",
+    );
+    let select = format!(
+        "select epoch_us(from_ts), epoch_us(to_ts), epoch_us(received_at) \
+         from {coverage} where {same}"
+    );
+    let delete = format!("delete from {coverage} where {same}");
+    let key_list = joined(keys, |c| quote(&c.name), ", ");
+    let cover_casts = joined(keys, |c| format!("CAST(? AS {})", c.ty.sql()), ", ");
+    let insert = format!(
+        "insert into {coverage} ({key_list}, from_ts, to_ts, received_at)
+         values ({cover_casts}, make_timestamp(?), make_timestamp(?), make_timestamp(?))"
+    );
+    let mut done: Vec<&Vec<Option<String>>> = Vec::new();
+    for tuple in touched {
+        if done.contains(&tuple) {
+            continue;
+        }
+        done.push(tuple);
+        let params: Vec<Value> = tuple
+            .iter()
+            .map(|v| v.clone().map_or(Value::Null, Value::Text))
+            .collect();
+        let mut stmt = conn.prepare(&select).map_err(sql_err(&select))?;
+        let held: Vec<(i64, i64, i64)> = stmt
+            .query_map(duckdb::params_from_iter(params.clone()), |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .map_err(sql_err(&select))?
+            .collect::<Result<_, _>>()
+            .map_err(sql_err(&select))?;
+        let Some(newest) = held.iter().map(|h| h.2).max() else {
+            continue;
+        };
+        let mut spans: Vec<CoverSpan> = held
+            .iter()
+            .map(|&(f, t, _)| (from_micros(f), from_micros(t)))
+            .collect();
+        merge_spans(&mut spans);
+        conn.execute(&delete, duckdb::params_from_iter(params.clone()))
+            .map_err(sql_err(&delete))?;
+        for (from, to) in spans {
+            let mut row = params.clone();
+            row.extend([
+                Value::BigInt(micros(from)),
+                Value::BigInt(micros(to)),
+                Value::BigInt(newest),
+            ]);
+            conn.execute(&insert, duckdb::params_from_iter(row))
+                .map_err(sql_err(&insert))?;
+        }
+    }
+    Ok(())
 }
 
 /// Apply retention across a history dataset. `append_history` calls this
@@ -862,7 +939,107 @@ mod tests {
         let again = append_history(&store, &req("2026-01-09T09:00:00Z")).unwrap();
         assert_eq!(again.appended, 0);
         assert_eq!(all_rows(&store).len(), 3);
-        assert_eq!(coverage_count(&store), 2);
+        assert_eq!(
+            coverage_count(&store),
+            1,
+            "the repeated span is coalesced into the first"
+        );
+    }
+
+    #[test]
+    fn repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span() {
+        let (_d, store, ds) = fixture();
+        let exact: Vec<String> = vec!["SPX".into(), "3M".into(), "0.5".into()];
+        let tick = chrono::Duration::microseconds(1);
+        let point = |s: &str| (ts(s), ts(s) + tick);
+        let empty = HistoryRows {
+            ts: Vec::new(),
+            keys: vec![Vec::new(); 3],
+            values: vec![Vec::new(); 2],
+        };
+        // A refreshing board: the same Latest point many times, a span
+        // touching another, an overlapping one, and one apart from the rest.
+        let mut asks: Vec<(Vec<String>, CoverSpan)> = (0..20)
+            .map(|_| (exact.clone(), point("2026-01-07T21:00:00Z")))
+            .collect();
+        asks.extend([
+            (
+                exact.clone(),
+                (ts("2026-01-05T00:00:00Z"), ts("2026-01-06T00:00:00Z")),
+            ),
+            (
+                exact.clone(),
+                (ts("2026-01-06T00:00:00Z"), ts("2026-01-07T00:00:00Z")),
+            ),
+            (
+                exact.clone(),
+                (ts("2026-01-05T12:00:00Z"), ts("2026-01-06T12:00:00Z")),
+            ),
+            (
+                exact.clone(),
+                (ts("2026-01-12T00:00:00Z"), ts("2026-01-13T00:00:00Z")),
+            ),
+            // A prefix is a tuple of its own: never merged into the exact one.
+            (
+                vec!["SPX".into()],
+                (ts("2026-01-08T00:00:00Z"), ts("2026-01-09T00:00:00Z")),
+            ),
+        ]);
+        let mut expected: Vec<CoverSpan> = Vec::new();
+        for (i, (asked, span)) in asks.iter().enumerate() {
+            append_history(
+                &store,
+                &HistoryAppendRequest {
+                    dataset: &ds,
+                    source: "hanweck",
+                    rows: &empty,
+                    covered: vec![Covered {
+                        asked: asked.clone(),
+                        span: *span,
+                    }],
+                    received_at: ts("2026-01-14T09:00:00Z") + chrono::Duration::seconds(i as i64),
+                },
+            )
+            .unwrap();
+            // The prefix's span covers the exact tuple too.
+            expected.push(*span);
+            let mut want = expected.clone();
+            merge_spans(&mut want);
+            assert_eq!(
+                covered_spans(store.writer(), &ds, &exact).unwrap(),
+                want,
+                "lookups answer the union of everything recorded"
+            );
+        }
+        assert_eq!(
+            coverage_count(&store),
+            4,
+            "the exact tuple's three disjoint spans and the prefix's one"
+        );
+        let newest: i64 = store
+            .writer()
+            .query_row(
+                "select max(epoch_us(received_at)) from vol_surface_history_coverage \
+                 where tenor is not null",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(newest, micros(ts("2026-01-14T09:00:23Z")));
+        let merged_received: i64 = store
+            .writer()
+            .query_row(
+                "select epoch_us(received_at) from vol_surface_history_coverage \
+                 where tenor is not null and epoch_us(from_ts) = ?",
+                [micros(ts("2026-01-05T00:00:00Z"))],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            merged_received,
+            micros(ts("2026-01-14T09:00:23Z")),
+            "a coalesced row carries the newest received_at"
+        );
     }
 
     #[test]
@@ -1066,7 +1243,11 @@ mod tests {
         let got = all_rows(&store);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].5, 15.5);
-        assert_eq!(coverage_count(&store), 2, "the 2026 coverage stays");
+        assert_eq!(
+            coverage_count(&store),
+            1,
+            "the 2026 coverage stays, its two equal spans coalesced"
+        );
     }
 
     #[test]
