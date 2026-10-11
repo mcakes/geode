@@ -40,4 +40,5 @@ pub mod tile_columns;
 pub mod tree;
 pub mod view;
 pub mod vol;
+pub mod volboard;
 pub mod watchlist;
