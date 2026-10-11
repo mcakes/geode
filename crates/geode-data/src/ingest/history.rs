@@ -485,6 +485,40 @@ pub(crate) mod tests {
         w.shutdown();
     }
 
+    /// Answers any ask with one row keyed `SPX / 3M / 0.50`.
+    struct SpellsDeltaLong;
+    impl HistoryQuery for SpellsDeltaLong {
+        fn query(&mut self, _: &HistoryRequest) -> Result<HistoryRows, AdapterError> {
+            Ok(HistoryRows {
+                ts: vec![ts("2026-01-05T21:00:00Z")],
+                keys: vec![vec!["SPX".into()], vec!["3M".into()], vec!["0.50".into()]],
+                values: vec![vec![15.0], vec![7650.0]],
+            })
+        }
+        fn keys(&mut self, _: &str, _: &str) -> Option<Vec<String>> {
+            None
+        }
+    }
+
+    #[test]
+    fn an_exact_ask_answered_in_another_spelling_is_accepted() {
+        let (mut w, rx) = spawn(Box::new(SpellsDeltaLong));
+        let exact = KeySet::Exact(vec![vec!["SPX".into(), "3M".into(), "0.5".into()]]);
+        assert!(w.request(HistoryWork::Query {
+            ticket: Ticket(8),
+            request: between(exact),
+            value_arity: 2,
+        }));
+        match rx.recv_timeout(WAIT).unwrap() {
+            HistoryWorkOutcome::Fetched { ticket, rows, .. } => {
+                assert_eq!(ticket, Ticket(8));
+                assert_eq!(rows.key_at(0), vec!["SPX", "3M", "0.5"]);
+            }
+            other => panic!("`0.50` answering `0.5` is one key: {other:?}"),
+        }
+        w.shutdown();
+    }
+
     #[test]
     fn an_unparsable_key_fails_the_ticket() {
         let (mut w, rx) = spawn(Box::new(FakeHistory {

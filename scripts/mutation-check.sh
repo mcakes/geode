@@ -40002,7 +40002,7 @@ run_mutation "order: an overflowing tenor wraps" \
 run_mutation "history: a repeated (key, ts) from the source is filed" \
   crates/geode-data/src/adapter/mod.rs \
   '            if !seen.insert((key, self.ts[i])) {' \
-  '            if false {' \
+  '            if !seen.insert((key, self.ts[i])) && false {' \
   geode-data \
   history_rows_validate_shape_duplicates_and_the_asked_keys
 
@@ -40077,7 +40077,7 @@ run_mutation "history worker: the answer's keys are not normalized" \
     rows.validate_against' \
   '    rows.validate_against' \
   geode-data \
-  a_key_spelled_differently_by_the_source_is_normalized_before_validation
+  an_exact_ask_answered_in_another_spelling_is_accepted
 
 # ... and it normalizes BEFORE it validates: the other order compares the
 # source's raw spelling with the normalized ask.
@@ -40090,7 +40090,7 @@ run_mutation "history worker: validate runs before normalize" \
     rows.normalize_keys(key_types)
         .map_err(|message| AdapterError { message })?;' \
   geode-data \
-  a_key_spelled_differently_by_the_source_is_normalized_before_validation
+  an_exact_ask_answered_in_another_spelling_is_accepted
 
 # A request with no table names the source's configured one. Dropped, the
 # adapter is asked for table "".
