@@ -16167,6 +16167,67 @@ run_mutation "settings: shift+click on the value chip steps back (spec §20.3)" 
   geode-shell \
   the_settings_value_chip_steps_and_a_row_click_only_selects
 
+# ---- Cell glyphs (vol watchlist Part 3a) ---- Each glyph's core decides
+# its numbers; these entries break one decision each.
+
+# A NaN or infinity in a column must not set the scale every chip and bar
+# is measured against.
+run_mutation "cell: the column scale counts a non-finite value" \
+  crates/geode-widgets/src/cell/mod.rs \
+  '        .filter(|v| v.is_finite())' \
+  '        .filter(|_| true)' \
+  geode-widgets \
+  column_scale_skips_non_finite
+
+# The host's ceiling caps the chip fill so its text stays readable.
+run_mutation "cell: the chip alpha ignores the ceiling" \
+  crates/geode-widgets/src/cell/delta_chip.rs \
+  '        ((value.abs() / scale).min(1.0) as f32) * ceiling' \
+  '        (value.abs() / scale) as f32' \
+  geode-widgets \
+  a_move_beyond_the_scale_clamps_at_the_ceiling
+
+# A zero or non-finite column scale tints nothing (a NaN alpha would paint
+# unpredictably).
+run_mutation "cell: a zero scale tints the chip" \
+  crates/geode-widgets/src/cell/delta_chip.rs \
+  '    let alpha = if scale.is_finite() && scale > 0.0 && sign != Sign::Zero {' \
+  '    let alpha = if sign != Sign::Zero {' \
+  geode-widgets \
+  a_zero_scale_tints_nothing
+
+# The warning tone is at or beyond the decile edges, inclusive.
+run_mutation "cell: the slider warns strictly beyond the deciles" \
+  crates/geode-widgets/src/cell/percent_slider.rs \
+  '        warn: rank <= WARN_LOW || rank >= WARN_HIGH,' \
+  '        warn: rank < WARN_LOW || rank > WARN_HIGH,' \
+  geode-widgets \
+  the_decile_edges_warn_inclusive
+
+# An out-of-range rank keeps the marker on the track.
+run_mutation "cell: the slider marker leaves the track" \
+  crates/geode-widgets/src/cell/percent_slider.rs \
+  '        position: rank.clamp(0.0, 1.0) as f32,' \
+  '        position: rank as f32,' \
+  geode-widgets \
+  an_out_of_range_rank_clamps_and_still_warns
+
+# A spread beyond the column scale fills its half and no more.
+run_mutation "cell: a bar beyond the scale overflows its half" \
+  crates/geode-widgets/src/cell/zero_bar.rs \
+  '        (value.abs() / scale).min(1.0) as f32' \
+  '        (value.abs() / scale) as f32' \
+  geode-widgets \
+  a_value_beyond_the_scale_fills_the_half_and_no_more
+
+# A grid whose values are all equal has no levels: no tint, not full tint.
+run_mutation "cell: a flat heat range tints fully" \
+  crates/geode-widgets/src/cell/heat.rs \
+  '    if !(value.is_finite() && lo.is_finite() && hi.is_finite()) || lo >= hi {' \
+  '    if !(value.is_finite() && lo.is_finite() && hi.is_finite()) {' \
+  geode-widgets \
+  a_flat_range_tints_nothing
+
 # ---- Object-dialog action buttons ----
 
 # While confirmation is armed, render the value chip as plain text without a

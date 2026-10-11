@@ -592,6 +592,16 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The `⋯` button, action menu placement, `y −2.75%…2.75%` ylim chip, out-of-domain
   clipping.
 
+## Cell glyphs
+
+### Display checks
+
+- Cell glyphs (`cargo run -p geode-widgets --example cells`, `t` toggles the
+  theme): the change chip's tint ceiling against its text on light and dark;
+  the slider marker's warning tone at 0.05, 0.10, 0.90 and 0.97 and the plain
+  marker between; the heat tint's spread across the level column; the bar's
+  sides and zero axis; the `KOSPI2` row paints `—` with no glyph.
+
 ## Data path
 
 ### Open work

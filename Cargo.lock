@@ -2860,6 +2860,7 @@ dependencies = [
  "geode-core",
  "gpui-component",
  "gpui-pre",
+ "gpui-pre-platform",
 ]
 
 [[package]]

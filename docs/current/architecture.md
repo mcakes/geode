@@ -100,7 +100,7 @@ UI and opens no window; `cargo tree -p geode-collector` names no gpui crate
 with `-e normal` or `-e dev`.
 
 Reusable presentation is kept below features. `geode-widgets` holds shared
-stateful controls; `geode-chart` holds chart preparation and painting. It is
+controls and stateless cell glyphs; `geode-chart` holds chart preparation and painting. It is
 a kit and one element per chart type, never one per module: an element
 borrows the kit and owns its model and paint, and a module prepares that
 element's model. Wire formats live in `geode-documents`. Calculation crates

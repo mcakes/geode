@@ -21,3 +21,9 @@ chrono = "0.4.42"
 # Match the workspace test features so crate-local tests share its dependency graph.
 geode-core = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
+# The example window's entry point.
+gpui_platform.workspace = true
+
+[[example]]
+name = "cells"
+bench = false
