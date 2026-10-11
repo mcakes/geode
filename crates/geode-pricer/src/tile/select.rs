@@ -135,6 +135,7 @@ impl PricerTile {
     /// the selection is then cleared and the footer says why, so the
     /// caller re-prepares the chrome.
     pub(crate) fn refresh_selection(&mut self) -> bool {
+        self.follow_own_anchor();
         let Some(sel) = &self.selection else {
             self.clear_selection();
             return false;
@@ -171,6 +172,33 @@ impl PricerTile {
                 );
                 true
             }
+        }
+    }
+
+    /// A grouping-row anchor a grouping-row editor's own write moved (a
+    /// step on the grouped column carries the anchor group's lines to
+    /// another path) follows its lead line to the group now holding it at
+    /// the anchor's depth, so the selection stays painted through the
+    /// steps and is whole again after `escape` takes them back. Only
+    /// during that write (`own_write`): a regroup or another writer losing
+    /// the anchor still clears the selection.
+    fn follow_own_anchor(&mut self) {
+        let Some(lead) = self.own_write.as_ref().and_then(|f| f.anchor_lead) else {
+            return;
+        };
+        let Some(At::Group(path)) = self.selection.as_ref().map(|s| &s.anchor_row) else {
+            return;
+        };
+        if self.group_row(path).is_some() {
+            return;
+        }
+        let dest = self
+            .sheet
+            .index_of(lead)
+            .and_then(|row| self.group_holding(row, path.len()))
+            .filter(|p| self.group_row(p).is_some());
+        if let (Some(dest), Some(sel)) = (dest, self.selection.as_mut()) {
+            sel.anchor_row = At::Group(dest);
         }
     }
 
@@ -303,9 +331,22 @@ impl PricerTile {
         })
     }
 
-    /// The plan columns a bulk edit writes: the block's under `v`, the
-    /// cursor's otherwise (none while a selection has not resolved).
+    /// The plan columns a bulk edit writes: a grouping-row editor's, frozen
+    /// at open by name (a column the view no longer plans is passed over);
+    /// else the block's under `v`, the cursor's otherwise (none while a
+    /// selection has not resolved).
     fn edit_cols(&self) -> Vec<usize> {
+        if let Some(frozen) = self.editor.as_ref().and_then(|e| e.frozen()) {
+            return frozen
+                .cols
+                .iter()
+                .filter_map(|name| self.plan.columns.iter().position(|c| c.def.name == *name))
+                .collect();
+        }
+        self.live_cols()
+    }
+
+    fn live_cols(&self) -> Vec<usize> {
         match (&self.selection, &self.resolved) {
             (Some(_), None) => Vec::new(),
             (_, Some(r)) if r.kind == SelectKind::Block => r.cols.clone().collect(),
@@ -346,16 +387,47 @@ impl PricerTile {
         Some((direct, grouped, hidden))
     }
 
-    /// The targets a grouping-row editor opening now keeps for its whole
-    /// life, by line identity.
-    pub(crate) fn freeze_targets(&self) -> FrozenTargets {
+    /// The targets a grouping-row editor opening now on the group at
+    /// `path` keeps for its whole life, by line identity and column name,
+    /// with the line it follows: the first line the cursor's group paints
+    /// — never the selection's first in sheet order, which may sit in
+    /// another group. `None` when that group paints no line (only empty
+    /// packages): there is nothing to follow, nor to write.
+    pub(crate) fn freeze_targets(&self, path: &[Option<String>]) -> Option<FrozenTargets> {
+        let lead = self.first_painted_line(path)?;
         let (direct, grouped, hidden) = self.live_targets().unwrap_or_default();
         let ids = |rows: Vec<usize>| rows.into_iter().map(|r| self.sheet.id(r)).collect();
-        FrozenTargets {
+        let anchor_lead = match self.selection.as_ref().map(|s| &s.anchor_row) {
+            Some(At::Group(anchor)) => self.first_painted_line(anchor),
+            _ => None,
+        };
+        Some(FrozenTargets {
             direct: ids(direct),
             grouped: ids(grouped),
             hidden: ids(hidden),
+            cols: self
+                .live_cols()
+                .into_iter()
+                .filter_map(|c| self.plan.columns.get(c).map(|p| p.def.name))
+                .collect(),
+            lead: self.sheet.id(lead),
+            depth: path.len(),
+            anchor_lead: anchor_lead.map(|r| self.sheet.id(r)),
+        })
+    }
+
+    /// The first line, in painted order, under the group at `path`:
+    /// preorder over the rollup, which a sort has ranked.
+    fn first_painted_line(&self, path: &[Option<String>]) -> Option<usize> {
+        let mut stack = vec![self.group_node(path)?];
+        while let Some(id) = stack.pop() {
+            let n = &self.rollup.nodes[id];
+            if let NodeKind::Leaf { row } = n.kind {
+                return Some(row);
+            }
+            stack.extend(n.children.iter().rev());
         }
+        None
     }
 
     /// The hidden lines a column's notice counts: a quantity counts a
@@ -375,20 +447,18 @@ impl PricerTile {
     }
 
     /// Run `f` — a rebuild after a grouping-row editor's own write — with
-    /// [`PricerTile::own_write`] naming `line`, so `follow_editor` moves
-    /// the editor with its lines rather than dropping it.
+    /// [`PricerTile::own_write`] holding its frozen targets, so a
+    /// selection anchor that write moved follows its lead line rather than
+    /// clearing. An outer call's targets stand inside a nested one.
     pub(crate) fn as_own_write<R>(
         &mut self,
-        line: Option<LineId>,
+        frozen: Option<Rc<FrozenTargets>>,
         f: impl FnOnce(&mut Self) -> R,
     ) -> R {
-        let grouped = matches!(
-            self.editor.as_ref().map(|e| e.target().0),
-            Some(EditOn::Group { .. })
-        );
-        self.own_write = line.filter(|_| grouped);
+        let outer = self.own_write.clone();
+        self.own_write = outer.clone().or(frozen);
         let out = f(self);
-        self.own_write = None;
+        self.own_write = outer;
         out
     }
 
@@ -450,9 +520,6 @@ impl PricerTile {
         let mut edits = Vec::new();
         let mut set = 0usize;
         let mut skips = Skips::default();
-        // The first line given the value: the line a grouping-row editor
-        // follows should the write move every line out of its path.
-        let mut first_set: Option<usize> = None;
         // A quantity sets each root: a package through its weights, a
         // bare line (or a leg selected on its own row) to the number.
         let lines = if kind == ColumnKind::Qty && editable {
@@ -468,7 +535,6 @@ impl PricerTile {
                 match package::commit(&self.sheet, pkg, kind, &format, text) {
                     Ok(es) => {
                         set += legs.clone().filter(|&l| self.sheet.is_line(l)).count();
-                        first_set = first_set.or(legs.clone().next());
                         edits.extend(es);
                     }
                     Err(_) => skips.add(Skip::Refused),
@@ -504,7 +570,6 @@ impl PricerTile {
                 Ok(Some(edit)) => {
                     edits.push(edit);
                     set += 1;
-                    first_set = first_set.or(Some(line));
                 }
                 // Already that value: it counts as set, with no edit.
                 Ok(None) => set += 1,
@@ -528,27 +593,33 @@ impl PricerTile {
             cx.notify();
             return false;
         }
-        let written = first_set.map(|row| self.sheet.id(row));
+        // A grouping-row editor closes before the write lands: the write
+        // may carry the lead line anywhere, into a closed group even, and
+        // a field still open across that rebuild would be dropped with a
+        // footer for a commit that succeeded. The cursor then goes where
+        // the lead-line rule puts it, or the nearest painted row above.
+        let frozen = self.editor.as_ref().and_then(|e| e.frozen());
+        if frozen.is_some() {
+            self.release_editor(cx);
+        }
         // Every edit is a `Set*` on its own line, so no edit shifts
         // another's row index; one batch makes one undo entry and a
         // refusal rolls the whole batch back. Defensive: every edit was
         // validated against the sheet above, so no route reaches this
         // refusal today — but should the sheet's own checks ever outgrow
-        // the cell's, the value must not half-land.
-        //
-        // A grouping-row editor is still open across the write: should it
-        // move every line out of the path (a grouped column), the rebuild
-        // moves the editor and the cursor to the group row the written
-        // line now sits under (one it merged with, perhaps), rather than
-        // reading the write as the cell moving away under it.
+        // the cell's, the value must not half-land (a grouping-row editor
+        // is closed by then; the footer says why nothing changed).
         if !edits.is_empty()
-            && let Err(e) = self.as_own_write(written, |this| this.apply_edits(edits, cx))
+            && let Err(e) = self.as_own_write(frozen.clone(), |this| this.apply_edits(edits, cx))
         {
             self.footer = Some(e.to_string().into());
             self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
             return false;
+        }
+        if let Some(frozen) = frozen {
+            self.place_cursor_by_lead(&frozen, cx);
         }
         self.notice = Some(set_notice(set, &skips).into());
         self.rebuild_chrome();
@@ -1036,10 +1107,11 @@ impl PricerTile {
             .map(|&r| (self.sheet.id(r), self.step_mark(r)))
             .collect();
         // Every rebuild below is this editor's own write: a step on the
-        // grouped column (or under a `status` grouping) moves a grouping
-        // row's lines out of its path, and the editor and the cursor
-        // follow the first stepped line instead of dropping as moved.
-        let written = touched.first().map(|&r| self.sheet.id(r));
+        // grouped column (or under a `status` grouping) can move a
+        // selection's grouping-row anchor, which then follows its lines
+        // rather than clearing (the editor itself follows its lead line
+        // on every rebuild, own write or not).
+        let written = self.editor.as_ref().and_then(|e| e.frozen());
         let undo = match self.apply_batch(edits) {
             Ok(Some(u)) => u,
             Ok(None) => return Some(()),
@@ -1173,14 +1245,14 @@ impl PricerTile {
         }
         let shown = bulk.notice.clone();
         // A typed commit after steps takes them back with its grouping-row
-        // editor still open: the rollback moves the lines back, and the
-        // editor follows them as it followed each step.
-        let stepped = bulk.after.keys().next().copied();
+        // editor still open: the rollback is its own write, so a selection
+        // anchor the steps moved follows the lines back.
+        let frozen = self.editor.as_ref().and_then(|e| e.frozen());
         if self.take_back_steps(bulk) {
             if shown.is_some() && self.notice == shown {
                 self.notice = None;
             }
-            self.as_own_write(stepped, |this| this.after_edit(cx));
+            self.as_own_write(frozen, |this| this.after_edit(cx));
         }
     }
 

@@ -28445,8 +28445,8 @@ run_mutation "pricer select: a package qty step steps each leg by one" \
 # Every cancel of a live step's editor takes the steps back.
 run_mutation "pricer select: escape keeps the live steps" \
   crates/geode-pricer/src/tile.rs \
-  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, false, cx);\n            if let Some((path, id)) = home' \
-  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, true, cx);\n            if let Some((path, id)) = home' \
+  '            self.as_own_write(frozen.clone(), |this| this.settle_bulk(bulk, false, cx));' \
+  '            self.as_own_write(frozen.clone(), |this| this.settle_bulk(bulk, true, cx));' \
   geode-pricer escape_rolls_every_step_back
 
 # A rollback runs only while the steps are the sheet's last change: a
@@ -30771,9 +30771,11 @@ run_mutation "pricer group edit: shown lines count as hidden" \
   '        .filter(|&row| sheet.is_line(row))' \
   geode-pricer a_group_row_edit_leaves_a_scope_hidden_line_and_counts_it
 
+# A typed commit on a grouping row puts the cursor by the lead-line rule:
+# on the group its lines moved into, or the closed group above it.
 run_mutation "pricer group edit: the cursor is lost after a re-tag" \
-  crates/geode-pricer/src/tile.rs \
-  '            self.cursor.at = Some(At::Group(dest.clone()));' \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if let Some(frozen) = frozen {\n            self.place_cursor_by_lead(&frozen, cx);\n        }' \
   '' \
   geode-pricer a_group_row_retag_lands_the_cursor_on_the_merged_group
 
@@ -30785,32 +30787,66 @@ run_mutation "pricer group edit: targets are read live, not frozen" \
   '        if let Some(EditOn::Group { frozen, .. }) = None::<EditOn> {' \
   geode-pricer a_line_joining_the_group_mid_edit_is_not_written
 
-# The editor survives its own write moving its lines out of the path.
-run_mutation "pricer group edit: the editor's own write drops it as moved" \
+# The lead line is the first line of the CURSOR's group row, not of the
+# selection: with a `V` from [3000] the editor on [5000] follows a 5000 line.
+run_mutation "pricer group edit: the lead line is the selection's first line" \
   crates/geode-pricer/src/tile/select.rs \
-  '        self.own_write = line.filter(|_| grouped);' \
-  '        self.own_write = line.filter(|_| grouped && false);' \
-  geode-pricer a_live_step_on_the_grouped_column_follows_its_lines
+  '        let lead = self.first_painted_line(path)?;' \
+  '        let lead = self.first_painted_line(path).and(Some(0))?;' \
+  geode-pricer a_step_keeps_a_selection_whose_anchor_group_it_moves
 
-run_mutation "pricer group edit: a typed re-tag reads as the cell moving" \
+# The editor follows its lead line on every rebuild, not only when its
+# row stops painting: stepping through a group that still paints carries
+# it on with the lines.
+run_mutation "pricer group edit: the editor moves only when its row is gone" \
+  crates/geode-pricer/src/tile.rs \
+  '            let why = match self.lead_place(frozen) {' \
+  '            let why = match if self.row_at(at).is_some() { LeadPlace::On(at.clone()) } else { self.lead_place(frozen) } {' \
+  geode-pricer a_step_through_a_still_painted_group_follows_the_lead_line
+
+run_mutation "pricer group edit: the editor stays behind in a merged group (qty)" \
+  crates/geode-pricer/src/tile.rs \
+  '            let why = match self.lead_place(frozen) {' \
+  '            let why = match if self.row_at(at).is_some() { LeadPlace::On(at.clone()) } else { self.lead_place(frozen) } {' \
+  geode-pricer a_qty_step_through_an_existing_group_follows_the_lead_line
+
+# A block's columns are frozen with its targets: a selection cleared
+# mid-edit must not shrink the next press to the cursor's column.
+run_mutation "pricer group edit: block columns are read live" \
   crates/geode-pricer/src/tile/select.rs \
-  '            && let Err(e) = self.as_own_write(written, |this| this.apply_edits(edits, cx))' \
-  '            && let Err(e) = self.apply_edits(edits, cx)' \
-  geode-pricer a_group_row_retag_lands_the_cursor_on_the_merged_group
+  '        if let Some(frozen) = self.editor.as_ref().and_then(|e| e.frozen()) {' \
+  '        if let Some(frozen) = None::<Rc<FrozenTargets>> {' \
+  geode-pricer a_block_step_keeps_its_columns_when_the_selection_clears
 
-# The step path follows its lines too: each press re-anchors the editor
-# and the cursor.
-run_mutation "pricer group edit: a step does not follow its lines" \
+# A selection anchored on a group the editor's own step moves follows the
+# group's first line instead of clearing.
+run_mutation "pricer group edit: an own step clears the selection" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        let total = bulk.steps;\n        self.as_own_write(written, |this| this.after_edit(cx));' \
-  $'        let total = bulk.steps;\n        self.after_edit(cx);' \
-  geode-pricer a_live_step_on_the_grouped_column_follows_its_lines
+  '        let Some(lead) = self.own_write.as_ref().and_then(|f| f.anchor_lead) else {' \
+  '        let Some(lead) = self.own_write.as_ref().and_then(|f| f.anchor_lead.filter(|_| false)) else {' \
+  geode-pricer a_step_keeps_a_selection_whose_anchor_group_it_moves
 
+# A drop after steps says the steps stand, never that the edit refused.
+run_mutation "pricer group edit: a drop after steps reads as a plain drop" \
+  crates/geode-pricer/src/tile.rs \
+  '                LeadPlace::Hidden if stepped => Some(STEPS_KEPT_HIDDEN),' \
+  '                LeadPlace::Hidden if false => Some(STEPS_KEPT_HIDDEN),' \
+  geode-pricer a_drop_after_steps_keeps_them_and_says_so
+
+# A successful commit closes the editor before its write: no drop footer
+# even when the lines land in a closed group.
+run_mutation "pricer group edit: a successful commit shows a drop footer" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if frozen.is_some() {\n            self.release_editor(cx);\n        }' \
+  '' \
+  geode-pricer a_retag_into_a_closed_parent_lands_the_cursor_on_it
+
+# Escape's rollback puts the cursor home by the same lead-line rule.
 run_mutation "pricer group edit: escape leaves the cursor where the steps took it" \
   crates/geode-pricer/src/tile.rs \
-  '                self.cursor.at = Some(At::Group(dest));' \
+  '                self.place_cursor_by_lead(&frozen, cx);' \
   '' \
-  geode-pricer a_qty_step_under_a_qty_grouping_keeps_its_lines
+  geode-pricer a_qty_step_through_an_existing_group_follows_the_lead_line
 
 # A hidden leg of a package a quantity skips as split counts once.
 run_mutation "pricer group edit: a hidden leg of a skipped package counts twice" \

@@ -2735,24 +2735,42 @@ other column writes the one value to each line; a barrier on a vanilla line
 counts `n/a`. Lines the scope hides are never written; the ones the group
 would hold were they shown count as `hidden`. On a qty, strike, barrier or
 shift cell the arrows step every line live, as over a selection: `escape`
-takes the steps back and `enter` keeps them as one undo entry. Editing the
-group's own grouped column, or an enclosing group's shown on a nested row,
-moves its lines: the cursor lands on the group row they moved into (one they
-merged with, if it already existed). A live step that moves them (stepping
-the grouped column, or any step under a `status` grouping, which sends the
-lines to `pricing…`) carries the open editor and the cursor along to that
-row, press by press; `escape` brings both back with the lines. Undoing a
-re-tag moves the lines back but leaves the cursor on the group they had
-moved into. A group path that stops painting for any other reason (a
-regroup, the scope hiding the lines, another write) closes the editor with
-`the cell moved; edit refused`, or `the line is hidden by the scope; edit
-dropped` when the scope hid them.
+takes the steps back and `enter` keeps them as one undo entry.
+
+The editor follows a lead line, never the group's path: the first line the
+group row paints when the editor opens. After every rebuild while it is
+open (its own step, a delivery, a regroup, a rollback) the editor and the
+cursor sit on the group row that holds the lead line at the editor's
+original depth; after a regroup to a shallower chain, its deepest group
+row, or with no grouping the line's own row. So editing the group's own
+grouped column, or an enclosing group's shown on a nested row, carries
+them to the group the lines moved into, one they merged with or one they
+then left again, press by press, and under a `status` grouping (where any
+step sends the lines to `pricing…`) a delivery that turns them fresh again
+moves the editor with them. `escape` takes the steps back and the same rule
+puts the cursor home with the lines. A typed commit closes the editor with
+no footer and puts the cursor on the lead line's row by the same rule, or
+the nearest painted row above it when that is inside a closed group.
+Undoing a re-tag moves the lines back but leaves the cursor where it is.
+The editor closes only when the lead line cannot paint at all: deleted, the
+sheet replaced, hidden by the scope, or inside a closed group. With no step
+taken the footer reads `the cell moved; edit refused`, `the line is hidden
+by the scope; edit dropped` or `the line moved to another group; edit
+dropped`; after steps they stand as one undo entry and the footer says so
+(`edit closed: the line is hidden by the scope; steps kept`, `…the line is
+in a closed group; steps kept`, `…the line went away; steps kept`).
 
 A selection's typed commit and live step treat each selected group row the
 same way: the targets are the selected line rows and every selected group's
 lines, each line written once. `i` on a group row under a selection opens
-the editor there and commits over the selection's targets, fixed when it
-opens as on a group alone.
+the editor there and commits over the selection's targets and columns (a
+`v` block's columns stay the block's for every press), fixed when it opens
+as on a group alone; the lead line is the first line of the group row the
+cursor is on. A step or a rollback that moves the group the selection is
+anchored on does not clear the selection: the anchor follows the first
+line that group painted, so the selection stays painted through the steps
+and is whole again after `escape`. Losing the anchor any other way (a
+regroup, another write) clears it as below.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
 are selected too. `y y` or `V y` on a split package row yanks that row's
