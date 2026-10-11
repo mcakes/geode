@@ -783,6 +783,12 @@ pub mod fixtures {
 
     impl Rows {
         pub fn snapshot(&self, dataset: &str, generation: Option<i64>) -> Snapshot {
+            self.snapshot_with(provenance(dataset, generation))
+        }
+
+        /// [`Rows::snapshot`] under a given provenance (a source time, a
+        /// historical read).
+        pub fn snapshot_with(&self, provenance: Provenance) -> Snapshot {
             let depth = self.grouping.len();
             let mut columns: Vec<(ColumnMeta, TestColumn)> = Vec::new();
             for (i, g) in self.grouping.iter().enumerate() {
@@ -797,7 +803,7 @@ pub mod fixtures {
                 let values = self.rows.iter().map(|(_, _, v)| v[i]).collect();
                 columns.push((sum(m, depth), TestColumn::F64(values)));
             }
-            Snapshot::for_tests_with_provenance(columns, depth, provenance(dataset, generation))
+            Snapshot::for_tests_with_provenance(columns, depth, provenance)
         }
     }
 

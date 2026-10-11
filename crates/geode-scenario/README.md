@@ -70,10 +70,15 @@ builtin five, the pivot and the tile.
   the frame's grouping. A followed-group change drops the picture and asks
   again. Hiding keeps the chain in flight; closing cancels by key and
   answers an open barrier through the deferred door. A refused submission
-  or an unresolved named expression is a danger notice and answers the
-  barrier. The picture's notices: diff with no base row in scope, and no
-  data yet (no leaf and no generation); an empty scope under a generation
-  is an empty grid with the domains painted and no notice.
+  at any step, or an unresolved named expression, is a danger notice and
+  answers the barrier; a refusal forgets what was asked, so the next frame
+  notification asks again. A snapshot that does not fit the shape is an
+  error and the last picture (cells, source times, what `c`/`m` rebuild
+  over) stays. The picture's notices: diff with no base row in scope, and
+  no data yet (no leaf, and the dataset's freshness has neither a
+  generation nor a source time; a historical read has only the time). An
+  empty scope over published data is an empty grid with the domains
+  painted and no notice.
 - `header.rs`: the shared header strip (title and readout; mode, links,
   health, ×), the table, and the footer (the reported notice; the
   selection's totals or the cursor readout).

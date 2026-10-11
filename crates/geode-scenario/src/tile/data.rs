@@ -292,8 +292,7 @@ impl ScenarioTile {
                         as_of,
                     }
                 }
-                // No answer is owed: fail the chain, which arrives.
-                Err(r) => self.hand_over(tag, Err(refused(&r)), cx),
+                Err(r) => self.refuse_step(&r, cx),
             }
         } else {
             let next = remaining.remove(0);
@@ -308,7 +307,7 @@ impl ScenarioTile {
                         as_of,
                     }
                 }
-                Err(r) => self.hand_over(tag, Err(refused(&r)), cx),
+                Err(r) => self.refuse_step(&r, cx),
             }
         }
     }
@@ -339,7 +338,7 @@ impl ScenarioTile {
                     ),
                     Some(grouping) => match self.submit_grouped(tag, grouping, &scope, &as_of) {
                         Ok(()) => self.fetch = Fetch::Totals { tag, domains, main },
-                        Err(r) => self.hand_over(tag, Err(refused(&r)), cx),
+                        Err(r) => self.refuse_step(&r, cx),
                     },
                 },
             },
@@ -359,6 +358,23 @@ impl ScenarioTile {
             other @ Fetch::Domains { .. } => self.fetch = other,
             Fetch::Idle => {}
         }
+    }
+
+    /// A later step of the chain was refused. No outcome is owed, so the
+    /// barrier is answered here, and the versions asked under are
+    /// forgotten (`Retry`): the next frame notification asks again, rather
+    /// than self-arriving while the notice stands.
+    fn refuse_step(&mut self, refusal: &Refusal, cx: &mut Context<Self>) {
+        let key = self.key();
+        self.fetch = Fetch::Idle;
+        self.set_error(Notice::danger(refused(refusal)));
+        self.following.submitted(
+            false,
+            Unanswered::Retry,
+            &mut FrameDoor::new(&self.frame, cx),
+            key,
+        );
+        cx.notify();
     }
 
     /// Hand the chain's answer, or its failure, to the barrier: the one
@@ -392,54 +408,77 @@ impl ScenarioTile {
         cx.notify();
     }
 
-    /// Put a fetched picture on screen: the error it answers clears, the
-    /// pivot is built, and the stale timer arms on its source times.
+    /// Put a fetched picture on screen. The pivot is built first: only a
+    /// picture that fits the shape replaces the last one, clears the error
+    /// it answers and arms the stale timer on its source times. One that
+    /// does not fit (a stale or foreign delivery) is an error, and the last
+    /// picture, its times and what `c`/`m` rebuild over all stay (spec §7).
     fn install(&mut self, fetched: Arc<Fetched>, cx: &mut Context<Self>) {
-        self.error = None;
-        self.times = fetched
-            .main
-            .provenance()
-            .datasets
-            .iter()
-            .filter_map(|f| f.as_of.as_deref())
-            .filter_map(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-            .map(|t| t.with_timezone(&chrono::Utc))
-            .collect();
-        self.picture = Some(fetched);
-        self.rebuild_pivot(cx);
-        self.arm_stale(cx);
+        match self.build(&fetched) {
+            Ok(pivot) => {
+                self.error = None;
+                self.times = fetched
+                    .main
+                    .provenance()
+                    .datasets
+                    .iter()
+                    .filter_map(|f| f.as_of.as_deref())
+                    .filter_map(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc))
+                    .collect();
+                self.show_pivot(&fetched.main, pivot, cx);
+                self.picture = Some(fetched);
+                self.arm_stale(cx);
+            }
+            Err(e) => self.set_error(Notice::danger(format!("picture: {e}"))),
+        }
+        cx.notify();
     }
 
-    /// Build the pivot for the current mode over the last picture and
+    fn build(&self, p: &Fetched) -> Result<Pivot, String> {
+        let mode = Mode {
+            currency: self.state.currency,
+            diff: self.state.diff,
+        };
+        Pivot::build(&p.main, p.totals.as_deref(), &self.shape, mode, &p.domains)
+    }
+
+    /// Paint `pivot` and recompute the notice the picture carries.
+    fn show_pivot(&mut self, main: &Snapshot, pivot: Pivot, cx: &mut Context<Self>) {
+        self.standing = self.picture_notice(main, &pivot);
+        let pivot = Arc::new(pivot);
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().set_picture(Some(pivot));
+            t.refresh(cx);
+        });
+        self.prune_dismissed();
+    }
+
+    /// Rebuild the pivot for the current mode over the last picture and
     /// recompute the notice the picture itself carries (the missing diff
     /// base, no data yet). A query error is not the picture's and stays.
     pub(crate) fn rebuild_pivot(&mut self, cx: &mut Context<Self>) {
         let Some(p) = self.picture.clone() else {
             return;
         };
-        let mode = Mode {
-            currency: self.state.currency,
-            diff: self.state.diff,
-        };
-        match Pivot::build(&p.main, p.totals.as_deref(), &self.shape, mode, &p.domains) {
-            Ok(pivot) => {
-                self.standing = self.picture_notice(&p.main, &pivot);
-                let pivot = Arc::new(pivot);
-                self.table.update(cx, |t, cx| {
-                    t.delegate_mut().set_picture(Some(pivot));
-                    t.refresh(cx);
-                });
+        match self.build(&p) {
+            Ok(pivot) => self.show_pivot(&p.main, pivot, cx),
+            // The installed picture fit the shape; a mode cannot unfit it.
+            // Said rather than dropped, should it ever happen.
+            Err(e) => {
+                self.standing = Some(Notice::danger(format!("picture: {e}")));
+                self.prune_dismissed();
             }
-            // A snapshot that does not fit the shape: the last pivot stays.
-            Err(e) => self.standing = Some(Notice::danger(format!("picture: {e}"))),
         }
-        self.prune_dismissed();
         cx.notify();
     }
 
     /// Spec §7: diff with no base row in scope is a warning naming the axis
-    /// and base; no leaf and no generation is "no data yet". An empty
-    /// scope under a generation is an empty grid and says nothing.
+    /// and base. No leaf, and a dataset freshness with neither a generation
+    /// nor a source time, is "no data yet": a historical read carries no
+    /// generation but its resolved time, a live one both once anything is
+    /// published. An empty scope over published data is an empty grid and
+    /// says nothing.
     fn picture_notice(&self, main: &Snapshot, pivot: &Pivot) -> Option<Notice> {
         if pivot.diff_base_missing {
             let base = match self.shape.diff.as_ref().map(|d| &d.base) {
@@ -454,13 +493,13 @@ impl ScenarioTile {
         }
         let leaf_depth = self.shape.grouping().len();
         let has_leaves = (0..main.rows()).any(|r| main.depth_of_row(r) == Some(leaf_depth));
-        let generation = main
+        let published = main
             .provenance()
             .datasets
             .iter()
             .find(|f| f.dataset == self.shape.dataset)
-            .and_then(|f| f.generation);
-        (!has_leaves && generation.is_none())
+            .is_some_and(|f| f.generation.is_some() || f.as_of.is_some());
+        (!has_leaves && !published)
             .then(|| Notice::status(format!("no {} data yet", self.shape.dataset)))
     }
 

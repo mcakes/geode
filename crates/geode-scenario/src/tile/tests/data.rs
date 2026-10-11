@@ -7,7 +7,7 @@ use super::*;
 use crate::core::pivot::fixtures::{ladder_main, vega_main, vega_totals};
 use geode_core::link::{Group, Membership, Posting, underlying_scope};
 use geode_core::query::{AsOf, DistinctOutcome, QueryKey, QueryOutcome};
-use geode_core::snapshot::Snapshot;
+use geode_core::snapshot::{Freshness, Provenance, Snapshot};
 use geode_data::QueryParams;
 use geode_shell::frame::Publish;
 use geode_shell::module::Delivery;
@@ -596,6 +596,138 @@ fn no_generation_yet_is_a_status_notice_and_an_empty_scope_paints_the_domain(
     );
     assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
     assert_eq!(h.delegate(&vcx, |d| d.layout.data_rows), 2);
+    // A historical read carries no generation, only the source time it
+    // resolved: published data, so an empty scope is again no notice.
+    vcx.update(|w, cx| h.content.command("asof 2026-10-09T15:00:00Z", w, cx))
+        .unwrap();
+    vcx.run_until_parked();
+    let reqs = h.requests();
+    let tag = distincts(&reqs)[0].tag;
+    h.answer_distinct(&mut vcx, tag, "tenor", &["1Y", "2Y"]);
+    h.answer_distinct(&mut vcx, tag, "moneyness", &["90.0"]);
+    let _ = h.requests();
+    let historical = || Provenance {
+        datasets: vec![Freshness {
+            dataset: "vega_buckets".into(),
+            as_of: Some("2026-10-09T14:58:00+00:00".into()),
+            generation: None,
+        }],
+        as_of_request: Some("2026-10-09T15:00:00+00:00".into()),
+    };
+    h.answer_query(&mut vcx, tag, empty.snapshot_with(historical()));
+    let _ = h.requests();
+    h.answer_query(&mut vcx, tag, empty_totals.snapshot_with(historical()));
+    assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
+    assert_eq!(
+        h.delegate(&vcx, |d| (d.layout.data_rows, d.layout.data_cols)),
+        (2, 1),
+        "the domain paints"
+    );
+}
+
+/// A refusal on a later step of the chain (here the main query, after
+/// both domains) is a notice and answers the barrier, and forgets what was
+/// asked: the next frame notification asks again rather than standing on
+/// the refusal.
+#[gpui::test]
+fn a_refusal_mid_chain_answers_the_barrier_and_the_next_change_asks_again(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_bound(cx, "vega_kt", None);
+    h.show(&mut vcx);
+    h.open_flip(&mut vcx);
+    let reqs = h.requests();
+    let tag = distincts(&reqs)[0].tag;
+    h.answer_distinct(&mut vcx, tag, "tenor", &["1Y"]);
+    let _ = h.requests();
+    h.data.fill_for_tests();
+    h.answer_distinct(&mut vcx, tag, "moneyness", &["90.0"]);
+    assert!(
+        h.notices(&vcx)
+            .iter()
+            .any(|n| n.contains("refused") && n.contains("busy")),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    assert!(!h.barrier_open(&vcx), "the refused chain arrived");
+    // Drained: the pool admits again. Any frame notification retries.
+    let _ = h.requests();
+    h.frame.update(&mut vcx, |_, cx| cx.notify());
+    vcx.run_until_parked();
+    let reqs = h.requests();
+    let q = queries(&reqs);
+    assert_eq!(q.len(), 1, "the main query again: {reqs:?}");
+    h.answer_query(
+        &mut vcx,
+        q[0].tag,
+        vega_main().snapshot("vega_buckets", Some(1)),
+    );
+    let _ = h.requests();
+    h.answer_query(
+        &mut vcx,
+        q[0].tag,
+        vega_totals().snapshot("vega_buckets", Some(1)),
+    );
+    assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
+}
+
+/// Spec §7: a snapshot that does not fit the shape is an error and the
+/// last picture stays: what is painted, the source times the stale timer
+/// arms on, and what `c` rebuilds over.
+#[gpui::test]
+fn a_snapshot_that_does_not_fit_keeps_the_last_picture(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound_with(cx, crate::core::pivot::fixtures::spot_ladder(), None);
+    let at = |t: &str| Provenance {
+        datasets: vec![Freshness {
+            dataset: "spot_ladder".into(),
+            as_of: Some(t.into()),
+            generation: Some(1),
+        }],
+        as_of_request: None,
+    };
+    h.show(&mut vcx);
+    let reqs = h.requests();
+    let tag = distincts(&reqs)[0].tag;
+    h.answer_distinct(&mut vcx, tag, "spot_shift", &["-5.0", "0.0", "5.0"]);
+    let _ = h.requests();
+    h.answer_query(
+        &mut vcx,
+        tag,
+        ladder_main().snapshot_with(at("2026-10-09T14:00:00+00:00")),
+    );
+    let first = chrono::DateTime::parse_from_rfc3339("2026-10-09T14:00:00Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.times.clone()), [first]);
+    h.publish(&mut vcx, "spot_ladder");
+    let reqs = h.requests();
+    let tag = distincts(&reqs)[0].tag;
+    h.answer_distinct(&mut vcx, tag, "spot_shift", &["-5.0", "0.0", "5.0"]);
+    let _ = h.requests();
+    // Grouped by tenor × moneyness: not this shape's.
+    h.answer_query(
+        &mut vcx,
+        tag,
+        vega_main().snapshot_with(at("2026-10-09T15:00:00+00:00")),
+    );
+    let notices = h.notices(&vcx);
+    assert!(
+        notices.len() == 1 && notices[0].starts_with("picture: "),
+        "{notices:?}"
+    );
+    assert_eq!(
+        h.delegate(&vcx, |d| d.layout.data_cols),
+        3,
+        "the picture stays"
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.times.clone()),
+        [first],
+        "the stale timer keeps the painted picture's times"
+    );
+    vcx.simulate_keystrokes("c");
+    assert_eq!(h.notices(&vcx), notices, "c rebuilds over the last picture");
+    assert_eq!(h.delegate(&vcx, |d| d.layout.data_cols), 3);
 }
 
 /// Spec §7: diff without a base row in scope shows absolutes and a
