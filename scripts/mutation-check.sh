@@ -24498,8 +24498,9 @@ run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row
   crates/geode-pricer/src/tile.rs \
   '                self.cursor.at = Some(at);
                 self.sync_cursor(cx);
-                if group {' \
-  '                if group {' \
+                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  '                let _ = at;
+                let Some(c) = SheetDelegate::plan_col(*col) else {' \
   geode-pricer a_tree_column_double_click_while_the_bar_is_open_keeps_that_row
 
 # A chevron stops propagation, so no SelectCell hands off for it: without
@@ -25100,7 +25101,9 @@ run_mutation "pricer bridge: the reload observer is seeded with the startup key"
 run_mutation "pricer tile: an open editor follows its column through a reload" \
   crates/geode-pricer/src/tile.rs \
   '            Some(c) => {
-                editor.set_col(c);
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.set_col(c);
+                }
                 self.cursor.col = c;' \
   '            Some(c) => {
                 self.cursor.col = c;' \
@@ -25110,9 +25113,11 @@ run_mutation "pricer tile: an open editor follows its column through a reload" \
 # cursor highlight sit on the same column.
 run_mutation "pricer tile: the cursor follows a re-pointed editor" \
   crates/geode-pricer/src/tile.rs \
-  '                editor.set_col(c);
+  '                    editor.set_col(c);
+                }
                 self.cursor.col = c;' \
-  '                editor.set_col(c);' \
+  '                    editor.set_col(c);
+                }' \
   geode-pricer an_open_editor_follows_its_column_through_a_view_reload
 
 # An editor whose column left the plan closes; left open it stays focused
@@ -28340,8 +28345,8 @@ run_mutation "pricer select: totals drop the qty weighting" \
 # An unpriced or failed row makes its column incomplete, never a partial sum.
 run_mutation "pricer select: an unpriced row counts as zero in the totals" \
   crates/geode-pricer/src/core/select.rs \
-  '                _ => None,' \
-  '                _ => *s,' \
+  $'                _ => None,\n            };' \
+  $'                _ => *s,\n            };' \
   geode-pricer risk_totals_are_position_totals_and_refuse_an_incomplete_column
 
 # `v`/`V` anchor on a grouping row's path as on a line.
@@ -28426,8 +28431,8 @@ run_mutation "pricer select: a typed commit under V writes the row's last column
 # per-leg path writes the bare number to every leg (-5/+5 → -5/-5).
 run_mutation "pricer select: a typed package qty writes every leg unweighted" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        if kind == ColumnKind::Qty && editable {\n            let packages' \
-  $'        if false {\n            let packages' \
+  '        let lines = if kind == ColumnKind::Qty && editable {' \
+  '        let lines = if false {' \
   geode-pricer a_typed_package_qty_over_a_selection_scales_its_legs_by_the_weights
 
 # The live step on a package qty steps the PACKAGE qty through the weights.
@@ -28549,10 +28554,10 @@ run_mutation "pricer double-click: a package's tree cell toggles nothing" \
 # through tree_verb's leaf-to-parent rule.
 run_mutation "pricer double-click: a leg's tree cell collapses its package" \
   crates/geode-pricer/src/tile.rs \
-  '                            Some(GridRowKind::Package { .. })
+  '                            Some(GridRowKind::Package { .. } | GridRowKind::Group { .. })
                         )
                     {' \
-  '                            Some(GridRowKind::Package { .. })
+  '                            Some(GridRowKind::Package { .. } | GridRowKind::Group { .. })
                         ) || true
                     {' \
   geode-pricer double_clicking_a_legs_tree_cell_does_not_collapse_its_package
@@ -28675,9 +28680,17 @@ run_mutation "pricer select: a single-cell nudge moves an inherited shift from z
 # own value filled across the targets turned the 4000 P into a call.
 run_mutation "pricer select: an untouched choice or text enter fills the selection" \
   crates/geode-pricer/src/tile.rs \
-  '        if unchanged && self.selection.is_some() {' \
-  '        if false && self.selection.is_some() {' \
+  '        if unchanged && bulk {' \
+  '        if false && bulk {' \
   geode-pricer an_untouched_choice_enter_over_a_selection_writes_nothing
+
+# A grouping row's untouched editor writes nothing either: on a `mixed`
+# cell it opens empty, and the empty text sent to every line is refused.
+run_mutation "pricer group edit: an untouched enter on a group row writes" \
+  crates/geode-pricer/src/tile.rs \
+  '        if unchanged && bulk {' \
+  '        if unchanged && self.selection.is_some() {' \
+  geode-pricer a_group_row_editor_opens_on_its_lines_shared_value
 
 run_mutation "pricer select: an untouched choice reads as changed" \
   crates/geode-pricer/src/tile.rs \
@@ -30435,8 +30448,8 @@ run_mutation "pricer scope: a hidden cursor falls back by index" \
 # A partly hidden package row is read-only: the editor never opens on it.
 run_mutation "pricer scope: the editor opens on a partly hidden package" \
   crates/geode-pricer/src/tile.rs \
-  $'        if let Some(why) = self.read_only(row) {\n            self.footer = Some(why.into());\n            return;\n        }' \
-  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            return;\n        }' \
+  $'                if let Some(why) = self.read_only(row) {\n                    self.footer = Some(why.into());\n                    return;\n                }' \
+  $'                if let Some(why) = None::<&str> {\n                    self.footer = Some(why.into());\n                    return;\n                }' \
   geode-pricer an_edit_on_a_partly_hidden_package_row_is_refused_with_the_footer
 
 # A selected package stands for every leg, hidden ones too: a typed
@@ -30693,24 +30706,92 @@ run_mutation "pricer grouping: :group completes nothing after a column" \
   '        ["group", ..] => Vec::new(),' \
   geode-pricer completions_offer_each_positions_vocabulary_unfiltered
 
-# Group rows and split packages are read-only through the existing doors.
-run_mutation "pricer grouping: i opens on a group row" \
-  crates/geode-pricer/src/tile.rs \
-  $'        if self.cursor_on_group() {\n            self.footer = Some(GROUP_ROW.into());\n            return;\n        }' \
-  $'        if false {\n            self.footer = Some(GROUP_ROW.into());\n            return;\n        }' \
-  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
-
+# Group rows refuse structural verbs; split packages refuse those and
+# their own cell edits, through the existing doors.
 run_mutation "pricer grouping: a structural verb acts on a group row" \
   crates/geode-pricer/src/tile/select.rs \
   $'            if self.cursor_on_group() {\n                return Some(GROUP_ROW);\n            }' \
   '' \
-  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
+  geode-pricer a_group_row_refuses_structural_verbs_and_yanks_its_lines
 
 run_mutation "pricer grouping: a selection holding a group row acts" \
   crates/geode-pricer/src/tile/select.rs \
   $'        let targets: Vec<usize> = if selected {\n            if self.selection_holds_group() {\n                return Some(GROUP_ROW);\n            }' \
   $'        let targets: Vec<usize> = if selected {' \
-  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
+  geode-pricer a_group_row_refuses_structural_verbs_and_yanks_its_lines
+
+# A grouping row's cell edit writes the shown lines beneath it.
+run_mutation "pricer group edit: i refuses on a group row" \
+  crates/geode-pricer/src/tile.rs \
+  '        let (on, row, opening) = match (&self.cursor.at, self.cursor_on_group()) {' \
+  $'        if self.cursor_on_group() {\n            self.footer = Some(GROUP_ROW.into());\n            return;\n        }\n        let (on, row, opening) = match (&self.cursor.at, self.cursor_on_group()) {' \
+  geode-pricer a_group_row_edit_writes_every_line_under_it_as_one_undo
+
+run_mutation "pricer group edit: a selected group row stands for nothing" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        let grouped: Vec<usize> = groups.iter().flat_map(|p| self.group_lines(p)).collect();' \
+  '        let grouped: Vec<usize> = Vec::new();' \
+  geode-pricer a_selection_over_a_closed_group_edits_its_lines_too
+
+run_mutation "pricer group edit: a line under a selected group is written twice" \
+  crates/geode-pricer/src/core/select.rs \
+  $'    lines.sort_unstable();\n    lines.dedup();\n    let mut packages' \
+  $'    lines.sort_unstable();\n    let mut packages' \
+  geode-pricer targets_merge_selected_rows_and_group_lines_once
+
+run_mutation "pricer group edit: a package a group holds in part takes the qty" \
+  crates/geode-pricer/src/core/select.rs \
+  '            split.push(p);' \
+  '            packages.push(p);' \
+  geode-pricer a_group_row_qty_skips_a_split_package
+
+run_mutation "pricer group edit: a package a group holds whole is skipped" \
+  crates/geode-pricer/src/core/select.rs \
+  '        if whole {' \
+  '        if false {' \
+  geode-pricer a_group_row_qty_sets_each_line_and_whole_package
+
+run_mutation "pricer group edit: a split package's quantity is not counted" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            for _ in &t.split {\n                skips.add(Skip::Refused);\n            }\n            t.qty_lines' \
+  '            t.qty_lines' \
+  geode-pricer a_group_row_qty_skips_a_split_package
+
+run_mutation "pricer group edit: hidden lines are not counted" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        for _ in 0..hidden {\n            skips.add(Skip::Hidden);\n        }\n        if set == 0 {' \
+  '        if set == 0 {' \
+  geode-pricer a_group_row_edit_leaves_a_scope_hidden_line_and_counts_it
+
+run_mutation "pricer group edit: shown lines count as hidden" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '        .filter(|&row| sheet.is_line(row) && !vis.is_shown(row))' \
+  '        .filter(|&row| sheet.is_line(row))' \
+  geode-pricer a_group_row_edit_leaves_a_scope_hidden_line_and_counts_it
+
+run_mutation "pricer group edit: the cursor is lost after a re-tag" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            self.cursor.at = Some(At::Group(dest));\n' \
+  $'            let _ = dest;\n' \
+  geode-pricer a_group_row_retag_lands_the_cursor_on_the_merged_group
+
+run_mutation "pricer group edit: a group row's arrows step its text alone" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if self.selection.is_none() && !matches!(on, EditOn::Group(_)) {' \
+  '        if self.selection.is_none() {' \
+  geode-pricer arrows_step_a_group_rows_lines_live
+
+run_mutation "pricer group edit: a group row's editor has no live step" \
+  crates/geode-pricer/src/tile.rs \
+  '        let live = self.selection.is_some() || matches!(on, EditOn::Group(_));' \
+  '        let live = self.selection.is_some();' \
+  geode-pricer arrows_step_a_group_rows_lines_live
+
+run_mutation "pricer group edit: the editor seeds one line's value over mixed" \
+  crates/geode-pricer/src/core/select.rs \
+  '    items.all(|v| v.as_ref() == Some(&first)).then_some(first)' \
+  '    Some(first)' \
+  geode-pricer a_group_row_editor_opens_on_its_lines_shared_value
 
 run_mutation "pricer grouping: a split package edits" \
   crates/geode-pricer/src/tile.rs \
@@ -32169,19 +32250,13 @@ run_mutation "visual commit: marketdata untouched choice keeps the selection" \
   '            self.close_popup_with_window(window, cx);' \
   geode-marketdata an_untouched_choice_commit_over_a_selection_writes_nothing
 
-# A selection's edit passes over group rows, open or closed, and writes
-# only the visible lines it holds.
+# A selection's edit never refuses over a group row: the group stands for
+# the shown lines beneath it.
 run_mutation "pricer selection: a group row refuses the edit" \
   crates/geode-pricer/src/tile/select.rs \
   $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n' \
   $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n        if self.selection_holds_group() {\n            return Some(GROUP_ROW);\n        }\n' \
   geode-pricer a_selection_across_groups_edits_its_lines
-
-run_mutation "pricer selection: a closed group's hidden lines are written" \
-  crates/geode-pricer/src/tile/select.rs \
-  '            .filter_map(|g| self.model.sheet_row(g))' \
-  '            .flat_map(|g| self.grid_rows_under(g))' \
-  geode-pricer a_selection_over_a_closed_group_edits_only_the_visible_lines
 
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \
@@ -34864,13 +34939,19 @@ run_mutation "silence: a matching pattern is checked for its prefix" \
   geode-data \
   a_match_under_an_unlistable_prefix_is_not_a_path_problem
 
-# A double-click on a group row toggles it; the edit route it would
-# otherwise take only refuses on a row with no editable cell.
-run_mutation "pricer tile: a double-click on a group row toggles it" \
+# A double-click on a group row's label toggles it, as on a package's
+# name; on a value cell it opens the editor, which writes the group's lines.
+run_mutation "pricer tile: a double-click on a group row's label edits" \
   crates/geode-pricer/src/tile.rs \
-  '                let group = matches!(at, At::Group(_));' \
-  '                let group = false;' \
-  geode-pricer a_double_click_on_a_group_row_toggles_it
+  '                            Some(GridRowKind::Package { .. } | GridRowKind::Group { .. })' \
+  '                            Some(GridRowKind::Package { .. })' \
+  geode-pricer a_double_click_on_a_group_rows_label_toggles_it_and_a_value_cell_edits
+
+run_mutation "pricer tile: a double-click on a group row's value cell toggles it" \
+  crates/geode-pricer/src/tile.rs \
+  $'                let Some(c) = SheetDelegate::plan_col(*col) else {\n                    // A package or grouping row' \
+  $'                if matches!(self.cursor.at, Some(At::Group(_))) {\n                    self.tree_verb(None, cx);\n                    return;\n                }\n                let Some(c) = SheetDelegate::plan_col(*col) else {\n                    // A package or grouping row' \
+  geode-pricer a_double_click_on_a_group_rows_label_toggles_it_and_a_value_cell_edits
 
 # The blotter's, pricer's and market data's find tables highlight the match
 # run in the table accent every table's match highlights share.
