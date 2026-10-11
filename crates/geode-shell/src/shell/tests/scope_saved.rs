@@ -2296,3 +2296,51 @@ fn a_toggle_that_adds_a_current_row_keeps_the_saved_row_in_view(cx: &mut gpui::T
         "{row:?} inside {list:?}"
     );
 }
+
+/// A refresh that moves nothing (a data or frame tick, an unchanged key)
+/// leaves a wheel-scrolled list where the wheel put it; the next key that
+/// moves the cursor brings it back into view.
+#[gpui::test]
+fn a_refresh_that_moves_nothing_keeps_a_wheel_scroll(cx: &mut gpui::TestAppContext) {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&scopes));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let before = shell.read_with(&vcx, |s, _| s.scope_dialog_scroll.offset());
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: list.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+        modifiers: gpui::Modifiers::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    draw(&mut vcx);
+    let wheeled = shell.read_with(&vcx, |s, _| s.scope_dialog_scroll.offset());
+    assert!(
+        wheeled.y < before.y,
+        "the wheel scrolled: {before:?} -> {wheeled:?}"
+    );
+    shell.update(&mut vcx, |s, cx| s.refresh_dialog_rows(cx));
+    draw(&mut vcx);
+    let after = shell.read_with(&vcx, |s, _| s.scope_dialog_scroll.offset());
+    assert_eq!(after, wheeled, "no snap back to the cursor");
+    // `j` moves the cursor: the list follows it again.
+    vcx.simulate_keystrokes("j");
+    draw(&mut vcx);
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(&mut vcx, "scope-saved-row-1".to_string()).expect("s01 paints");
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "{row:?} inside {list:?}"
+    );
+}

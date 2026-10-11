@@ -164,6 +164,12 @@ pub(crate) struct ScopeDialogState {
     /// first ingredient edits that row instead of loading a saved scope over
     /// it. Any user-chosen move (`rest_in`) clears it.
     forced_saved: bool,
+    /// The list child `follow_cursor` last scrolled to; `None` before the
+    /// first follow and while a step hides the saved group. A re-derive that
+    /// leaves the cursor's child where it was (a data tick, an unchanged
+    /// key) must not scroll: the user may have wheeled the list away from
+    /// the cursor, and a refresh snapping it back is a defect.
+    followed: Option<usize>,
 }
 
 /// What the rows read: the frame generation (every lane value change) and
@@ -192,6 +198,7 @@ impl ScopeDialogState {
             zone: Zone::Current,
             opener,
             forced_saved: false,
+            followed: None,
         }
     }
 
@@ -365,14 +372,19 @@ fn jump_saved(view: &mut ShellView, section: super::saved_view::Section, cx: &Ap
 /// `normalize_zone` all pass there) and after the moves that no re-derive
 /// follows (the saved door's jump, the frozen filter row's press); never
 /// from `build`. The child index comes from `screen::child_index`, which
-/// must agree with `build`'s paint order. Only while the screen is on top:
+/// must agree with `build`'s paint order. It scrolls only when that index
+/// differs from the one it last scrolled to, so a refresh that moves
+/// nothing leaves a wheel-scrolled list alone. Only while the screen is on top:
 /// a step drawn over it does not paint the saved group, so an index into
 /// it would be left pending against the wrong children.
 pub(crate) fn follow_cursor(shell: &mut ShellView) {
-    let Some(state) = shell.scope_dialog.as_ref() else {
+    let Some(state) = shell.scope_dialog.as_mut() else {
         return;
     };
     if !state.on_screen() {
+        // The step's paint drops the saved group and may clamp the offset:
+        // the screen's return must follow afresh.
+        state.followed = None;
         return;
     }
     let layout = super::screen::Layout {
@@ -414,10 +426,13 @@ pub(crate) fn follow_cursor(shell: &mut ShellView) {
                 within,
             }),
     };
-    if let Some(at) = at {
-        shell
-            .scope_dialog_scroll
-            .scroll_to_item(super::screen::child_index(&layout, &at));
+    let Some(ix) = at.map(|at| super::screen::child_index(&layout, &at)) else {
+        return;
+    };
+    // Only a cursor whose child moved scrolls; see `followed`.
+    if state.followed != Some(ix) {
+        state.followed = Some(ix);
+        shell.scope_dialog_scroll.scroll_to_item(ix);
     }
 }
 
