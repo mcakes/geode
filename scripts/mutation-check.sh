@@ -39866,6 +39866,75 @@ run_mutation "history service: dropped non-finite rows earn no load note" \
   geode-data \
   non_finite_rows_are_dropped_from_the_answer_and_named_in_a_load_note
 
+# The demo history is a pure function of (seed, key, day); a walk seeded
+# without the seed makes every seed serve the same history.
+run_mutation "demo hanweck: the vol walk ignores the seed" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '    let mut rng = StdRng::seed_from_u64(fnv(seed, underlying, -1));' \
+  '    let mut rng = StdRng::seed_from_u64(fnv(0, underlying, -1));' \
+  geode-compose \
+  the_first_spx_3m_atm_point_for_seed_42_is_pinned
+
+# `Between` is half-open: a close exactly at `to` belongs to the next ask,
+# or two adjacent spans would both cache it.
+run_mutation "demo hanweck: Between includes a close at to" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '    while on(day, CLOSE) < to {' \
+  '    while on(day, CLOSE) <= to {' \
+  geode-compose \
+  a_weekend_has_no_point_and_overlapping_between_asks_agree
+
+# ... and a close exactly at `from` belongs to this one.
+run_mutation "demo hanweck: Between drops a close at from" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '        if is_weekday(day) && ts >= from {' \
+  '        if is_weekday(day) && ts > from {' \
+  geode-compose \
+  a_weekend_has_no_point_and_overlapping_between_asks_agree
+
+# ATM rises along the term; an inverted structure reads as a stressed
+# market on every demo day.
+run_mutation "demo hanweck: the term structure inverts" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '    x.exp() * (1.0 + 0.18 * (1.0 - (-years(tenor) / 0.9).exp()))' \
+  '    x.exp() * (1.0 - 0.18 * (1.0 - (-years(tenor) / 0.9).exp()))' \
+  geode-compose \
+  the_put_wing_is_above_atm_and_the_call_wing_below_and_the_term_rises
+
+# An equity skew's put wing is steeper than its call wing.
+run_mutation "demo hanweck: a symmetric smile" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '            let wing = if delta > 0.5 { 2.0 } else { 1.0 };' \
+  '            let wing = 1.0;' \
+  geode-compose \
+  the_put_wing_is_above_atm_and_the_call_wing_below_and_the_term_rises
+
+# Inside a weekday session `At` and `Latest` answer an intraday point at
+# the last five-minute mark, not the previous close.
+run_mutation "demo hanweck: no intraday point in session" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '        if time >= OPEN {' \
+  '        if false && time >= OPEN {' \
+  geode-compose \
+  latest_and_at_answer_the_last_business_close_or_an_intraday_point
+
+# An unknown underlying is a missing key: it answers no rows, never every
+# underlying's rows under the asked prefix.
+run_mutation "demo hanweck: any text key names every value" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '        asked.trim() == known' \
+  '        true' \
+  geode-compose \
+  keys_enumerate_the_constants_and_unknown_tables_and_symbols_behave
+
+# Realized vol tracks the 1M implied its window ago.
+run_mutation "demo hanweck: realized vol is not lagged" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '            let lagged = atm(walk[index.saturating_sub(lag)], "1M");' \
+  '            let lagged = atm(walk[index], "1M");' \
+  geode-compose \
+  realized_and_varswap_tables_have_the_declared_shapes
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
