@@ -13,6 +13,7 @@ pub mod linear;
 pub mod marks;
 pub mod palette;
 pub mod scale;
+pub mod spark;
 pub mod time;
 pub mod view;
 
