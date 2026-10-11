@@ -300,8 +300,8 @@ platform's save or open dialog, which is modeless and keyboard-driven by
 the platform; the tile awaits its answer without blocking and binds it to
 the classification shown when the verb ran. The Watchlist tile follows the
 same pattern: `Watchlist: Commit field` and `Watchlist: Cancel` own its
-prompt field, and `Watchlist: New…`, `Clone…`, `Rename…`, `Delete…`,
-`Revert…` and `Rules…` have no default chord.
+prompt field, and `Watchlist: New…`, `Clone…`, `Rename…`, `Delete…` and
+`Revert…` have no default chord (`Rules…` is `r`).
 
 Binding badges are indicative: the palette takes the first compiled binding
 for an action without resolving current contexts or later shadows. They are

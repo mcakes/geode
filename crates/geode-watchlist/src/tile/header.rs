@@ -256,19 +256,44 @@ pub(crate) fn render(h: &HeaderModel, mut c: HeaderChrome, theme: &Theme) -> Div
                     .child(names),
             )
         })
-        // The rules popup hangs from the item's bottom-left edge, as the
-        // switcher does from the name.
+        // The `<k> rules` item is a control: a press toggles the popup
+        // (`watchlist::rules`, the `r` route), taken in the capture phase
+        // ahead of the open popup's outside-press closer, as the switch
+        // control's is. The popup hangs from the item's bottom-left edge,
+        // as the switcher does from the name.
         .when_some(h.rules.clone(), |el, (rules, bad)| {
+            let on_press = dispatch(c.tile, "watchlist::rules");
+            let rules_open = rules_popup.is_some();
+            let item = div()
+                .id(ElementId::NamedInteger(
+                    SharedString::new_static("watchlist-rules"),
+                    tile_id,
+                ))
+                .flex_none()
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .text_color(tone(bad))
+                .debug_selector(move || format!("watchlist-rules-{tile_id}"))
+                .when(rules_open, |el| el.bg(theme.secondary))
+                .when(!rules_open, |el| {
+                    el.pointer_states(control::paint(
+                        theme,
+                        control::Rest::Bare,
+                        theme.background,
+                        tone(bad),
+                    ))
+                })
+                .capture_any_mouse_down(move |event, window, cx| {
+                    if event.button == gpui::MouseButton::Left {
+                        on_press(window, cx);
+                    }
+                })
+                .child(rules);
             el.child(
                 div()
                     .relative()
                     .flex_none()
-                    .child(
-                        div()
-                            .text_color(tone(bad))
-                            .debug_selector(move || format!("watchlist-rules-{tile_id}"))
-                            .child(rules),
-                    )
+                    .child(item)
                     .when_some(rules_popup, |el, m| {
                         el.child(div().absolute().left_0().bottom_0().child(m))
                     }),

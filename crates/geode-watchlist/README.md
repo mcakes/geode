@@ -21,7 +21,7 @@ request and never depends on `geode-data`.
   `watch_emission`), `ACTIONS` (category `Watchlist`) and the
   `DEFAULT_KEYMAP` fragment (contexts `normal`, `visual`, `insert`, `menu`
   and `rules`). New, Clone, Rename, Delete and Revert have no default
-  chord, and Rules… none either: the palette and the `⋯` menu reach them.
+  chord: the palette and the `⋯` menu reach them. Rules… is `r`.
 - `core/session.rs`: the session table (`version`, `name`,
   `sort = [column, "asc" | "desc"]` over `name`, `origin` or `reference`,
   `cursor` holding a member name). An unreadable key is dropped with a
@@ -224,8 +224,11 @@ object is restored, not the file's order.
 
 ## Rules
 
-`r`, `Watchlist: Rules…` and the `⋯` menu's Rules… row open the rules
-popup, hung from the header's `<k> rules` item: one row per rule,
+`r`, `Watchlist: Rules…`, the `⋯` menu's Rules… row and a press on the
+header's `<k> rules` item (a control, like the switch beside it; the press
+is `watchlist::rules`, so it passes the same gate and closes an open
+popup as `r` does) open the rules popup, hung from that item: one row per
+rule,
 `rule <i> · <dataset> · <scope>` (`whole dataset`, `scope <name>`, or
 the expression as written), with the fold's reason in the warning tone
 beneath a rule the startup schema refuses (one over a dataset it lacks,
@@ -344,10 +347,11 @@ last until the next verb or another list is shown; the standing ones
 until the next resolution changes them, and dismissed they hide until
 their text changes; session-restore notices until the trader's first key
 or press in the tile. `escape` (`watchlist::cancel`) peels one layer at a
-time: an open field first (it owns the keys), then a menu (the surface on
-top, which may be acting on the selection), then the rules popup, then a
-live selection, then the warning and danger notices showing, each as a
-click on one would; with nothing to dismiss it is unhandled.
+time: an armed confirm bar first (it answers no and stops there), then an
+open field (it owns the keys), then a menu (the surface on top, which may
+be acting on the selection), then the rules popup, then a live selection,
+then the warning and danger notices showing, each as a click on one would;
+with nothing to dismiss it is unhandled.
 
 ## Link groups
 

@@ -2866,6 +2866,48 @@ fn a_refusal_after_switching_away_keeps_the_shown_list(cx: &mut gpui::TestAppCon
     );
 }
 
+/// The header's `<k> rules` item is the popup's pointer route: a press
+/// toggles it as `r` does, through the same gate.
+#[gpui::test]
+fn a_press_on_the_rules_item_toggles_the_popup(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = rules_shown(cx, europe_rules());
+    let press_rules = |vcx: &mut gpui::VisualTestContext| {
+        h.draw(vcx);
+        let item = vcx
+            .debug_bounds("watchlist-rules-7")
+            .expect("the rules item is painted");
+        vcx.simulate_mouse_down(
+            item.center(),
+            gpui::MouseButton::Left,
+            gpui::Modifiers::none(),
+        );
+    };
+    assert_eq!(h.rules(&vcx), None, "closed at first");
+    press_rules(&mut vcx);
+    assert_eq!(h.rules_cursor(&vcx), Some(0), "open on the first rule");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("rules"));
+    press_rules(&mut vcx);
+    assert_eq!(h.rules(&vcx), None, "a second press closes it");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    // While the shown list's revert is on its way the press is refused
+    // like `r`, and no popup opens.
+    let (h, mut vcx) = open_with(cx, with_mine(true), restored("mine"));
+    h.act(&mut vcx, "watchlist::revert");
+    h.press(&mut vcx, "y");
+    assert_eq!(h.edits(&mut vcx), [removal_of("mine")]);
+    h.draw(&mut vcx);
+    let item = vcx
+        .debug_bounds("watchlist-rules-7")
+        .expect("the rules item is painted");
+    vcx.simulate_mouse_down(
+        item.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.rules(&vcx), None);
+    assert_eq!(h.notices(&vcx), ["reverting mine\u{2026}"]);
+}
+
 // ---- Link-group emission ---------------------------------------------
 
 /// What the shell would pull: asked of the `TileContent` door.
