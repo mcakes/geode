@@ -300,17 +300,11 @@ impl WatchlistTile {
         match &awaiting.shows {
             Some(name) => self.show(name, cx),
             None => {
-                self.state.name = None;
-                self.state.cursor = None;
-                self.grid = crate::core::grid::GridModel::new();
-                self.grid.set_sort(self.state.sort);
-                self.find_entry = None;
-                self.was_shown = false;
+                self.show_none(cx);
                 let rows = self.switch_rows(&snapshot(cx));
                 self.menu =
                     (!rows.is_empty()).then(|| (MenuKind::Switch, Menu::new(rows, &self.chords)));
                 self.menu_at = None;
-                self.rebuild_rows(false, cx);
             }
         }
         cx.notify();
@@ -360,16 +354,28 @@ impl WatchlistTile {
     }
 
     /// `y` on a rename: the new object and the old one's removal in one
-    /// batch, validated again (the lists may have moved while the question
-    /// stood). The object written is the shown one as the tile has it: an
-    /// edit still on its way to the old name goes with the rename, not
-    /// into the old name's removal.
+    /// batch, the name and the ownership checked again (the lists may have
+    /// moved while the question stood: a desk copy appearing under `from`
+    /// would be left standing under the old name). The object written is
+    /// the shown one as the tile has it: an edit still on its way to the
+    /// old name goes with the rename, not into the old name's removal.
     fn rename(&mut self, from: String, to: String, cx: &mut Context<Self>) {
         let snapshot = snapshot(cx);
         let Some(state) = snapshot.lists.get(&from) else {
             self.refuse(format!("not renamed: {from} no longer exists"), cx);
             return;
         };
+        match self.own(&snapshot, Verb::Rename) {
+            Ok(owned) if owned == from => {}
+            Ok(_) => {
+                self.refuse(format!("not renamed: {from} is no longer shown"), cx);
+                return;
+            }
+            Err(refusal) => {
+                self.refuse(format!("not renamed: {}", refusal.long), cx);
+                return;
+            }
+        }
         let asked = Prompt::Rename { from: from.clone() };
         match prompt::submit_object(&asked, &to, &defined(&snapshot)) {
             Step::Rename { .. } => {}

@@ -2683,6 +2683,15 @@ fn revert_is_offered_only_over_a_shadowed_user_copy_and_gates_the_verbs(
     h.press(&mut vcx, "o");
     assert_eq!(h.prompt(&vcx), None);
     assert_eq!(h.notices(&vcx), [reverting]);
+    // The rules popup is a rules verb: the key, the palette and the row
+    // agree with the lane.
+    h.press(&mut vcx, "r");
+    assert_eq!(h.rules(&vcx), None);
+    assert_ne!(h.mode(&vcx).as_deref(), Some("rules"));
+    assert_eq!(h.notices(&vcx), [reverting]);
+    h.act(&mut vcx, "watchlist::rules");
+    assert_eq!(h.rules(&vcx), None);
+    assert_eq!(h.notices(&vcx), [reverting]);
     h.press(&mut vcx, ".");
     let reasons = h.reasons(&vcx).unwrap();
     assert_eq!(reasons[0], off("Add name", reverting));
@@ -2749,4 +2758,75 @@ fn n_on_the_confirm_bar_cancels_and_any_other_key_cancels_too(cx: &mut gpui::Tes
     h.draw(&mut vcx);
     assert_eq!(h.question(&vcx), None);
     assert_eq!(h.edits(&mut vcx), [removal_of("mine")]);
+}
+
+/// A desk copy appearing under the name while the question stands: `y`
+/// would remove the user copy and leave the desk one under the old name,
+/// so the ownership is checked again at `y`, not only the name.
+#[gpui::test]
+fn y_on_a_rename_checks_ownership_again(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, with_mine(false), restored("mine"));
+    h.act(&mut vcx, "watchlist::rename");
+    vcx.simulate_input("ours");
+    h.press(&mut vcx, "enter");
+    assert_eq!(
+        h.question(&vcx).as_deref(),
+        Some("rename mine \u{2192} ours \u{2014} y renames")
+    );
+    // The reload: `mine` now shadows a desk copy.
+    vcx.update(|_, cx| publish(cx, with_mine(true)));
+    assert!(h.question(&vcx).is_some(), "the question stands");
+    h.press(&mut vcx, "y");
+    assert_eq!(h.question(&vcx), None);
+    assert!(h.edits(&mut vcx).is_empty(), "nothing written");
+    assert_eq!(
+        h.notices(&vcx),
+        ["not renamed: mine shadows the desk copy \u{2014} Revert\u{2026} removes it"]
+    );
+    assert_eq!(h.title(&mut vcx), "Watchlist: mine");
+    assert!(!h.awaiting(&vcx));
+    // A clash appearing meanwhile is refused the same way.
+    vcx.update(|_, cx| publish(cx, with_mine(false)));
+    h.act(&mut vcx, "watchlist::rename");
+    vcx.simulate_input("ours");
+    h.press(&mut vcx, "enter");
+    let mut snap = with_mine(false);
+    snap.lists.insert("Ours".into(), user_list(&[], None));
+    vcx.update(|_, cx| publish(cx, snap));
+    h.press(&mut vcx, "y");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert_eq!(
+        h.notices(&vcx),
+        ["not renamed: 'ours' already exists ('Ours')"]
+    );
+}
+
+/// Clone… is allowed while a revert is on its way; its refusal is its own,
+/// and the revert, still in the shell's batch, keeps its gate until the
+/// revert's own refusal or its reload.
+#[gpui::test]
+fn a_refused_clone_does_not_release_the_revert_gate(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, with_mine(true), restored("mine"));
+    h.act(&mut vcx, "watchlist::revert");
+    h.press(&mut vcx, "y");
+    assert_eq!(h.edits(&mut vcx), [removal_of("mine")]);
+    let reverting = "reverting mine\u{2026}";
+    h.act(&mut vcx, "watchlist::clone");
+    vcx.simulate_input("mine2");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.edits(&mut vcx).len(), 1, "the clone");
+    assert_eq!(h.title(&mut vcx), "Watchlist: mine2");
+    // The clone's refusal: back to `mine`, still reverting.
+    let why = "watchlists not written: the user layer is read-only";
+    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    assert_eq!(h.title(&mut vcx), "Watchlist: mine");
+    assert_eq!(h.notices(&vcx), [why]);
+    h.press(&mut vcx, "x");
+    assert_eq!(h.notices(&vcx), [reverting]);
+    assert!(h.edits(&mut vcx).is_empty());
+    // The revert's own refusal ends the wait: the user copy stands.
+    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    h.press(&mut vcx, "x");
+    assert_eq!(h.edits(&mut vcx).len(), 1, "the verbs act again");
+    assert_eq!(h.notices(&vcx), ["removed HSI"]);
 }

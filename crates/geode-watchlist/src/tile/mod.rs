@@ -218,6 +218,14 @@ fn spell(keystrokes: &[Keystroke]) -> String {
         .join(" ")
 }
 
+/// An empty grid sorted the tile's way: what a fresh tile and a newly
+/// shown list start from.
+fn fresh_grid(sort: Option<(SortCol, bool)>) -> GridModel {
+    let mut grid = GridModel::new();
+    grid.set_sort(sort);
+    grid
+}
+
 /// The installed display clock, or the machine's for a tile hosted
 /// without `AppClock`.
 fn clock(cx: &App) -> Clock {
@@ -299,8 +307,7 @@ impl WatchlistTile {
         cx: &mut Context<Self>,
     ) -> WatchlistTile {
         let (state, restore) = restored.map(session::from_table).unwrap_or_default();
-        let mut grid = GridModel::new();
-        grid.set_sort(state.sort);
+        let mut grid = fresh_grid(state.sort);
         // A restored cursor lands on its name once the snapshot holds it.
         if let Some(name) = &state.cursor {
             grid.seed_cursor(name.clone());
@@ -543,17 +550,16 @@ impl WatchlistTile {
         // A create, clone, rename or delete that never landed: back to
         // what was shown before it, ahead of the notices, which showing
         // another list would clear.
-        if refused
-            && let Some(a) = self.awaiting.take()
-            && self.state.name == a.shows
-        {
+        let awaited = refused
+            && self
+                .awaiting
+                .as_ref()
+                .is_some_and(|a| self.state.name == a.shows);
+        if awaited && let Some(a) = self.awaiting.take() {
             self.menu = None;
             match a.restores {
                 Some(name) => self.show(&name, cx),
-                None => {
-                    self.state.name = None;
-                    self.was_shown = false;
-                }
+                None => self.show_none(cx),
             }
         }
         for notice in told {
@@ -564,8 +570,13 @@ impl WatchlistTile {
         }
         if refused {
             self.history.refused();
-            // A refused revert is over: the user copy stands.
-            self.reverting = None;
+            // A refused revert is over: the user copy stands. But a refusal
+            // taken by an awaited create or clone (the verbs allowed while
+            // a revert is on its way) is theirs, not the revert's, which
+            // may still be in the shell's batch: the gate holds.
+            if !awaited {
+                self.reverting = None;
+            }
             self.rebuild_rows(false, cx);
         } else {
             self.rebuild_chrome(cx);
@@ -896,26 +907,39 @@ impl WatchlistTile {
         }
     }
 
-    /// Show `name`. The cursor, the filter, a selection and the last
-    /// verb's notices belonged to the previous list, so they are dropped;
-    /// the sort is the tile's and stays.
+    /// Show `name` (see `replace_shown` for what the previous list takes
+    /// with it).
     fn show(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.state.name.as_deref() != Some(name) {
-            self.state.name = Some(name.to_string());
-            self.state.cursor = None;
-            self.grid = GridModel::new();
-            self.grid.set_sort(self.state.sort);
-            self.find_entry = None;
-            self.notices.outcome.clear();
-            // The history, an open field and the rules popup were the
-            // previous list's.
-            self.history.forget();
-            self.release_prompt(cx);
-            self.rules = None;
+            self.replace_shown(Some(name.to_string()), cx);
         }
         self.was_shown = self.shown_in(&snapshot(cx));
         self.rebuild_rows(false, cx);
         cx.notify();
+    }
+
+    /// Show nothing: the empty state (a delete on its way, a refused
+    /// create from nothing shown). The switcher is the caller's business.
+    pub(super) fn show_none(&mut self, cx: &mut Context<Self>) {
+        self.replace_shown(None, cx);
+        self.was_shown = false;
+        self.rebuild_rows(false, cx);
+        cx.notify();
+    }
+
+    /// The one door a change of the shown name takes. The cursor, the
+    /// filter, a selection, the last verb's notices, the history, an open
+    /// field and the rules popup belonged to the previous list, so they
+    /// go; the sort is the tile's and stays.
+    fn replace_shown(&mut self, name: Option<String>, cx: &mut Context<Self>) {
+        self.state.name = name;
+        self.state.cursor = None;
+        self.grid = fresh_grid(self.state.sort);
+        self.find_entry = None;
+        self.notices.outcome.clear();
+        self.history.forget();
+        self.release_prompt(cx);
+        self.rules = None;
     }
 
     /// A press on shown row `row`: shift extends a row selection to it, a

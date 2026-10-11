@@ -130,7 +130,8 @@ pub(crate) fn render_inline(
 /// The popup's lifetime, keys and the rule verbs.
 impl WatchlistTile {
     /// `r`, `Watchlist: Rules…`, the `⋯` row: open the popup on the first
-    /// rule, or close it when it is open. Nothing shown: refused.
+    /// rule, or close it when it is open. Nothing shown, or the shown
+    /// list's revert on its way: refused, as the `⋯` row says.
     pub(super) fn toggle_rules(&mut self, cx: &mut Context<Self>) {
         if self.rules.is_some() {
             self.close_rules(cx);
@@ -138,6 +139,10 @@ impl WatchlistTile {
         }
         if self.shown(&snapshot(cx)).is_none() {
             self.refuse(NOTHING_SHOWN, cx);
+            return;
+        }
+        if let Err(why) = self.verbs_allowed() {
+            self.refuse(why, cx);
             return;
         }
         self.close_menu(cx);
