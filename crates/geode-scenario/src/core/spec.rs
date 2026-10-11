@@ -201,6 +201,7 @@ mod tests {
             &schema,
         );
         assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(shapes.len(), BUILTIN_KINDS.len(), "every builtin shape");
         for shape in &shapes {
             let ds = schema.dataset(&shape.dataset).unwrap();
             let view = shape.derive_view(ds);

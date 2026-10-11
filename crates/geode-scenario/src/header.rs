@@ -5,7 +5,7 @@
 //! column header, and the footer (the reported notice on the left; the
 //! selection's totals, or the cursor readout, on the right).
 
-use crate::core::readout::{ScopeReadout, scope_readout};
+use crate::core::readout::ScopeReadout;
 use crate::tile::ScenarioTile;
 use geode_shell::fonts;
 use geode_shell::shell::chip::{Tone, chip_paint};
@@ -83,8 +83,8 @@ pub(crate) fn render(tile: &ScenarioTile, cx: &mut Context<ScenarioTile>) -> Div
 /// chips in spec order.
 fn render_header(tile: &ScenarioTile, theme: &Theme, cx: &mut Context<ScenarioTile>) -> Div {
     let id = tile.tile.0;
-    let readout = scope_readout(&tile.effective_scope_for_title(cx));
-    let readout_color = match &readout {
+    let (readout, readout_text) = tile.readout();
+    let readout_color = match readout {
         ScopeReadout::All => theme.muted_foreground,
         ScopeReadout::Nothing => chip_paint(theme, Tone::DangerText).text,
         ScopeReadout::Scope(_) => theme.foreground,
@@ -109,7 +109,7 @@ fn render_header(tile: &ScenarioTile, theme: &Theme, cx: &mut Context<ScenarioTi
                 .truncate()
                 .text_color(readout_color)
                 .debug_selector(move || format!("scenario-readout-{id}"))
-                .child(SharedString::from(readout.text().to_string())),
+                .child(readout_text.clone()),
         );
     for chip in tile.chips() {
         let paint = chip_paint(theme, chip.tone);

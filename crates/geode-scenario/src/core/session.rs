@@ -121,12 +121,13 @@ pub fn to_table(shape: &ShapeSpec, state: &State) -> Table {
 pub fn from_table(shape: &ShapeSpec, restored: &Table) -> (State, Vec<String>) {
     let mut s = State::fresh(shape);
     let mut notices = Vec::new();
-    let mut drop = |key: &str, why: String| notices.push(format!("session: dropped {key}: {why}"));
+    let mut dropped =
+        |key: &str, why: String| notices.push(format!("session: dropped {key}: {why}"));
     if let Some(v) = restored.get("currency") {
         match v.as_str() {
             Some("usd") => s.currency = Currency::Usd,
             Some("native") => s.currency = Currency::Native,
-            _ => drop(
+            _ => dropped(
                 "currency",
                 format!("expected \"usd\" or \"native\", got {v}"),
             ),
@@ -135,7 +136,7 @@ pub fn from_table(shape: &ShapeSpec, restored: &Table) -> (State, Vec<String>) {
     if let Some(v) = restored.get("paint") {
         match v.as_str().and_then(Paint::parse) {
             Some(p) => s.paint = p,
-            None => drop("paint", format!("expected \"heat\" or \"plain\", got {v}")),
+            None => dropped("paint", format!("expected \"heat\" or \"plain\", got {v}")),
         }
     }
     if let Some(v) = restored.get("scale") {
@@ -143,20 +144,20 @@ pub fn from_table(shape: &ShapeSpec, restored: &Table) -> (State, Vec<String>) {
             Some("k") => s.scale = Some(Scale::Thousands),
             Some("m") => s.scale = Some(Scale::Millions),
             Some("1") => s.scale = None,
-            _ => drop("scale", format!("expected \"k\", \"m\" or \"1\", got {v}")),
+            _ => dropped("scale", format!("expected \"k\", \"m\" or \"1\", got {v}")),
         }
     }
     if let Some(v) = restored.get("diff") {
         match (v.as_bool(), shape.diff.is_some()) {
             (Some(b), true) => s.diff = b,
             (Some(_), false) => {}
-            (None, _) => drop("diff", format!("expected a boolean, got {v}")),
+            (None, _) => dropped("diff", format!("expected a boolean, got {v}")),
         }
     }
     if let Some(v) = restored.get("unscoped") {
         match v.as_bool() {
             Some(b) => s.unscoped = b,
-            None => drop("unscoped", format!("expected a boolean, got {v}")),
+            None => dropped("unscoped", format!("expected a boolean, got {v}")),
         }
     }
     if let Some(v) = restored.get("as_of") {
@@ -164,16 +165,16 @@ pub fn from_table(shape: &ShapeSpec, restored: &Table) -> (State, Vec<String>) {
             Some("live") => s.as_of = TileAsOf::Pinned(AsOf::Live),
             Some(text) => match chrono::DateTime::parse_from_rfc3339(text) {
                 Ok(at) => s.as_of = TileAsOf::Pinned(AsOf::At(at.with_timezone(&chrono::Utc))),
-                Err(e) => drop("as_of", format!("'{text}' is not RFC 3339 ({e})")),
+                Err(e) => dropped("as_of", format!("'{text}' is not RFC 3339 ({e})")),
             },
-            None => drop("as_of", format!("expected a string, got {v}")),
+            None => dropped("as_of", format!("expected a string, got {v}")),
         }
     }
     if let Some(v) = restored.get("filter") {
         match v.as_table().map(read_filter) {
             Some(Ok(scope)) => s.filter = scope,
-            Some(Err(why)) => drop("filter", why),
-            None => drop("filter", format!("expected a table, got {v}")),
+            Some(Err(why)) => dropped("filter", why),
+            None => dropped("filter", format!("expected a table, got {v}")),
         }
     }
     (s, notices)

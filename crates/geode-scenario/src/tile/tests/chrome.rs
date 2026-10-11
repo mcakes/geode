@@ -25,15 +25,22 @@ fn draw(vcx: &mut gpui::VisualTestContext) {
 #[gpui::test]
 fn the_title_is_the_shape_title_and_the_readout(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_bound(cx, "vega_kt", None);
+    // The header's readout is prepared when the scope moves, never in
+    // render: a frame post and a `:` line each re-prepare it.
+    let readout =
+        |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.readout().1.to_string());
     assert_eq!(h.title(&mut vcx), "Vega K/T · all");
+    assert_eq!(readout(&vcx), "all");
     h.show_picture(&mut vcx);
     h.follow_a(&mut vcx);
     let _ = h.requests();
     h.post(&mut vcx, scope_of("SPX"));
     assert_eq!(h.title(&mut vcx), "Vega K/T · SPX");
+    assert_eq!(readout(&vcx), "SPX");
     vcx.update(|w, cx| h.content.command("filter vega > 0", w, cx))
         .unwrap();
     assert_eq!(h.title(&mut vcx), "Vega K/T · SPX · vega > 0");
+    assert_eq!(readout(&vcx), "SPX · vega > 0");
     draw(&mut vcx);
     assert!(
         vcx.debug_bounds("scenario-readout-7").is_some(),

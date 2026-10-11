@@ -12671,7 +12671,7 @@ run_mutation "colour: hue takes the shorter arc" \
 # Gamut overflow pulls chroma, never clamps channels.
 run_mutation "colour: gamut clip pulls chroma" \
   crates/geode-core/src/colour/oklab.rs \
-  '    if in_gamut(direct) {' \
+  '    if linear_in_gamut(direct) {' \
   '    if true {' \
   geode-core \
   gamut_clip_pulls_chroma_and_keeps_lightness_and_hue
@@ -12917,7 +12917,7 @@ run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
 # bundled-theme tests both check this through the resolver.
 run_mutation "colour: the readability floor pulls lightness until 3:1" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= ratio {
+  '    if contrast(rgb) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -12992,7 +12992,7 @@ run_mutation "theme additions: Dragon hue anchors keep link groups distinct" \
 
 run_mutation "theme: bundled themes clear 3:1 through the resolver" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= ratio {
+  '    if contrast(rgb) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -37924,9 +37924,9 @@ run_mutation "scenario data: a new picture re-prepares the chips" \
 run_mutation "scenario tile: c without a twin refuses" \
   crates/geode-scenario/src/tile/mod.rs \
   '                if twinned {
-                    self.state.currency = match self.state.currency {' \
+                    let previous = self.mode();' \
   '                if true {
-                    self.state.currency = match self.state.currency {' \
+                    let previous = self.mode();' \
   geode-scenario c_toggles_currency_without_a_requery_and_refuses_without_a_twin
 
 run_mutation "scenario tile: m without a diff refuses" \
@@ -38002,6 +38002,183 @@ run_mutation "app: builtin shapes over undeclared datasets are withheld quietly"
   '        !withheld.iter().any(|(kind, _)| {' \
   '        true || !withheld.iter().any(|(kind, _)| {' \
   geode-app without_the_demo_layer_the_builtin_shapes_are_withheld_quietly
+
+# PF-23: c and m rebuild over the last picture; only an installed picture
+# clears a query error, so a toggle never hides one.
+run_mutation "scenario data: a rebuilt pivot leaves a query error standing" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        self.standing = self.picture_notice(main, &pivot);' \
+  '        self.standing = self.picture_notice(main, &pivot);
+        self.error = None;' \
+  geode-scenario a_query_error_is_a_standing_notice_and_keeps_the_picture
+
+# A refusal mid-chain forgets what was asked: kept as acted, the versions
+# would read as answered and the next change would not ask again.
+run_mutation "scenario data: a refusal mid-chain asks again on the next change" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        self.set_error(Notice::danger(refused(refusal)));
+        self.following.submitted(
+            false,
+            Unanswered::Retry,' \
+  '        self.set_error(Notice::danger(refused(refusal)));
+        self.following.submitted(
+            false,
+            Unanswered::KeepActed,' \
+  geode-scenario a_refusal_mid_chain_answers_the_barrier_and_the_next_change_asks_again
+
+# install builds the pivot before it commits anything: a misfit snapshot
+# committed first is what c and m would rebuild over.
+run_mutation "scenario data: install builds before it commits the picture" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        match self.build(&fetched) {
+            Ok(pivot) => {
+                self.error = None;' \
+  '        self.picture = Some(fetched.clone());
+        match self.build(&fetched) {
+            Ok(pivot) => {
+                self.error = None;' \
+  geode-scenario a_snapshot_that_does_not_fit_keeps_the_last_picture
+
+# A contradiction selects no rows: read as its layers it would look like a
+# narrower scope over real numbers.
+run_mutation "scenario readout: a contradiction reads nothing" \
+  crates/geode-scenario/src/core/readout.rs \
+  '    if scope.impossible {
+        return ScopeReadout::Nothing;
+    }' \
+  '    if false {
+        return ScopeReadout::Nothing;
+    }' \
+  geode-scenario a_contradiction_reads_nothing_not_all
+
+run_mutation "scenario session: a pinned instant keeps its fractional seconds" \
+  crates/geode-scenario/src/core/session.rs \
+  'chrono::SecondsFormat::AutoSi' \
+  'chrono::SecondsFormat::Secs' \
+  geode-scenario a_pinned_instant_keeps_its_fractional_seconds
+
+# A filter part of the wrong type drops the whole filter with a notice; read
+# as empty, the rest would restore a different filter from the one saved.
+run_mutation "scenario session: a malformed filter part is a notice, not a silent drop" \
+  crates/geode-scenario/src/core/session.rs \
+  '            .ok_or_else(|| format!("text: expected a string, got {v}"))?;' \
+  '            .unwrap_or("");' \
+  geode-scenario a_filter_part_of_the_wrong_type_drops_the_filter_with_a_notice
+
+# An unscoped tile must not requery, or read, under the frame's scope: it
+# would show `unscoped` over scoped numbers.
+run_mutation "scenario data: an unscoped tile ignores the scope counter" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        (scoped && a.scope != b.scope)' \
+  '        (a.scope != b.scope)' \
+  geode-scenario an_unscoped_tile_queries_its_filter_alone_and_ignores_the_scope
+
+run_mutation "scenario data: an unscoped tile queries its filter alone" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        let scope = if self.state.unscoped {
+            self.state.filter.clone()' \
+  '        let scope = if false {
+            self.state.filter.clone()' \
+  geode-scenario an_unscoped_tile_queries_its_filter_alone_and_ignores_the_scope
+
+run_mutation "scenario data: a pinned tile ignores the as-of counter" \
+  crates/geode-scenario/src/tile/data.rs \
+  '            || (follows_as_of && a.as_of != b.as_of)' \
+  '            || (a.as_of != b.as_of)' \
+  geode-scenario a_pinned_as_of_ignores_the_frames_counter
+
+# Spec §7: an unknown column in :filter is refused, never dropped or widened.
+run_mutation "scenario tile: a filter expression is checked before it is kept" \
+  crates/geode-scenario/src/tile/mod.rs \
+  '                self.validate_filter(&scope)?;' \
+  '                let _ = self.validate_filter(&scope);' \
+  geode-scenario a_filter_expression_is_checked_and_reaches_the_query
+
+run_mutation "scenario tile: a filter over an undeclared dataset is refused" \
+  crates/geode-scenario/src/tile/mod.rs \
+  '        let Some(dataset) = schema.dataset(&self.shape.dataset) else {
+            return Err(format!(' \
+  '        let Some(dataset) = schema.dataset(&self.shape.dataset) else {
+            return Ok(());
+            return Err(format!(' \
+  geode-scenario a_filter_over_an_undeclared_dataset_is_refused
+
+# A mode the picture cannot be drawn in puts the previous mode back: kept,
+# the chip would name a mode the cells are not drawn in.
+run_mutation "scenario data: a mode the picture cannot take is put back" \
+  crates/geode-scenario/src/tile/data.rs \
+  '                self.state.currency = previous.currency;
+                self.state.diff = previous.diff;' \
+  '                let _ = previous;' \
+  geode-scenario a_mode_the_picture_cannot_take_is_refused_and_the_mode_stays
+
+# A named color resolves when the window is prepared; left named, render
+# would run the readable-text search per cell on every frame.
+run_mutation "scenario delegate: a named color is fixed when the window is prepared" \
+  crates/geode-scenario/src/delegate.rs \
+  '                cell.color = CellColor::Fixed(rgb);' \
+  '                let _ = rgb;' \
+  geode-scenario a_named_color_arrives_in_the_cache_fixed_and_readable_over_its_fill
+
+run_mutation "scenario delegate: new named colours re-prepare the window" \
+  crates/geode-scenario/src/delegate.rs \
+  '        self.named = ColourCache::new();
+        self.invalidate_cells();' \
+  '        self.named = ColourCache::new();' \
+  geode-scenario new_named_colours_resolve_afresh_and_the_same_ones_are_kept
+
+run_mutation "scenario delegate: unchanged paint re-prepares nothing" \
+  crates/geode-scenario/src/delegate.rs \
+  '        if self.heat != heat || self.scale != scale {' \
+  '        if true {' \
+  geode-scenario the_scale_override_is_kept_and_unchanged_paint_is_a_no_op
+
+run_mutation "scenario delegate: a cursor move re-prepares the footer readout" \
+  crates/geode-scenario/src/delegate.rs \
+  '        self.resolve_selection();
+        self.prepare_cursor_readout();' \
+  '        self.resolve_selection();' \
+  geode-scenario the_footer_reads_the_cursor_cell_or_the_selection
+
+run_mutation "scenario data: a frame change re-prepares the header readout" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        self.prepare_readout(cx);
+        cx.notify();
+        if self.sync_following(cx) {' \
+  '        cx.notify();
+        if self.sync_following(cx) {' \
+  geode-scenario the_title_is_the_shape_title_and_the_readout
+
+# The scenario tiles compile :filter against the schema the service serves,
+# never an edited datasets doc awaiting restart.
+run_mutation "app: the scenario schema cell keeps the startup schema" \
+  crates/geode-app/src/bridge.rs \
+  '                    pinned = Some(Rc::new(schema.clone()));
+                    factory.set_schema(schema);' \
+  '                    pinned = Some(Rc::new(schema.clone()));
+                    *scenario_cells.schema.borrow_mut() = schema.clone();
+                    factory.set_schema(schema);' \
+  geode-app a_reload_leaves_the_scenario_schema_cell_on_the_startup_schema
+
+# The linear gamut shortcut decides only where encoding would agree; a
+# looser edge calls an out-of-gamut channel in.
+run_mutation "colour: the linear gamut test agrees with the encoded one" \
+  crates/geode-core/src/colour/oklab.rs \
+  '    if linear > -3.8e-5 && linear < 1.0011 {' \
+  '    if linear > -3.8e-5 && linear < 1.002 {' \
+  geode-core the_linear_gamut_test_agrees_with_the_encoded_one_at_both_edges
+
+run_mutation "colour: the contrast search holds the hue it hoists" \
+  crates/geode-core/src/colour/mod.rs \
+  '    let (cos_h, sin_h) = (lch.h.cos(), lch.h.sin());' \
+  '    let (cos_h, sin_h) = (lch.h.sin(), lch.h.cos());' \
+  geode-core the_contrast_search_matches_the_original_bit_for_bit
+
+run_mutation "tile header: dataset times sort oldest first" \
+  crates/geode-tile/src/header.rs \
+  '        sorted.sort_by(|a, b| a.as_of.cmp(&b.as_of));' \
+  '        sorted.sort_by(|a, b| b.as_of.cmp(&a.as_of));' \
+  geode-tile dataset_times_sort_oldest_first_and_label_on_the_clock
 
 run_mutation "shell: scenarios is restart-required" \
   crates/geode-shell/src/shell/hot_reload.rs \

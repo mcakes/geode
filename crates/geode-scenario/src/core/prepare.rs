@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(
             &*cell(&own, 0, 2).unwrap().text,
             "1,000",
-            "delta: its own k"
+            "delta: its own thousands scale, with no suffix"
         );
         let millions = Inputs {
             scale: Some(Scale::Millions),
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(
             &*cell(&millions, 0, 2).unwrap().text,
             "1",
-            "the tile scale overrides delta's own k"
+            "the tile scale overrides delta's own thousands"
         );
         let back = Inputs { scale: None, ..own };
         assert_eq!(

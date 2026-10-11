@@ -8,8 +8,8 @@ mod menu;
 mod tests;
 
 use crate::core::commands::{self, AsOfArg, Command, Vocabulary};
-use crate::core::pivot::{Currency, Pivot};
-use crate::core::readout::{cursor_readout, tile_title};
+use crate::core::pivot::Currency;
+use crate::core::readout::{ScopeReadout, scope_readout, tile_title};
 use crate::core::session::{self, State, TileAsOf};
 use crate::delegate::{CellPointer, ScenarioDelegate};
 use crate::header::{self, Chip};
@@ -80,6 +80,9 @@ pub struct ScenarioTile {
     pub(crate) menu_ids: MenuIds,
     /// The header chips, prepared whenever the state they read changes.
     chips: Vec<Chip>,
+    /// The header's readout of the scope the next query runs under and
+    /// its words, prepared with the chips and on every frame change.
+    readout: (ScopeReadout, SharedString),
     /// The clock and local day a pinned as-of chip was formatted on: a
     /// new day or a zone change re-prepares it.
     chips_day: (Clock, chrono::NaiveDate),
@@ -231,6 +234,7 @@ impl ScenarioTile {
             menu_selector,
             menu_ids,
             chips: Vec::new(),
+            readout: (ScopeReadout::All, SharedString::default()),
             chips_day: (clock, clock.today(now)),
             stack: None,
             close: None,
@@ -424,10 +428,24 @@ impl ScenarioTile {
         &self.chips
     }
 
+    /// The scope readout and its words, as prepared.
+    pub(crate) fn readout(&self) -> &(ScopeReadout, SharedString) {
+        &self.readout
+    }
+
+    /// Prepare the header's scope readout from the scope the next query
+    /// runs under: the frame's, the tile's filter, `:unscoped`.
+    pub(crate) fn prepare_readout(&mut self, cx: &App) {
+        let readout = scope_readout(&self.effective_scope_for_title(cx));
+        let text = SharedString::from(readout.text().to_string());
+        self.readout = (readout, text);
+    }
+
     /// Prepare the header chips in spec order: currency, scale, `filtered`,
-    /// `diff`, `unscoped`, the as-of pin. Every string is formatted here,
-    /// never in render.
+    /// `diff`, `unscoped`, the as-of pin, and the scope readout beside
+    /// them. Every string is formatted here, never in render.
     pub(crate) fn prepare_chips(&mut self, cx: &App) {
+        self.prepare_readout(cx);
         let id = self.tile.0;
         let chip = |key: &'static str,
                     text: SharedString,
@@ -451,9 +469,9 @@ impl ScenarioTile {
             if mixed {
                 "native sums across currencies"
             } else if native {
-                "Native currency; `c` for USD"
+                "Native currency; toggles to USD"
             } else {
-                "USD twins; `c` for native"
+                "USD twins; toggles to native"
             }
             .into(),
             Some("scenario::currency"),
@@ -490,7 +508,7 @@ impl ScenarioTile {
                 "scenario-chip-diff",
                 "diff".into(),
                 Tone::Neutral,
-                "value minus the base row; `m` for absolutes".into(),
+                "value minus the base row; toggles to absolutes".into(),
                 Some("scenario::diff"),
             ));
         }
@@ -749,16 +767,10 @@ impl ScenarioTile {
         Ok(())
     }
 
-    /// `1Y × 100 · 254.5` for the cursor cell; `None` before a picture.
-    pub(crate) fn cursor_readout(&self, cx: &App) -> Option<String> {
-        let d = self.table.read(cx).delegate();
-        let p: &Pivot = d.pivot.as_ref()?;
-        let (r, c) = d.cursor;
-        Some(cursor_readout(
-            p.rows.get(r)?,
-            &p.columns.get(c)?.head,
-            d.cursor_text(),
-        ))
+    /// `1Y × 100 · 254.5` for the cursor cell, as the delegate prepared
+    /// it; `None` before a picture.
+    pub(crate) fn cursor_readout(&self, cx: &App) -> Option<SharedString> {
+        self.table.read(cx).delegate().cursor_readout.clone()
     }
 }
 

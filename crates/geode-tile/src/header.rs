@@ -811,6 +811,46 @@ mod tests {
         assert_eq!(short_time("", utc), "");
     }
 
+    /// A snapshot's dataset times sort oldest first with a dataset that has
+    /// no time ahead of them all, label on the display clock (an em dash
+    /// for no time), and carry the parsed instant only when there is one.
+    #[test]
+    fn dataset_times_sort_oldest_first_and_label_on_the_clock() {
+        use geode_core::snapshot::Freshness;
+        let fresh = |dataset: &str, as_of: Option<&str>| Freshness {
+            dataset: dataset.into(),
+            as_of: as_of.map(str::to_string),
+            generation: None,
+        };
+        let p = Provenance {
+            datasets: vec![
+                fresh("risk", Some("2026-08-30T14:32:00Z")),
+                fresh("vol", Some("2026-08-30T09:05:00Z")),
+                fresh("refs", None),
+                fresh("odd", Some("not a time")),
+            ],
+            as_of_request: None,
+        };
+        let times = DatasetTime::from_provenance(&p, Clock::in_zone_named("Asia/Tokyo"));
+        let labels: Vec<&str> = times.iter().map(|t| t.label.as_ref()).collect();
+        assert_eq!(
+            labels,
+            ["refs \u{2014}", "vol 18:05", "risk 23:32", "odd not a time"],
+            "no time first, then oldest; labels on the display clock"
+        );
+        let at = |s: &str| {
+            Some(
+                chrono::DateTime::parse_from_rfc3339(s)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            )
+        };
+        assert_eq!(times[0].at, None, "no time is never stale");
+        assert_eq!(times[1].at, at("2026-08-30T09:05:00Z"));
+        assert_eq!(times[2].at, at("2026-08-30T14:32:00Z"));
+        assert_eq!(times[3].at, None, "an unparsable time is never stale");
+    }
+
     /// The pinned chip omits the date for today on the configured clock and
     /// includes it for other dates.
     #[test]

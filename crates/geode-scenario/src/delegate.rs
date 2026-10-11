@@ -7,7 +7,7 @@
 
 use crate::core::pivot::{Head, Pivot};
 use crate::core::prepare::{self, CellColor, Inputs, Layout, Palette, PreparedCell};
-use crate::core::readout::head_text;
+use crate::core::readout::{cursor_readout, head_text};
 use geode_core::colour::scale::Diverging;
 use geode_core::colour::{Anchors, NamedColours, Rgb, Sign, Tokens};
 use geode_core::grid::selection::{self, Accumulator, Resolved, SelectKind, Selection, describe};
@@ -68,6 +68,13 @@ struct ThemeInputs {
     tokens: Tokens,
 }
 
+/// A table column's header text and unit, prepared with the picture.
+#[derive(Debug, Clone, Default)]
+struct PreparedHead {
+    key: SharedString,
+    unit: Option<SharedString>,
+}
+
 pub struct ScenarioDelegate {
     pub pivot: Option<Arc<Pivot>>,
     pub layout: Layout,
@@ -84,6 +91,10 @@ pub struct ScenarioDelegate {
     pub summary: Vec<AggregateCell>,
     /// `2 rows × 3 cols`, while a selection is live.
     pub extent: Option<SharedString>,
+    /// The footer's cursor readout; `None` before a picture.
+    pub cursor_readout: Option<SharedString>,
+    /// One per table column, label and Σ included.
+    heads: Vec<PreparedHead>,
     /// Whether the rows axis is a scenario axis: a column sum down it is unsummable.
     rows_axis_is_scenario: bool,
     cache: WindowCache<PreparedCell>,
@@ -99,7 +110,7 @@ pub struct ScenarioDelegate {
 
 impl ScenarioDelegate {
     pub fn new(rows_axis: &str, rows_axis_is_scenario: bool, colours: Arc<NamedColours>) -> Self {
-        ScenarioDelegate {
+        let mut d = ScenarioDelegate {
             pivot: None,
             layout: EMPTY,
             rows_axis: rows_axis.to_string().into(),
@@ -111,6 +122,8 @@ impl ScenarioDelegate {
             resolved: None,
             summary: Vec::new(),
             extent: None,
+            cursor_readout: None,
+            heads: Vec::new(),
             rows_axis_is_scenario,
             cache: WindowCache::default(),
             requested: WindowRequest::with_first(FIRST_WINDOW),
@@ -120,7 +133,9 @@ impl ScenarioDelegate {
             named: ColourCache::new(),
             drag_last: None,
             drag_origin: false,
-        }
+        };
+        d.prepare_heads();
+        d
     }
 
     /// Resolve named colors against `colours` from now on. New definitions
@@ -140,6 +155,7 @@ impl ScenarioDelegate {
     pub fn set_picture(&mut self, pivot: Option<Arc<Pivot>>) {
         self.layout = pivot.as_deref().map(Layout::of).unwrap_or(EMPTY);
         self.pivot = pivot;
+        self.prepare_heads();
         self.clamp_cursor();
         self.refresh_selection();
         self.invalidate_cells();
@@ -203,6 +219,7 @@ impl ScenarioDelegate {
         if let Some(window) = window {
             self.fill_window(window);
         }
+        self.prepare_cursor_readout();
     }
 
     fn fill_window(&mut self, window: Range<usize>) {
@@ -227,6 +244,8 @@ impl ScenarioDelegate {
             }
             Some(cell)
         });
+        // The cursor's text may have just entered the window.
+        self.prepare_cursor_readout();
     }
 
     fn clamp_cursor(&mut self) {
@@ -300,9 +319,16 @@ impl ScenarioDelegate {
         self.refresh_selection();
     }
 
+    /// After the cursor, the selection or the picture moved: resolve the
+    /// selection and re-prepare the cursor readout.
+    pub fn refresh_selection(&mut self) {
+        self.resolve_selection();
+        self.prepare_cursor_readout();
+    }
+
     /// Resolve the selection to ranges over data cells and summarise each
     /// selected column over its selected rows.
-    pub fn refresh_selection(&mut self) {
+    fn resolve_selection(&mut self) {
         let Some(s) = &self.selection else {
             self.resolved = None;
             self.summary.clear();
@@ -414,23 +440,56 @@ impl ScenarioDelegate {
         Some(out)
     }
 
-    fn column_key(&self, col: usize) -> String {
-        if col == 0 {
-            return self.rows_axis.to_string();
-        }
-        if self.layout.is_sigma_col(col) {
-            return SIGMA.into();
-        }
-        self.layout
-            .data_col(col)
-            .and_then(|c| {
-                self.pivot
-                    .as_ref()?
-                    .columns
-                    .get(c)
-                    .map(|column| head_text(&column.head))
-            })
+    /// Table column `col`'s header text, as prepared with the picture.
+    fn column_key(&self, col: usize) -> SharedString {
+        self.heads
+            .get(col)
+            .map(|h| h.key.clone())
             .unwrap_or_default()
+    }
+
+    /// Every table column's header text and unit, formatted once per
+    /// picture so neither the column list nor a header cell formats in
+    /// render.
+    fn prepare_heads(&mut self) {
+        let head = |col: usize| -> PreparedHead {
+            if col == 0 {
+                return PreparedHead {
+                    key: self.rows_axis.clone(),
+                    unit: None,
+                };
+            }
+            if self.layout.is_sigma_col(col) {
+                return PreparedHead {
+                    key: SharedString::new_static(SIGMA),
+                    unit: None,
+                };
+            }
+            let column = self
+                .layout
+                .data_col(col)
+                .and_then(|c| self.pivot.as_ref()?.columns.get(c));
+            PreparedHead {
+                key: column
+                    .map(|column| head_text(&column.head).into())
+                    .unwrap_or_default(),
+                unit: column.and_then(|column| match &column.head {
+                    Head::Measure { unit, .. } => unit.clone().map(SharedString::from),
+                    Head::Axis { .. } => None,
+                }),
+            }
+        };
+        self.heads = (0..self.layout.cols()).map(head).collect();
+    }
+
+    /// The footer's `1Y × 100 · 254.5` for the cursor cell, re-prepared
+    /// whenever the cursor, the picture or the prepared window moves.
+    fn prepare_cursor_readout(&mut self) {
+        let readout = self.pivot.as_ref().and_then(|p| {
+            let (r, c) = self.cursor;
+            Some(cursor_readout(p.rows.get(r)?, &p.columns.get(c)?.head, self.cursor_text()).into())
+        });
+        self.cursor_readout = readout;
     }
 
     /// The two-level header's groups: consecutive columns sharing an outer
@@ -537,12 +596,12 @@ impl TableDelegate for ScenarioDelegate {
         let default = if is_label { LABEL_WIDTH } else { CELL_WIDTH };
         let width = self
             .fitted
-            .get(&key)
+            .get(key.as_ref())
             .copied()
             .unwrap_or_else(|| scale::design_px(default, px(self.rem_px)));
         Column {
-            key: SharedString::from(key.clone()),
-            name: SharedString::from(key),
+            key: key.clone(),
+            name: key,
             align: if is_label {
                 gpui::TextAlign::Left
             } else {
@@ -632,12 +691,10 @@ impl TableDelegate for ScenarioDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let unit = self.layout.data_col(col_ix).and_then(|c| {
-            match &self.pivot.as_ref()?.columns.get(c)?.head {
-                Head::Measure { unit, .. } => unit.clone(),
-                Head::Axis { .. } => None,
-            }
-        });
+        let (key, unit) = match self.heads.get(col_ix) {
+            Some(h) => (h.key.clone(), h.unit.clone()),
+            None => (SharedString::default(), None),
+        };
         div()
             .size_full()
             .flex()
@@ -648,7 +705,7 @@ impl TableDelegate for ScenarioDelegate {
             .font_family(fonts::MONO)
             .text_color(theme.muted_foreground)
             .debug_selector(move || format!("scenario-th-{col_ix}"))
-            .child(self.column_key(col_ix))
+            .child(key)
             .when_some(unit, |el, unit| el.child(div().text_xs().child(unit)))
     }
 

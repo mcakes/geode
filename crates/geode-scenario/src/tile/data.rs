@@ -543,7 +543,9 @@ impl ScenarioTile {
 
     /// The frame observer.
     pub(crate) fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
-        // The title reads the frame's scope, whatever else happens.
+        // The title and the header readout read the frame's scope, whatever
+        // else happens.
+        self.prepare_readout(cx);
         cx.notify();
         if self.sync_following(cx) {
             if self.visible {
