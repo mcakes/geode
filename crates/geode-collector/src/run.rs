@@ -742,6 +742,14 @@ impl Events {
                     outcome.column
                 );
             }
+            // Nor for a board.
+            DataEvent::VolBoard(outcome) => {
+                tracing::debug!(
+                    target: TARGET,
+                    "board for key {} answered; ignored",
+                    outcome.key.0
+                );
+            }
             // Logged by the loop once it knows whether an app explains it.
             DataEvent::ThreadStopped { thread, reason } => {
                 self.stops

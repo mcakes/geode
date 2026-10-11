@@ -1776,6 +1776,15 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                             outcome.tag
                         );
                     }
+                    // Nor for a board.
+                    DataEvent::VolBoard(outcome) => {
+                        tracing::debug!(
+                            target: "geode::query",
+                            "board answer for key {} tag {} dropped: no consumer",
+                            outcome.key.0,
+                            outcome.tag
+                        );
+                    }
                     // The live lane keeps `ReferenceGlobal`; see `ReferenceCache`.
                     DataEvent::Reference(outcome) if outcome.key == REFERENCE_KEY => {
                         reference_cache.answer(outcome, cx);

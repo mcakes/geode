@@ -439,6 +439,7 @@ grain = "instrument"
                 Payload::Series(_) => panic!("a distinct query answered with a series"),
                 Payload::Watchlist(_) => panic!("a distinct query answered with a watchlist"),
                 Payload::History(_) => panic!("a distinct query answered with history"),
+                Payload::VolBoard(_) => panic!("a distinct query answered with a board"),
             };
             let v = snap.column_index("value").expect("distinct selects value");
             let n = snap.column_index("n").expect("distinct selects n");

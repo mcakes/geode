@@ -30,6 +30,7 @@ enum Key {
     Watchlist(QueryKey),
     History(QueryKey),
     HistoryKeys(QueryKey),
+    VolBoard(QueryKey),
     Catalog(QueryKey),
     Price(QueryKey),
     VolSlices(QueryKey),
@@ -72,6 +73,7 @@ fn key(event: &DataEvent, seq: u64) -> Key {
         DataEvent::Watchlist(o) => Key::Watchlist(o.key),
         DataEvent::History(o) => Key::History(o.key),
         DataEvent::HistoryKeys(o) => Key::HistoryKeys(o.key),
+        DataEvent::VolBoard(o) => Key::VolBoard(o.key),
         DataEvent::Catalog(o) => Key::Catalog(o.key),
         DataEvent::Price(o) => Key::Price(o.key),
         DataEvent::VolSlices(o) => Key::VolSlices(o.key),
@@ -112,6 +114,7 @@ fn tag(event: &DataEvent) -> Option<u64> {
         DataEvent::Watchlist(o) => Some(o.tag),
         DataEvent::History(o) => Some(o.tag),
         DataEvent::HistoryKeys(o) => Some(o.tag),
+        DataEvent::VolBoard(o) => Some(o.tag),
         DataEvent::Catalog(o) => Some(o.tag),
         DataEvent::Price(o) => Some(o.tag),
         DataEvent::VolSlices(o) => Some(o.tag),
@@ -552,6 +555,36 @@ mod tests {
         assert!(matches!(
             rx.recv().await.unwrap(),
             DataEvent::VolSlices(o) if o.key == QueryKey(8) && o.tag == 3
+        ));
+        assert!(rx.recv().await.is_err());
+    }
+
+    /// A board answer coalesces by its requester's key like a query's: a
+    /// late lower tag cannot replace the higher one already waiting.
+    #[gpui::test]
+    async fn vol_boards_coalesce_by_key_and_a_lower_tag_never_replaces_a_higher_one() {
+        let (tx, rx) = channel();
+        let outcome = |key, tag| {
+            DataEvent::VolBoard(geode_core::volboard::VolBoardOutcome {
+                key: QueryKey(key),
+                tag,
+                submitted: Instant::now(),
+                result: Err("unused".into()),
+            })
+        };
+        tx.try_send(outcome(7, 2)).unwrap();
+        tx.try_send(outcome(7, 1)).unwrap();
+        assert_eq!(rx.pending.lock().unwrap().events.len(), 1);
+        tx.try_send(outcome(8, 3)).unwrap();
+        assert_eq!(rx.pending.lock().unwrap().events.len(), 2);
+        drop(tx);
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::VolBoard(o) if o.key == QueryKey(7) && o.tag == 2
+        ));
+        assert!(matches!(
+            rx.recv().await.unwrap(),
+            DataEvent::VolBoard(o) if o.key == QueryKey(8) && o.tag == 3
         ));
         assert!(rx.recv().await.is_err());
     }

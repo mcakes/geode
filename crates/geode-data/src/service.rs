@@ -53,6 +53,7 @@ use geode_core::snapshot::Provenance;
 use geode_core::source_config::SourceShape;
 use geode_core::view::ViewSpec;
 use geode_core::vol::{VolSliceOutcome, VolSliceParams};
+use geode_core::volboard::VolBoardOutcome;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -144,6 +145,9 @@ pub enum DataEvent {
     /// A history key column's listed values, addressed by the requester's
     /// key and tag.
     HistoryKeys(HistoryKeysOutcome),
+    /// One board request answered, addressed to the requester's key and
+    /// tag.
+    VolBoard(VolBoardOutcome),
     /// Pricing result, addressed by the requesting tile's key.
     Price(PriceOutcome),
     /// Vol slice batch result, addressed by the requesting tile's key.
@@ -320,6 +324,7 @@ fn view_snapshot(payload: Payload) -> Result<geode_core::snapshot::Snapshot, Str
             Err("internal: a view query answered with a watchlist".to_string())
         }
         Payload::History(_) => Err("internal: a view query answered with history".to_string()),
+        Payload::VolBoard(_) => Err("internal: a view query answered with a board".to_string()),
     }
 }
 
@@ -374,6 +379,9 @@ fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
                 Ok(Payload::History(_)) => {
                     Err("internal: a series request answered with history".to_string())
                 }
+                Ok(Payload::VolBoard(_)) => {
+                    Err("internal: a series request answered with a board".to_string())
+                }
                 Err(e) => Err(e),
             };
             DataEvent::Series(SeriesOutcome {
@@ -404,6 +412,16 @@ fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
             result: match r.payload {
                 Ok(Payload::History(table)) => Ok(table),
                 Ok(_) => Err("internal: a history request answered with another payload".into()),
+                Err(e) => Err(e),
+            },
+        }),
+        RequestKind::VolBoard { requester } => DataEvent::VolBoard(VolBoardOutcome {
+            key: requester,
+            tag: r.tag,
+            submitted: r.submitted,
+            result: match r.payload {
+                Ok(Payload::VolBoard(board)) => Ok(*board),
+                Ok(_) => Err("internal: a board request answered with another payload".into()),
                 Err(e) => Err(e),
             },
         }),
@@ -458,6 +476,12 @@ fn contained_result_event(
                     submitted,
                     dataset,
                     span,
+                    result: Err(reason),
+                }),
+                RequestKind::VolBoard { requester } => DataEvent::VolBoard(VolBoardOutcome {
+                    key: requester,
+                    tag,
+                    submitted,
                     result: Err(reason),
                 }),
             }
@@ -6168,6 +6192,44 @@ mod tests {
                     o.values.is_err_and(|e| e.contains("value")),
                     "an Err for the key, not a panic"
                 );
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_board_result_is_addressed_to_its_requester_not_its_pool_key() {
+        let requester = QueryKey(3);
+        let result = |payload| crate::query::pool::QueryResult {
+            id: 1,
+            key: crate::query::volboard::board_pool_key(requester),
+            tag: 2,
+            submitted: Instant::now(),
+            view: crate::query::pool::ViewId("board".into()),
+            payload,
+            kind: RequestKind::VolBoard { requester },
+        };
+        let board = geode_core::volboard::VolBoard {
+            missing: vec!["NDX".into()],
+            ..Default::default()
+        };
+        match result_event(
+            result(Ok(Payload::VolBoard(Box::new(board.clone())))),
+            &HealthTracker::default(),
+        ) {
+            DataEvent::VolBoard(o) => {
+                assert_eq!((o.key, o.tag), (requester, 2));
+                assert_eq!(o.result, Ok(board));
+            }
+            other => panic!("{other:?}"),
+        }
+        match contained_result_event(result(Err("unused".into())), |_| {
+            panic!("the board builder fell over")
+        }) {
+            DataEvent::VolBoard(o) => {
+                assert_eq!((o.key, o.tag), (requester, 2));
+                let reason = o.result.expect_err("a panicking build is an error");
+                assert!(reason.contains("the board builder fell over"), "{reason}");
             }
             other => panic!("{other:?}"),
         }

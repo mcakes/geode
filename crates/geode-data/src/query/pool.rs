@@ -16,6 +16,7 @@ use crate::store::Store;
 use geode_core::query::{HistoryTable, QueryKey, Span, WatchlistResult};
 use geode_core::series::SeriesResult;
 use geode_core::snapshot::{ColumnMeta, Provenance, Snapshot};
+use geode_core::volboard::VolBoard;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -56,6 +57,8 @@ pub enum Payload {
     Watchlist(WatchlistResult),
     /// One history request's cached rows.
     History(HistoryTable),
+    /// One board request's rows.
+    VolBoard(Box<VolBoard>),
 }
 
 /// Work yielding a snapshot, a series result or a watchlist. Snapshot work
@@ -76,6 +79,9 @@ pub enum Work {
     /// One history request read from the cache, after the service fetched
     /// what its coverage lacked.
     History(Box<super::history::HistoryRead>),
+    /// One board read after the service fetched what its coverage lacked,
+    /// under the requester's derived key (`board_pool_key`).
+    VolBoard(Box<super::volboard::BoardRead>),
 }
 
 /// What kind of request this is, carried through to the result so the
@@ -101,6 +107,11 @@ pub enum RequestKind {
     History {
         dataset: String,
         span: Span,
+    },
+    VolBoard {
+        /// The key the answer is addressed to; the request itself runs
+        /// under `board_pool_key(requester)`.
+        requester: QueryKey,
     },
 }
 
@@ -473,6 +484,10 @@ pub(crate) fn run_one(
             .run(conn)
             .map(Payload::History)
             .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
+        Work::VolBoard(read) => read
+            .run(conn)
+            .map(|b| Payload::VolBoard(Box::new(b)))
+            .map_err(|e| duckdb::Error::InvalidParameterName(e.to_string())),
     }
 }
 
@@ -569,6 +584,7 @@ mod tests {
             Payload::Series(_) => panic!("a view query answered with a series"),
             Payload::Watchlist(_) => panic!("a view query answered with a watchlist"),
             Payload::History(_) => panic!("a view query answered with history"),
+            Payload::VolBoard(_) => panic!("a view query answered with a board"),
         })
     }
 
@@ -1243,6 +1259,7 @@ mod tests {
             Payload::Snapshot(_) => panic!("a series request answered with a snapshot"),
             Payload::Watchlist(_) => panic!("a series request answered with a watchlist"),
             Payload::History(_) => panic!("a series request answered with history"),
+            Payload::VolBoard(_) => panic!("a series request answered with a board"),
         }
         pool.shutdown();
     }
