@@ -547,15 +547,19 @@ impl WatchlistTile {
         if refused {
             self.notices.outcome.clear();
         }
-        // A create, clone, rename or delete that never landed: back to
-        // what was shown before it, ahead of the notices, which showing
-        // another list would clear.
-        let awaited = refused
-            && self
-                .awaiting
-                .as_ref()
-                .is_some_and(|a| self.state.name == a.shows);
-        if awaited && let Some(a) = self.awaiting.take() {
+        // The shell keeps one pending config batch per tile, every edit
+        // queued while it is pending or in flight merging into it, and
+        // refuses it whole with one notice: a refusal refuses everything
+        // this tile has pending. So a create, clone, rename or delete on
+        // its way never landed: back to what was shown before it, ahead
+        // of the notices, which showing another list would clear. With
+        // the trader switched away meanwhile, the wait just ends and what
+        // is shown stays (a stale wait would keep hiding the name a
+        // rename or delete was removing from the switcher).
+        let awaited = if refused { self.awaiting.take() } else { None };
+        if let Some(a) = awaited
+            && self.state.name == a.shows
+        {
             self.menu = None;
             match a.restores {
                 Some(name) => self.show(&name, cx),
@@ -570,13 +574,9 @@ impl WatchlistTile {
         }
         if refused {
             self.history.refused();
-            // A refused revert is over: the user copy stands. But a refusal
-            // taken by an awaited create or clone (the verbs allowed while
-            // a revert is on its way) is theirs, not the revert's, which
-            // may still be in the shell's batch: the gate holds.
-            if !awaited {
-                self.reverting = None;
-            }
+            // The one refusal for the batch refused the revert's removal
+            // too: the user copy stands, and the gate goes with it.
+            self.reverting = None;
             self.rebuild_rows(false, cx);
         } else {
             self.rebuild_chrome(cx);
@@ -920,7 +920,10 @@ impl WatchlistTile {
 
     /// Show nothing: the empty state (a delete on its way, a refused
     /// create from nothing shown). The switcher is the caller's business.
-    pub(super) fn show_none(&mut self, cx: &mut Context<Self>) {
+    /// A `New…` field open during `saving X…` is released when X's
+    /// refusal arrives, like any field when the shown name changes (the
+    /// `restores: Some` arm does the same through `show`).
+    fn show_none(&mut self, cx: &mut Context<Self>) {
         self.replace_shown(None, cx);
         self.was_shown = false;
         self.rebuild_rows(false, cx);

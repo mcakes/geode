@@ -406,7 +406,11 @@ impl Harness {
         self.frame.update(vcx, |f, _| f.take_pending_config_edits())
     }
     /// Post a notice for this tile the way the shell's drain does: on the
-    /// frame, then one notify.
+    /// frame, then one notify. The shell keeps ONE pending config batch
+    /// per tile (every edit queued while a batch is pending or in flight
+    /// merges into it) and a failed or rejected batch posts exactly one
+    /// `Refused` per tile for the whole batch: a test must not post a
+    /// sequence of refusals for edits the shell would have batched.
     fn shell_says(&self, vcx: &mut gpui::VisualTestContext, notice: TileNotice) {
         self.frame.update(vcx, |f, cx| {
             f.post_tile_notice_for_test(TileId(TILE), notice);
@@ -2801,32 +2805,63 @@ fn y_on_a_rename_checks_ownership_again(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// Clone… is allowed while a revert is on its way; its refusal is its own,
-/// and the revert, still in the shell's batch, keeps its gate until the
-/// revert's own refusal or its reload.
+/// The shell keeps one pending batch per tile and refuses it whole: a
+/// refusal reaching the tile while a clone is awaited and a revert stands
+/// has refused the revert's removal too, so the clone's previous list
+/// comes back and the revert gate goes.
 #[gpui::test]
-fn a_refused_clone_does_not_release_the_revert_gate(cx: &mut gpui::TestAppContext) {
+fn one_refusal_restores_the_clone_and_releases_the_revert_gate(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_with(cx, with_mine(true), restored("mine"));
     h.act(&mut vcx, "watchlist::revert");
     h.press(&mut vcx, "y");
     assert_eq!(h.edits(&mut vcx), [removal_of("mine")]);
-    let reverting = "reverting mine\u{2026}";
     h.act(&mut vcx, "watchlist::clone");
     vcx.simulate_input("mine2");
     h.press(&mut vcx, "enter");
     assert_eq!(h.edits(&mut vcx).len(), 1, "the clone");
     assert_eq!(h.title(&mut vcx), "Watchlist: mine2");
-    // The clone's refusal: back to `mine`, still reverting.
+    assert!(h.awaiting(&vcx));
+    // The one refusal for the batch (the removal and the clone).
     let why = "watchlists not written: the user layer is read-only";
     h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
     assert_eq!(h.title(&mut vcx), "Watchlist: mine");
     assert_eq!(h.notices(&vcx), [why]);
-    h.press(&mut vcx, "x");
-    assert_eq!(h.notices(&vcx), [reverting]);
-    assert!(h.edits(&mut vcx).is_empty());
-    // The revert's own refusal ends the wait: the user copy stands.
-    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    assert!(!h.awaiting(&vcx));
     h.press(&mut vcx, "x");
     assert_eq!(h.edits(&mut vcx).len(), 1, "the verbs act again");
     assert_eq!(h.notices(&vcx), ["removed HSI"]);
+}
+
+/// A refusal arriving after the trader switched away from the awaited
+/// list drops the wait without touching what is shown; the name the
+/// awaited rename was removing is listed again.
+#[gpui::test]
+fn a_refusal_after_switching_away_keeps_the_shown_list(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, with_mine(false), restored("mine"));
+    h.act(&mut vcx, "watchlist::rename");
+    vcx.simulate_input("ours");
+    h.press(&mut vcx, "enter y");
+    assert_eq!(h.edits(&mut vcx).len(), 2);
+    assert_eq!(h.title(&mut vcx), "Watchlist: ours");
+    // The switcher leaves `mine` out while the rename is on its way.
+    h.press(&mut vcx, "g w");
+    assert_eq!(h.switcher(&vcx), rows(&["a", "b"]));
+    h.press(&mut vcx, "escape");
+    h.switch_to(&mut vcx, "a");
+    assert!(h.awaiting(&vcx), "still on its way");
+    let why = "watchlists not written: the user layer is read-only";
+    h.shell_says(&mut vcx, TileNotice::Refused(why.into()));
+    assert_eq!(h.title(&mut vcx), "Watchlist: a", "untouched");
+    assert!(!h.awaiting(&vcx));
+    assert_eq!(h.notices(&vcx), [why]);
+    h.press(&mut vcx, "g w");
+    assert_eq!(
+        h.switcher(&vcx),
+        Some(vec![
+            ("a".into(), true),
+            ("b".into(), false),
+            ("mine".into(), false)
+        ]),
+        "mine is back"
+    );
 }
