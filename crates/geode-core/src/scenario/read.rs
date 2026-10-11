@@ -196,6 +196,12 @@ fn read_columns(t: &Table, rows: &str) -> Result<Columns, Refusal> {
                     format!("'axis' names '{}' twice", axes[0]),
                 ));
             }
+            if axes.iter().any(|a| a.trim().is_empty()) {
+                return Err((
+                    "columns.axis".into(),
+                    "'axis' names must be non-empty".into(),
+                ));
+            }
             if let Some(a) = axes.iter().find(|a| *a == rows) {
                 return Err((
                     "columns.axis".into(),
@@ -274,7 +280,13 @@ fn read_diff(v: &Value, columns: &Columns) -> Result<Diff, Refusal> {
     };
     let base = match req(t, "diff", "base")? {
         Value::Integer(n) => DiffBase::Number(*n as f64),
-        Value::Float(x) => DiffBase::Number(*x),
+        Value::Float(x) if x.is_finite() => DiffBase::Number(*x),
+        Value::Float(x) => {
+            return Err((
+                "diff.base".into(),
+                format!("'base' must be finite (got {x})"),
+            ));
+        }
         Value::String(s) => DiffBase::Text(s.clone()),
         other => {
             return Err((
@@ -290,6 +302,7 @@ fn read_diff(v: &Value, columns: &Columns) -> Result<Diff, Refusal> {
             "'measures' lists at least one column the diff applies to".into(),
         ));
     }
+    let mut seen: Vec<&str> = Vec::new();
     let measures = measures
         .iter()
         .enumerate()
@@ -306,6 +319,13 @@ fn read_diff(v: &Value, columns: &Columns) -> Result<Diff, Refusal> {
                     format!("'{name}' is not one of the shape's measure columns"),
                 ));
             }
+            if seen.contains(&name) {
+                return Err((
+                    format!("diff.measures.{i}"),
+                    format!("'{name}' is listed twice"),
+                ));
+            }
+            seen.push(name);
             Ok(name.to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;

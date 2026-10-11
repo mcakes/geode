@@ -778,6 +778,81 @@ diff = { base = 1, measures = ["rho"] }"#,
     assert_eq!(diags[0].path.as_deref(), Some("scenarios.rho.diff.base"));
 }
 
+/// An empty axis name is no axis: refused at `columns.axis`, not by the
+/// schema check later with a message about a column named "".
+#[test]
+fn an_empty_axis_name_is_refused_structurally() {
+    assert_eq!(
+        refused(&with(
+            VEGA_KT,
+            r#"columns = { axis = "moneyness" }"#,
+            r#"columns = { axis = "" }"#
+        )),
+        "scenarios.vega_kt.columns.axis"
+    );
+    assert_eq!(
+        refused(&with(
+            VEGA_KT,
+            r#"columns = { axis = "moneyness" }"#,
+            r#"columns = { axis = ["moneyness", " "] }"#
+        )),
+        "scenarios.vega_kt.columns.axis"
+    );
+}
+
+/// A NaN base never matches a label and an infinite one never will: both
+/// are refused rather than left to paint absolutes with a missing-base
+/// notice forever.
+#[test]
+fn a_non_finite_diff_base_is_refused() {
+    for bad in ["nan", "inf", "-inf"] {
+        let text = with(SPOT_LADDER, "base = 0", &format!("base = {bad}"));
+        assert_eq!(refused(&text), "scenarios.spot_ladder.diff.base", "{bad}");
+    }
+}
+
+/// A measure listed twice in `diff.measures` is refused at the second
+/// index, as a ladder column listed twice is.
+#[test]
+fn a_duplicate_diff_measure_is_refused_at_its_index() {
+    let text = with(
+        SPOT_LADDER,
+        r#"measures = ["npv"]"#,
+        r#"measures = ["npv", "npv"]"#,
+    );
+    assert_eq!(refused(&text), "scenarios.spot_ladder.diff.measures.1");
+}
+
+/// A `_usd` twin at another grain than its measure is a misdeclared
+/// dataset: refused at the measure's path, naming both grains.
+#[test]
+fn a_twin_at_another_grain_is_refused_at_the_measure() {
+    // `delta` is at underlying grain in DATASETS; move its twin to instrument.
+    let datasets = with(
+        DATASETS,
+        "[spot_ladder.columns.delta_usd]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"underlying\"",
+        "[spot_ladder.columns.delta_usd]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"instrument\"",
+    );
+    let doc = merge_docs(
+        "datasets",
+        &[LayerDoc::builtin("datasets", &datasets).expect("well-formed test TOML")],
+    );
+    let (schema, diags) = SchemaSpec::from_doc(&doc);
+    assert!(diags.is_empty(), "{diags:?}");
+    let (shapes, diags) = load_scenarios(&builtin_doc(SPOT_LADDER), &schema);
+    assert!(shapes.is_empty(), "accepted: {shapes:?}");
+    assert_eq!(diags.len(), 1, "{diags:?}");
+    assert_eq!(
+        diags[0].path.as_deref(),
+        Some("scenarios.spot_ladder.columns.measures.1.column")
+    );
+    assert!(
+        diags[0].message.contains("delta_usd") && diags[0].message.contains("grain"),
+        "{}",
+        diags[0].message
+    );
+}
+
 #[test]
 fn a_structural_refusal_is_reported_once_and_the_rest_still_check() {
     let text = format!(

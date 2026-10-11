@@ -7,7 +7,7 @@
 use super::{AxisInfo, Columns, DiffBase, MeasureColumn, ShapeSpec, read_scenarios, refusal};
 use crate::config::{Diagnostic, MergedDoc};
 use crate::panel::read::Refusal;
-use crate::schema::{ColumnRole, DatasetSpec, SchemaSpec};
+use crate::schema::{ColumnRole, DatasetSpec, Grain, SchemaSpec};
 
 /// Every shape `doc` defines that both halves accept, in document order,
 /// plus an Error per refused shape. An accepted shape carries its dataset's
@@ -143,10 +143,33 @@ fn check_measure(m: &mut MeasureColumn, ds: &DatasetSpec, at: &str) -> Result<()
             ));
         }
     }
+    // A twin at another grain would sum the converted measure over a
+    // different row set than the measure itself: the toggle would swap in a
+    // plausible wrong total.
     let twin = format!("{}_usd", m.column);
-    m.usd_twin = ds
-        .column(&twin)
-        .filter(|c| matches!(c.role, ColumnRole::Measure { .. }))
-        .map(|_| twin);
+    let base_grain = ds.column(&m.column).and_then(|c| c.grain());
+    m.usd_twin = match ds.column(&twin) {
+        Some(c) if matches!(c.role, ColumnRole::Measure { .. }) => {
+            if c.grain() != base_grain {
+                return Err((
+                    at.into(),
+                    format!(
+                        "'{twin}' is at {} grain while '{}' is at {}; a twin converts the same measure at the same grain",
+                        grain_name(c.grain()),
+                        m.column,
+                        grain_name(base_grain),
+                    ),
+                ));
+            }
+            Some(twin)
+        }
+        _ => None,
+    };
     Ok(())
+}
+
+/// A measure always carries a grain; "no" only spells a schema that broke
+/// that invariant, rather than panicking over a message.
+fn grain_name(grain: Option<Grain>) -> &'static str {
+    grain.map_or("no", Grain::short)
 }

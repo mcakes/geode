@@ -644,20 +644,22 @@ supplied it, when:
 - a key is unknown, a required key is missing, or a value has the wrong
   shape, including a malformed `format`;
 - `columns` gives both or neither of `axis` and `measures`, an empty
-  `axis = []`, more than two axes, the same axis twice, or the `rows` axis;
+  `axis = []`, more than two axes, the same axis twice, an empty axis name,
+  or the `rows` axis;
 - a ladder's `measures = []` is empty;
 - `value` is missing with an axis `columns`, or present with a measures
   `columns`; `format` or `unit` sits at the top level of a ladder;
 - a ladder lists a measure twice or two measures share a label;
 - `diff` accompanies an axis `columns`, lacks `base` or `measures`, has an
-  empty `measures = []`, lists a measure not in `columns`, or its `base` is
-  neither a number nor a string;
+  empty `measures = []`, lists a measure not in `columns` or twice, or its
+  `base` is neither a finite number nor a string;
 - `paint` is anything but `heat` or `plain`;
 - `dataset` is not declared, or is not a measures dataset with `axes`;
 - `rows` or a `columns` axis is not an axis of the dataset, or an axis of
   the dataset is laid out nowhere (it would be summed across silently);
 - `value` or a ladder measure is not a measure of the dataset;
-- `diff.base` is a number on a text axis, or text on a numeric axis.
+- `diff.base` is a number on a text axis, or text on a numeric axis;
+- a measure's `_usd` twin sits at another grain than the measure.
 
 Datasets are checked against the assembled schema, so a desk shape over a
 desk dataset is accepted when both documents agree. A refused shape never

@@ -37659,8 +37659,8 @@ run_mutation "scenario: a measure's twin is its _usd column" \
 # offered as m's currency alternate: the toggle would paint a label column.
 run_mutation "scenario: only a measure is a _usd twin" \
   crates/geode-core/src/scenario/check.rs \
-  '        .filter(|c| matches!(c.role, ColumnRole::Measure { .. }))' \
-  '        .filter(|_| true)' \
+  '        Some(c) if matches!(c.role, ColumnRole::Measure { .. }) => {' \
+  '        Some(c) => {' \
   geode-core a_usd_named_column_that_is_not_a_measure_is_no_twin
 
 run_mutation "scenario: a diff base must fit the rows axis type" \
