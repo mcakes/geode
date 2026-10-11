@@ -38,3 +38,8 @@ tracing-appender.workspace = true
 geode-core = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }
 tempfile = "3.27.0"
+criterion = "0.8.2"
+
+[[bench]]
+name = "demo_hanweck"
+harness = false

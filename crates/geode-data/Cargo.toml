@@ -55,3 +55,7 @@ harness = false
 [[bench]]
 name = "series_query"
 harness = false
+
+[[bench]]
+name = "vol_board"
+harness = false

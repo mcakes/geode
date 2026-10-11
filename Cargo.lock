@@ -2595,6 +2595,7 @@ name = "geode-compose"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "criterion",
  "geode-core",
  "geode-data",
  "geode-demo-data",

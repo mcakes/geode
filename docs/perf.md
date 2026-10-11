@@ -2933,3 +2933,85 @@ over a long range would be slow, and the UI never waits for it (the
 request is bounded submission, answered on the pool). Not tuned here; the
 lever, if a desk asks for such spans, is a recursive or `ewm`-style
 running form that keeps one accumulator per row instead of a list.
+
+## Vol board request and the history family's costs (2026-10-11)
+
+The board request's costs as the history family stands before the
+batched coverage check, the restricted append dedupe and the O(rows)
+`validate_against` land, so those changes are measured against these
+numbers. Two benches.
+
+`crates/geode-data/benches/vol_board.rs`: one temporary store holding
+three history datasets for 25 members (`M00`..`M24`): `vol_surface`
+(8 tenors × 5 deltas, values `vol` and `forward`), `realized_vol`
+(windows `5D`, `20D`, `60D`) and `varswap` (8 tenors), one 21:00 UTC close
+per weekday over the last 400 calendar days (about 286 closes: 286,000
+surface rows, 21,450 realized, 57,200 varswap). The seed appends in
+20-day chunks with coverage recorded per member prefix, so lookbacks and
+the window read from the cache. Setup appends outside timing. The
+service cases run `DataService` with 4 query workers over a fake
+`bench_hanweck` adapter that answers every ask from the same generator,
+so a fetched `Latest` appends rows equal to the cache (all deduped). The
+Changes view is `Forward(1M)`, ATFM at the 8 tenors, `Skew(3M)` and
+`Slope(1Y, 1M)`, D1 lookback and a 30-day 3M ATFM sparkline: 10 surface
+tuples per member (vol and forward share `[1M, 0.5]`; skew reads the
+`0.25` and `0.75` 3M deltas), 250 in all, about 71,500 rows across the
+400 days. The Rich/cheap view is 3M ATFM, realized 5D and 20D, IV−RV,
+varswap, VS spread, skew and slope with a 365-day percentile window.
+Cases are Criterion medians, 20 samples each.
+
+`crates/geode-compose/benches/demo_hanweck.rs`: the demo Hanweck
+adapter's `HistoryQuery` called directly (no store, no service), seed 42,
+on the `surface` table over the ten demo underlyings, 100 samples each.
+It answers spec §11's question whether a member prefix should split into
+several calls (decision D2: no split).
+
+Commands: `cargo bench -p geode-data --bench vol_board -- --warm-up-time 2
+--measurement-time 5` and `cargo bench -p geode-compose --bench
+demo_hanweck -- --warm-up-time 1 --measurement-time 3`. Conditions:
+Apple M5 Pro (arm64, 18 cores, 48 GB), rustc 1.96.0, DuckDB crate
+1.10505.0, bench profile. The machine was heavily loaded: load averages
+46 / 50 / 35 before the `vol_board` run (other sessions' `cargo test`
+builds and a running `target/release/geode`), 12 / 33 / 30 after it and
+before `demo_hanweck`, 30 / 35 / 31 after that. Treat the medians as
+upper bounds; the service round trips carry the widest spread
+(`vol_board/rich_cheap_view_25` sampled 1.11 s to 1.99 s).
+
+| Benchmark | Baseline | After |
+|---|---|---|
+| `board_read/changes_view_25` (the read alone: SQL projection plus reduce, one connection) | 18.0 ms | |
+| `board_read/rich_cheap_view_25` (the read alone, 365-day percentile window) | 51.4 ms | |
+| `append/between_400d_prefix_answer_deduped` (one member's 400-day surface prefix answer, about 11,400 rows all equal to live, into the full table: dedupe scan plus coverage coalescing) | 20.5 ms | |
+| `validate/286k_rows_vs_25_prefix` (`HistoryRows::validate_against`, 286,000 rows against a 25-member prefix ask) | 82.4 ms | |
+| `validate/71k_rows_vs_250_exact` (71,500 rows against 250 exact tuples) | 47.6 ms | |
+| `vol_board/changes_view_25` (`DataService::vol_board` to its `DataEvent::VolBoard`: three prefix `Latest` fetches appended, the D1 `At` from coverage, the read) | 645 ms | |
+| `vol_board/rich_cheap_view_25` (the same round trip with the 365-day window `Between` per dataset) | 1.50 s | |
+| `history/prefix_latest_25` (a prefix `Latest` over the 25 members: fetch, append, read) | 111 ms | |
+| `history/prefix_at_25_always_fetches` (a prefix `At` at yesterday's end of day; a prefix `At` never reads from coverage) | 146 ms | |
+| `history/exact_at_250_from_coverage` (an exact `At` over the 250 Changes tuples, answered locally) | 304 ms | |
+| `history/exact_between_30d_250_from_coverage` (an exact 30-day `Between` over the 250 tuples, `to` = now) | 700 ms | |
+| `demo_hanweck/prefix_latest_10` (one prefix `Latest` call over ten underlyings) | 2.01 ms | |
+| `demo_hanweck/single_latest_x10` (ten single-member prefix `Latest` calls) | 3.32 ms | |
+| `demo_hanweck/prefix_between_400d_10` (one 400-day prefix `Between` over ten underlyings, the largest answer a board can ask) | 39.0 ms | |
+| `demo_hanweck/exact_at_100` (an exact `At` over the ten surface points per underlying the Changes view reads) | 2.35 ms | |
+
+`board_read/changes_view_25` is inside the 50 ms requery target by a
+factor of almost three; `board_read/rich_cheap_view_25` sits at the
+target (51.4 ms, 3% over under this load), its cost being the 365-day
+daily projection per input tuple across three datasets.
+`history/exact_at_250_from_coverage` costs 304 ms, about 1.2 ms per
+tuple: the request is answered from the cache, so nearly all of it is
+the per-tuple `covers_instant` check (two statements per tuple), which
+the batched check is to remove. `history/exact_between_30d_250_from_coverage`
+costs 700 ms, about 2.8 ms per tuple. It is not a pure cache read: the
+dispatch clips `to` to now and coverage ends `HISTORY_SETTLE` (30 min)
+before the fetch that recorded it, so every iteration still fetches and
+appends the recent tail for all 250 tuples; and its `missing_by_key`
+coverage check is also one statement per tuple (`store/history.rs`),
+which this part does not fix. In the round trips, `vol_board/*` pay that
+per-tuple cost several times over (the D1 `At` and, for Rich/cheap, the
+window `Between` per dataset) plus three deduped prefix appends.
+
+On the demo adapter, one prefix call over ten underlyings costs 2.0 ms
+against 3.3 ms for ten single-member calls: splitting a prefix buys
+nothing and costs ten queue slots, which supports D2.
