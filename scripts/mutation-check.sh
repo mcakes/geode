@@ -28684,13 +28684,15 @@ run_mutation "pricer select: an untouched choice or text enter fills the selecti
   '        if false && bulk {' \
   geode-pricer an_untouched_choice_enter_over_a_selection_writes_nothing
 
-# A grouping row's untouched editor writes nothing either: on a `mixed`
-# cell it opens empty, and the empty text sent to every line is refused.
+# A grouping row's untouched editor writes nothing either: a typeahead on
+# a `mixed` cell opens on no option, and the list's first option sent to
+# every line would turn a put into a call. (A steppable cell's untouched
+# enter settles through the live step first and never reaches this.)
 run_mutation "pricer group edit: an untouched enter on a group row writes" \
   crates/geode-pricer/src/tile.rs \
   '        if unchanged && bulk {' \
   '        if unchanged && self.selection.is_some() {' \
-  geode-pricer a_group_row_editor_opens_on_its_lines_shared_value
+  geode-pricer an_untouched_choice_on_a_mixed_group_row_writes_nothing
 
 run_mutation "pricer select: an untouched choice reads as changed" \
   crates/geode-pricer/src/tile.rs \

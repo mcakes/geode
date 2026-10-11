@@ -1223,6 +1223,24 @@ fn a_group_row_editor_opens_on_its_lines_shared_value(cx: &mut gpui::TestAppCont
     assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
 }
 
+/// A typeahead on a group whose lines differ opens on no option, and an
+/// untouched `enter` writes nothing: the list's first option sent to
+/// every line would turn the put into a call from a no-op gesture.
+#[gpui::test]
+fn an_untouched_choice_on_a_mixed_group_row_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 5000 P"]);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "option_type");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.mode(&mut vcx), "insert", "a typeahead opens");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&mut vcx), "normal");
+    assert_eq!(line_texts(&h, &vcx), ["SPX Z26 5000 C", "SPX Z26 5000 P"]);
+    assert_eq!(edit_notice(&h, &vcx), None);
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
 /// On a grouping row's steppable cell the arrows step every line beneath
 /// it live; escape rolls every step back, and enter keeps them as ONE
 /// undo entry.
