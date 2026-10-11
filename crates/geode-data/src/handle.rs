@@ -425,7 +425,7 @@ impl DataHandle {
     /// answered by one keyed/tagged DataEvent::VolBoard, refusals
     /// included, unless a newer request or a cancel for its key supersedes
     /// it first; a newer history request under the same key supersedes it
-    /// too, and it a pending history request. The board's own pool read
+    /// too, and it supersedes a pending history request. The board's own pool read
     /// runs under `query::volboard::board_pool_key(key)`, so the tile's key
     /// stays free for its view queries; a history read already in the pool
     /// under `key` is not replaced by it and still answers, so a requester

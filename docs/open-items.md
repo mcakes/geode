@@ -660,9 +660,13 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   hashed once, but `key_at` still allocates a key per row (about 285,000 for
   a 400-day prefix answer over 25 members).
 - History family: each append's retention sweep still scans the dataset's
-  whole payload table (the dedupe now groups the staged keys only), and a
-  prefix ask still fans out to one adapter call per distinct gap list,
-  uncapped. Neither is on the board's path; measure before acting.
+  whole payload table (the dedupe now groups the staged keys only). Every
+  board refresh appends (its `Latest` prefix answer per dataset and the
+  window or sparkline tail), so the sweep runs on the board's path on every
+  refresh; it is the likely reason the dedupe restriction measured no gain
+  on `append/between_400d_prefix_answer_deduped`. A prefix ask still fans
+  out to one adapter call per distinct gap list, uncapped; that half is off
+  the board's path (its prefix ask is a `Latest`). Measure before acting.
 - Vol board: the Rich/cheap board read measured 51.9 ms, about 4% over the
   50 ms budget (`board_read/rich_cheap_view_25`). The read's `live` CTE
   groups every version of the asked tuples on every read; a materialized

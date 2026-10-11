@@ -3018,13 +3018,16 @@ tuples answered from the cache fell from 642 ms to 195 ms (3.3×): the
 per-tuple `covers_instant` (two statements per tuple) became two
 statements for the whole set. What remains is the read itself and the
 two statements' 250-term `OR` predicates. The Changes round trip, which
-pays the D1 exact `At` once, fell from 945 ms to 534 ms.
+pays the D1 exact `At` once, fell from 945 ms to 534 ms; part of that
+drop is likely the sparkline tail fetch's `validate_against` over 250
+exact tuples (Task 9) and the falling load at the Baseline's start (29),
+so the attribution is approximate.
 
 **The O(rows) `validate_against`.** Against 250 exact tuples, 71,250 rows
 fell from 47.5 ms to 12.4 ms (3.8×): the linear scan of the asked tuples
 per row is gone. Against a 25-member prefix the scan was short, so the
 gain is small and inside this run's noise (70.1 against 78.8 ms, a wide
-sample spread); the alternating re-runs put it near 12% (71 and 70 against
+sample spread); the alternating re-runs put it near 14% (71 and 70 against
 63 and 59 ms). The remaining cost is `key_at`, which allocates a key per
 row (285,000 here): the next lever.
 

@@ -1605,9 +1605,9 @@ cell from those: a change is current minus the last observation at or
 before the instant; a rank is the share of the window's daily values
 strictly below the current, carried with their count (fewer than 60 still
 answers; muting is the tile's); a derived measure is combined pointwise
-over the days all its inputs hold. The read itself skips a member or suffix
-that does not normalize (it names no stored row), so such a member shows
-only as missing.
+over the days all its inputs hold. Behind the service's refusal, the read
+also skips a member or suffix that does not normalize (it names no stored
+row), as a guard for a direct `read_board` caller.
 
 Rows come one per member in request order. A member with no current
 observation among the request's surface inputs keeps its row (`as_of:
