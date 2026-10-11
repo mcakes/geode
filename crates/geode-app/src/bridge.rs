@@ -3495,7 +3495,7 @@ grain = "underlying"
             "fixture: no views handed over yet"
         );
 
-        s.vcx.simulate_keystrokes("c");
+        s.vcx.simulate_keystrokes("i");
         s.draw();
         s.vcx.simulate_input("Alpine");
         s.vcx.simulate_keystrokes("enter");
