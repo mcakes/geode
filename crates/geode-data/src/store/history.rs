@@ -7,7 +7,8 @@
 //!
 //! Coverage records which asked key (an exact tuple, or a prefix stored with
 //! trailing NULLs) was fetched over which span, whether or not any row came
-//! back, so an empty answer is not asked for again.
+//! back, so an empty answer is not asked for again. Each append coalesces
+//! the coverage of the tuples it touched, one row per disjoint span.
 //!
 //! Both timestamps are UTC stored as naive `TIMESTAMP`, bound and read as
 //! epoch microseconds (`make_timestamp` / `epoch_us`) so session time zones
@@ -806,7 +807,7 @@ mod tests {
         assert!(sql[1].contains("\"from_ts\" TIMESTAMP"));
         assert!(
             !sql[1].contains("PRIMARY KEY"),
-            "coverage rows repeat freely"
+            "coverage has no key: a tuple holds one row per disjoint span"
         );
     }
 

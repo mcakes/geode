@@ -365,6 +365,11 @@ windows, and `order = "tenor"` on a tenor or window key column.
   does not change: a covered span is never asked again, so a later vendor
   correction reaches the cache only through an ask the cache cannot answer
   (`Latest`, or `At` at an uncovered instant).
+- That an observation is published within 30 minutes of its timestamp
+  (`HISTORY_SETTLE`): coverage from an answer ends that long before the
+  call, so anything stamped earlier but published later than that is never
+  asked for again. A vendor whose closes arrive later needs a longer
+  margin (an open item).
 
 ### Reference data
 

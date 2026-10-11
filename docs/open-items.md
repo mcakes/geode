@@ -639,9 +639,17 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   (the vol watchlist tile) land together in Part 4 of the vol watchlist.
 - History family, for the Part 2 bench: measure the prefix fan-out (one
   adapter call per distinct gap list, uncapped), a prefix `At` always reaching
-  the source, a stepped `Between` never recording coverage, and each append's
+  the source, a stepped `Between` never recording coverage, each append's
   dedupe and retention scanning the whole payload table (filtering to the
-  staged keys is the likely lever).
+  staged keys is the likely lever), the coverage coalescing on append (one
+  select, delete and insert per touched tuple), and `validate_against` in the
+  history worker, which is O(rows x tuples) with two allocations per row (a
+  400-day prefix answer for 25 members is about 400k rows against 25
+  tuples).
+- History family: `HISTORY_SETTLE` (30 minutes) is a guess at the vendors'
+  publication lag. Tune it against the real Hanweck and KDB sources once they
+  are reachable: too short and a late-published observation is lost behind
+  coverage; too long and every ask refetches more of its recent tail.
 
 ### Display checks
 

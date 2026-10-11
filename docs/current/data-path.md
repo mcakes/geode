@@ -781,6 +781,26 @@ What an answer establishes depends on its span:
 | `At(t)`, otherwise (a `Prefix` ask, or no rows) | `[t, t + 1µs)` |
 | `Latest` | `[ts, ts + 1µs)` at the tuple's latest answered row, and nothing for a tuple with none |
 
+Every recorded span then ends by the call's fetch time less
+`HISTORY_SETTLE` (30 minutes), the fetch time taken by the worker just
+before the adapter call. A source can vouch for nothing after it was asked,
+and an observation stamped shortly before the ask may not be published yet:
+unclipped, a span reaching past now would mark the future covered, and a
+close stamped 21:00 but published at 21:20 would be lost behind coverage
+for good. A span the clip empties records nothing, so an `At` or `Latest`
+point inside the last 30 minutes, and any `At` in the future, is never
+answered from the cache. The cost is that the last 30 minutes of any span
+are asked for again on the next request. The margin is a guess at the
+vendors' publication lag ([real sources](real-sources.md)).
+
+An append then coalesces the coverage of every asked tuple it recorded
+coverage for: that tuple's rows (exactly its shape, trailing NULLs
+included) are replaced by its merged spans, each under the newest
+`received_at` among them. The table so holds one row per disjoint span per
+asked tuple, rather than a row per ask that a refreshing board would grow
+without bound and every lookup would scan. Lookups merge a tuple's spans
+with its prefixes' anyway, so they answer the same.
+
 Rows, coverage and the retention sweep commit in one writer transaction, so
 a span read as covered is a span whose rows are readable. Calls into
 `append_history` share the fixed `staging_history` table, so only the ingest
@@ -1451,8 +1471,11 @@ cached row in the span.
 
 The service first refuses, as that request's `DataEvent::History` error, a
 drifted dataset, a dataset that is not of the history family or has no
-source, a key set of the wrong arity, a zero `step`, a key that does not
-normalize (see [history storage](#history-storage)), and a coverage read
+source, a key set of the wrong arity, a zero `step`, a `Between` whose
+`from` is not before its `to` as asked (`a history span must end after it
+starts`: an inverted span is the caller's error and must not read as no
+data), a key that does not normalize (see
+[history storage](#history-storage)), and a coverage read
 that fails (`reading coverage: <error>`). It then normalizes the asked keys,
 removes repeats, and plans adapter calls against coverage:
 
@@ -1468,10 +1491,13 @@ removes repeats, and plans adapter calls against coverage:
   as whole here.
 - `Between` is first clipped to the dataset's `history` window (`from`
   rises to now less the window): retention would delete what an older span
-  fetched, and the next ask would fetch it again forever. A span left empty
-  by the clip, wholly expired, is read from the cache without an adapter
-  call. Otherwise each tuple's coverage gaps are asked for; tuples with the
-  same gaps share calls, one per gap.
+  fetched, and the next ask would fetch it again forever. Its `to` is
+  clipped to now: nothing later can be covered, so the future part would be
+  a gap asked for on every request. A span left empty by the clips, wholly
+  expired or wholly in the future, is read from the cache without an
+  adapter call. Otherwise each tuple's coverage gaps are asked for; tuples
+  with the same gaps share calls, one per gap. The read and the answer keep
+  the span as asked.
 
 With no call needed, the request is read at once on the query pool.
 Otherwise it waits in the data layer, never on the UI thread, on a ticket
@@ -1481,6 +1507,9 @@ error, or else with a read on the pool under the requester's key and tag.
 The answer is a `HistoryTable`: the key and value column names, then rows
 ordered by key then `ts`, keys in their normalized spelling. A failed call
 also reports `Failed` on the source's `<dataset>@<source>` load lane.
+Load-lane health is reported per adapter call, not per request: in a
+request planning two calls where the first fails and the second appends,
+the lane ends at `Ok` while that request answered `Err`.
 
 Every request is recorded as the newest for its key, whatever path it
 takes. A newer request for the same key supersedes an older one, and the
@@ -1869,9 +1898,6 @@ Open skips rebuilding a drifted dataset's generation summary. See
   tuple naming fewer key columns, reach the source on every ask, since neither can be answered from the cache; and
   each history append's dedupe and retention scan the dataset's whole
   payload table. None is measured yet.
-- History coverage recorded from an answer is not clipped at the time it
-  was fetched, so a `Between` reaching past now marks the future covered and
-  a later `Between` over that span does not ask for what arrived since.
 - Maintained budgets and known gaps are in
   [performance.md](performance.md); raw conditions and runs are in the
   measurement log.
