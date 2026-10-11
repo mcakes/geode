@@ -37590,7 +37590,19 @@ run_mutation "scenario pivot: a missing diff base is reported" \
   crates/geode-scenario/src/core/pivot.rs \
   '                None => diff_base_missing = true,' \
   '                None => diff_base_missing = false,' \
-  geode-scenario a_missing_base_row_paints_absolutes_and_says_so
+  geode-scenario a_base_label_only_the_domain_carries_is_a_missing_base
+
+run_mutation "scenario pivot: a NULL diff base value is reported" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                            diff_base_missing = true;' \
+  '                            diff_base_missing = false;' \
+  geode-scenario a_null_base_value_leaves_that_column_absolute_and_says_so
+
+run_mutation "scenario pivot: a diffed column has no Σ" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                if column.diffed {' \
+  '                if false && column.diffed {' \
+  geode-scenario a_diffed_ladder_column_has_no_sum
 
 run_mutation "scenario pivot: the heat domain skips the base row's diffed cells" \
   crates/geode-scenario/src/core/pivot.rs \

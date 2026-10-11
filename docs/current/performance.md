@@ -158,7 +158,7 @@ the measurement log for fixture and hardware details.
 | Market-data window fill | 40 × five values | 17.7 µs |
 | Market-data cell patch | 10,000 × five values: one-cell window refill | 105 ns |
 | Market-data `/` open cells | 10,000 × five values: the find table's first window (64 rows) then its 40 shown rows, into a `RowCache` | 53 µs |
-| Scenario pivot build (`pivot_build_40x40`) | 40 × 40 matrix with its Σ companion, USD: `Pivot::build` only, snapshots built outside the timed loop. Budget: the 8 ms pure-UI target, since the build runs on delivery before the table repaints (Apple M5 Pro, 18 cores, load average 4.3 to 4.5) | 261 µs |
+| Scenario pivot build (`pivot_build_40x40`) | 40 × 40 matrix with its Σ companion, USD: `Pivot::build` only | 261 µs |
 | Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
 | Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open: the `GridIndex`, no measure text | 271 µs |

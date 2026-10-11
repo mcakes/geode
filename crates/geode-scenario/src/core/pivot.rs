@@ -109,17 +109,23 @@ pub struct Pivot {
     /// a columns axis is a scenario axis or the shape is a ladder.
     pub row_sums: Option<Vec<Option<f64>>>,
     /// Σ across the rows, one per column (the second query's leaves, or a
-    /// ladder's total row); `None` when the rows axis is a scenario axis,
-    /// the second query has not arrived, or the pair disagree.
+    /// ladder's total row). `None` means one of three things: the Σ row is
+    /// not meaningful for the shape (`sums_rows` false, a scenario rows
+    /// axis), the companion snapshot has not arrived, or the pair's
+    /// generations disagree (`totals_disagree`). A diffed column's entry
+    /// is `None`: the total row is absolute and never sits under
+    /// value-minus-base cells.
     pub column_sums: Option<Vec<Option<f64>>>,
     /// The corner: the total row's value, present only with both Σ.
     pub grand_sum: Option<Option<f64>>,
     /// The two snapshots carry different generations: `column_sums` is
     /// withheld until a delivery agrees.
     pub totals_disagree: bool,
-    /// The diff's base row, when diff is on and the row is in scope.
+    /// The diff's base row, when diff is on and a scoped leaf carries the
+    /// base label (a label only the axis domain supplies does not count).
     pub base_row: Option<usize>,
-    /// Diff is on but no row matches the base: absolutes shown.
+    /// Diff is on but no scoped leaf carries the base, or a diff measure's
+    /// base value is NULL: those columns show absolutes.
     pub diff_base_missing: bool,
     /// The scoped rows span more than one `currency` (the ungrouped
     /// dimension's mixed flag on the total row).
@@ -266,10 +272,13 @@ impl Pivot {
 
         // Pass 2: the cells.
         let mut cells = vec![None; rows.len() * ncols];
+        // Rows a scoped leaf carries; a domain-only row has none.
+        let mut has_leaf = vec![false; rows.len()];
         for &r in &leaves {
-            let Some(row) = main.text_at(axis_idx[0], r).and_then(|l| row_of.get(l)) else {
+            let Some(&row) = main.text_at(axis_idx[0], r).and_then(|l| row_of.get(l)) else {
                 continue;
             };
+            has_leaf[row] = true;
             match &shape.columns {
                 Columns::Axes(_) => {
                     let key: Option<Vec<String>> = axis_idx[1..]
@@ -305,7 +314,7 @@ impl Pivot {
             None
         };
         let mut totals_disagree = false;
-        let column_sums = match (&shape.columns, shape.sums_rows()) {
+        let mut column_sums = match (&shape.columns, shape.sums_rows()) {
             (Columns::Measures(_), true) => total_row.map(|r| {
                 reads
                     .iter()
@@ -341,12 +350,15 @@ impl Pivot {
             _ => None,
         };
 
-        // Diff: the configured measures against the base row.
+        // Diff: the configured measures against the base row. The base is
+        // the row a scoped leaf carries — a domain-only label has nothing
+        // to subtract — and a diff measure whose base value is NULL stays
+        // absolute rather than blanking its column; either is reported.
         let mut columns = columns;
         let mut base_row = None;
         let mut diff_base_missing = false;
         if let (true, Some(diff), Columns::Measures(_)) = (mode.diff, &shape.diff, &shape.columns) {
-            base_row = rows.iter().position(|l| l.matches(&diff.base));
+            base_row = (0..rows.len()).find(|&i| has_leaf[i] && rows[i].matches(&diff.base));
             match base_row {
                 None => diff_base_missing = true,
                 Some(base) => {
@@ -355,19 +367,27 @@ impl Pivot {
                         if !diff.measures.contains(&m.column) {
                             continue;
                         }
+                        let Some(b) = cells[base * ncols + col] else {
+                            diff_base_missing = true;
+                            continue;
+                        };
                         column.diffed = true;
-                        let base_value = cells[base * ncols + col];
                         for row in 0..rows.len() {
                             if row == base {
                                 continue;
                             }
                             let at = row * ncols + col;
-                            cells[at] = match (cells[at], base_value) {
-                                (Some(v), Some(b)) => Some(v - b),
-                                _ => None,
-                            };
+                            cells[at] = cells[at].map(|v| v - b);
                         }
                     }
+                }
+            }
+        }
+        // The total row is absolute: no Σ under value-minus-base cells.
+        if let Some(sums) = column_sums.as_mut() {
+            for (sum, column) in sums.iter_mut().zip(&columns) {
+                if column.diffed {
+                    *sum = None;
                 }
             }
         }
@@ -851,6 +871,7 @@ pub(crate) mod fixtures {
 mod tests {
     use super::fixtures::*;
     use super::*;
+    use geode_core::scenario::Diff;
     use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
 
     fn usd() -> Mode {
@@ -1446,6 +1467,113 @@ mod tests {
         assert!(!p.columns[0].diffed, "nothing is diffed without a base");
     }
 
+    fn diff_on() -> Mode {
+        Mode {
+            currency: Currency::Native,
+            diff: true,
+        }
+    }
+
+    #[test]
+    fn a_base_label_only_the_domain_carries_is_a_missing_base() {
+        // The dataset knows the 0.0 shift, so its row is drawn; no scoped
+        // leaf carries it, so there is nothing to subtract.
+        let main = Rows {
+            rows: ladder_main()
+                .rows
+                .into_iter()
+                .filter(|(l, _, _)| l[0] != Some("0.0"))
+                .collect(),
+            ..ladder_main()
+        };
+        let mut domains = AxisDomains::default();
+        domains.insert(
+            "spot_shift",
+            vec!["-5.0".into(), "0.0".into(), "5.0".into()],
+        );
+        let shape = spot_ladder();
+        let p = Pivot::build(
+            &main.snapshot(&shape.dataset, Some(1)),
+            None,
+            &shape,
+            diff_on(),
+            &domains,
+        )
+        .unwrap();
+        assert_eq!(texts(&p.rows), ["-5.0", "0.0", "5.0"]);
+        assert!(p.diff_base_missing, "the notice stands");
+        assert_eq!(p.base_row, None);
+        assert!(!p.columns[0].diffed);
+        assert_eq!(p.cell(0, 0), Some(90.0), "absolute, not blank");
+        assert_eq!(p.cell(1, 0), None, "the domain-only row is blank");
+        assert_eq!(p.cell(2, 0), Some(115.0));
+    }
+
+    #[test]
+    fn a_null_base_value_leaves_that_column_absolute_and_says_so() {
+        let main = Rows {
+            rows: ladder_main()
+                .rows
+                .into_iter()
+                .map(|(l, d, mut v)| {
+                    if l[0] == Some("0.0") {
+                        v[0] = None;
+                    }
+                    (l, d, v)
+                })
+                .collect(),
+            ..ladder_main()
+        };
+        let shape = ShapeSpec {
+            diff: Some(Diff {
+                base: DiffBase::Number(0.0),
+                measures: vec!["npv".into(), "delta".into()],
+            }),
+            ..spot_ladder()
+        };
+        let p = build(&shape, &main, diff_on());
+        assert_eq!(p.base_row, Some(1));
+        assert!(p.diff_base_missing, "npv has no base value");
+        assert!(!p.columns[0].diffed, "npv stays absolute");
+        assert_eq!(p.cell(0, 0), Some(90.0));
+        assert_eq!(p.cell(2, 0), Some(115.0));
+        assert!(p.columns[1].diffed, "delta has its base and diffs");
+        assert_eq!(p.cell(0, 1), Some(-1.0));
+        assert_eq!(p.cell(1, 1), Some(2.0));
+        assert_eq!(p.cell(2, 1), Some(1.0));
+        assert!(!p.columns[2].diffed);
+    }
+
+    #[test]
+    fn a_diffed_ladder_column_has_no_sum() {
+        let main = Rows {
+            grouping: vec!["tenor"],
+            measures: vec!["repo", "skew"],
+            rows: vec![
+                (vec![Some("1Y")], 1, vec![Some(1.0), Some(10.0)]),
+                (vec![Some("2Y")], 1, vec![Some(4.0), Some(20.0)]),
+                (vec![None], 0, vec![Some(5.0), Some(30.0)]),
+            ],
+        };
+        let shape = ShapeSpec {
+            diff: Some(Diff {
+                base: DiffBase::Text("1Y".into()),
+                measures: vec!["repo".into()],
+            }),
+            ..by_maturity()
+        };
+        let p = build(&shape, &main, diff_on());
+        assert!(p.columns[0].diffed);
+        assert_eq!(p.cell(1, 0), Some(3.0));
+        assert_eq!(
+            p.column_sums,
+            Some(vec![None, Some(30.0)]),
+            "an absolute total never sits under value-minus-base cells"
+        );
+        let absolute = build(&shape, &main, native());
+        assert_eq!(absolute.column_sums, Some(vec![Some(5.0), Some(30.0)]));
+    }
+
     #[test]
     fn a_shape_without_diff_ignores_diff_mode() {
         let p = build(
@@ -1471,8 +1599,9 @@ mod tests {
                 diff: true,
             },
         );
-        // Deltas are -10 and 15; the base row's npv (100) and its untouched
-        // delta/theta cells (2, -2) stay in; the largest is 15.
+        // Deltas are -10 and 15; the base row's npv (100) is left out as a
+        // diffed base cell, its untouched delta/theta cells (2, -2) stay
+        // in; the largest is 15.
         assert_eq!(p.heat_domain, 15.0);
         let absolute = build(&spot_ladder(), &ladder_main(), native());
         assert_eq!(absolute.heat_domain, 115.0);

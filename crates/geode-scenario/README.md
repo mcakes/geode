@@ -16,7 +16,17 @@ builtin five and the pivot. The tile itself is not built yet.
   the second, column-totals snapshot) into cells, Σ, diff and heat domain.
   Every Σ comes from the snapshot's subtotal and total rows, never from the
   cells; a Σ along a scenario axis does not exist; the Σ from the second
-  query is blanked while the pair's generations disagree.
+  query is blanked while the pair's generations disagree. Diff takes its
+  base from the row a scoped leaf carries (a label only the axis domain
+  supplies is no base); a diff measure whose base value is NULL stays
+  absolute; either sets `diff_base_missing`. A diffed column has no Σ
+  entry, since the total row is absolute. The heat domain counts finite
+  painted cells only, excluding Σ cells and the base row's diffed cells.
+  `Err` (a stale or foreign delivery, or a shape never checked) when the
+  snapshot's grouping does not match the shape's, it lacks `row_depth`,
+  the shape has not been checked against the schema, a measure or its
+  USD twin column is missing, the shape paints no measure, or the totals
+  snapshot is grouped wrongly (or lacks `row_depth`).
 - `benches/pivot.rs`: build for a 40 × 40 matrix.
 
 Dependencies: `geode-core` only. `cargo tree -p geode-scenario -e normal |

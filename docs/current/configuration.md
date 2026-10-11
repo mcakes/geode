@@ -634,13 +634,15 @@ supplied it, when:
 
 - a key is unknown, a required key is missing, or a value has the wrong
   shape, including a malformed `format`;
-- `columns` gives both or neither of `axis` and `measures`, more than two
-  axes, the same axis twice, or the `rows` axis;
+- `columns` gives both or neither of `axis` and `measures`, an empty
+  `axis = []`, more than two axes, the same axis twice, or the `rows` axis;
+- a ladder's `measures = []` is empty;
 - `value` is missing with an axis `columns`, or present with a measures
   `columns`; `format` or `unit` sits at the top level of a ladder;
 - a ladder lists a measure twice or two measures share a label;
-- `diff` accompanies an axis `columns`, lacks `base` or `measures`, lists a
-  measure not in `columns`, or its `base` is neither a number nor a string;
+- `diff` accompanies an axis `columns`, lacks `base` or `measures`, has an
+  empty `measures = []`, lists a measure not in `columns`, or its `base` is
+  neither a number nor a string;
 - `paint` is anything but `heat` or `plain`;
 - `dataset` is not declared, or is not a measures dataset with `axes`;
 - `rows` or a `columns` axis is not an axis of the dataset, or an axis of
