@@ -198,7 +198,11 @@ fn board_sql(
 /// `reduce` looks them up by those values. Members and suffixes are
 /// compared with the stored keys in `normalize_key`'s spelling, so a
 /// suffix spelt `0.250` reads the `0.25` key. A key that does not
-/// normalize names no stored row and reads nothing.
+/// normalize names no stored row and reads nothing. The observations
+/// reach `obs` only once the whole statement has been read: a read failing
+/// partway (rows come by kind, so current and lookback rows precede the
+/// daily ones) must not leave a current or a truncated day set beside the
+/// dataset's error.
 fn read_role(
     conn: &Connection,
     schema: &SchemaSpec,
@@ -223,7 +227,10 @@ fn read_role(
     let mut members: HashMap<String, Vec<&str>> = HashMap::new();
     for m in &plan.params.members {
         if let Ok(canonical) = normalize_key(m, keys[0].ty) {
-            members.entry(canonical).or_default().push(m.as_str());
+            let spellings = members.entry(canonical).or_default();
+            if !spellings.contains(&m.as_str()) {
+                spellings.push(m.as_str());
+            }
         }
     }
     // Canonical suffix -> the inputs asking for it, in first-seen order.
@@ -272,6 +279,7 @@ fn read_role(
         statement: sql.clone(),
         source: e,
     };
+    let mut found: HashMap<(String, Input), Observed> = HashMap::new();
     let mut stmt = conn.prepare(&sql).map_err(err)?;
     let mut rows = stmt.query(duckdb::params_from_iter(params)).map_err(err)?;
     while let Some(r) = rows.next().map_err(err)? {
@@ -300,8 +308,7 @@ fn read_role(
             };
             let value: f64 = r.get(3 + n_keys + ci).map_err(err)?;
             for member in spellings {
-                let o = obs
-                    .by_input
+                let o = found
                     .entry((member.to_string(), (*input).clone()))
                     .or_insert_with(|| Observed {
                         at: vec![None; n_lookbacks],
@@ -332,6 +339,7 @@ fn read_role(
             }
         }
     }
+    obs.by_input.extend(found);
     Ok(())
 }
 
@@ -675,6 +683,104 @@ mod tests {
         .unwrap();
         let found = obs.by_input.get(&("SPX".to_string(), input)).unwrap();
         assert_eq!(found.current.map(|(_, v)| v), Some(0.20));
+    }
+
+    /// A realized history dataset beside the seeded surface: key
+    /// `(underlying_ref, window)`, value `vol`.
+    fn with_realized(store: &Store, schema: &mut SchemaSpec) {
+        let text = r#"
+[realized_vol]
+family = "history"
+key = ["underlying_ref", "window"]
+history = "400d"
+retention = "7d"
+[realized_vol.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[realized_vol.columns.window]
+type = "utf8"
+role = "dimension"
+[realized_vol.columns.vol]
+type = "f64"
+role = "value"
+"#;
+        let doc = geode_core::config::merge_docs(
+            "datasets",
+            &[geode_core::config::LayerDoc::builtin("datasets", text).unwrap()],
+        );
+        let (parsed, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = parsed.dataset("realized_vol").unwrap().clone();
+        store.apply_schema(&ds).unwrap();
+        schema.datasets.push(ds);
+    }
+
+    #[test]
+    fn a_dataset_read_failing_partway_contributes_no_observations() {
+        let (_dir, store, mut schema) = seeded();
+        with_realized(&store, &mut schema);
+        // The current and lookback rows read cleanly; the 8th's daily row
+        // has a NULL vol, which fails the read after the rows before it
+        // (ordered by kind) were already taken.
+        store
+            .writer()
+            .execute_batch(&format!(
+                "insert into {table} (underlying_ref, \"window\", ts, received_at, vol) values
+                 ('SPX', '20D', TIMESTAMP '2026-01-10 21:00:00', TIMESTAMP '2026-01-10 21:05:00', 0.15),
+                 ('SPX', '20D', TIMESTAMP '2026-01-09 21:00:00', TIMESTAMP '2026-01-10 21:05:00', 0.14),
+                 ('SPX', '20D', TIMESTAMP '2026-01-08 21:00:00', TIMESTAMP '2026-01-10 21:05:00', NULL)",
+                table = history_table("realized_vol")
+            ))
+            .unwrap();
+        let mut p = plan(
+            vec![
+                Measure::atfm("3M"),
+                Measure::IvRv {
+                    tenor: "3M".into(),
+                    window: "20D".into(),
+                },
+                Measure::Realized {
+                    window: "20D".into(),
+                },
+            ],
+            Some(365),
+            None,
+        );
+        p.params.realized = Some("realized_vol".into());
+        let board = read_board(store.writer(), &schema, &p).unwrap();
+        assert_eq!(
+            board
+                .dataset_errors
+                .iter()
+                .map(|(d, _)| d.as_str())
+                .collect::<Vec<_>>(),
+            vec!["realized_vol"],
+            "{:?}",
+            board.dataset_errors
+        );
+        let spx = &board.rows[0];
+        assert_eq!(spx.cells[0].current, Some(0.20), "the surface still reads");
+        for cell in &spx.cells[1..] {
+            assert_eq!(cell.current, None, "{cell:?}");
+            assert!(cell.changes.iter().all(Option::is_none), "{cell:?}");
+            assert_eq!(cell.pctl, None, "{cell:?}");
+        }
+    }
+
+    #[test]
+    fn a_member_named_twice_reads_once() {
+        let (_dir, store, schema) = seeded();
+        let mut p = plan(vec![Measure::atfm("3M")], None, Some(3));
+        p.params.members = vec!["SPX".into(), "SPX".into()];
+        let board = read_board(store.writer(), &schema, &p).unwrap();
+        assert_eq!(board.rows.len(), 2);
+        assert!(
+            board
+                .rows
+                .iter()
+                .all(|r| r.spark == Some(vec![0.18, 0.19, 0.20]))
+        );
     }
 
     #[test]
