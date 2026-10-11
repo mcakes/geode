@@ -89,9 +89,14 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   `SCOPE_DROPPED_EDIT`, not `MOVED`.
 - A package shows when any leg does. A partly hidden package's row paints its
   shown legs only (`· N of M legs`, summary, aggregates, fold, find key,
-  selection totals) and is read-only: cell edits and every structural verb
-  refuse with `PARTLY_HIDDEN`, a selection containing one refuses whole, and
-  a counted `g p` over a hidden line refuses with `HIDDEN_IN_RANGE`. A new
+  selection totals) and is read-only: its own cell edits and every structural
+  verb refuse with `PARTLY_HIDDEN`, a selection containing one refuses the
+  structural verbs whole, and a counted `g p` over a hidden line refuses with
+  `HIDDEN_IN_RANGE`. In a selection's typed commit or live step a split or
+  partly hidden package row stands for the legs it paints (`live_targets`
+  adds them to the grouped lines, its hidden legs to the hidden count), so
+  `targets` writes each once and a quantity skips the package unless the
+  selection reaches every leg. A new
   verb that mutates a package's legs must pass `partly_hidden_refusal`.
 - A grouping value is the scope value (`SheetRow`): a group and a scope on
   the same column mean the same value, so `expiry` groups by ISO date while

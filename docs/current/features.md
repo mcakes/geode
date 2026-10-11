@@ -2547,11 +2547,14 @@ partly hidden would be a plausible wrong total.
 
 A partly hidden package's row is read-only. These refuse with
 `package partly hidden by the scope: edit its legs` and change nothing: `i`,
-`enter` or a double-click on its cells; a typed commit or a live step over a
-selection containing it; and the structural verbs `d`, `shift+j`/`shift+k`,
-`g p` and `g u`, from keys, the `.` menu, `:package` or `:unpackage`, because
-each would act on the hidden legs too. A selection containing one refuses
-whole. Yank, put, fold and find still work, and a shown leg edits and
+`enter` or a double-click on its cells without a selection; and the
+structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u`, from keys, the
+`.` menu, `:package` or `:unpackage`, because each would act on the hidden
+legs too. A selection containing one refuses those verbs whole. A typed
+commit or a live step over a selection containing it writes the legs its row
+paints and never the hidden ones, which the notice counts; a quantity skips
+the package as refused, since through its weights it would rescale the
+hidden legs. Yank, put, fold and find still work, and a shown leg edits and
 deletes as usual. A counted `g p` takes the next sheet rows, hidden ones
 included, so it refuses with `a line in that range is hidden by the scope`
 when any of them is hidden. `:unscoped` shows the whole package to edit it.
@@ -2703,9 +2706,15 @@ structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.`
 menu, `:package`, `:unpackage`) refuse on either, with `a grouping row: edit
 its lines` and `split package: edit its legs` in the footer, and a
 selection containing either refuses them whole. A split package row also
-refuses its own cell edits, and a selection's typed commit or live step
-containing one; a package both split and partly hidden reads the split
-reason. A split package's legs edit as usual.
+refuses its own cell edits without a selection; a package both split and
+partly hidden reads the split reason. Under a selection it stands for the
+legs it paints under its own node, as a group row stands for its lines: a
+selection's typed commit or live step writes those legs, each line once,
+and `i` with the cursor on it opens the editor over the selection. A
+quantity sets the package through its weights only when the selection
+reaches every leg (both its split rows, say, or a row and a group holding
+the rest); reaching part of it, the quantity skips it as refused. A split
+package's legs edit as usual.
 
 **Editing a grouping row.** A group row stands for its shown lines: every
 line beneath it, through nested and closed subgroups. `i`, `enter` or a
