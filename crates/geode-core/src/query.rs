@@ -181,6 +181,133 @@ pub struct WatchlistOutcome {
     pub result: Result<WatchlistResult, String>,
 }
 
+/// The key tuples a history request names. `Prefix`: fixed values for the
+/// leading key columns, every value of the rest (`[["SPX"], ["SX5E"]]` over a
+/// three-column key). `Exact`: whole tuples. Every tuple in one set has the
+/// same arity; f64 key values are normalized text (`normalize_key`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum KeySet {
+    Prefix(Vec<Vec<String>>),
+    Exact(Vec<Vec<String>>),
+}
+
+impl KeySet {
+    pub fn tuples(&self) -> &[Vec<String>] {
+        match self {
+            KeySet::Prefix(t) | KeySet::Exact(t) => t,
+        }
+    }
+
+    pub fn is_prefix(&self) -> bool {
+        matches!(self, KeySet::Prefix(_))
+    }
+
+    /// The length of the first tuple; `None` for an empty set.
+    pub fn arity(&self) -> Option<usize> {
+        self.tuples().first().map(Vec::len)
+    }
+
+    /// Refuses a set that cannot name keys of a `key_len`-column dataset: an
+    /// empty set, mixed arity, a prefix of 0 or more than `key_len` columns,
+    /// or an exact tuple of other than `key_len` columns. A wrong arity would
+    /// otherwise bind values to the wrong key columns.
+    pub fn validate(&self, key_len: usize) -> Result<(), String> {
+        let Some(arity) = self.arity() else {
+            return Err("a history request names at least one key".to_string());
+        };
+        if self.tuples().iter().any(|t| t.len() != arity) {
+            return Err("every key tuple in one request has the same arity".to_string());
+        }
+        match self {
+            KeySet::Prefix(_) if arity == 0 || arity > key_len => Err(format!(
+                "a prefix names 1 to {key_len} leading key columns, not {arity}"
+            )),
+            KeySet::Exact(_) if arity != key_len => {
+                Err(format!("an exact key has {key_len} columns, not {arity}"))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// The time extent of a history request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Span {
+    Latest,
+    /// The last observation at or before `t` for every key.
+    At(DateTime<Utc>),
+    /// Every observation with `from <= ts < to`; `step` asks the source for
+    /// at most one observation per step (the last in each).
+    Between {
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        step: Option<std::time::Duration>,
+    },
+}
+
+/// Ask a history dataset for the observations of `keys` over `span`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryParams {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub submitted: Instant,
+    pub dataset: String,
+    pub keys: KeySet,
+    pub span: Span,
+}
+
+/// One observation: the full key tuple, its time, and the value columns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryRow {
+    pub key: Vec<String>,
+    pub ts: DateTime<Utc>,
+    pub values: Vec<f64>,
+}
+
+/// Rows in key order then `ts`; `key_columns` and `value_columns` name the
+/// positions of `HistoryRow::key` and `HistoryRow::values`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HistoryTable {
+    pub key_columns: Vec<String>,
+    pub value_columns: Vec<String>,
+    pub rows: Vec<HistoryRow>,
+}
+
+/// The history request's answer, addressed to the key that asked. `Err` is
+/// the failure text.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryOutcome {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub submitted: Instant,
+    pub dataset: String,
+    pub span: Span,
+    pub result: Result<HistoryTable, String>,
+}
+
+/// One key value as stored and compared: text keys trimmed, f64 keys parsed
+/// and re-formatted with `{}` so `0.50` and `0.5` are one key. `Err` names
+/// an unparsable f64. A blank value and a non-finite f64 are refused: either
+/// would store rows under a key no request can name.
+pub fn normalize_key(value: &str, ty: crate::schema::ColumnType) -> Result<String, String> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Err("a key value is not blank".to_string());
+    }
+    match ty {
+        crate::schema::ColumnType::F64 => {
+            let f: f64 = v
+                .parse()
+                .map_err(|_| format!("'{value}' is not an f64 key"))?;
+            if !f.is_finite() {
+                return Err(format!("'{value}' is not a finite f64 key"));
+            }
+            Ok(format!("{f}"))
+        }
+        _ => Ok(v.to_string()),
+    }
+}
+
 /// What the database holds, as of the moment it was read.
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct CatalogSnapshot {
@@ -485,6 +612,51 @@ mod tests {
                 chrono::NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
                 t
             ))
+        );
+    }
+
+    #[test]
+    fn key_sets_validate_arity_against_the_dataset_key() {
+        let p = KeySet::Prefix(vec![vec!["SPX".into()], vec!["SX5E".into()]]);
+        assert_eq!(p.arity(), Some(1));
+        assert!(p.validate(3).is_ok());
+        assert!(KeySet::Prefix(vec![]).validate(3).is_err(), "empty");
+        assert!(
+            KeySet::Prefix(vec![vec![]]).validate(3).is_err(),
+            "zero-arity prefix"
+        );
+        assert!(
+            KeySet::Prefix(vec![vec!["a".into(); 4]])
+                .validate(3)
+                .is_err(),
+            "too deep"
+        );
+        assert!(
+            KeySet::Prefix(vec![vec!["a".into()], vec!["a".into(), "b".into()]])
+                .validate(3)
+                .is_err(),
+            "mixed"
+        );
+        let e = KeySet::Exact(vec![vec!["SPX".into(), "3M".into(), "0.5".into()]]);
+        assert!(e.validate(3).is_ok());
+        assert!(e.validate(2).is_err(), "exact must match the key length");
+    }
+
+    #[test]
+    fn f64_keys_normalize_to_one_spelling_and_text_keys_trim() {
+        use crate::schema::ColumnType;
+        assert_eq!(normalize_key("0.50", ColumnType::F64).unwrap(), "0.5");
+        assert_eq!(normalize_key(" .5 ", ColumnType::F64).unwrap(), "0.5");
+        assert_eq!(normalize_key("1", ColumnType::F64).unwrap(), "1");
+        assert!(normalize_key("x", ColumnType::F64).is_err());
+        assert!(
+            normalize_key("NaN", ColumnType::F64).is_err(),
+            "a NaN key is no key"
+        );
+        assert_eq!(normalize_key(" SPX ", ColumnType::Utf8).unwrap(), "SPX");
+        assert!(
+            normalize_key("  ", ColumnType::Utf8).is_err(),
+            "a blank key is refused"
         );
     }
 }
