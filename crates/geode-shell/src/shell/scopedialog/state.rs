@@ -5,8 +5,8 @@
 //! stay one-shot. A step pushed over a screen returns to that screen, so a
 //! visit that started on the screen can build several ingredients.
 //!
-//! Doors: `mod+o` and `+` open `Current`. The saved door (the load glyph,
-//! `frame::scope_saved`, `config::scopes`, `config::expressions`) opens the
+//! Doors: `mod+o` and `+` open `Current`. The saved door
+//! (`frame::scope_saved`, `config::scopes`, `config::expressions`) opens the
 //! same screen with the cursor in the saved group and records
 //! `Opener::Saved`. A `≡` chip opens `Step(Definition)`; the `save` chip and
 //! `scope::save_current` open `Step(SaveScope)`. The dimension and expression
@@ -46,8 +46,8 @@ pub(crate) enum After {
 }
 
 /// Which door opened the dialog. A load or toggle on a saved row closes the
-/// dialog when the saved door opened it (the load glyph,
-/// `frame::scope_saved`, `config::scopes`, `config::expressions`): that door
+/// dialog when the saved door opened it
+/// (`frame::scope_saved`, `config::scopes`, `config::expressions`): that door
 /// is one-shot. Opened any other way, the commit stays on the screen, so a
 /// visit from `mod+o` sees what it changed in the current sections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

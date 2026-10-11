@@ -474,8 +474,8 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // The Scope dialog: the lane's scope by ingredient.
     action(reg, "frame::scope", "Scope…", "Frame");
     // The Scope dialog with the cursor on its saved scopes: a load, or a
-    // saved expression added or removed, closes it. No default binding; the load glyph is its
-    // pointer door.
+    // saved expression added or removed, closes it. No default binding; the palette is its door,
+    // and inside the dialog `o` reaches the saved scopes.
     action(
         reg,
         "frame::scope_saved",

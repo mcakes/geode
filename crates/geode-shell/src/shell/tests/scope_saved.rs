@@ -323,24 +323,21 @@ fn the_save_prompt_hides_the_saved_group(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn pressed_fills_follow_the_opener(cx: &mut gpui::TestAppContext) {
+fn the_plus_reads_pressed_whichever_door_opened_the_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = shell_on_liq(cx);
+    assert!(vcx.debug_bounds("scope-pick-chip-open").is_none());
     dispatch_action(&shell, "frame::scope", &mut vcx);
     draw(&mut vcx);
     assert!(vcx.debug_bounds("scope-pick-chip-open").is_some());
-    assert!(vcx.debug_bounds("scope-load-chip-open").is_none());
-    vcx.simulate_keystrokes("o");
-    draw(&mut vcx);
-    assert!(
-        vcx.debug_bounds("scope-load-chip-open").is_none(),
-        "o moves the cursor; the opener is still mod+o"
-    );
     vcx.simulate_keystrokes("escape");
     draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-pick-chip-open").is_none());
     dispatch_action(&shell, "frame::scope_saved", &mut vcx);
     draw(&mut vcx);
-    assert!(vcx.debug_bounds("scope-load-chip-open").is_some());
-    assert!(vcx.debug_bounds("scope-pick-chip-open").is_none());
+    assert!(
+        vcx.debug_bounds("scope-pick-chip-open").is_some(),
+        "the + is the bar's only door to the dialog"
+    );
 }
 
 #[gpui::test]
@@ -403,13 +400,9 @@ fn enter_on_an_expression_toggles_it_and_returns(cx: &mut gpui::TestAppContext) 
 }
 
 #[gpui::test]
-fn the_load_glyph_opens_saved_alone_and_enter_closes(cx: &mut gpui::TestAppContext) {
+fn the_saved_door_opens_on_saved_and_enter_closes(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = shell_on_liq(cx);
-    assert!(vcx.debug_bounds("scope-load-chip-open").is_none());
-    let glyph = vcx
-        .debug_bounds("scope-load-chip")
-        .expect("the load glyph paints");
-    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
     vcx.run_until_parked();
     draw(&mut vcx);
     assert_eq!(
@@ -418,16 +411,11 @@ fn the_load_glyph_opens_saved_alone_and_enter_closes(cx: &mut gpui::TestAppConte
     );
     assert!(on_saved(&shell, &vcx));
     assert_eq!(depth(&shell, &vcx), 1, "one screen");
-    assert!(
-        vcx.debug_bounds("scope-load-chip-open").is_some(),
-        "the glyph reads pressed while its dialog is up"
-    );
     vcx.simulate_keystrokes("enter"); // asia
     vcx.run_until_parked();
     draw(&mut vcx);
     assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None);
     assert_eq!(lane_scope(&shell, &vcx).sole("book"), Some("BK002"));
-    assert!(vcx.debug_bounds("scope-load-chip-open").is_none());
 }
 
 #[gpui::test]
@@ -622,17 +610,14 @@ fn the_scope_dialog_paints_no_back_button(cx: &mut gpui::TestAppContext) {
     assert!(vcx.debug_bounds("shell-modal-back").is_none(), "after o");
     vcx.simulate_keystrokes("escape");
     draw(&mut vcx);
-    let glyph = vcx
-        .debug_bounds("scope-load-chip")
-        .expect("the load glyph paints");
-    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
     vcx.run_until_parked();
     draw(&mut vcx);
     assert!(on_saved(&shell, &vcx));
     assert!(vcx.debug_bounds("scope-saved").is_some());
     assert!(
         vcx.debug_bounds("shell-modal-back").is_none(),
-        "after the load glyph"
+        "after the saved door"
     );
 }
 

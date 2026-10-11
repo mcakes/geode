@@ -525,8 +525,8 @@ empty `SAVED EXPRESSIONS` row (where they act), and `enter` reads
 `new expression` on the empty `SAVED EXPRESSIONS` row.
 
 A commit on a saved row (a load or a toggle) depends on the door that opened
-the dialog. Opened by the saved door (the load glyph, `frame::scope_saved`,
-`config::scopes`, `config::expressions`), it closes the dialog. Opened by
+the dialog. Opened by the saved door (`frame::scope_saved`, `config::scopes`,
+`config::expressions`, all palette actions), it closes the dialog. Opened by
 any other door, it stays on the screen: the current sections show the
 result, and the cursor stays on the saved row it committed.
 
@@ -690,7 +690,7 @@ definition: the step it replaced is gone, so the text must be typed again.
 | Door | Cursor lands on | A saved-row commit |
 |---|---|---|
 | `frame::scope` (`mod+o`), the scope bar's `+` | The first current row (a saved stop when the scope is empty) | Stays open; the current sections show the result |
-| The toolbar's load glyph, `frame::scope_saved` (unbound), `config::scopes` | The lane's `loaded_from` scope when it is listed, else the first saved scope | Closes the dialog |
+| `frame::scope_saved` (unbound), `config::scopes` | The lane's `loaded_from` scope when it is listed, else the first saved scope | Closes the dialog |
 | `config::expressions` | The first saved expression | Closes the dialog |
 | The scope bar's save glyph, `scope::save_current` | The save prompt alone. An empty scope refuses on the status bar and opens nothing | — |
 | A `≡` chip's body | That expression's definition alone. A name nothing defines refuses on the status bar and opens nothing | — |
@@ -702,9 +702,8 @@ and `e` do there. A door that opens a step alone makes it the bottom layer,
 so its commit or `escape` closes the dialog. With the dialog on top on a
 step, or under a question, the saved, save and definition doors do nothing.
 
-The scope bar's pressed fills follow the opener: the load glyph holds its
-fill while a dialog a saved door opened is up, and the `+` while a dialog
-any other door opened is up.
+The scope bar's `+` is its one door to this dialog and holds its pressed
+fill while the dialog is up, whichever door opened it.
 
 ## Dimension picker
 

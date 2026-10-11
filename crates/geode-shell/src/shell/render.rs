@@ -420,19 +420,6 @@ impl Render for ShellView {
                 super::scopedialog::view::open_save(view, window, cx);
             });
         };
-        // The scope bar's load glyph opens the Scope dialog on its saved
-        // scopes, the mouse form of `frame::scope_saved`.
-        let load_chip_entity = cx.entity();
-        let on_load = move |window: &mut Window, cx: &mut App| {
-            load_chip_entity.update(cx, |view, cx| {
-                super::scopedialog::view::open_saved(
-                    view,
-                    super::scopedialog::saved_view::Section::Scopes,
-                    window,
-                    cx,
-                );
-            });
-        };
         // The grouping readout's click — the mouse form of
         // `frame::grouping`/`mod+g`, through the same door `input.rs`'s
         // dispatch arm uses.
@@ -502,13 +489,9 @@ impl Render for ShellView {
                         parked.state.domain == objectdialog::Domain::Groupings
                     })
                 });
-        // The load glyph reads pressed while the dialog its door opened is
-        // up; the `+` while a dialog any other door opened is.
-        let (scope_open, scope_dialog_open) = match self.scope_dialog.as_ref().map(|s| s.opener) {
-            Some(super::scopedialog::state::Opener::Saved) => (true, false),
-            Some(super::scopedialog::state::Opener::Scope) => (false, true),
-            None => (false, false),
-        };
+        // The `+` reads pressed while the Scope dialog is up, whichever
+        // door opened it: it is the scope bar's only door to that dialog.
+        let scope_dialog_open = self.scope_dialog.is_some();
         // The pin glyph names the active workspace, whose tiles are the
         // ones on screen, not a dialog's target.
         let ws = self.active_ix();
@@ -527,13 +510,11 @@ impl Render for ShellView {
             &self.filter_input,
             &bar_model,
             grouping_open,
-            scope_open,
             scope_dialog_open,
             on_chip_close,
             on_chip_open,
             on_add,
             on_save,
-            on_load,
             on_grouping,
             on_as_of,
             on_term_open,

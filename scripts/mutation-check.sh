@@ -18454,7 +18454,7 @@ run_mutation "grouping dialog: any object dialog presses the readout" \
   geode-shell \
   another_object_dialog_leaves_the_readout_at_rest
 
-# ---- Saved-scope chooser: the load glyph and `o` in the Scope dialog ----
+# ---- Saved-scope chooser: the saved door and `o` in the Scope dialog ----
 
 # open_shell_dialog_with_key prevents the shell root's bubble-phase focus
 # grab from taking focus back after an opening mouse-down. Title-bar chips
@@ -18812,42 +18812,14 @@ run_mutation "scope dialog: escape leaves the text step untouched" \
 
 # ---- Scope dialog: the saved group and its doors ----
 
-# The toolbar's load glyph opens the Scope dialog on its saved scopes.
-run_mutation "scope dialog: the load glyph opens Saved" \
+# The `+` reads pressed whichever door opened the dialog: it is the scope
+# bar's only door to it.
+run_mutation "scope dialog: the + reads pressed under the saved door too" \
   crates/geode-shell/src/shell/render.rs \
-  '                super::scopedialog::view::open_saved(
-                    view,
-                    super::scopedialog::saved_view::Section::Scopes,
-                    window,
-                    cx,
-                );' \
-  '                let _ = (view, window, cx);' \
+  '        let scope_dialog_open = self.scope_dialog.is_some();' \
+  '        let scope_dialog_open = self.scope_dialog.as_ref().is_some_and(|s| s.opener == super::scopedialog::state::Opener::Scope);' \
   geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
-
-# The load glyph reads pressed while the dialog it opened is up.
-run_mutation "scope dialog: the load glyph holds its pressed state while its dialog is up" \
-  crates/geode-shell/src/shell/toolbar.rs \
-  '            scope_open.then_some("scope-load-chip-open"),' \
-  '            None,' \
-  geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
-
-# The load glyph reads pressed while the dialog the saved door opened is up.
-run_mutation "scope dialog: the load glyph's pressed state reads the opener" \
-  crates/geode-shell/src/shell/render.rs \
-  '            Some(super::scopedialog::state::Opener::Saved) => (true, false),' \
-  '            Some(super::scopedialog::state::Opener::Saved) => (false, false),' \
-  geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
-
-# The load glyph does not read pressed for a dialog another door opened.
-run_mutation "scope dialog: the load glyph reads pressed only for its door" \
-  crates/geode-shell/src/shell/render.rs \
-  '            Some(super::scopedialog::state::Opener::Scope) => (false, true),' \
-  '            Some(super::scopedialog::state::Opener::Scope) => (true, true),' \
-  geode-shell \
-  pressed_fills_follow_the_opener
+  the_plus_reads_pressed_whichever_door_opened_the_dialog
 
 # frame::scope_saved is the saved door's own action.
 run_mutation "scope dialog: frame::scope_saved opens Saved" \
@@ -18980,12 +18952,12 @@ run_mutation "scope dialog: a saved commit from mod+o stays open" \
   geode-shell \
   enter_on_a_scope_loads_it_and_returns_to_current
 
-run_mutation "scope dialog: a saved commit from the load glyph closes" \
+run_mutation "scope dialog: a saved commit from the saved door closes" \
   crates/geode-shell/src/shell/scopedialog/state.rs \
   '        self == Opener::Saved' \
   '        false' \
   geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
+  the_saved_door_opens_on_saved_and_enter_closes
 
 # The commit reads the opener: without the close the saved door's dialog
 # would stay up.
@@ -18994,7 +18966,7 @@ run_mutation "scope dialog: a saved-door commit closes the dialog" \
   '    if state.opener.closes_on_saved_commit() {' \
   '    if false {' \
   geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
+  the_saved_door_opens_on_saved_and_enter_closes
 
 # A step opened alone is the bottom layer: its commit closes the dialog.
 run_mutation "scope dialog: a step opened alone closes on commit" \

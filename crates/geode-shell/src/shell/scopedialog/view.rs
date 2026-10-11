@@ -332,7 +332,7 @@ pub(crate) fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<S
     open_on(view, Layer::Current, Opener::Scope, window, cx);
 }
 
-/// The saved door (`frame::scope_saved`, the load glyph, `config::scopes`,
+/// The saved door (`frame::scope_saved`, `config::scopes`,
 /// `config::expressions`): the screen with the cursor on `section` — on the
 /// lane's `loaded_from` scope when it is listed. A load or toggle closes the
 /// dialog (`Opener::Saved`). With the dialog already on top on its screen,
