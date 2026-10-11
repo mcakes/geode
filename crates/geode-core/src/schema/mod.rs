@@ -16,7 +16,8 @@ use crate::config::{Diagnostic, MergedDoc, Severity};
 /// Dataset storage and query family. Measures use fixed grains for
 /// attribution; documents use declared identity and row axes; series use a
 /// fixed timestamped value schema; references replace one keyed table per
-/// snapshot. An omitted family defaults to measures.
+/// snapshot; history caches keyed timestamped rows fetched on demand. An
+/// omitted family defaults to measures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Family {
     #[default]
@@ -28,6 +29,10 @@ pub enum Family {
     /// One whole table replaced per snapshot: `key` identifies a row, every
     /// other column is a row attribute. Filled by a snapshot source.
     Reference,
+    /// Keyed timestamped rows fetched from a table-shaped source and cached
+    /// with coverage per asked key; declared key dimensions and f64 values,
+    /// implied ts and received_at.
+    History,
 }
 
 impl Family {
@@ -37,6 +42,7 @@ impl Family {
             "document" => Some(Family::Document),
             "series" => Some(Family::Series),
             "reference" => Some(Family::Reference),
+            "history" => Some(Family::History),
             _ => None,
         }
     }
@@ -73,8 +79,9 @@ pub struct DatasetSpec {
     /// path refuses it; its value is vocabulary (columns, roles, grains)
     /// that views, scopes, groupings and the Views dialog share.
     pub computed: bool,
-    /// Series family only: its retention windows. `None` on every other
-    /// family, `Some` (possibly both unbounded) on a series dataset.
+    /// Series and history families: their retention windows. `None` on
+    /// every other family, `Some` (possibly both unbounded) on a series or
+    /// history dataset.
     pub series_retention: Option<SeriesRetention>,
 }
 
@@ -93,6 +100,33 @@ impl DatasetSpec {
 
     pub fn is_reference(&self) -> bool {
         self.family == Family::Reference
+    }
+
+    pub fn is_history(&self) -> bool {
+        self.family == Family::History
+    }
+
+    /// The key columns of a history dataset in declared `key` order.
+    pub fn history_key(&self) -> Vec<&ColumnSpec> {
+        self.key.iter().filter_map(|k| self.column(k)).collect()
+    }
+
+    /// The value columns of a history dataset in declared order.
+    pub fn history_values(&self) -> Vec<&ColumnSpec> {
+        self.columns
+            .iter()
+            .filter(|c| c.role == ColumnRole::Value)
+            .collect()
+    }
+
+    /// Storage and projection order shared by DDL, append and read: the
+    /// key columns, `ts`, `received_at`, then the value columns.
+    pub fn history_columns(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.key.clone();
+        out.push("ts".to_string());
+        out.push("received_at".to_string());
+        out.extend(self.history_values().iter().map(|c| c.name.clone()));
+        out
     }
 
     /// The implied columns of a series dataset, in storage order. Answers
@@ -165,11 +199,11 @@ impl DatasetSpec {
     /// Available grouping columns in schema order. Measures expose columns
     /// carried by a declared measure/attribute grain; without such a grain,
     /// there is no table to query. Documents expose identity dimensions,
-    /// excluding row axes. Series expose none. Grouping editors and column
-    /// completion share this vocabulary.
+    /// excluding row axes. Series, reference and history datasets expose
+    /// none. Grouping editors and column completion share this vocabulary.
     pub fn groupable_columns(&self) -> Vec<&str> {
-        if self.is_series() || self.is_reference() {
-            // Series and reference datasets have no scope or grouping.
+        if self.is_series() || self.is_reference() || self.is_history() {
+            // Series, reference and history datasets have no scope or grouping.
             return Vec::new();
         }
         if self.is_document() {
@@ -361,7 +395,7 @@ impl SchemaSpec {
                 computed,
                 series_retention: None,
             };
-            if family == Family::Series {
+            if matches!(family, Family::Series | Family::History) {
                 // Invalid retention values report errors and leave that window unbounded.
                 // Require a duration string representable as signed microseconds; an
                 // unrepresentable cutoff would otherwise silently disable pruning.
@@ -413,8 +447,8 @@ impl SchemaSpec {
                         diags.push(note(
                             format!("datasets.{ds_name}.{field}"),
                             format!(
-                                "dataset '{ds_name}': '{field}' applies to the series family \
-                                 only; ignored"
+                                "dataset '{ds_name}': '{field}' applies to the series and \
+                                 history families only; ignored"
                             ),
                         ));
                     }
@@ -442,9 +476,11 @@ impl SchemaSpec {
                 }
             }
             diags.extend(validate_dataset(&mut dataset));
-            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {
-                // Rejected or columnless documents and references cannot be stored or
-                // queried. Empty measure datasets remain inert because they declare no
+            if (dataset.is_document() || dataset.is_reference() || dataset.is_history())
+                && dataset.columns.is_empty()
+            {
+                // Rejected or columnless documents, references and history datasets
+                // cannot be stored or queried. Empty measure datasets remain inert because they declare no
                 // storage grain.
                 continue;
             }
@@ -509,6 +545,11 @@ fn validate_dataset(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
             path: Some(format!("datasets.{}.computed", ds.name)),
         });
         ds.computed = false;
+    }
+
+    if ds.is_history() {
+        diags.extend(validate_history(ds));
+        return diags;
     }
 
     if ds.is_series() {
@@ -790,6 +831,159 @@ fn validate_reference(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
             c.textual = false;
         }
     } else {
+        ds.columns.clear();
+        ds.key.clear();
+        ds.axes.clear();
+    }
+    diags
+}
+
+/// A history dataset is kept whole or dropped: a half-understood keyed
+/// table would file values under the wrong key. Rules: nonempty `key` of
+/// distinct declared grainless dimensions (utf8 or f64), no dimension off
+/// the key, at least one f64 `value`, no other roles, no timestamp
+/// columns, no `axes`, no storage names.
+fn validate_history(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
+    const STORAGE: [&str; 7] = [
+        "ts",
+        "received_at",
+        "source",
+        "batch",
+        "source_file_id",
+        "gen_id",
+        "source_time",
+    ];
+    let name = ds.name.clone();
+    let err = |message: String, path: String| Diagnostic {
+        severity: Severity::Error,
+        layer: None,
+        file: None,
+        message,
+        path: Some(path),
+    };
+    let mut diags = Vec::new();
+    let mut keep = true;
+    if ds.key.is_empty() {
+        diags.push(err(
+            format!("dataset '{name}': a history dataset needs a nonempty 'key'; dataset dropped"),
+            format!("datasets.{name}.key"),
+        ));
+        keep = false;
+    }
+    if !ds.axes.is_empty() {
+        diags.push(err(
+            format!(
+                "dataset '{name}': 'axes' is not accepted on the history family; dataset dropped"
+            ),
+            format!("datasets.{name}.axes"),
+        ));
+        keep = false;
+    }
+    for (i, k) in ds.key.iter().enumerate() {
+        // Storage DDL emits one column per key entry; a repeat is a duplicate column.
+        if ds.key[..i].contains(k) {
+            diags.push(err(
+                format!("dataset '{name}': '{k}' appears twice in 'key'; dataset dropped"),
+                format!("datasets.{name}.key"),
+            ));
+            keep = false;
+            continue;
+        }
+        let ok = ds.column(k).is_some_and(|c| {
+            c.role == ColumnRole::Dimension { grain: None }
+                && matches!(c.ty, ColumnType::Utf8 | ColumnType::F64)
+        });
+        if !ok {
+            diags.push(err(
+                format!(
+                    "dataset '{name}': key column '{k}' must be a declared utf8 or f64 column \
+                     with role = \"dimension\"; dataset dropped"
+                ),
+                format!("datasets.{name}.key"),
+            ));
+            keep = false;
+        }
+    }
+    let mut values = 0;
+    for c in &ds.columns {
+        let path = format!("datasets.{name}.columns.{}", c.name);
+        if STORAGE.contains(&c.name.as_str()) {
+            diags.push(err(
+                format!(
+                    "dataset '{name}': '{}' is a storage column and cannot be declared; \
+                     dataset dropped",
+                    c.name
+                ),
+                path.clone(),
+            ));
+            keep = false;
+        }
+        if c.ty == ColumnType::Timestamp {
+            diags.push(err(
+                format!(
+                    "dataset '{name}': column '{}' is a timestamp; a history row's time is the \
+                     implied 'ts'; dataset dropped",
+                    c.name
+                ),
+                path.clone(),
+            ));
+            keep = false;
+        }
+        match c.role {
+            ColumnRole::Dimension { grain: None } => {
+                // A dimension outside the key would make two rows with one key
+                // tuple differ in a column the cache never asks by.
+                if !ds.key.contains(&c.name) {
+                    diags.push(err(
+                        format!(
+                            "dataset '{name}': dimension '{}' is not in 'key'; every history \
+                             dimension is a key column; dataset dropped",
+                            c.name
+                        ),
+                        path,
+                    ));
+                    keep = false;
+                }
+            }
+            ColumnRole::Value if c.ty == ColumnType::F64 => values += 1,
+            ColumnRole::Value => {
+                diags.push(err(
+                    format!(
+                        "dataset '{name}': value '{}' must be f64; dataset dropped",
+                        c.name
+                    ),
+                    path,
+                ));
+                keep = false;
+            }
+            _ => {
+                diags.push(err(
+                    format!(
+                        "dataset '{name}': column '{}' has role {:?}; a history column is a key \
+                         dimension or an f64 value; dataset dropped",
+                        c.name, c.role
+                    ),
+                    path,
+                ));
+                keep = false;
+            }
+        }
+    }
+    if values == 0 && keep {
+        let path = match ds.columns.first() {
+            Some(c) => format!("datasets.{name}.columns.{}", c.name),
+            None => format!("datasets.{name}"),
+        };
+        diags.push(err(
+            format!(
+                "dataset '{name}': a history dataset needs at least one f64 'value' column; \
+                 dataset dropped"
+            ),
+            path,
+        ));
+        keep = false;
+    }
+    if !keep {
         ds.columns.clear();
         ds.key.clear();
         ds.axes.clear();
@@ -1173,7 +1367,7 @@ fn parse_column(
         "attribute" => ColumnRole::Attribute {
             grain: match family {
                 Family::Measures => Some(grain_of(table)?),
-                Family::Document | Family::Series | Family::Reference => None,
+                Family::Document | Family::Series | Family::Reference | Family::History => None,
             },
         },
         "axis" => ColumnRole::Axis,
@@ -2756,6 +2950,187 @@ role = "attribute"
         assert!(
             diags.iter().any(|d| d.message.contains("timestamp")),
             "{diags:?}"
+        );
+    }
+
+    // --- history family -------------------------------------------------
+
+    const SURFACE: &str = r#"
+[vol_surface]
+family = "history"
+key = ["underlying_ref", "tenor", "delta"]
+history = "400d"
+retention = "7d"
+[vol_surface.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[vol_surface.columns.tenor]
+type = "utf8"
+role = "dimension"
+order = "tenor"
+[vol_surface.columns.delta]
+type = "f64"
+role = "dimension"
+[vol_surface.columns.vol]
+type = "f64"
+role = "value"
+[vol_surface.columns.forward]
+type = "f64"
+role = "value"
+"#;
+
+    #[test]
+    fn a_history_dataset_keeps_its_key_values_and_windows() {
+        let (schema, diags) = series_schema(SURFACE);
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("vol_surface").unwrap();
+        assert!(ds.is_history());
+        assert_eq!(ds.key, ["underlying_ref", "tenor", "delta"]);
+        assert_eq!(
+            ds.history_key()
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["underlying_ref", "tenor", "delta"]
+        );
+        assert_eq!(
+            ds.history_values()
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>(),
+            ["vol", "forward"]
+        );
+        assert_eq!(
+            ds.history_columns(),
+            [
+                "underlying_ref",
+                "tenor",
+                "delta",
+                "ts",
+                "received_at",
+                "vol",
+                "forward"
+            ]
+        );
+        let r = ds.series_retention.unwrap();
+        assert_eq!(
+            r.history,
+            Some(std::time::Duration::from_secs(400 * 86_400))
+        );
+        assert_eq!(
+            r.retention,
+            Some(std::time::Duration::from_secs(7 * 86_400))
+        );
+        assert!(
+            ds.groupable_columns().is_empty(),
+            "no scope reaches a history table"
+        );
+    }
+
+    #[test]
+    fn a_history_dataset_is_dropped_on_each_shape_error() {
+        // Each case is the valid SURFACE with one thing wrong, and the path
+        // of the diagnostic that explains the drop:
+        // (name, replace-from, replace-to, path).
+        let cases: [(&str, &str, &str, &str); 7] = [
+            (
+                "no key",
+                "key = [\"underlying_ref\", \"tenor\", \"delta\"]\n",
+                "",
+                "datasets.vol_surface.key",
+            ),
+            (
+                "undeclared key",
+                "\"delta\"]",
+                "\"delta\", \"ghost\"]",
+                "datasets.vol_surface.key",
+            ),
+            (
+                "repeated key",
+                "\"tenor\", \"delta\"]",
+                "\"tenor\", \"tenor\"]",
+                "datasets.vol_surface.key",
+            ),
+            (
+                "no value",
+                "role = \"value\"",
+                "role = \"attribute\"",
+                "datasets.vol_surface.columns.vol",
+            ),
+            (
+                "i64 value",
+                "[vol_surface.columns.vol]\ntype = \"f64\"",
+                "[vol_surface.columns.vol]\ntype = \"i64\"",
+                "datasets.vol_surface.columns.vol",
+            ),
+            (
+                "dimension off the key",
+                "[vol_surface.columns.vol]",
+                "[vol_surface.columns.region]\ntype = \"utf8\"\nrole = \"dimension\"\n[vol_surface.columns.vol]",
+                "datasets.vol_surface.columns.region",
+            ),
+            (
+                "axes",
+                "history = \"400d\"",
+                "history = \"400d\"\naxes = [\"tenor\"]",
+                "datasets.vol_surface.axes",
+            ),
+        ];
+        for (name, from, to, path) in cases {
+            let text = SURFACE.replacen(from, to, 1);
+            assert_ne!(text, SURFACE, "{name}: the case must change the text");
+            let (schema, diags) = series_schema(&text);
+            assert!(
+                schema.dataset("vol_surface").is_none(),
+                "{name}: dataset kept"
+            );
+            assert!(
+                diags.iter().any(|d| d.severity == Severity::Error
+                    && d.path.as_deref() == Some(path)
+                    && d.message.contains("dataset dropped")),
+                "{name}: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn storage_names_and_timestamps_are_refused_on_a_history_dataset() {
+        let text = SURFACE.replace(
+            "[vol_surface.columns.forward]\ntype = \"f64\"",
+            "[vol_surface.columns.received_at]\ntype = \"f64\"",
+        );
+        let (schema, diags) = series_schema(&text);
+        assert!(schema.dataset("vol_surface").is_none());
+        assert!(diags.iter().any(|d| d.message.contains("storage column")));
+        let text = SURFACE.replace(
+            "[vol_surface.columns.delta]\ntype = \"f64\"",
+            "[vol_surface.columns.delta]\ntype = \"timestamp\"",
+        );
+        let (schema, _) = series_schema(&text);
+        assert!(
+            schema.dataset("vol_surface").is_none(),
+            "a timestamp key is refused"
+        );
+    }
+
+    #[test]
+    fn local_and_computed_are_refused_on_a_history_dataset_and_cleared() {
+        let text = SURFACE.replace(
+            "history = \"400d\"",
+            "history = \"400d\"\nlocal = true\ncomputed = true",
+        );
+        let (schema, diags) = series_schema(&text);
+        let ds = schema
+            .dataset("vol_surface")
+            .expect("flags are cleared, the dataset stays");
+        assert!(!ds.local && !ds.computed);
+        assert!(
+            diags
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .count()
+                >= 2
         );
     }
 }

@@ -10958,11 +10958,25 @@ run_mutation "schema/document: an empty key drops the dataset" \
 
 run_mutation "schema/reference: an empty key drops the dataset" \
   crates/geode-core/src/schema/mod.rs \
-  '    let mut keep = true;
-    if ds.key.is_empty() {' \
-  '    let mut keep = true;
-    if false {' \
+  "    if ds.key.is_empty() {
+        diags.push(err(
+            format!(
+                \"dataset '{name}': a reference dataset needs a nonempty 'key'; dataset dropped\"" \
+  "    if false {
+        diags.push(err(
+            format!(
+                \"dataset '{name}': a reference dataset needs a nonempty 'key'; dataset dropped\"" \
   geode-core a_reference_dataset_without_a_key_is_dropped
+
+run_mutation "schema/history: an empty key drops the dataset" \
+  crates/geode-core/src/schema/mod.rs \
+  "    if ds.key.is_empty() {
+        diags.push(err(
+            format!(\"dataset '{name}': a history dataset needs a nonempty 'key'; dataset dropped\")," \
+  "    if false {
+        diags.push(err(
+            format!(\"dataset '{name}': a history dataset needs a nonempty 'key'; dataset dropped\")," \
+  geode-core a_history_dataset_is_dropped_on_each_shape_error
 
 run_mutation "schema/document: a key column must be a dimension" \
   crates/geode-core/src/schema/mod.rs \
@@ -11000,15 +11014,37 @@ run_mutation "schema/measures: document vocabulary is dropped per column" \
 
 run_mutation "schema/document: a refused dataset is not pushed" \
   crates/geode-core/src/schema/mod.rs \
-  '            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {' \
-  '            if dataset.is_reference() && dataset.columns.is_empty() {' \
+  '            if (dataset.is_document() || dataset.is_reference() || dataset.is_history())' \
+  '            if (dataset.is_reference() || dataset.is_history())' \
   geode-core a_document_dataset_declares_at_least_one_value
 
 run_mutation "schema/reference: a refused dataset is not pushed" \
   crates/geode-core/src/schema/mod.rs \
-  '            if (dataset.is_document() || dataset.is_reference()) && dataset.columns.is_empty() {' \
-  '            if dataset.is_document() && dataset.columns.is_empty() {' \
+  '            if (dataset.is_document() || dataset.is_reference() || dataset.is_history())' \
+  '            if (dataset.is_document() || dataset.is_history())' \
   geode-core a_reference_dataset_without_a_key_is_dropped
+
+run_mutation "schema/history: a refused dataset is not pushed" \
+  crates/geode-core/src/schema/mod.rs \
+  '            if (dataset.is_document() || dataset.is_reference() || dataset.is_history())' \
+  '            if (dataset.is_document() || dataset.is_reference())' \
+  geode-core a_history_dataset_is_dropped_on_each_shape_error
+
+# A history dimension outside the key would let two rows with one key
+# tuple differ in a column the cache never asks by.
+run_mutation "schema/history: a dimension off the key is accepted" \
+  crates/geode-core/src/schema/mod.rs \
+  '                if !ds.key.contains(&c.name) {' \
+  '                if false {' \
+  geode-core a_history_dataset_is_dropped_on_each_shape_error
+
+# History reads its retention windows as series does; reading them on
+# series alone leaves a history cache unbounded and notes the fields ignored.
+run_mutation "schema/history: retention windows read on series only" \
+  crates/geode-core/src/schema/mod.rs \
+  '            if matches!(family, Family::Series | Family::History) {' \
+  '            if family == Family::Series {' \
+  geode-core a_history_dataset_keeps_its_key_values_and_windows
 
 # Document validation retains reserved-column diagnostics. Returning
 # `validate_document(ds)` directly drops earlier errors and lets names

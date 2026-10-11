@@ -17,8 +17,8 @@ pub struct RuleError {
 }
 
 /// Datasets a rule may name: stored (measures or document family), not
-/// computed, not local, carrying `underlying_ref`. Reference and series
-/// datasets have no grain for a distinct read.
+/// computed, not local, carrying `underlying_ref`. Reference, series and
+/// history datasets have no grain for a distinct read.
 pub fn eligible_datasets(schema: &SchemaSpec) -> Vec<&str> {
     schema
         .datasets
@@ -50,6 +50,7 @@ fn dataset_error(schema: &SchemaSpec, name: &str) -> Option<String> {
     match ds.family {
         Family::Reference => return Some(format!("'{name}' is a reference dataset")),
         Family::Series => return Some(format!("'{name}' is a series dataset")),
+        Family::History => return Some(format!("'{name}' is a history dataset")),
         Family::Measures | Family::Document => {}
     }
     if ds.column(UNDERLYING).is_none() {
