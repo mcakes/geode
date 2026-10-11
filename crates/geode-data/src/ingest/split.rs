@@ -297,6 +297,7 @@ grain = "instrument"
             required: false,
             textual: false,
             categorical: false,
+            order: geode_core::schema::TextOrder::Lexical,
             role: ColumnRole::Axis,
         });
         ds.columns.push(ColumnSpec {
@@ -306,6 +307,7 @@ grain = "instrument"
             required: false,
             textual: false,
             categorical: false,
+            order: geode_core::schema::TextOrder::Lexical,
             role: ColumnRole::Value,
         });
         ds.columns.push(ColumnSpec {
@@ -315,6 +317,7 @@ grain = "instrument"
             required: false,
             textual: false,
             categorical: false,
+            order: geode_core::schema::TextOrder::Lexical,
             role: ColumnRole::Attribute { grain: None },
         });
         let payload = payload_columns(&ds, Grain::Position);

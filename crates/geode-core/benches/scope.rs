@@ -33,6 +33,7 @@ fn dataset() -> DatasetSpec {
         required: false,
         textual,
         categorical: false,
+        order: geode_core::schema::TextOrder::Lexical,
         role: ColumnRole::Dimension {
             grain: Some(Grain::Underlying),
         },

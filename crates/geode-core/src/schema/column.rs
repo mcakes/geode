@@ -106,6 +106,9 @@ pub struct ColumnSpec {
     /// A string vocabulary suitable for interning, pickers, and dictionary
     /// text matching. Defaults to true for utf8 dimensions and false otherwise.
     pub categorical: bool,
+    /// How a dimension's text values sort where a family orders by value
+    /// (history keys). `Lexical` unless the column says `order = "tenor"`.
+    pub order: super::order::TextOrder,
     pub role: ColumnRole,
 }
 
@@ -149,6 +152,7 @@ impl ColumnSpec {
             required: true,
             textual: false,
             categorical: true,
+            order: super::order::TextOrder::Lexical,
             role: ColumnRole::Dimension { grain: None },
         }
     }

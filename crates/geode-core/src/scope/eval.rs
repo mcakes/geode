@@ -714,6 +714,7 @@ mod tests {
             required: false,
             textual: ty == ColumnType::Utf8,
             categorical: false,
+            order: crate::schema::TextOrder::Lexical,
             role: ColumnRole::Dimension {
                 grain: Some(Grain::Underlying),
             },

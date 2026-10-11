@@ -1097,6 +1097,7 @@ mod tests {
             required: false,
             textual: false,
             categorical: false,
+            order: geode_core::schema::TextOrder::Lexical,
             role: ColumnRole::Axis,
         });
         ds.columns.push(ColumnSpec {
@@ -1106,6 +1107,7 @@ mod tests {
             required: false,
             textual: false,
             categorical: false,
+            order: geode_core::schema::TextOrder::Lexical,
             role: ColumnRole::Value,
         });
         ds.columns.push(ColumnSpec {
@@ -1115,6 +1117,7 @@ mod tests {
             required: false,
             textual: false,
             categorical: false,
+            order: geode_core::schema::TextOrder::Lexical,
             role: ColumnRole::Attribute { grain: None },
         });
         let sql = create_table_sql(&ds, Grain::Position, TableKind::Live);

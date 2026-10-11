@@ -623,6 +623,7 @@ grain = "underlying"
                 required: true,
                 textual: false,
                 categorical: true,
+                order: crate::schema::TextOrder::Lexical,
                 role: ColumnRole::Dimension { grain: None },
             }],
             family: Family::Document,

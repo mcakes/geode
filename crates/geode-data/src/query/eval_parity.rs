@@ -38,6 +38,7 @@ fn column(name: &str, ty: ColumnType, textual: bool, role: ColumnRole) -> Column
         required: false,
         textual,
         categorical: false,
+        order: geode_core::schema::TextOrder::Lexical,
         role,
     }
 }

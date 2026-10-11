@@ -283,6 +283,7 @@ pub mod cvi {
                 required: true,
                 textual,
                 categorical: false,
+                order: geode_core::schema::TextOrder::Lexical,
                 role,
             };
             DatasetSpec {

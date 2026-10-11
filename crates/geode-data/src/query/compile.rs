@@ -3100,6 +3100,7 @@ kind = "measure"
             required: false,
             textual: false,
             categorical: false,
+            order: geode_core::schema::TextOrder::Lexical,
             role: ColumnRole::Measure {
                 grain: Grain::UnderlyingPair,
                 aggregate: Aggregate::Sum,

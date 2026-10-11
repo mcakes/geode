@@ -1085,6 +1085,7 @@ grain = "position"
             required: false,
             textual: false,
             categorical: false,
+            order: geode_core::schema::TextOrder::Lexical,
             role: geode_core::schema::ColumnRole::Attribute {
                 grain: Some(Grain::Instrument),
             },

@@ -5,9 +5,11 @@
 
 mod column;
 mod grain;
+pub mod order;
 
 pub use column::{Aggregate, ColumnRole, ColumnSpec, ColumnType};
 pub use grain::Grain;
+pub use order::{TextOrder, sort_text};
 
 use crate::config::{Diagnostic, MergedDoc, Severity};
 
@@ -1123,7 +1125,7 @@ fn parse_column(
 ) -> Result<(ColumnSpec, Option<Diagnostic>), Diagnostic> {
     // `datasets.<ds>.columns.<name>[.<key>]` — `key` is the deepest field
     // a call site honestly knows (`type`, `role`, `grain`, `aggregate`,
-    // `categorical`); `None` only for "not a table", which names no key.
+    // `categorical`, `order`); `None` only for "not a table", which names no key.
     let bad = |key: Option<&str>, m: String| {
         note(
             match key {
@@ -1213,6 +1215,25 @@ fn parse_column(
         Some(v) => v,
     };
 
+    let order = match table.get("order").and_then(|v| v.as_str()) {
+        None => TextOrder::Lexical,
+        Some(s) => match (TextOrder::parse(s), &role) {
+            (Some(o), ColumnRole::Dimension { .. }) => o,
+            (Some(_), _) => {
+                return Err(bad(
+                    Some("order"),
+                    "'order' applies to a dimension column only".into(),
+                ));
+            }
+            (None, _) => {
+                return Err(bad(
+                    Some("order"),
+                    format!("unknown order '{s}' (expected \"lexical\" or \"tenor\")"),
+                ));
+            }
+        },
+    };
+
     Ok((
         ColumnSpec {
             name: name.to_string(),
@@ -1230,6 +1251,7 @@ fn parse_column(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             categorical,
+            order,
             role,
         },
         warning,
@@ -2373,6 +2395,49 @@ role = "attribute"
     fn series_schema(text: &str) -> (SchemaSpec, Vec<Diagnostic>) {
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
         SchemaSpec::from_doc(&doc)
+    }
+
+    #[test]
+    fn order_is_read_on_a_dimension_and_refused_elsewhere() {
+        let (schema, diags) = series_schema(
+            r#"
+[t]
+[t.columns.tenor]
+type = "utf8"
+role = "dimension"
+grain = "underlying"
+order = "tenor"
+[t.columns.vega01]
+type = "f64"
+role = "measure"
+grain = "underlying"
+order = "tenor"
+[t.columns.bad]
+type = "utf8"
+role = "dimension"
+grain = "underlying"
+order = "alphabetical"
+"#,
+        );
+        let ds = schema.dataset("t").unwrap();
+        assert_eq!(ds.column("tenor").unwrap().order, TextOrder::Tenor);
+        assert!(
+            ds.column("vega01").is_none(),
+            "a non-dimension with order is dropped"
+        );
+        assert!(
+            ds.column("bad").is_none(),
+            "an unknown order drops the column"
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path.as_deref() == Some("datasets.t.columns.vega01.order"))
+        );
+        assert!(diags.iter().any(
+            |d| d.path.as_deref() == Some("datasets.t.columns.bad.order")
+                && d.message.contains("unknown order")
+        ));
     }
 
     #[test]
