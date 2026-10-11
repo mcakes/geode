@@ -42,6 +42,9 @@ pub enum HistoryWorkOutcome {
         rows: HistoryRows,
         /// Rows with a non-finite value dropped before the rows were handed on.
         dropped: usize,
+        /// Taken just before the adapter call: the source can vouch for
+        /// nothing later than when it was asked.
+        fetched_at: chrono::DateTime<chrono::Utc>,
     },
     Failed {
         ticket: Ticket,
@@ -178,6 +181,7 @@ fn run(
                     if request.table.is_empty() {
                         request.table = table.to_string();
                     }
+                    let fetched_at = chrono::Utc::now();
                     match query
                         .query(&request)
                         .and_then(|rows| checked(rows, key_types, value_arity, &request))
@@ -195,6 +199,7 @@ fn run(
                                 request,
                                 rows,
                                 dropped,
+                                fetched_at,
                             }
                         }
                         Err(e) => HistoryWorkOutcome::Failed {
@@ -441,6 +446,7 @@ pub(crate) mod tests {
                 request,
                 rows,
                 dropped,
+                ..
             } => {
                 assert_eq!(ticket, Ticket(7));
                 assert_eq!(rows.len(), 2);

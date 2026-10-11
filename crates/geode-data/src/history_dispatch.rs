@@ -238,8 +238,9 @@ fn same_kind(like: &KeySet, tuples: Vec<Vec<String>>) -> KeySet {
 ///   tuple; otherwise one call for every asked tuple.
 /// - `Between` is clipped to the dataset's history window first (retention
 ///   would delete what an older span fetched, and the next ask would fetch
-///   it again forever; a wholly expired span asks nothing), then one call
-///   per distinct gap for the tuples sharing that gap list.
+///   it again forever; a wholly expired span asks nothing) and its end to
+///   `now`, then one call per distinct gap for the tuples sharing that gap
+///   list. The read still answers the span as asked.
 pub(crate) fn plan_calls(
     conn: &duckdb::Connection,
     ds: &DatasetSpec,
@@ -267,6 +268,9 @@ pub(crate) fn plan_calls(
                 Some(cutoff) => from.max(cutoff),
                 None => from,
             };
+            // Nothing after now can be covered, so the part of the span
+            // past it would be a gap asked for on every request.
+            let to = to.min(now);
             if from >= to {
                 return Ok(Vec::new());
             }
@@ -307,8 +311,23 @@ fn history_cutoff(ds: &DatasetSpec, now: DateTime<Utc>) -> Option<DateTime<Utc>>
 ///   exact tuple with rows (the source asserts nothing lies between), else
 ///   just `t` itself.
 /// - `Latest`: just the latest answered instant, for a tuple with rows.
-pub(crate) fn covered_by(request: &HistoryRequest, rows: &HistoryRows) -> Vec<Covered> {
+///
+/// Every span ends by `fetched_at` less [`crate::HISTORY_SETTLE`]: the
+/// source could vouch for nothing after it was asked, and an observation
+/// stamped shortly before the ask may not be published yet. Without the
+/// clip a span reaching past now would mark the future covered and its
+/// observations would never be fetched. A span the clip empties records
+/// nothing.
+pub(crate) fn covered_by(
+    request: &HistoryRequest,
+    rows: &HistoryRows,
+    fetched_at: DateTime<Utc>,
+) -> Vec<Covered> {
     let tick = chrono::Duration::microseconds(1);
+    let bound = chrono::Duration::from_std(crate::HISTORY_SETTLE)
+        .ok()
+        .and_then(|settle| fetched_at.checked_sub_signed(settle))
+        .unwrap_or(fetched_at);
     let latest_of = |tuple: &[String]| {
         (0..rows.ts.len())
             .filter(|&i| {
@@ -321,11 +340,16 @@ pub(crate) fn covered_by(request: &HistoryRequest, rows: &HistoryRows) -> Vec<Co
             .max()
     };
     let tuples = request.keys.tuples();
-    let instant = |asked: &Vec<String>, at: DateTime<Utc>, start: DateTime<Utc>| {
-        at.checked_add_signed(tick).map(|end| Covered {
+    let clipped = |asked: &Vec<String>, start: DateTime<Utc>, end: DateTime<Utc>| {
+        let end = end.min(bound);
+        (start < end).then(|| Covered {
             asked: asked.clone(),
             span: (start, end),
         })
+    };
+    let instant = |asked: &Vec<String>, at: DateTime<Utc>, start: DateTime<Utc>| {
+        at.checked_add_signed(tick)
+            .and_then(|end| clipped(asked, start, end))
     };
     match request.span {
         Span::Between {
@@ -334,10 +358,7 @@ pub(crate) fn covered_by(request: &HistoryRequest, rows: &HistoryRows) -> Vec<Co
             step: None,
         } => tuples
             .iter()
-            .map(|asked| Covered {
-                asked: asked.clone(),
-                span: (from, to),
-            })
+            .filter_map(|asked| clipped(asked, from, to))
             .collect(),
         Span::Between { step: Some(_), .. } => Vec::new(),
         Span::At(t) => tuples
@@ -380,6 +401,77 @@ mod tests {
         t.iter().map(|s| s.to_string()).collect()
     }
 
+    /// A fetch time long after every span below, so no clip applies.
+    fn settled() -> DateTime<Utc> {
+        ts("2027-01-01T00:00:00Z")
+    }
+
+    #[test]
+    fn coverage_ends_at_the_fetch_time_less_the_settle_margin() {
+        let fetched_at = ts("2026-01-08T12:00:00Z");
+        let bound = fetched_at - chrono::Duration::from_std(crate::HISTORY_SETTLE).unwrap();
+        let r = rows(&["2026-01-07T21:00:00Z"], &[&["SPX"], &["3M"], &["0.5"]]);
+        let spx = exact(&["SPX", "3M", "0.5"]);
+        let ask = |keys: KeySet, span| HistoryRequest {
+            table: String::new(),
+            keys,
+            span,
+        };
+        let from = ts("2026-01-05T00:00:00Z");
+        let past_now = Span::Between {
+            from,
+            to: ts("2026-01-10T00:00:00Z"),
+            step: None,
+        };
+        assert_eq!(
+            covered_by(
+                &ask(KeySet::Prefix(vec![exact(&["SPX"])]), past_now),
+                &r,
+                fetched_at
+            ),
+            vec![Covered {
+                asked: exact(&["SPX"]),
+                span: (from, bound)
+            }]
+        );
+        let unsettled = Span::Between {
+            from: bound,
+            to: ts("2026-01-10T00:00:00Z"),
+            step: None,
+        };
+        assert!(
+            covered_by(
+                &ask(KeySet::Prefix(vec![exact(&["SPX"])]), unsettled),
+                &r,
+                fetched_at
+            )
+            .is_empty(),
+            "a span the clip empties records nothing"
+        );
+        let future = Span::At(ts("2026-01-09T00:00:00Z"));
+        assert_eq!(
+            covered_by(
+                &ask(KeySet::Exact(vec![spx.clone()]), future),
+                &r,
+                fetched_at
+            ),
+            vec![Covered {
+                asked: spx.clone(),
+                span: (ts("2026-01-07T21:00:00Z"), bound)
+            }],
+            "an instant past the bound covers only up to it"
+        );
+        assert!(
+            covered_by(
+                &ask(KeySet::Prefix(vec![exact(&["SPX"])]), future),
+                &r,
+                fetched_at
+            )
+            .is_empty(),
+            "a prefix point past the bound records nothing"
+        );
+    }
+
     #[test]
     fn a_stepped_between_records_no_coverage_and_a_full_one_records_its_span() {
         let (from, to) = (ts("2026-01-05T00:00:00Z"), ts("2026-01-10T00:00:00Z"));
@@ -390,14 +482,19 @@ mod tests {
             span: Span::Between { from, to, step },
         };
         assert_eq!(
-            covered_by(&ask(None), &r),
+            covered_by(&ask(None), &r, settled()),
             vec![Covered {
                 asked: exact(&["SPX"]),
                 span: (from, to)
             }]
         );
         assert!(
-            covered_by(&ask(Some(std::time::Duration::from_secs(86_400))), &r).is_empty(),
+            covered_by(
+                &ask(Some(std::time::Duration::from_secs(86_400))),
+                &r,
+                settled()
+            )
+            .is_empty(),
             "a thinned answer is not coverage"
         );
     }
@@ -418,7 +515,7 @@ mod tests {
             span: Span::At(t),
         };
         assert_eq!(
-            covered_by(&at, &r),
+            covered_by(&at, &r, settled()),
             vec![
                 Covered {
                     asked: spx.clone(),
@@ -436,7 +533,7 @@ mod tests {
         };
         let last = ts("2026-01-06T21:00:00Z");
         assert_eq!(
-            covered_by(&latest, &r),
+            covered_by(&latest, &r, settled()),
             vec![Covered {
                 asked: spx,
                 span: (last, last + tick)

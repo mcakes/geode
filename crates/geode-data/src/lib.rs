@@ -36,5 +36,13 @@ pub use vol::{VolConfig, VolModelRegistry};
 /// store over.
 pub const HANDOFF_DRAIN: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// How far behind its fetch time a history answer is trusted to be
+/// complete: coverage recorded from an answer ends this long before the
+/// adapter was called, so an observation the vendor stamps before the ask
+/// but publishes after it is fetched by the next ask instead of lost
+/// behind coverage. A guess at the vendors' publication lag; tune it
+/// against the real Hanweck and KDB sources.
+pub const HISTORY_SETTLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 #[cfg(test)]
 mod consistency_tests;

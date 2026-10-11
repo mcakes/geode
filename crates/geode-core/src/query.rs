@@ -286,13 +286,14 @@ pub struct HistoryOutcome {
 }
 
 /// One key value as stored and compared: text keys trimmed, f64 keys parsed
-/// and re-formatted with `{}` so `0.50` and `0.5` are one key. `Err` names
+/// and re-formatted with `{}` so `0.50` and `0.5` are one key (and `-0`
+/// and `0`). `Err` names
 /// an unparsable f64. A blank value and a non-finite f64 are refused: either
 /// would store rows under a key no request can name.
 pub fn normalize_key(value: &str, ty: crate::schema::ColumnType) -> Result<String, String> {
     let v = value.trim();
     if v.is_empty() {
-        return Err("a key value is not blank".to_string());
+        return Err("a key value must not be blank".to_string());
     }
     match ty {
         crate::schema::ColumnType::F64 => {
@@ -302,7 +303,9 @@ pub fn normalize_key(value: &str, ty: crate::schema::ColumnType) -> Result<Strin
             if !f.is_finite() {
                 return Err(format!("'{value}' is not a finite f64 key"));
             }
-            Ok(format!("{f}"))
+            // `+ 0.0` turns -0.0 into 0.0: `{}` spells them "-0" and "0",
+            // two keys for one value.
+            Ok(format!("{}", f + 0.0))
         }
         _ => Ok(v.to_string()),
     }
@@ -654,9 +657,17 @@ mod tests {
             "a NaN key is no key"
         );
         assert_eq!(normalize_key(" SPX ", ColumnType::Utf8).unwrap(), "SPX");
-        assert!(
-            normalize_key("  ", ColumnType::Utf8).is_err(),
-            "a blank key is refused"
+        assert_eq!(
+            normalize_key("  ", ColumnType::Utf8).unwrap_err(),
+            "a key value must not be blank"
         );
+    }
+
+    #[test]
+    fn a_negative_zero_f64_key_is_the_zero_key() {
+        use crate::schema::ColumnType;
+        assert_eq!(normalize_key("-0", ColumnType::F64).unwrap(), "0");
+        assert_eq!(normalize_key("-0.0", ColumnType::F64).unwrap(), "0");
+        assert_eq!(normalize_key("0", ColumnType::F64).unwrap(), "0");
     }
 }

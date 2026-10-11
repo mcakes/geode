@@ -40117,6 +40117,62 @@ run_mutation "history worker: a key listing panic reads as no listing" \
   geode-data \
   a_panicking_key_listing_is_an_outcome_for_its_column
 
+# ---- History family: final fix wave ----
+
+# Coverage from an answer ends at the fetch time less the settle margin.
+# Unclipped, a Between reaching past now marks the future covered and the
+# observations that arrive later are never fetched.
+run_mutation "history dispatch: coverage is not clipped at the settle bound" \
+  crates/geode-data/src/history_dispatch.rs \
+  '        let end = end.min(bound);' \
+  '        let end = end;' \
+  geode-data \
+  a_between_reaching_past_now_covers_only_to_the_settle_bound_and_a_repeat_asks_the_rest
+
+# A span the clip empties records nothing (a stored `from >= to` row).
+run_mutation "history dispatch: an empty clipped span is recorded" \
+  crates/geode-data/src/history_dispatch.rs \
+  '        (start < end).then(|| Covered {' \
+  '        (start <= end).then(|| Covered {' \
+  geode-data \
+  coverage_ends_at_the_fetch_time_less_the_settle_margin
+
+# The settle margin itself: zero, an observation stamped just before the
+# ask but published after it is lost behind coverage for good.
+run_mutation "history dispatch: no settle margin" \
+  crates/geode-data/src/lib.rs \
+  'pub const HISTORY_SETTLE: std::time::Duration = std::time::Duration::from_secs(30 * 60);' \
+  'pub const HISTORY_SETTLE: std::time::Duration = std::time::Duration::from_secs(0);' \
+  geode-data \
+  a_span_inside_the_settle_window_records_no_coverage
+
+# The plan asks nothing past now: nothing there can be covered, so the
+# future part would be a gap asked for on every request.
+run_mutation "history dispatch: the plan asks past now" \
+  crates/geode-data/src/history_dispatch.rs \
+  '            let to = to.min(now);' \
+  '            let to = to;' \
+  geode-data \
+  a_between_reaching_past_now_covers_only_to_the_settle_bound_and_a_repeat_asks_the_rest
+
+# An inverted (or empty) span as asked is the caller's error. Mutated to
+# refuse only a strictly inverted one, an empty span answers "no data".
+run_mutation "history service: an empty asked span is answered" \
+  crates/geode-data/src/service.rs \
+  '            && from >= to' \
+  '            && from > to' \
+  geode-data \
+  a_history_request_for_an_unserved_or_malformed_ask_is_refused_at_once
+
+# -0.0 and 0.0 are one f64 key. Formatted as is, `-0` and `0` are two
+# strings and a vendor's `-0` answering a `0` ask is refused as unasked.
+run_mutation "history key: -0 is a key of its own" \
+  crates/geode-core/src/query.rs \
+  '            Ok(format!("{}", f + 0.0))' \
+  '            Ok(format!("{f}"))' \
+  geode-core \
+  a_negative_zero_f64_key_is_the_zero_key
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

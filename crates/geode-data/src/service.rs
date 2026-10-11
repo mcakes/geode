@@ -798,6 +798,7 @@ fn history_outcome_sink(
             request,
             rows,
             dropped,
+            fetched_at,
         } => {
             // Before the rows go on, so the warning precedes the answer it
             // explains.
@@ -809,7 +810,7 @@ fn history_outcome_sink(
             {
                 let _ = sink(DataEvent::Diagnostics(vec![warning]));
             }
-            let covered = crate::history_dispatch::covered_by(&request, &rows);
+            let covered = crate::history_dispatch::covered_by(&request, &rows, fetched_at);
             ingest.submit_history(HistoryJob {
                 source: source.clone(),
                 dataset: name.clone(),
@@ -3053,7 +3054,20 @@ impl DataService {
         } = params.span
             && step.is_zero()
         {
-            return refuse(&params, "a history step is longer than zero".to_string());
+            return refuse(
+                &params,
+                "a history step must be longer than zero".to_string(),
+            );
+        }
+        // As asked, before any clip: an inverted span is the caller's error
+        // and must not read as "no data". Only a clip may empty a span.
+        if let Span::Between { from, to, .. } = params.span
+            && from >= to
+        {
+            return refuse(
+                &params,
+                "a history span must end after it starts".to_string(),
+            );
         }
         let keys = match crate::history_dispatch::normalize_keys(ds, &params.keys) {
             Ok(keys) => keys,
@@ -5479,6 +5493,87 @@ mod tests {
     }
 
     #[test]
+    fn a_between_reaching_past_now_covers_only_to_the_settle_bound_and_a_repeat_asks_the_rest() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        let now = Utc::now();
+        let days = |n: i64| chrono::Duration::days(n);
+        let settle = chrono::Duration::from_std(crate::HISTORY_SETTLE).unwrap();
+        let ask = Span::Between {
+            from: now - days(3),
+            to: now + days(2),
+            step: None,
+        };
+        service.history(history_ask(9, 1, spx(), ask));
+        history_answer(&rx, 1).result.unwrap();
+        {
+            let asked = calls.lock().unwrap();
+            assert_eq!(asked.len(), 1);
+            match asked[0].span {
+                Span::Between { to, .. } => assert!(
+                    to <= Utc::now(),
+                    "the part of the span after now is not asked for: {to}"
+                ),
+                other => panic!("{other:?}"),
+            }
+        }
+        let before = Utc::now();
+        service.history(history_ask(9, 2, spx(), ask));
+        history_answer(&rx, 2).result.unwrap();
+        let after = Utc::now();
+        let asked = calls.lock().unwrap().clone();
+        assert_eq!(asked.len(), 2, "the unsettled tail is asked again");
+        match asked[1].span {
+            Span::Between { from, to, .. } => {
+                assert!(
+                    from >= now - settle && from <= before - settle,
+                    "coverage ended at the fetch time less the settle margin: {from}"
+                );
+                assert!(to >= before && to <= after, "and is asked up to now: {to}");
+            }
+            other => panic!("{other:?}"),
+        }
+        service.shutdown();
+    }
+
+    #[test]
+    fn an_at_in_the_future_is_asked_again_not_served_stale_from_the_cache() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        let exact = KeySet::Exact(vec![tuple(&["SPX", "3M", "0.5"])]);
+        let at = Utc::now() + chrono::Duration::days(1);
+        service.history(history_ask(9, 1, exact.clone(), Span::At(at)));
+        assert_eq!(history_answer(&rx, 1).result.unwrap().rows.len(), 1);
+        service.history(history_ask(9, 2, exact, Span::At(at)));
+        assert_eq!(history_answer(&rx, 2).result.unwrap().rows.len(), 1);
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            2,
+            "an instant past the settle bound is never covered"
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn a_span_inside_the_settle_window_records_no_coverage() {
+        let (_dir, calls, service, rx) = history_service(5, None, false);
+        let now = Utc::now();
+        let recent = Span::Between {
+            from: now - chrono::Duration::minutes(10),
+            to: now,
+            step: None,
+        };
+        service.history(history_ask(9, 1, spx(), recent));
+        history_answer(&rx, 1).result.unwrap();
+        service.history(history_ask(9, 2, spx(), recent));
+        history_answer(&rx, 2).result.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            2,
+            "nothing inside the settle margin is vouched for"
+        );
+        service.shutdown();
+    }
+
+    #[test]
     fn an_at_request_is_served_from_coverage_once_the_instant_is_covered() {
         let (_dir, calls, service, rx) = history_service(5, None, false);
         service.history(history_ask(9, 1, spx(), jan("05", "10")));
@@ -5561,7 +5656,10 @@ mod tests {
             "a thinned answer recorded no coverage, so it is asked again"
         );
         service.history(history_ask(9, 3, spx(), stepped(Duration::ZERO)));
-        assert!(history_answer(&rx, 3).result.is_err());
+        assert_eq!(
+            history_answer(&rx, 3).result.unwrap_err(),
+            "a history step must be longer than zero"
+        );
         assert_eq!(calls.lock().unwrap().len(), 2);
         service.shutdown();
     }
@@ -5583,6 +5681,14 @@ mod tests {
         ));
         let refused = history_answer(&rx, 2).result.unwrap_err();
         assert!(refused.contains("exact key has 3 columns"), "{refused}");
+        for (tag, inverted) in [(3, jan("10", "05")), (4, jan("05", "05"))] {
+            service.history(history_ask(9, tag, spx(), inverted));
+            let refused = history_answer(&rx, tag).result.unwrap_err();
+            assert!(
+                refused.contains("a history span must end after it starts"),
+                "{refused}"
+            );
+        }
         assert!(calls.lock().unwrap().is_empty());
         service.shutdown();
     }
