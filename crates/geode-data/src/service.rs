@@ -1661,6 +1661,12 @@ impl DataService {
                     continue;
                 }
                 SourceShape::Subscribed => {}
+                // Reported rather than dropped: a configured source with no
+                // worker must show as unservable, not as a quiet healthy one.
+                SourceShape::History => {
+                    report_unservable("history sources are not served yet".into());
+                    continue;
+                }
                 SourceShape::Snapshot => {
                     let Some(adapter) = config.adapters.get(&spec.adapter) else {
                         report_unservable(format!(

@@ -177,6 +177,11 @@ fn source_row(d: &Diagnostics, name: &str, state: &SourceState, clock: Clock) ->
                 "snapshot".to_string(),
                 vec![format!("adapter: {}", spec.adapter)],
             ),
+            // Queried per key on demand: no topics, files or poll to show.
+            SourceShape::History => (
+                "history".to_string(),
+                vec![format!("adapter: {}", spec.adapter)],
+            ),
             SourceShape::Subscribed => (
                 format!("subscribed · {} topics", spec.topics.len()),
                 vec![
@@ -988,6 +993,7 @@ pub(crate) mod tests {
         };
         d.describe_source("dir", summary(SourceShape::Directory, Vec::new()));
         d.describe_source("fetch", summary(SourceShape::Fetch, Vec::new()));
+        d.describe_source("hist", summary(SourceShape::History, Vec::new()));
         d.describe_source(
             "sub",
             summary(SourceShape::Subscribed, vec!["a/>".into(), "b".into()]),
@@ -1001,6 +1007,8 @@ pub(crate) mod tests {
             row("fetch").detail,
             vec!["adapter: ADAPTER".to_string(), "fetch".to_string()]
         );
+        assert_eq!(row("hist").shape, "history");
+        assert_eq!(row("hist").detail, vec!["adapter: ADAPTER".to_string()]);
         assert_eq!(row("sub").shape, "subscribed · 2 topics");
         assert_eq!(row("sub").detail[1], "topics: a/>, b");
     }

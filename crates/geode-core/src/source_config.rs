@@ -75,7 +75,8 @@ pub enum SourceTime {
 
 /// Runtime pipeline selected by adapter and dataset family. `csv_dir` uses
 /// discovery; another adapter uses fetching for series, snapshot polling for
-/// reference datasets, and subscription for documents. Derive this from the
+/// reference datasets, on-demand history queries for history datasets, and
+/// subscription for documents. Derive this from the
 /// schema rather than storing a second answer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SourceShape {
@@ -85,6 +86,9 @@ pub enum SourceShape {
     /// Another adapter over a reference dataset: a worker polls the whole
     /// table on `poll_interval`.
     Snapshot,
+    /// Another adapter over a history dataset: a worker answers keyed,
+    /// timestamped table queries on demand.
+    History,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,7 +127,7 @@ pub struct SourceSpec {
     pub recover_max_age: Duration,
     /// Which timestamp a publish is stamped with. See [`SourceTime`].
     pub source_time: SourceTime,
-    /// Snapshot only: the adapter-defined name of the table to read.
+    /// Snapshot and history: the adapter-defined name of the table to read.
     pub table: Option<String>,
 }
 
@@ -160,6 +164,8 @@ impl SourceSpec {
             SourceShape::Fetch
         } else if family == Some(Family::Reference) {
             SourceShape::Snapshot
+        } else if family == Some(Family::History) {
+            SourceShape::History
         } else {
             SourceShape::Subscribed
         }
@@ -351,7 +357,7 @@ impl SourceSpec {
     pub fn from_doc(doc: &MergedDoc, schema: &SchemaSpec) -> (Vec<SourceSpec>, Vec<Diagnostic>) {
         let mut out = Vec::new();
         let mut diags = Vec::new();
-        // Reference dataset → the accepted snapshot source filling it, in TOML order.
+        // Reference or history dataset → the accepted source filling it, in TOML order.
         let mut claimed: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
@@ -419,6 +425,7 @@ impl SourceSpec {
             let family = schema.dataset(&dataset).map(|d| d.family);
             let fetch = subscribed && family == Some(Family::Series);
             let snapshot = subscribed && family == Some(Family::Reference);
+            let history = subscribed && family == Some(Family::History);
 
             // Directory loading writes grain tables, so it cannot fill a series dataset.
             if !subscribed && family == Some(Family::Series) {
@@ -446,6 +453,19 @@ impl SourceSpec {
                 ));
                 continue;
             }
+            // Nor a history dataset, whose rows a worker fetches per key on demand.
+            if !subscribed && family == Some(Family::History) {
+                diags.push(diag(
+                    Severity::Error,
+                    name,
+                    Some("dataset"),
+                    format!(
+                        "a directory source cannot fill the history dataset '{dataset}'; \
+                         name a history adapter"
+                    ),
+                ));
+                continue;
+            }
             // A snapshot publishes the whole table as one batch named after the
             // dataset, so a second source would replace the first's rows on every
             // poll: never unchanged, and an archive growing without bound.
@@ -461,10 +481,26 @@ impl SourceSpec {
                 ));
                 continue;
             }
+            // History coverage is kept per key, not per source: a second source
+            // would answer asks the first already covered, and the dataset could
+            // not say which source's rows a read returned.
+            if history && let Some(first) = claimed.get(&dataset) {
+                diags.push(diag(
+                    Severity::Error,
+                    name,
+                    Some("dataset"),
+                    format!(
+                        "history source '{first}' already fills the history dataset \
+                         '{dataset}'; a history dataset has at most one source"
+                    ),
+                ));
+                continue;
+            }
             // A subscription adapter publishes DocumentRows and requires a document dataset.
             if subscribed
                 && !fetch
                 && !snapshot
+                && !history
                 && !schema.dataset(&dataset).is_some_and(|d| d.is_document())
             {
                 diags.push(diag(
@@ -485,7 +521,9 @@ impl SourceSpec {
                 if !table.contains_key(key) {
                     return;
                 }
-                let m = if fetch {
+                let m = if history {
+                    format!("'{key}' is ignored by a history source (a history dataset)")
+                } else if fetch {
                     format!("'{key}' is ignored by a fetch source (a series dataset)")
                 } else if snapshot {
                     format!("'{key}' is ignored by a snapshot source (a reference dataset)")
@@ -523,11 +561,11 @@ impl SourceSpec {
                 "recover_max_age",
                 "source_time",
             ] {
-                if !subscribed || fetch || snapshot {
+                if !subscribed || fetch || snapshot || history {
                     ignored(key, &mut diags);
                 }
             }
-            if !snapshot {
+            if !snapshot && !history {
                 ignored("table", &mut diags);
             }
             // Snapshots are taken ahead of every file: priority orders files only.
@@ -547,7 +585,9 @@ impl SourceSpec {
                 .unwrap_or_default();
             if subscribed {
                 if !paths.is_empty() {
-                    let m = if fetch {
+                    let m = if history {
+                        "'paths' is ignored by a history source (a history dataset)".to_string()
+                    } else if fetch {
                         "'paths' is ignored by a fetch source (a series dataset)".to_string()
                     } else if snapshot {
                         "'paths' is ignored by a snapshot source (a reference dataset)".to_string()
@@ -685,6 +725,23 @@ impl SourceSpec {
                         continue;
                     }
                 }
+            } else if history {
+                // The vendor's table is usually named after the dataset.
+                match table.get("table") {
+                    None => Some(dataset.clone()),
+                    Some(v) => match v.as_str() {
+                        Some(t) if !t.is_empty() => Some(t.to_string()),
+                        _ => {
+                            diags.push(diag(
+                                Severity::Warning,
+                                name,
+                                Some("table"),
+                                format!("'table' must name a table; using '{dataset}'"),
+                            ));
+                            Some(dataset.clone())
+                        }
+                    },
+                }
             } else {
                 None
             };
@@ -692,6 +749,7 @@ impl SourceSpec {
             let (document, topics, coalesce, recover, source_time) = if subscribed
                 && !fetch
                 && !snapshot
+                && !history
             {
                 let document = match table.get("document").and_then(|v| v.as_str()) {
                     Some(d) => Some(d.to_string()),
@@ -827,7 +885,7 @@ impl SourceSpec {
                 )
             };
 
-            if snapshot {
+            if snapshot || history {
                 claimed.insert(dataset.clone(), name.clone());
             }
             out.push(SourceSpec {
@@ -908,6 +966,29 @@ role = "dimension"
 [underlyings.columns.currency]
 type = "utf8"
 role = "attribute"
+
+[vol_surface]
+family = "history"
+key = ["underlying_ref", "tenor", "delta"]
+history = "400d"
+retention = "7d"
+[vol_surface.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[vol_surface.columns.tenor]
+type = "utf8"
+role = "dimension"
+order = "tenor"
+[vol_surface.columns.delta]
+type = "f64"
+role = "dimension"
+[vol_surface.columns.vol]
+type = "f64"
+role = "value"
+[vol_surface.columns.forward]
+type = "f64"
+role = "value"
 "#;
         let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
         SchemaSpec::from_doc(&doc).0
@@ -1589,6 +1670,80 @@ paths = ["/x/*.csv"]
                 .iter()
                 .any(|d| d.path.as_deref() == Some("sources.x.dataset")
                     && d.message.contains("document family"))
+        );
+    }
+
+    #[test]
+    fn history_schema_fixture_is_clean() {
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", "").unwrap()]);
+        let _ = doc;
+        assert!(
+            schema()
+                .dataset("vol_surface")
+                .is_some_and(|d| d.is_history())
+        );
+    }
+
+    #[test]
+    fn a_source_over_a_history_dataset_is_a_history_source_that_keeps_table() {
+        let (specs, diags) = from(
+            r#"
+[hanweck]
+adapter = "kdb_hanweck"
+dataset = "vol_surface"
+table = "surface"
+"#,
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let s = &specs[0];
+        assert_eq!(s.shape(&schema()), SourceShape::History);
+        assert_eq!(s.table.as_deref(), Some("surface"));
+        assert!(s.is_subscribed());
+    }
+
+    #[test]
+    fn a_history_source_defaults_table_to_the_dataset_and_warns_on_foreign_keys() {
+        let (specs, diags) = from(
+            r#"
+[hanweck]
+adapter = "kdb_hanweck"
+dataset = "vol_surface"
+topics = ["a/>"]
+document = "cvi_params"
+paths = ["/x/*.csv"]
+poll_interval = "2s"
+"#,
+        );
+        assert_eq!(specs[0].table.as_deref(), Some("vol_surface"));
+        for key in ["topics", "document", "paths", "poll_interval"] {
+            assert!(
+                diags.iter().any(|d| d.severity == Severity::Warning
+                    && d.path.as_deref() == Some(&format!("sources.hanweck.{key}"))
+                    && d.message.contains("history source")),
+                "missing warning for {key}: {diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_csv_dir_source_or_a_second_source_over_a_history_dataset_is_refused() {
+        let (specs, diags) = from("[x]\ndataset = \"vol_surface\"\npaths = [\"/x/*.csv\"]\n");
+        assert!(specs.is_empty());
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path.as_deref() == Some("sources.x.dataset")
+                    && d.message.contains("history dataset"))
+        );
+        let (specs, diags) = from(
+            "[a]\nadapter = \"kdb\"\ndataset = \"vol_surface\"\n[b]\nadapter = \"kdb\"\ndataset = \"vol_surface\"\n",
+        );
+        assert_eq!(specs.len(), 1, "the first source wins");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.path.as_deref() == Some("sources.b.dataset")
+                    && d.message.contains("at most one source"))
         );
     }
 
