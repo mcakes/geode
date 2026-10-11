@@ -1618,7 +1618,10 @@ open tile with its next picture, which the reload's requery brings.
 
 **Currency.** A tile starts in USD when any painted measure has a `_usd`
 twin. `c` toggles between USD and native without a requery. A shape with no
-twin starts native, and `c` refuses with `no USD twin for <measure>`. Native
+twin starts native, and `c` refuses with `no USD twin for <measure>`. When
+the last picture lacks the column the other mode reads, `c` (or `m`) is
+refused with that column (`snapshot lacks 'vega'`) and the tile keeps its
+mode and picture, so the chip never names a mode the cells are not in. Native
 over a scope that mixes currencies puts the chip in the warning tone with
 the tooltip `native sums across currencies`. A dataset without a `currency`
 dimension never warns.
@@ -1651,8 +1654,11 @@ key's refusal. Below the verbs come the parameterless `:` lines
 The commands are `:filter <expr>`, `:filter text <words>` and
 `:filter clear`; `:unscoped` (a toggle); `:asof <time>`, `:asof live` and
 `:asof clear`; and `:scale k|m|1`, where `1` restores each column's own
-scale. `:filter` completes over the dataset's groupable columns, the derived
-dimensions and the shape's measures. Frame-wide verbs (`:scope`, `:live`,
+scale. `:filter <expr>` compiles against the shape's dataset in the schema
+the service started with: an unknown column is refused, and every expression
+is refused while the dataset is undeclared (an edited `datasets` waits for
+a restart). `:filter` completes over the dataset's groupable columns, the
+derived dimensions and the shape's measures. Frame-wide verbs (`:scope`, `:live`,
 `:asof undo`) are refused, and the refusal names the palette entry that
 owns them.
 

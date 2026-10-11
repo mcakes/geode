@@ -2,7 +2,8 @@
 //! the pivot build, then the delegate preparing a 40-row window of cells.
 //! The snapshots, domains and (for the window bench) the pivot are built
 //! once, outside the timed loop. Target: together under the 8 ms pure-UI
-//! budget by a wide margin.
+//! budget. Most of the window's cost is choosing readable text over each
+//! heat fill (`geode_core::colour::readable_text_on`).
 
 use std::hint::black_box;
 

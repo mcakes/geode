@@ -106,8 +106,9 @@ may still use separately configured `CC`/`CXX` wrappers.
   `schtasks`, and uses `install --dry-run` and the pure plan builders.
 - `geode-app` is the only composition root that adds UI: it builds on
   `geode-compose`, registers pricers, vol models, module factories, panels
-  and scenario shapes, and opens the window. The app and the collector must build equal
-  schemas and sources; a test in `geode-app` holds them to it.
+  and scenario shapes, and opens the window. The app and the collector
+  must build equal schemas and sources; a test in `geode-app` holds them
+  to it.
 - Only `geode-data` owns source I/O and DuckDB connections. Only the ingest
   runner owns the writer.
 - Calculation crates remain leaves behind request/outcome traits. UI modules

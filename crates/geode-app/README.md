@@ -27,7 +27,7 @@ Config directories:
 
 | Layer | Where |
 |---|---|
-| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates the builtin market-data panels and the builtin scenario shapes, then `geode_compose::builtin_data_layer`: the two app datasets and the `--demo` layer) |
+| Builtin | compiled in (`geode_shell::defaults`, plus `builtin_layer`'s keymap, the pricer's bundled views and templates, the builtin market-data panels and the builtin scenario shapes, then `geode_compose::builtin_data_layer`: the two app datasets and the `--demo` layer) |
 | Desk | `$GEODE_DESK_CONFIG`, if set |
 | User | `$APPDATA/geode` when set, otherwise `$HOME/.config/geode` |
 

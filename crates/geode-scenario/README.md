@@ -43,8 +43,12 @@ builtin five, the pivot and the tile.
 - `delegate.rs`: the `TableDelegate`. A label column pinned left, the
   pivot's columns, Σ edges where the pivot has sums. Cells are prepared
   into a `WindowCache` from a palette resolved once per theme signature
-  (at construction and on a theme change, never in render); `render_td`
-  only reads them. The cursor and a rows or block selection live over
+  (at construction and on a theme change, never in render). A named
+  `format.color` is resolved, sign variant and readability over the heat
+  fill included, when the window is prepared, and new named colors
+  re-prepare the window; `render_td` only reads fixed colors. The column
+  heads and units are prepared with each picture, and the footer's cursor
+  readout whenever the cursor, the picture or the prepared window moves. The cursor and a rows or block selection live over
   data cells only; the selection's per-column totals are unsummable down
   a scenario rows axis. A two-level header (two columns axes) adds one
   group row through the table's own `group_headers`: an empty group over
@@ -56,15 +60,21 @@ builtin five, the pivot and the tile.
   yank as TSV, `c` currency without a requery, `p` paint, `m` diff, `.`
   menu, and the shell's grid motions with counts), the `:` commands
   (`filter`, `unscoped`, `asof`, `scale`; frame-wide verbs refused by
-  name), notices and the session record. `escape` clears the selection
+  name; `filter <expr>` is compiled against the shape's dataset in the
+  startup schema and refused when it names an unknown column or the
+  dataset is undeclared), notices and the session record. `escape` clears the selection
   and a live refusal (every verb clears the refusal); with neither it
   dismisses the standing notice, and with nothing to clear it is
   unhandled. Motions and presses scroll the cursor cell into view.
   The footer reports the refusal, then a query error, then the picture's
   own notice; a query error stands until a picture installs, so `c` and
-  `m` (which rebuild the pivot) never hide it. The header chips are
-  prepared after every verb, `:` line and picture (and on a clock change
-  or a new local day for a pinned as-of), in spec order: currency
+  `m` (which rebuild the pivot) never hide it. A picture that cannot be
+  drawn in the mode `c` or `m` asks for keeps its mode, and the key is
+  refused with the missing column. The header chips and the scope readout
+  are prepared after every verb other than a motion, every `:` line and
+  picture (the readout also on every frame change, and the chips on a
+  clock change or a new local day for a pinned as-of), in spec order:
+  currency
   (`USD`/`native`, warning while native sums mixed currencies; a click is
   `c`), scale, `filtered` (its tip spells the filter), `diff` (a click is
   `m`), `unscoped` (warning), the as-of pin (`LIVE`, `AS OF …`). The

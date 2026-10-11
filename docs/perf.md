@@ -2942,9 +2942,9 @@ picture. The palette is a fixed dark one (background grey 0.1, foreground
 gpui table's own layout.
 
 - `pivot_build_40x40`: median 411.5 µs (95% CI 408.8 to 414.0). This is
-  up from 261 µs on 2026-10-10; that run was on the Part 2 pivot, before
-  the per-column heat domains and the currency handling, so the two are not
-  the same code.
+  up from 261 µs on 2026-10-10; that run measured the pivot before
+  per-column heat domains and currency handling, so the two are not the
+  same code.
 - `prepare_window_40x40`: median 9.87 ms (95% CI 9.87 to 9.88). This is
   over the 8 ms pure-UI budget.
 
@@ -2952,18 +2952,44 @@ Probes taken on the same fixture and then removed from the bench:
 
 - With heat off, the window costs 0.27 ms.
 - The 1,532 heat fills alone (`Diverging::fill`) cost 0.20 ms.
-- `readable_text_on` over those fills costs 1.5 ms for the bullish text
-  color and 16.8 ms for the bearish and foreground colors together.
+- `readable_text_on` over those fills: the probe ran each text color over
+  all 1,532 fills, where a window runs one color per cell. The bullish
+  color cost 1.5 ms over the 1,532 fills (about 1 µs a call); the bearish
+  and foreground colors together cost 16.8 ms over 3,064 calls (about
+  5.5 µs a call).
 
 The cost is therefore the readable-text search:
 
 - It is a 16-step bisection on OKLCH lightness.
 - Every step maps back into the sRGB gamut with a 16-step chroma
   bisection.
-- A saturated text color over a mid fill pays both nests, roughly 11 µs a
-  cell.
+- A call whose text color must move to read over its fill pays both
+  nests; a call that already reads returns after one contrast check.
 
-Open in `open-items.md` under Scenario tiles.
+Resolved by the faster contrast search in the next entry.
+
+## Scenario window prepare after the contrast-search speedup (2026-10-11)
+
+Conditions: as the entry above (Apple M5 Pro, bench profile, other
+sessions on the machine; one-minute load average 4.66 before, 6.48 after).
+Same fixture and command, two runs, the second recorded (the first agreed
+within 1%).
+
+The change is in `geode_core::colour`: the contrast search computes the
+background's luminance and the hue's cosine and sine once rather than per
+step, and the gamut clip tests linear-light channels, running the transfer
+curve's `powf` only within narrow bands around the gamut edges and once
+for the result. Results are bit-identical to the previous search (a test
+holds the two equal over a color grid). Named cell colors are now resolved
+in the same `fill_window` pass, which the fixture does not exercise.
+
+- `prepare_window_40x40`: median 2.04 ms (95% CI 2.038 to 2.042), under
+  the 8 ms pure-UI budget. The same command run just before the change, at
+  load 2.3 to 6.7, read 6.46 ms; the 9.87 ms above was taken at load up to
+  10.6.
+- `pivot_build_40x40`: median 283.9 µs (95% CI 282.9 to 284.9); the code is
+  unchanged since the entry above, so the difference from 411.5 µs is the
+  machine's load.
 
 ## Series expressions: rolling and `ema` over a month of minutes (2026-10-10)
 
