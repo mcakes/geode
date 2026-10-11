@@ -130,9 +130,12 @@ pub struct Pivot {
     /// The scoped rows span more than one `currency` (the ungrouped
     /// dimension's mixed flag on the total row).
     pub currency_mixed: bool,
-    /// The largest |cell| painted: the heat scale's domain. Σ cells do not
-    /// count, nor the base row's diff-measure cells in diff mode.
-    pub heat_domain: f64,
+    /// The heat scale's domain per column: the largest |cell| painted in
+    /// that column for a ladder (each column is its own unit), the largest
+    /// in the whole matrix for an axis `columns` (every entry equal). Σ
+    /// cells do not count, nor the base row's diff-measure cells in diff
+    /// mode; only finite cells count.
+    pub heat_domains: Vec<f64>,
 }
 
 impl Pivot {
@@ -141,6 +144,11 @@ impl Pivot {
             return None;
         }
         self.cells[row * self.columns.len() + col]
+    }
+
+    /// The heat domain of column `col`; `0.0` past the end (no fill).
+    pub fn heat_domain(&self, col: usize) -> f64 {
+        self.heat_domains.get(col).copied().unwrap_or(0.0)
     }
 
     /// Read `main` (grouped `shape.grouping()`) and, for a matrix with a
@@ -396,7 +404,7 @@ impl Pivot {
             (Some(idx), Some(r)) => main.is_mixed_at(idx, r),
             _ => false,
         };
-        let mut heat_domain = 0.0_f64;
+        let mut heat_domains = vec![0.0_f64; ncols];
         for row in 0..rows.len() {
             for (col, column) in columns.iter().enumerate() {
                 if Some(row) == base_row && column.diffed {
@@ -405,9 +413,13 @@ impl Pivot {
                 if let Some(v) = cells[row * ncols + col]
                     && v.is_finite()
                 {
-                    heat_domain = heat_domain.max(v.abs());
+                    heat_domains[col] = heat_domains[col].max(v.abs());
                 }
             }
+        }
+        if matches!(shape.columns, Columns::Axes(_)) {
+            let whole = heat_domains.iter().copied().fold(0.0_f64, f64::max);
+            heat_domains.iter_mut().for_each(|d| *d = whole);
         }
         Ok(Pivot {
             rows,
@@ -420,7 +432,7 @@ impl Pivot {
             base_row,
             diff_base_missing,
             currency_mixed,
-            heat_domain,
+            heat_domains,
         })
     }
 }
@@ -1148,10 +1160,23 @@ mod tests {
     }
 
     #[test]
-    fn the_heat_domain_is_the_largest_cell_magnitude() {
-        assert_eq!(build(&vega_kt(), &vega_main(), native()).heat_domain, 30.0);
-        assert_eq!(build(&vega_kt(), &vega_main(), usd()).heat_domain, 36.0);
+    fn a_matrixs_heat_domain_is_the_largest_cell_magnitude_in_every_column() {
+        let p = build(&vega_kt(), &vega_main(), native());
+        assert_eq!(p.heat_domains, vec![30.0; p.columns.len()]);
+        assert_eq!(p.heat_domain(0), 30.0);
+        assert_eq!(p.heat_domain(p.columns.len()), 0.0, "past the end");
+        let p = build(&vega_kt(), &vega_main(), usd());
+        assert_eq!(p.heat_domains, vec![36.0; p.columns.len()]);
         // Σ rows do not count: 66 and 31 are not cells.
+    }
+
+    /// A ladder's columns are different units: each column's domain is its
+    /// own largest magnitude, so gamma beside npv paints, not blanks.
+    #[test]
+    fn a_ladders_heat_domain_is_per_column() {
+        let p = build(&spot_ladder(), &ladder_main(), native());
+        // npv 90/100/115, delta 1/2/3, theta -2/-2/-2.
+        assert_eq!(p.heat_domains, vec![115.0, 3.0, 2.0]);
     }
 
     #[test]
@@ -1599,12 +1624,11 @@ mod tests {
                 diff: true,
             },
         );
-        // Deltas are -10 and 15; the base row's npv (100) is left out as a
-        // diffed base cell, its untouched delta/theta cells (2, -2) stay
-        // in; the largest is 15.
-        assert_eq!(p.heat_domain, 15.0);
+        // npv deltas are -10 and 15; the base row's npv (100) is left out as
+        // a diffed base cell; delta and theta keep their own domains.
+        assert_eq!(p.heat_domains, vec![15.0, 3.0, 2.0]);
         let absolute = build(&spot_ladder(), &ladder_main(), native());
-        assert_eq!(absolute.heat_domain, 115.0);
+        assert_eq!(absolute.heat_domains[0], 115.0);
     }
 
     #[test]
@@ -1697,7 +1721,17 @@ mod tests {
                 .collect(),
             ..vega_main()
         };
-        assert_eq!(build(&vega_kt(), &main, native()).heat_domain, 30.0);
-        assert_eq!(build(&vega_kt(), &main, usd()).heat_domain, 36.0);
+        assert!(
+            build(&vega_kt(), &main, native())
+                .heat_domains
+                .iter()
+                .all(|d| *d == 30.0)
+        );
+        assert!(
+            build(&vega_kt(), &main, usd())
+                .heat_domains
+                .iter()
+                .all(|d| *d == 36.0)
+        );
     }
 }

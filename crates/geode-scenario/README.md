@@ -20,8 +20,10 @@ builtin five and the pivot. The tile itself is not built yet.
   base from the row a scoped leaf carries (a label only the axis domain
   supplies is no base); a diff measure whose base value is NULL stays
   absolute; either sets `diff_base_missing`. A diffed column has no Σ
-  entry, since the total row is absolute. The heat domain counts finite
-  painted cells only, excluding Σ cells and the base row's diffed cells.
+  entry, since the total row is absolute. The heat domain is per column
+  for a ladder (each column its own unit) and matrix-wide for an axis
+  `columns`; it counts finite painted cells only, excluding Σ cells and
+  the base row's diffed cells.
   `Err` (a stale or foreign delivery, or a shape never checked) when the
   snapshot's grouping does not match the shape's, it lacks `row_depth`,
   the shape has not been checked against the schema, a measure or its

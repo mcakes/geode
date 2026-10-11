@@ -163,7 +163,7 @@ fn build(c: &mut Criterion) {
                 &domains,
             )
             .unwrap();
-            black_box(p.heat_domain)
+            black_box(p.heat_domains)
         })
     });
 }
