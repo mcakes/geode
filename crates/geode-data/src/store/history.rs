@@ -621,10 +621,23 @@ fn append_in_transaction(
         |c| format!("live.{0} = s.{0}", quote(&c.name)),
         " and ",
     );
+    // Live versions of the staged keys only: the dedupe compares each
+    // staged row with the live row of its own (key, ts), so rows under keys
+    // this append does not touch need not be grouped at all. The filter is
+    // on the key, never on received_at, so every version of a staged
+    // (key, ts) is still grouped and live stays its newest. Without the
+    // restriction every append grouped the whole payload table.
+    let staged_match = joined(
+        keys,
+        |c| format!("t.{0} = CAST(s2.{0} AS {1})", quote(&c.name), c.ty.sql()),
+        " and ",
+    );
     let dedupe = format!(
         "delete from {STAGING_TABLE} s where exists (
              select 1 from (
-                 select {key_list}, ts, {live_values} from {table} group by {key_list}, ts
+                 select {key_list}, ts, {live_values} from {table} t
+                 where exists (select 1 from {STAGING_TABLE} s2 where {staged_match})
+                 group by {key_list}, ts
              ) live
              where {key_match} and live.ts = make_timestamp(s.ts_us) and {value_match}
          )"
@@ -708,6 +721,8 @@ fn coalesce_coverage(
         "insert into {coverage} ({key_list}, from_ts, to_ts, received_at)
          values ({cover_casts}, make_timestamp(?), make_timestamp(?), make_timestamp(?))"
     );
+    // One prepare per append, not one per touched tuple.
+    let mut stmt = conn.prepare(&select).map_err(sql_err(&select))?;
     let mut done: Vec<&Vec<Option<String>>> = Vec::new();
     for tuple in touched {
         if done.contains(&tuple) {
@@ -718,7 +733,6 @@ fn coalesce_coverage(
             .iter()
             .map(|v| v.clone().map_or(Value::Null, Value::Text))
             .collect();
-        let mut stmt = conn.prepare(&select).map_err(sql_err(&select))?;
         let held: Vec<(i64, i64, i64)> = stmt
             .query_map(duckdb::params_from_iter(params.clone()), |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -1237,9 +1251,17 @@ mod tests {
         )
         .unwrap();
         // Same ts and values, another delta: the dedupe must match on the
-        // whole key, or this row would be dropped as already live.
+        // whole key, or this row would be dropped as already live. The live
+        // 0.5 row is staged again beside it, so the dedupe's live set holds
+        // a row the 0.25 one could wrongly match; the repeat itself is
+        // deduped.
         let mut other = rows.clone();
-        other.keys[2] = vec!["0.25".into()];
+        other.ts.push(rows.ts[0]);
+        other.keys[0].push("SPX".into());
+        other.keys[1].push("3M".into());
+        other.keys[2] = vec!["0.25".into(), "0.5".into()];
+        other.values[0].push(rows.values[0][0]);
+        other.values[1].push(rows.values[1][0]);
         let out = append_history(
             &store,
             &HistoryAppendRequest {
