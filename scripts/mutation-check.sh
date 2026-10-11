@@ -16118,10 +16118,23 @@ run_mutation "asof: a refreshed highlight scrolls into view too" \
 # paints one queued for a lone file and never reaches zero during loading.
 run_mutation "ingest: queued counts what waits behind the popped job" \
   crates/geode-data/src/ingest/runner.rs \
-  '                        q.items.len() + q.documents.len() + q.series.len() + q.references.len(),' \
-  '                        q.items.len() + q.documents.len() + q.series.len() + q.references.len() + 1,' \
+  '                            + q.history.len()
+                            + q.references.len(),' \
+  '                            + q.history.len()
+                            + q.references.len()
+                            + 1,' \
   geode-data \
   started_precedes_each_publish_and_counts_what_is_still_queued
+
+# Queued history jobs are waiting work too. Left out of the count, a
+# fetch's appends announce nothing waiting behind them.
+run_mutation "ingest: queued leaves out waiting history" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                            + q.history.len()
+                            + q.references.len(),' \
+  '                            + q.references.len(),' \
+  geode-data \
+  a_draining_runner_appends_queued_history_and_counts_it_as_waiting
 
 # LoadEnded must be sent from the Failed arm too: a failed load's Health
 # is deduplicated by the tracker, so without it the strip sticks on a
@@ -20081,6 +20094,9 @@ run_mutation "runner: snapshots are taken before series" \
   '    if let Some(job) = q.series.pop_front() {
         return Some(Work::Series(job));
     }
+    if let Some(job) = q.history.pop_front() {
+        return Some(Work::History(job));
+    }
     if let Some(job) = q.references.pop_front() {
         return Some(Work::Reference(job));
     }' \
@@ -20089,9 +20105,59 @@ run_mutation "runner: snapshots are taken before series" \
     }
     if let Some(job) = q.series.pop_front() {
         return Some(Work::Series(job));
+    }
+    if let Some(job) = q.history.pop_front() {
+        return Some(Work::History(job));
     }' \
   geode-data \
   take_work_pops_documents_then_series_then_snapshots_then_files
+
+# History waits behind series: both are fetches someone waits on, and a
+# series fetch is one identity where a history fetch can be a whole
+# surface. Swapped, a queued surface delays a chart's series.
+run_mutation "runner: history is taken before series" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(job) = q.series.pop_front() {
+        return Some(Work::Series(job));
+    }
+    if let Some(job) = q.history.pop_front() {
+        return Some(Work::History(job));
+    }' \
+  '    if let Some(job) = q.history.pop_front() {
+        return Some(Work::History(job));
+    }
+    if let Some(job) = q.series.pop_front() {
+        return Some(Work::Series(job));
+    }' \
+  geode-data \
+  history_is_taken_after_series_and_before_snapshots
+
+# History goes before snapshots: a poll's whole-table publish must not
+# delay the fetch a watchlist is waiting on.
+run_mutation "runner: snapshots are taken before history" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(job) = q.history.pop_front() {
+        return Some(Work::History(job));
+    }
+    if let Some(job) = q.references.pop_front() {
+        return Some(Work::Reference(job));
+    }' \
+  '    if let Some(job) = q.references.pop_front() {
+        return Some(Work::Reference(job));
+    }
+    if let Some(job) = q.history.pop_front() {
+        return Some(Work::History(job));
+    }' \
+  geode-data \
+  history_is_taken_after_series_and_before_snapshots
+
+# A history job goes before a queued file even with no snapshot queued.
+run_mutation "runner: history jobs are taken after files" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(job) = q.history.pop_front() {' \
+  '    if q.items.is_empty() && let Some(job) = q.history.pop_front() {' \
+  geode-data \
+  history_is_taken_after_series_and_before_snapshots
 
 # The other half of the same order: a document still goes first. Mutated
 # by swapping the two pops, a queued series job delays the document a
@@ -25544,9 +25610,28 @@ run_mutation "release: the deadline bounds the drain" \
 
 run_mutation "release: files are left for discovery" \
   crates/geode-data/src/ingest/runner.rs \
-  '                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty());' \
-  '                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty() && q.items.is_empty());' \
+  '                        && q.references.is_empty());' \
+  '                        && q.references.is_empty()
+                        && q.items.is_empty());' \
   geode-data a_draining_runner_runs_queued_documents_series_and_snapshots_and_drops_files
+
+# A drain runs queued history: the next owner does not ask again for a
+# fetch this one already made. Left out of `fed`, a drain holding only
+# history ends at once and drops it.
+run_mutation "release: a drain drops the queued history" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                        && q.history.is_empty()
+                        && q.references.is_empty());' \
+  '                        && q.references.is_empty());' \
+  geode-data a_draining_runner_appends_queued_history_and_counts_it_as_waiting
+
+# The drop warning counts the history it left. Mutated to zero, history
+# dropped at the deadline goes unreported.
+run_mutation "release: the drop warning leaves out history" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        history: q.history.len(),' \
+  '        history: 0,' \
+  geode-data a_draining_runner_stops_at_the_deadline_and_counts_what_is_left
 
 run_mutation "release: files are held from the start of a release" \
   crates/geode-data/src/ingest/runner.rs \
@@ -34540,11 +34625,103 @@ run_mutation "silence: a fetch for a drifted dataset loses the drift reason" \
 run_mutation "silence: a series is appended into a drifted dataset" \
   crates/geode-data/src/ingest/runner.rs \
   '    if let Some(reason) = drift_refusal(store, &job.dataset) {
-        if !sink(failed(reason)) {' \
+        if !sink(failed(reason)) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for series {pair}"),' \
   '    if let Some(reason) = None::<String> {
-        if !sink(failed(reason)) {' \
+        if !sink(failed(reason)) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for series {pair}"),' \
   geode-data \
   a_series_job_for_a_drifted_dataset_is_refused_before_any_insert
+
+# The runner refuses a history append into a drifted dataset before any
+# INSERT, failing the job's ticket with the drift reason.
+run_mutation "silence: history is appended into a drifted dataset" \
+  crates/geode-data/src/ingest/runner.rs \
+  '    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        if !sink(failed(reason)) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for history {what}"),' \
+  '    if let Some(reason) = None::<String> {
+        if !sink(failed(reason)) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for history {what}"),' \
+  geode-data \
+  a_history_job_for_a_drifted_dataset_is_refused_before_any_insert
+
+# A history completion carries its job's ticket: the service answers the
+# request by it. Mutated to a fixed ticket, the asker is never answered.
+run_mutation "history runner: an append reports another ticket" \
+  crates/geode-data/src/ingest/runner.rs \
+  '            ticket: job.ticket,
+            appended,' \
+  '            ticket: Ticket(0),
+            appended,' \
+  geode-data \
+  a_history_job_appends_and_reports_its_ticket
+
+# A history failure carries its job's ticket, as the completion does.
+run_mutation "history runner: a failure reports another ticket" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        ticket: job.ticket,
+        reason,' \
+  '        ticket: Ticket(0),
+        reason,' \
+  geode-data \
+  a_history_job_for_an_undeclared_dataset_fails_its_ticket
+
+# The append records the job's covered spans with its rows. Dropped, an
+# answered ask is fetched again on every request.
+run_mutation "history runner: the covered spans are not recorded" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    covered: job.covered.clone(),' \
+  '                    covered: Vec::new(),' \
+  geode-data \
+  a_history_job_appends_and_reports_its_ticket
+
+# Started names the history job by source then dataset.
+run_mutation "history runner: Started names another path" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                    path: format!("history://{}/{}", job.source, job.dataset),' \
+  '                    path: format!("history://{}/{}", job.dataset, job.source),' \
+  geode-data \
+  a_history_job_appends_and_reports_its_ticket
+
+# A history job counts toward its source's backlog, and taking it uncounts
+# it. Mutated to count against no source, a history-only backlog never clears.
+run_mutation "history runner: a taken history job is not uncounted" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        Work::History(job) => Some(&job.source),' \
+  '        Work::History(_) => None,' \
+  geode-data \
+  history_jobs_count_toward_their_sources_backlog_and_draining_clears_it
+
+# A shape error inside the append fails the ticket and the runner goes on.
+run_mutation "history runner: an append error is reported as appended" \
+  crates/geode-data/src/ingest/runner.rs \
+  '        Ok(Err(reason)) => failed(reason),
+        Err(payload) => {
+            let message = panic_payload_message(payload.as_ref());
+            let path =
+                std::path::PathBuf::from(format!("history://{}/{}", job.source, job.dataset));' \
+  '        Ok(Err(_)) => IngestEvent::HistoryAppended {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            ticket: job.ticket,
+            appended: 0,
+            swept: 0,
+        },
+        Err(payload) => {
+            let message = panic_payload_message(payload.as_ref());
+            let path =
+                std::path::PathBuf::from(format!("history://{}/{}", job.source, job.dataset));' \
+  geode-data \
+  a_history_job_with_rows_of_the_wrong_shape_fails_its_ticket_and_the_runner_lives
 
 # A drop episode ends after DROP_QUIET without a new drop.
 run_mutation "silence: a drop episode never clears" \

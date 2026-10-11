@@ -1,15 +1,16 @@
 //! One ingest thread owns the writer and serializes all publication.
 //!
-//! Each dequeue prefers documents, then fetched series, then reference
-//! snapshots, then files. Documents (publishes and local forgets, in one
-//! queue), series and snapshots are FIFO; files follow planned priority and
+//! Each dequeue prefers documents, then fetched series, then fetched
+//! history, then reference snapshots, then files. Documents (publishes and
+//! local forgets, in one queue), series, history and snapshots are FIFO;
+//! files follow planned priority and
 //! descending source time. Running work finishes
 //! before priorities are reconsidered. Sustained
 //! higher-priority traffic can starve lower-priority work.
 //!
 //! File submissions deduplicate queued/in-flight path, size, and source time;
-//! a queued file can be promoted. Document, series and snapshot queues have no
-//! dedupe, refusal, or fixed capacity; a source past `BACKLOG_DEPTH` queued jobs is
+//! a queued file can be promoted. Document, series, history and snapshot
+//! queues have no dedupe, refusal, or fixed capacity; a source past `BACKLOG_DEPTH` queued jobs is
 //! reported as `<source>:backlog` health. Upstream coalescing does not bound
 //! these queues.
 //!
@@ -17,17 +18,18 @@
 //! store are unsafe. Shutdown finishes the running operation, then runs the
 //! queued local document work (`local`-source publishes and forgets) in
 //! queue order, each answering as usual, and drops the rest: feed
-//! documents, series, snapshots and files are resent by their sources
-//! after a restart. A draining shutdown (a handoff of the store, where the
-//! next owner's feeds do not resend) keeps taking documents, series and
-//! snapshots in the usual order until they are empty or its deadline
+//! documents, series, history, snapshots and files are resent or asked
+//! again after a restart. A draining shutdown (a handoff of the store,
+//! where the next owner's feeds do not resend) keeps taking documents,
+//! series, history and snapshots in the usual order until they are empty or its deadline
 //! passes, never runs a queued file (the next owner's discovery finds it
 //! again), then stops as a shutdown does, with one warning naming what it
 //! dropped. See `docs/current/data-path.md` for delivery and health
 //! contracts.
 
-use crate::adapter::SeriesRows;
+use crate::adapter::{HistoryRows, SeriesRows};
 use crate::health::Health;
+use crate::ingest::history::Ticket;
 use crate::ingest::load::{LoadError, LoadOutcome, LoadRequest, load_file};
 use crate::ingest::plan::{WorkItem, WorkPlan};
 use crate::source::discovery::is_unchanged;
@@ -36,6 +38,7 @@ use crate::store::document::{
     DocumentOutcome, DocumentPublishRequest, document_generation_count, document_path,
     forget_document, prune_orphan_provenance, publish_document,
 };
+use crate::store::history::{Covered, HistoryAppendRequest, HistoryAppended, append_history};
 use crate::store::reference::{ReferencePublishRequest, ReferencePublished, publish_reference};
 use crate::store::retention::{RetentionPolicy, sweep};
 use crate::store::series::{SeriesAppendRequest, SeriesAppended, Span, append_series};
@@ -104,6 +107,25 @@ pub enum IngestEvent {
         identity: String,
         reason: String,
     },
+    /// History append completion for one ticket, emitted even when
+    /// `appended` is zero: the covered spans are recorded, so the asking
+    /// request can be answered from the store.
+    HistoryAppended {
+        source: String,
+        dataset: String,
+        ticket: Ticket,
+        appended: usize,
+        swept: usize,
+    },
+    /// A history job that could not be appended: refused rows, an
+    /// undeclared or drifted dataset, or a panic inside the append. Its
+    /// ticket's request is answered with the reason.
+    HistoryFailed {
+        source: String,
+        dataset: String,
+        ticket: Ticket,
+        reason: String,
+    },
     /// A reference snapshot equal to the live table: nothing was written
     /// and no generation spent. Its source's load lane for `batch` is clean
     /// again, as after a publish.
@@ -148,7 +170,8 @@ pub enum IngestEvent {
 /// so without a bound every edit burst would grow the archive forever.
 pub const LOCAL_KEEP_GENERATIONS: usize = 200;
 
-/// Feed documents and series queued for one source past which the source
+/// Feed documents, series, history and snapshots queued for one source
+/// past which the source
 /// reports `Degraded "ingest backlog N"` on its load lane under
 /// `<source>:backlog`. Queueing itself is unchanged: no capacity, refusal or
 /// coalescing.
@@ -231,6 +254,19 @@ pub struct SeriesJob {
     pub received_at: DateTime<Utc>,
 }
 
+/// Fetched history rows for one ticket, waiting for the serialized
+/// append. `covered` is every asked key the fetch answered, recorded even
+/// when no row is new.
+#[derive(Debug)]
+pub struct HistoryJob {
+    pub source: String,
+    pub dataset: String,
+    pub ticket: Ticket,
+    pub rows: HistoryRows,
+    pub covered: Vec<Covered>,
+    pub received_at: DateTime<Utc>,
+}
+
 #[derive(Default)]
 struct Queue {
     /// Parsed documents, taken ahead of `items` (see the module doc for
@@ -244,18 +280,22 @@ struct Queue {
     /// fetch was asked for by a trader watching a chart, a file was
     /// found by a poll.
     series: VecDeque<SeriesJob>,
-    /// Polled reference snapshots, taken after series and ahead of files.
+    /// Fetched history, taken after series and ahead of snapshots: as for
+    /// a series fetch, someone is waiting on the ticket.
+    history: VecDeque<HistoryJob>,
+    /// Polled reference snapshots, taken after history and ahead of files.
     /// A snapshot worker finishes one poll before starting the next, so a
     /// source queues few of them.
     references: VecDeque<ReferenceJob>,
     items: Vec<WorkItem>,
     shutdown: bool,
-    /// Set by `shutdown_draining`: run the queued documents, series and
-    /// snapshots until they are empty or this instant passes, drop the
+    /// Set by `shutdown_draining`: run the queued documents, series,
+    /// history and snapshots until they are empty or this instant passes, drop the
     /// queued files, then stop.
     drain_until: Option<std::time::Instant>,
     /// Set by `hold_files` when a release begins: no queued file is popped
-    /// from then on, while documents, series and snapshots run as usual.
+    /// from then on, while documents, series, history and snapshots run as
+    /// usual.
     /// A release stops the producers before it drains, and a file popped
     /// in that window would run a load the release must leave to the next
     /// owner's discovery, spending the drain's deadline on it.
@@ -269,7 +309,7 @@ struct Queue {
     /// before it starts, so `enqueue`'s dedupe still sees it as spoken for
     /// the entire time a poll could otherwise re-add it.
     in_flight: Option<(PathBuf, u64, DateTime<Utc>)>,
-    /// Feed documents, series and snapshots queued per source (local writes and forgets
+    /// Feed documents, series, history and snapshots queued per source (local writes and forgets
     /// belong to no configured source and are not counted).
     queued_per_source: std::collections::HashMap<String, usize>,
     /// Sources whose last backlog report was `over`.
@@ -399,6 +439,21 @@ impl IngestHandle {
         cvar.notify_all();
     }
 
+    /// Hand fetched history rows to the runner, counted toward its
+    /// source's backlog like `submit_series`. No dedupe and no refusal:
+    /// `append_history` drops unchanged rows, and the ticket is answered
+    /// by `HistoryAppended` or `HistoryFailed`.
+    pub fn submit_history(&self, job: HistoryJob) {
+        let (lock, cvar) = &*self.queue;
+        let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let backlog = backlog_push(&mut q, &job.source);
+        q.history.push_back(job);
+        if let Some(event) = backlog {
+            let _ = (self.sink)(event);
+        }
+        cvar.notify_all();
+    }
+
     /// Hand a polled snapshot to the runner, counted toward its source's
     /// backlog like `submit_document`. No dedupe: the publish itself
     /// compares the rows with the live table and reports `Unchanged`.
@@ -430,8 +485,8 @@ impl IngestHandle {
 
 impl IngestHandle {
     /// Begin a release: from now on no queued file is popped (the next
-    /// owner's discovery finds it again); documents, series and snapshots
-    /// keep running. The file being loaded, if any, finishes.
+    /// owner's discovery finds it again); documents, series, history and
+    /// snapshots keep running. The file being loaded, if any, finishes.
     pub fn hold_files(&self) {
         let (lock, _cvar) = &*self.queue;
         let mut q = lock.lock().unwrap_or_else(|e| e.into_inner());
@@ -447,7 +502,8 @@ impl IngestHandle {
 
     /// Stop the runner for a handoff of the store and join it. After the
     /// running operation it keeps taking queued documents (local writes
-    /// among them, in order), series and snapshots, in the usual priority,
+    /// among them, in order), series, history and snapshots, in the usual
+    /// priority,
     /// until those queues are empty or `until` passes; queued files are
     /// never run. What is left then is dropped as at `shutdown`, except the
     /// local writes, which still run.
@@ -514,6 +570,7 @@ fn clear_in_flight(queue: &(Mutex<Queue>, Condvar)) {
 enum Work {
     Document(DocumentWork),
     Series(SeriesJob),
+    History(HistoryJob),
     Reference(ReferenceJob),
     File(WorkItem),
 }
@@ -536,6 +593,7 @@ struct DrainEnd {
     local: Vec<DocumentWork>,
     documents: usize,
     series: usize,
+    history: usize,
     snapshots: usize,
     files: usize,
 }
@@ -548,11 +606,13 @@ fn end_drain(q: &mut Queue) -> DrainEnd {
     let end = DrainEnd {
         documents: queued - local.len(),
         series: q.series.len(),
+        history: q.history.len(),
         snapshots: q.references.len(),
         files: q.items.len(),
         local,
     };
     q.series.clear();
+    q.history.clear();
     q.references.clear();
     q.items.clear();
     q.queued_per_source.clear();
@@ -563,12 +623,13 @@ fn end_drain(q: &mut Queue) -> DrainEnd {
 /// The drain's one warning, only when it dropped feed work, and a debug
 /// line for the files it left to discovery.
 fn log_drain_end(end: &DrainEnd) {
-    if end.documents + end.series + end.snapshots > 0 {
+    if end.documents + end.series + end.history + end.snapshots > 0 {
         tracing::warn!(
             target: "geode::ingest",
-            "release: dropped {} documents, {} series, {} snapshots at the deadline",
+            "release: dropped {} documents, {} series, {} history, {} snapshots at the deadline",
             end.documents,
             end.series,
+            end.history,
             end.snapshots,
         );
     }
@@ -582,14 +643,14 @@ fn log_drain_end(end: &DrainEnd) {
 }
 
 /// Takes the next unit of work, **documents first, then series, then
-/// snapshots** (module
+/// history, then snapshots** (module
 /// doc). A free function for the reason `enqueue` is one: the ordering
 /// rule is the whole point and a test can only state it without a race by
 /// driving a bare `Queue` synchronously — through the runner thread,
 /// whether a document beat a file is a matter of when the submit landed.
 ///
 /// Only the file arm sets `in_flight`: it is the file dedupe's key, and
-/// neither a document nor a series job is a file. `None` means every
+/// no document, series or history job is a file. `None` means every
 /// queue is empty (files held by a release count as empty), which is what
 /// makes it the `PlanComplete` condition.
 fn take_work(q: &mut Queue) -> Option<Work> {
@@ -598,6 +659,9 @@ fn take_work(q: &mut Queue) -> Option<Work> {
     }
     if let Some(job) = q.series.pop_front() {
         return Some(Work::Series(job));
+    }
+    if let Some(job) = q.history.pop_front() {
+        return Some(Work::History(job));
     }
     if let Some(job) = q.references.pop_front() {
         return Some(Work::Reference(job));
@@ -660,14 +724,15 @@ fn backlog_pop(q: &mut Queue, source: &str) -> Option<IngestEvent> {
     None
 }
 
-/// The source a taken job is counted against: a feed document, a series or
-/// a snapshot.
+/// The source a taken job is counted against: a feed document, a series,
+/// a history job or a snapshot.
 fn backlog_source(work: &Work) -> Option<&str> {
     match work {
         Work::Document(DocumentWork::Publish(job)) if job.source != LOCAL_SOURCE => {
             Some(&job.source)
         }
         Work::Series(job) => Some(&job.source),
+        Work::History(job) => Some(&job.source),
         Work::Reference(job) => Some(&job.source),
         _ => None,
     }
@@ -1180,6 +1245,85 @@ fn append_one_series(
     }
 }
 
+/// Resolve the history dataset, append the rows and coverage under panic
+/// containment, and report the ticket's completion or failure. Refused
+/// delivery does not stop the runner.
+fn append_one_history(
+    store: &Store,
+    schema: &SchemaSpec,
+    sink: &IngestSink,
+    refusal_logged: &AtomicBool,
+    job: HistoryJob,
+) {
+    let what = format!("{}@{} ticket {}", job.dataset, job.source, job.ticket.0);
+    let failed = |reason: String| IngestEvent::HistoryFailed {
+        source: job.source.clone(),
+        dataset: job.dataset.clone(),
+        ticket: job.ticket,
+        reason,
+    };
+    let Some(dataset) = schema.dataset(&job.dataset) else {
+        let event = failed(format!("dataset '{}' is not declared", job.dataset));
+        if !sink(event) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the undeclared-dataset failure for history {what}"),
+            );
+        }
+        return;
+    };
+    if let Some(reason) = drift_refusal(store, &job.dataset) {
+        if !sink(failed(reason)) {
+            log_refused_event(
+                refusal_logged,
+                &format!("the drift refusal for history {what}"),
+            );
+        }
+        return;
+    }
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        geode_core::panic::contained(|| {
+            append_history(
+                store,
+                &HistoryAppendRequest {
+                    dataset,
+                    source: &job.source,
+                    rows: &job.rows,
+                    covered: job.covered.clone(),
+                    received_at: job.received_at,
+                },
+            )
+            .map_err(|e| e.to_string())
+        })
+    }));
+    let event = match outcome {
+        Ok(Ok(HistoryAppended { appended, swept })) => IngestEvent::HistoryAppended {
+            source: job.source.clone(),
+            dataset: job.dataset.clone(),
+            ticket: job.ticket,
+            appended,
+            swept,
+        },
+        Ok(Err(reason)) => failed(reason),
+        Err(payload) => {
+            let message = panic_payload_message(payload.as_ref());
+            let path =
+                std::path::PathBuf::from(format!("history://{}/{}", job.source, job.dataset));
+            log_ingest_panic(&path, &message);
+            failed(format!(
+                "history append panicked at {}: {message}",
+                path.display()
+            ))
+        }
+    };
+    if !sink(event) {
+        log_refused_event(
+            refusal_logged,
+            &format!("the history append outcome for {what}"),
+        );
+    }
+}
+
 fn run(
     store: Store,
     schema: SchemaSpec,
@@ -1204,9 +1348,11 @@ fn run(
                     // A handoff: the feeds' queued work is not resent to
                     // the next owner, so it runs until the deadline. Files
                     // never run; `take_work` reaches them only once these
-                    // three are empty, which ends the drain first.
-                    let fed =
-                        !(q.documents.is_empty() && q.series.is_empty() && q.references.is_empty());
+                    // four are empty, which ends the drain first.
+                    let fed = !(q.documents.is_empty()
+                        && q.series.is_empty()
+                        && q.history.is_empty()
+                        && q.references.is_empty());
                     if !fed || std::time::Instant::now() >= until {
                         let end = end_drain(&mut q);
                         drop(q);
@@ -1228,12 +1374,12 @@ fn run(
                     // The app's own writes still queued are its user's last
                     // edits (a save flushed at quit, a `:rm` just confirmed):
                     // run them, in order, each answering as usual, before
-                    // stopping. Feed documents, series and files are dropped;
+                    // stopping. Feed documents, series, history and files are dropped;
                     // their sources resend them after a restart.
                     run_local_writes(&store, &schema, &sink, publish, &refusal_logged, local);
                     return;
                 }
-                // Documents first, then series, then snapshots, then
+                // Documents first, then series, then history, then snapshots, then
                 // files; `None` means every queue is empty (files held by
                 // a release count as empty), which is the only state that
                 // announces a drain.
@@ -1245,7 +1391,11 @@ fn run(
                     }
                     break (
                         work,
-                        q.items.len() + q.documents.len() + q.series.len() + q.references.len(),
+                        q.items.len()
+                            + q.documents.len()
+                            + q.series.len()
+                            + q.history.len()
+                            + q.references.len(),
                     );
                 }
                 if !announced_idle {
@@ -1300,6 +1450,17 @@ fn run(
                     log_refused_event(&refusal_logged, "a load-started announcement");
                 }
                 append_one_series(&store, &schema, &sink, &refusal_logged, job);
+                continue;
+            }
+            Work::History(job) => {
+                if !sink(IngestEvent::Started {
+                    source: job.source.clone(),
+                    path: format!("history://{}/{}", job.source, job.dataset),
+                    queued,
+                }) {
+                    log_refused_event(&refusal_logged, "a load-started announcement");
+                }
+                append_one_history(&store, &schema, &sink, &refusal_logged, job);
                 continue;
             }
             // No Started: a snapshot is polled every interval and is
@@ -1615,6 +1776,8 @@ mod tests {
                 IngestEvent::Unchanged { .. } => "unchanged",
                 IngestEvent::SeriesAppended { .. } => "series_appended",
                 IngestEvent::SeriesFailed { .. } => "series_failed",
+                IngestEvent::HistoryAppended { .. } => "history_appended",
+                IngestEvent::HistoryFailed { .. } => "history_failed",
                 IngestEvent::Forgotten { .. } => "forgotten",
                 IngestEvent::ForgetFailed { .. } => "forget_failed",
                 IngestEvent::Diagnostic(_) => "diagnostic",
@@ -3114,6 +3277,12 @@ mod tests {
                 IngestEvent::SeriesAppended {
                     dataset, identity, ..
                 } => done.push(format!("appended {dataset}/{identity}")),
+                IngestEvent::HistoryAppended {
+                    dataset, ticket, ..
+                } => done.push(format!("appended history {dataset}/{}", ticket.0)),
+                IngestEvent::HistoryFailed {
+                    dataset, reason, ..
+                } => panic!("history {dataset}: {reason}"),
                 IngestEvent::Failed {
                     dataset,
                     batch,
@@ -3137,12 +3306,19 @@ mod tests {
         assert!(plan.items.len() >= 2, "need two files");
         plan.items.truncate(2);
         let reference = geode_core::reference::test_support::reference_dataset();
-        for ds in [cvi_dataset(), series_dataset(), reference.clone()] {
+        let history = crate::store::ddl::tests_support::history_dataset();
+        for ds in [
+            cvi_dataset(),
+            series_dataset(),
+            history.clone(),
+            reference.clone(),
+        ] {
             store.apply_schema(&ds).unwrap();
         }
         let mut schema = schema_of(risk);
         schema.datasets.push(cvi_dataset());
         schema.datasets.push(series_dataset());
+        schema.datasets.push(history);
         schema.datasets.push(reference);
         let (handle, rx) = spawn_channel_with_publish(store, schema, gated_stop_publish_0);
         handle.submit_document(job("cvi_params", spx()));
@@ -3155,6 +3331,7 @@ mod tests {
             series_rows("2026-01-05T14:30:00Z", 3, 100.0),
         ));
         handle.submit_reference(reference_job("u"));
+        handle.submit_history(history_job(9));
         assert_eq!(handle.submit(plan), 2);
         std::thread::scope(|s| {
             s.spawn(|| {
@@ -3170,9 +3347,10 @@ mod tests {
                 "published cvi_params/SPX.Z",
                 "published cvi_params/NDX.Z",
                 "appended series/SPX.close",
+                "appended history vol_surface/9",
                 "published u/u",
             ],
-            "every queued document, series and snapshot ran, in order"
+            "every queued document, series, history and snapshot ran, in order"
         );
         assert!(
             started.iter().all(|p| !p.ends_with(".csv")),
@@ -3249,6 +3427,11 @@ mod tests {
             for _ in 0..20 {
                 q.documents.push_back(job("cvi_params", spx()).into());
             }
+            // Behind twenty slow documents, these never run: the warning
+            // counts them.
+            for i in 0..3 {
+                q.history.push_back(history_job(i));
+            }
             q.drain_until = Some(began + Duration::from_millis(400));
         }
         let (tx, rx) = channel();
@@ -3284,7 +3467,7 @@ mod tests {
         assert_eq!(
             warnings[0].message,
             format!(
-                "release: dropped {} documents, 0 series, 0 snapshots at the deadline",
+                "release: dropped {} documents, 0 series, 3 history, 0 snapshots at the deadline",
                 20 - done.len()
             )
         );
@@ -3494,6 +3677,266 @@ mod tests {
         assert_eq!(id, "SPX.close");
         assert!(reason.contains("2 values for 1 timestamps"), "{reason}");
         assert_eq!(appended.unwrap(), ("VIX".to_string(), 1));
+        handle.shutdown();
+    }
+
+    // History append.
+
+    /// Create a store holding the `vol_surface` history dataset.
+    fn history_store() -> (tempfile::TempDir, Store, geode_core::schema::SchemaSpec) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = crate::store::ddl::tests_support::history_dataset();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        (dir, store, schema_of(ds))
+    }
+
+    /// Two observations of SPX 3M (deltas 0.5 and 0.25) yesterday, inside
+    /// the dataset's 400-day window whatever the date the test runs, with
+    /// the SPX prefix covered over that day.
+    fn history_job(ticket: u64) -> HistoryJob {
+        let at = Utc::now() - chrono::Duration::days(1);
+        HistoryJob {
+            source: "hanweck".into(),
+            dataset: "vol_surface".into(),
+            ticket: Ticket(ticket),
+            rows: HistoryRows {
+                ts: vec![at, at],
+                keys: vec![
+                    vec!["SPX".into(), "SPX".into()],
+                    vec!["3M".into(), "3M".into()],
+                    vec!["0.5".into(), "0.25".into()],
+                ],
+                values: vec![vec![15.0, 17.5], vec![7650.0, 7650.0]],
+            },
+            covered: vec![crate::store::history::Covered {
+                asked: vec!["SPX".into()],
+                span: (
+                    at - chrono::Duration::hours(12),
+                    at + chrono::Duration::hours(1),
+                ),
+            }],
+            received_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn a_history_job_appends_and_reports_its_ticket() {
+        let (_d, store, schema) = history_store();
+        let reader = store.reader().unwrap();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        handle.submit_history(history_job(7));
+        let started = next_skipping_idle(&rx);
+        assert!(
+            matches!(&started, IngestEvent::Started { source, path, .. }
+                if source == "hanweck" && path == "history://hanweck/vol_surface"),
+            "{started:?}"
+        );
+        let done = next_skipping_idle(&rx);
+        assert!(
+            matches!(&done, IngestEvent::HistoryAppended { source, dataset, ticket: Ticket(7), appended: 2, swept: 0 }
+                if source == "hanweck" && dataset == "vol_surface"),
+            "{done:?}"
+        );
+        let coverage: i64 = reader
+            .query_row(
+                "select count(*) from vol_surface_history_coverage",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(coverage, 1, "the covered span is recorded with the rows");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_history_job_for_an_undeclared_dataset_fails_its_ticket() {
+        let (_d, store, schema) = history_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        let mut job = history_job(11);
+        job.dataset = "ghost".into();
+        handle.submit_history(job);
+        let (ticket, dataset, reason) = loop {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                IngestEvent::HistoryFailed {
+                    ticket,
+                    dataset,
+                    reason,
+                    ..
+                } => break (ticket, dataset, reason),
+                IngestEvent::HistoryAppended { .. } => panic!("appended into 'ghost'"),
+                _ => continue,
+            }
+        };
+        assert_eq!(ticket, Ticket(11));
+        assert_eq!(dataset, "ghost");
+        assert!(
+            reason.contains("dataset 'ghost' is not declared"),
+            "{reason}"
+        );
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_history_job_for_a_drifted_dataset_is_refused_before_any_insert() {
+        let (_d, mut store, schema) = history_store();
+        store.mark_drifted("vol_surface", "schema drift in 'vol_surface': test".into());
+        let reader = store.reader().unwrap();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        handle.submit_history(history_job(3));
+        let (ticket, reason) = loop {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                IngestEvent::HistoryFailed { ticket, reason, .. } => break (ticket, reason),
+                IngestEvent::HistoryAppended { .. } => panic!("appended into a drifted dataset"),
+                _ => continue,
+            }
+        };
+        assert_eq!(ticket, Ticket(3));
+        assert_eq!(reason, "schema drift in 'vol_surface': test");
+        let rows: i64 = reader
+            .query_row("select count(*) from vol_surface_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "refused before any INSERT");
+        handle.shutdown();
+    }
+
+    #[test]
+    fn a_history_job_with_rows_of_the_wrong_shape_fails_its_ticket_and_the_runner_lives() {
+        let (_d, store, schema) = history_store();
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema);
+        let mut bad = history_job(5);
+        bad.rows.values.pop();
+        handle.submit_history(bad);
+        handle.submit_history(history_job(6));
+        let mut failed = None;
+        let mut appended = None;
+        for _ in 0..8 {
+            match rx.recv_timeout(Duration::from_secs(30)).unwrap() {
+                IngestEvent::HistoryFailed { ticket, .. } => failed = Some(ticket),
+                IngestEvent::HistoryAppended { ticket, .. } => appended = Some(ticket),
+                _ => {}
+            }
+            if failed.is_some() && appended.is_some() {
+                break;
+            }
+        }
+        assert_eq!(failed, Some(Ticket(5)));
+        assert_eq!(appended, Some(Ticket(6)));
+        handle.shutdown();
+    }
+
+    /// A drain with only history queued still runs it, and each `Started`
+    /// counts the history jobs waiting behind it. The queue is filled
+    /// before the runner starts, so the counts do not race a submit.
+    #[test]
+    fn a_draining_runner_appends_queued_history_and_counts_it_as_waiting() {
+        let (_d, store, schema) = history_store();
+        let queue = Arc::new((Mutex::new(Queue::default()), Condvar::new()));
+        {
+            let mut q = queue.0.lock().unwrap();
+            q.history.push_back(history_job(1));
+            q.history.push_back(history_job(2));
+            q.drain_until = Some(std::time::Instant::now() + Duration::from_secs(10));
+        }
+        let (tx, rx) = channel();
+        let sink: IngestSink = Arc::new(move |e| tx.send(e).is_ok());
+        let (done_tx, done_rx) = channel();
+        let worker_queue = Arc::clone(&queue);
+        std::thread::spawn(move || {
+            run(
+                store,
+                schema,
+                worker_queue,
+                sink,
+                load_file,
+                publish_document,
+            );
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(30))
+            .expect("the drain returns once the history is appended");
+        let mut started = Vec::new();
+        let mut appended = Vec::new();
+        for event in rx.try_iter() {
+            match event {
+                IngestEvent::Started { path, queued, .. } => started.push((path, queued)),
+                IngestEvent::HistoryAppended { ticket, .. } => appended.push(ticket),
+                IngestEvent::HistoryFailed { reason, .. } => panic!("{reason}"),
+                _ => {}
+            }
+        }
+        let path = "history://hanweck/vol_surface".to_string();
+        assert_eq!(started, vec![(path.clone(), 1), (path, 0)]);
+        assert_eq!(appended, vec![Ticket(1), Ticket(2)]);
+    }
+
+    #[test]
+    fn history_is_taken_after_series_and_before_snapshots() {
+        let mut q = Queue::default();
+        q.references.push_back(reference_job("u"));
+        q.history.push_back(history_job(1));
+        q.series
+            .push_back(series_job("SPX.close", SeriesRows::default()));
+        assert!(matches!(take_work(&mut q).unwrap(), Work::Series(_)));
+        assert!(matches!(take_work(&mut q).unwrap(), Work::History(_)));
+        assert!(matches!(take_work(&mut q).unwrap(), Work::Reference(_)));
+        assert!(take_work(&mut q).is_none());
+
+        // With no snapshot queued, a history job still goes before a file.
+        q.items.push(work_item(
+            "b.csv",
+            10,
+            ts("2026-08-30T07:00:00Z"),
+            Priority::Backfill,
+        ));
+        q.history.push_back(history_job(2));
+        assert!(matches!(take_work(&mut q).unwrap(), Work::History(_)));
+        assert!(matches!(take_work(&mut q).unwrap(), Work::File(_)));
+    }
+
+    /// A history job counts toward its source's backlog like a series job,
+    /// and taking it uncounts it.
+    #[test]
+    fn history_jobs_count_toward_their_sources_backlog_and_draining_clears_it() {
+        let (tx, rx) = channel();
+        let handle = IngestHandle {
+            queue: Arc::new((Mutex::new(Queue::default()), Condvar::new())),
+            sink: Arc::new(move |e| tx.send(e).is_ok()),
+            thread: Mutex::new(None),
+        };
+        for i in 0..=BACKLOG_DEPTH {
+            handle.submit_history(history_job(i as u64));
+        }
+        let backlogs: Vec<(String, usize, bool)> = rx
+            .try_iter()
+            .filter_map(|e| match e {
+                IngestEvent::Backlog {
+                    source,
+                    queued,
+                    over,
+                } => Some((source, queued, over)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            backlogs,
+            vec![("hanweck".to_string(), BACKLOG_DEPTH + 1, true)]
+        );
+        let mut cleared = Vec::new();
+        {
+            let mut q = handle.queue.0.lock().unwrap();
+            while let Some(work) = take_work(&mut q) {
+                if let Some(IngestEvent::Backlog { queued, over, .. }) =
+                    backlog_source(&work).and_then(|s| backlog_pop(&mut q, s))
+                {
+                    cleared.push((queued, over));
+                }
+            }
+            assert!(q.queued_per_source.is_empty(), "every job uncounted");
+        }
+        assert_eq!(cleared, vec![(BACKLOG_DEPTH - 1, false)]);
         handle.shutdown();
     }
 

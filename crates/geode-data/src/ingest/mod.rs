@@ -14,7 +14,7 @@ pub mod split;
 pub mod subscribe;
 
 pub use runner::{
-    DocumentJob, ForgetJob, IngestEvent, IngestHandle, IngestRunner, IngestSink,
+    DocumentJob, ForgetJob, HistoryJob, IngestEvent, IngestHandle, IngestRunner, IngestSink,
     LOCAL_KEEP_GENERATIONS, ReferenceJob, SeriesJob,
 };
 

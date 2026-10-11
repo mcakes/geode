@@ -1598,6 +1598,9 @@ impl DataService {
                         }
                     })
                 }
+                // No history request is dispatched yet, so no ticket waits
+                // on these.
+                IngestEvent::HistoryAppended { .. } | IngestEvent::HistoryFailed { .. } => true,
                 // A drained runner also ends progress. The runner does not retry refused
                 // events; the app mailbox coalesces progress state.
                 IngestEvent::PlanComplete => sink(DataEvent::LoadEnded),
