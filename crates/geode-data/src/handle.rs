@@ -21,7 +21,7 @@ use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     AsOf, CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
-    QueryOutcome, ReferenceOutcome, ReferenceParams,
+    QueryOutcome, ReferenceOutcome, ReferenceParams, WatchlistOutcome, WatchlistParams,
 };
 use geode_core::series::{SeriesOutcome, SeriesParams};
 use geode_core::textfile::{TextFileOp, TextFileOutcome, TextFileParams, TextFileResult};
@@ -72,6 +72,8 @@ pub enum Request {
     /// One reference table, answered synchronously on the service reader
     /// with DataEvent::Reference.
     Reference(ReferenceParams),
+    /// Resolve one watchlist live, answered with DataEvent::Watchlist.
+    Watchlist(WatchlistParams),
     /// Poll the snapshot source filling `dataset` now. No answer: the
     /// poll reports through Polled, Health and Published like any other.
     Poll {
@@ -314,6 +316,15 @@ impl DataHandle {
     /// in DataEvent::Reference.
     pub fn reference(&self, params: ReferenceParams) -> Result<(), Refusal> {
         self.send(Request::Reference(params))
+    }
+
+    /// Queue a watchlist resolution. `Err(Busy)` means the queue was full
+    /// and a later submission can succeed; `Err(Stopped)` means the service
+    /// can no longer serve and no outcome is owed. A drift refusal for an
+    /// admitted request is returned as a keyed/tagged DataEvent::Watchlist
+    /// error; superseded or cancelled work can produce no outcome.
+    pub fn watchlist(&self, params: WatchlistParams) -> Result<(), Refusal> {
+        self.send(Request::Watchlist(params))
     }
 
     /// Queue a poll of the snapshot source filling `dataset`. `Err(Busy)`
@@ -663,6 +674,11 @@ enum PanicAnswer {
         dataset: String,
         as_of: AsOf,
     },
+    Watchlist {
+        key: QueryKey,
+        tag: u64,
+        name: String,
+    },
     Price {
         key: QueryKey,
         tag: u64,
@@ -757,6 +773,14 @@ impl PanicAnswer {
                     tag: p.tag,
                     dataset: p.dataset.clone(),
                     as_of: p.as_of.clone(),
+                },
+            ),
+            Request::Watchlist(p) => (
+                "watchlist",
+                PanicAnswer::Watchlist {
+                    key: p.key,
+                    tag: p.tag,
+                    name: p.name.clone(),
                 },
             ),
             Request::Price(p) => (
@@ -884,6 +908,14 @@ impl PanicAnswer {
                     dataset,
                     as_of,
                     table: Err(reason),
+                }));
+            }
+            PanicAnswer::Watchlist { key, tag, name } => {
+                let _ = sink(DataEvent::Watchlist(WatchlistOutcome {
+                    key,
+                    tag,
+                    name,
+                    result: Err(reason),
                 }));
             }
             PanicAnswer::Price {
@@ -1191,6 +1223,17 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
         Request::Reference(params) => {
             let _ = sink(DataEvent::Reference(service.reference(&params)));
         }
+        Request::Watchlist(params) => {
+            if let Err(e) = service.watchlist(&params) {
+                // A drift refusal is this key's outcome, not a lost request.
+                let _ = sink(DataEvent::Watchlist(WatchlistOutcome {
+                    key: params.key,
+                    tag: params.tag,
+                    name: params.name,
+                    result: Err(e.to_string()),
+                }));
+            }
+        }
         Request::Poll { dataset } => service.poll(&dataset),
         Request::Price(params) => service.price(params),
         Request::VolSlices(params) => service.vol_slices(params),
@@ -1481,6 +1524,7 @@ mod tests {
             column: column.to_string(),
             scope: Scope::default(),
             as_of: AsOf::Live,
+            dataset: None,
         }
     }
 
@@ -1531,6 +1575,21 @@ mod tests {
         assert!(
             matches!(rx.recv().unwrap(), Request::Poll { dataset } if dataset == "underlyings")
         );
+    }
+
+    #[test]
+    fn a_watchlist_request_reaches_the_service_queue_as_sent() {
+        let (handle, rx) = DataHandle::for_tests();
+        let params = WatchlistParams {
+            key: QueryKey(3),
+            tag: 4,
+            name: "eu".into(),
+            rules: vec![],
+            include: vec!["SPX".into()],
+            exclude: vec![],
+        };
+        assert!(handle.watchlist(params.clone()).is_ok());
+        assert!(matches!(rx.recv().unwrap(), Request::Watchlist(p) if p == params));
     }
 
     fn series_params(key: u64) -> SeriesParams {
@@ -2378,6 +2437,7 @@ mod tests {
             Request::Series(p) => p.key == MARKED,
             Request::Catalog(p) => p.key == MARKED,
             Request::Reference(p) => p.key == MARKED,
+            Request::Watchlist(p) => p.key == MARKED,
             Request::Poll { dataset } => dataset == "marked",
             Request::Price(p) => p.key == MARKED,
             Request::VolSlices(p) => p.key == MARKED,
@@ -2519,6 +2579,27 @@ mod tests {
             seen.iter().any(|e| matches!(e, DataEvent::Distinct(o)
             if o.key == MARKED && o.column == "book"
                 && o.values.as_ref().is_err_and(|r| panicked(r, "distinct")))),
+            "{seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_watchlist_request_is_answered_on_its_key_and_name() {
+        let (_d, h, rx) = probed(panic_marked_arms);
+        h.watchlist(WatchlistParams {
+            key: MARKED,
+            tag: 8,
+            name: "eu".into(),
+            rules: vec![],
+            include: vec!["SPX".into()],
+            exclude: vec![],
+        })
+        .unwrap();
+        let seen = serves_on(&h, &rx);
+        assert!(
+            seen.iter().any(|e| matches!(e, DataEvent::Watchlist(o)
+            if o.key == MARKED && o.tag == 8 && o.name == "eu"
+                && o.result.as_ref().is_err_and(|r| panicked(r, "watchlist")))),
             "{seen:?}"
         );
     }

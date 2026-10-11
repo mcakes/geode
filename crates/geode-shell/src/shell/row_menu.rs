@@ -115,6 +115,7 @@ impl ActionCx<'_, '_> {
                 column: column.to_string(),
                 scope: Scope::default(),
                 as_of: AsOf::Live,
+                dataset: None,
             }));
         }
     }

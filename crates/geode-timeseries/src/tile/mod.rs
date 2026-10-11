@@ -50,7 +50,7 @@ use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Sizable as _, Theme, v_flex};
 
 use crate::commands::{self, Command};
-use crate::core::complete::{Write, expand_unique};
+use crate::core::complete::{Write, expand_unique, help_for};
 use crate::core::menu::MenuKind;
 use crate::core::model::{Changed, Color, Model, SlotState};
 use crate::core::{

@@ -25,6 +25,7 @@ use crate::query::pool::{
 };
 use crate::query::read::{ReadConfig, ReadQuery};
 use crate::query::series::compile_series;
+use crate::query::watchlist::WatchlistQuery;
 use crate::source::SourceSpec;
 use crate::store::catalog::BookFreshness;
 use crate::store::{Catalog, Store, StoreError, StoreOptions, stamp};
@@ -38,7 +39,7 @@ use geode_core::positions::{CommandOutcome, MoveLhuParams};
 use geode_core::pricing::{LOCAL_SOURCE, LocalPublish, PriceOutcome, PriceParams};
 use geode_core::query::{
     CatalogOutcome, CatalogParams, DistinctOutcome, DistinctParams, DocumentParams, QueryKey,
-    QueryOutcome, ReferenceOutcome, ReferenceParams,
+    QueryOutcome, ReferenceOutcome, ReferenceParams, WatchlistOutcome, WatchlistParams,
 };
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::Scope;
@@ -127,6 +128,8 @@ pub enum DataEvent {
     /// One reference table, live or as of a time, addressed by the
     /// requester's key and tag.
     Reference(ReferenceOutcome),
+    /// One watchlist resolved, addressed by the requester's key and tag.
+    Watchlist(WatchlistOutcome),
     /// Pricing result, addressed by the requesting tile's key.
     Price(PriceOutcome),
     /// Vol slice batch result, addressed by the requesting tile's key.
@@ -291,7 +294,7 @@ pub struct FetchParams {
     pub to: DateTime<Utc>,
 }
 
-/// The `Snapshot` a `Query` or `Distinct` result must carry. A series
+/// The `Snapshot` a `Query` or `Distinct` result must carry. Another
 /// payload under either kind is a routing defect, not data: reported as
 /// that key's failure rather than unwrapped, so it degrades one tile and
 /// leaves the pool running.
@@ -299,6 +302,9 @@ fn view_snapshot(payload: Payload) -> Result<geode_core::snapshot::Snapshot, Str
     match payload {
         Payload::Snapshot(s) => Ok(s),
         Payload::Series(_) => Err("internal: a view query answered with a series".to_string()),
+        Payload::Watchlist(_) => {
+            Err("internal: a view query answered with a watchlist".to_string())
+        }
     }
 }
 
@@ -347,6 +353,9 @@ fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
                 Ok(Payload::Snapshot(_)) => {
                     Err("internal: a series request answered with a snapshot".to_string())
                 }
+                Ok(Payload::Watchlist(_)) => {
+                    Err("internal: a series request answered with a watchlist".to_string())
+                }
                 Err(e) => Err(e),
             };
             DataEvent::Series(SeriesOutcome {
@@ -356,6 +365,18 @@ fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
                 result,
             })
         }
+        RequestKind::Watchlist { name } => DataEvent::Watchlist(WatchlistOutcome {
+            key: r.key,
+            tag: r.tag,
+            name,
+            result: match r.payload {
+                Ok(Payload::Watchlist(res)) => Ok(res),
+                Ok(_) => {
+                    Err("internal: a watchlist request answered with another payload".to_string())
+                }
+                Err(e) => Err(e),
+            },
+        }),
     }
 }
 
@@ -393,6 +414,12 @@ fn contained_result_event(
                     key,
                     tag,
                     submitted,
+                    result: Err(reason),
+                }),
+                RequestKind::Watchlist { name } => DataEvent::Watchlist(WatchlistOutcome {
+                    key,
+                    tag,
+                    name,
                     result: Err(reason),
                 }),
             }
@@ -2205,6 +2232,33 @@ impl DataService {
             provenance: Provenance::default(),
             kind: RequestKind::Distinct {
                 column: params.column.clone(),
+            },
+        }))
+    }
+
+    /// Resolve one watchlist on the query pool. A drifted dataset a rule
+    /// names refuses the whole list: a shortened answer would read as a
+    /// smaller list.
+    pub fn watchlist(&self, params: &WatchlistParams) -> Result<QueryId, StoreError> {
+        self.refuse_drifted(
+            self.drifted
+                .keys()
+                .map(String::as_str)
+                .filter(|name| params.rules.iter().any(|r| r.dataset == *name)),
+        )?;
+        Ok(self.pool.submit(QueryRequest {
+            key: params.key,
+            tag: params.tag,
+            submitted: Instant::now(),
+            view: ViewId(format!("watchlist:{}", params.name)),
+            grouping: Vec::new(),
+            work: Work::Watchlist(Box::new(WatchlistQuery::new(
+                Arc::clone(&self.read_config),
+                params.clone(),
+            ))),
+            provenance: Provenance::default(),
+            kind: RequestKind::Watchlist {
+                name: params.name.clone(),
             },
         }))
     }
@@ -4307,6 +4361,7 @@ mod tests {
                 column: "book".into(),
                 scope: Scope::default(),
                 as_of: AsOf::Live,
+                dataset: None,
             })
             .unwrap_err()
             .to_string();
@@ -4319,6 +4374,71 @@ mod tests {
             })
             .is_none(),
             "nothing was submitted to the pool"
+        );
+        service.shutdown();
+    }
+
+    /// A watchlist with a rule on a drifted dataset is refused whole, with
+    /// the drift; a list whose rules name no drifted dataset still rides
+    /// the pool. Tested at `DataService::watchlist` as the distinct and
+    /// view refusals are: `dispatch` only forwards an `Err` here onto the
+    /// request's key, tag and name.
+    #[test]
+    fn a_watchlist_rule_on_a_drifted_dataset_refuses_the_list_with_the_drift() {
+        let (_db, _src, service, rx) = service_with(|store| {
+            store
+                .writer()
+                .execute_batch(
+                    "alter table risk_snapshot_position_archive add column surprise VARCHAR;",
+                )
+                .unwrap();
+        });
+        let list = |rules: Vec<geode_core::query::ResolvedRule>| WatchlistParams {
+            key: QueryKey(5),
+            tag: 1,
+            name: "eu".into(),
+            rules,
+            include: vec!["SPX".into()],
+            exclude: vec![],
+        };
+        let refused = service
+            .watchlist(&list(vec![geode_core::query::ResolvedRule {
+                index: 0,
+                dataset: "risk_snapshot".into(),
+                scope: Scope::default(),
+            }]))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refused.starts_with(
+                "schema drift in 'risk_snapshot': 'risk_snapshot_position_archive' column"
+            ),
+            "{refused}"
+        );
+        assert!(
+            until_within(&rx, Duration::from_millis(300), |e| match e {
+                DataEvent::Watchlist(o) => Some(o.key),
+                _ => None,
+            })
+            .is_none(),
+            "nothing was submitted to the pool"
+        );
+        service.watchlist(&list(vec![])).unwrap();
+        let answered = until_within(&rx, Duration::from_secs(10), |e| match e {
+            DataEvent::Watchlist(o) if o.key == QueryKey(5) && o.name == "eu" => {
+                Some(o.result.clone())
+            }
+            _ => None,
+        })
+        .expect("a list naming no drifted dataset answers");
+        assert_eq!(
+            answered
+                .unwrap()
+                .members
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["SPX"]
         );
         service.shutdown();
     }
@@ -5614,6 +5734,7 @@ mod tests {
             column: "book".into(),
             scope: Scope::default(),
             as_of: AsOf::Live,
+            dataset: None,
         };
         svc.distinct(&params).unwrap();
         loop {

@@ -12,7 +12,7 @@ Current behavior and rationale:
 
 | Module | Holds |
 |---|---|
-| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency) as `geode_tile::menu` rows over `Pick`, the expression field's series-name completion (`core::complete`), and the absolute `#rrggbb` color with the picker's pick mapping (`core::rgb`). |
+| `core` | Pure model, range, source resolution, request building, chart-model preparation, session conversion, the three menus' rows (action list, range, frequency) as `geode_tile::menu` rows over `Pick`, the expression field's series-name completion and help line (`core::complete`: `name_at`, `Completion`, `enclosing_at`, `help_for`), and the absolute `#rrggbb` color with the picker's pick mapping (`core::rgb`). |
 | `commands` | The tile-local `:` vocabulary. |
 | `tile` | The retained entity, frame observation, visibility (hiding keeps the series query; `closed` cancels it and answers the barrier; arrivals from `closed` and `set_visible`, which the shell calls inside its draw, go through `geode_tile::following::DeferredDoor` so the release is heard), verbs, `:` dispatch, focus, and chart cache key. |
 | `tile::data` | Fetch submission, series queries and delivery filtering over `geode_tile::following` (the barrier staging and promotion rules), and the post-step `release_view` after each promotion and delivery. |
@@ -58,6 +58,9 @@ cargo bench -p geode-timeseries
   else the default source's identity, else a unique identity. A name that
   fits several series is refused with their labels, never resolved to the
   first. Expressions reference source series only.
+- Enter runs parse, then the shape check (`Ast::shape`), then name
+  resolution; the first refusal is the inline error, so `mean(2)` is refused
+  as a shape before any name in it is looked up.
 - `core::session` rewrites a pre-`version = 2` table's `sN` handles to names
   on restore: a source as its full `identity@source` (`resolve::name_for`,
   never the default-aware label), an expression operand as `(text)`. A text
@@ -128,7 +131,9 @@ calendar arithmetic and remain relative in sessions. Absolute ranges store
 inclusive UTC dates; reopening them retains their stored dates despite as-of
 clipping of queries.
 
-The expression field completes loaded series names (`Model::series_names`).
+The expression field completes loaded series names (`Model::series_names`)
+and the function names, each with its `(` (`core::complete::function_names`);
+Enter's expansion is over series names only.
 `core::complete::name_at` finds the name at the caret with the expression
 tokenizer's own character classes (`geode_core::series::expr`), so the word
 boundary cannot drift from what the parser reads; a caret at a name's start
@@ -148,6 +153,26 @@ unique inexact name, then re-ranks, before resolving. A row press writes the
 same way, stops propagation,
 and the list surface occludes, so the shell root (which focuses only a hovered
 hitbox) never takes the keyboard from the field.
+
+The help line under the field (`ExprField::help`, a `core::complete::Help`)
+is prepared by `refresh_expr_help`: at the list's refresh points, on the
+Change the list skips (the tile's own write echo moved the caret), after a
+completion write, and from an observer on the input entity, because a caret
+moved by an arrow key or a click emits no Change and the key never reaches
+the strip's listener (gpui dispatches the input's bound action instead of
+the key event). It is never computed in render. The text and caret last read
+are kept, so a notify that moved neither rebuilds nothing. `help_for` reads
+the lit row only while a non-empty name at the caret is the one the list was
+ranked over (`Completion::ranked_at`); with nothing typed the list offers
+every name and says nothing about the caret's place, so the enclosing call
+(`enclosing_at`, the innermost open call or index frame; a bare or
+unknown-word paren nests for `)` matching but is transparent, and a comma
+inside one advances nothing) or the index note answers instead. The
+slot under the Input is one structural line pinned to a line's height and
+shared with the inline error, error first. The copy (`Function::signature`,
+`result`, `describe` and `INDEX_HELP` in `geode_core::series::expr`) is a
+claim about the lowering in `geode-data`; change the lowering and the
+sentence together.
 
 ## Color and menu contracts
 

@@ -1,0 +1,15 @@
+config_version = 1
+
+# A hand-picked list: no rules, the names as typed.
+[us_core]
+include = ["SPX", "NDX", "RTY"]
+
+# A dynamic list: every underlying the risk snapshot holds in the Europe
+# region (the demo `region` classification), plus SMI by hand, minus UKX.
+# Members follow the risk data as it publishes.
+[europe_risk]
+include = ["SMI"]
+exclude = ["UKX"]
+[[europe_risk.rules]]
+dataset = "risk_snapshot"
+expression = "region = 'Europe'"

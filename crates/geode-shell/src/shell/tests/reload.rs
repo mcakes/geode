@@ -239,6 +239,110 @@ fn a_value_colors_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppConte
     );
 }
 
+/// A `watchlists.toml` edit alone emits `ConfigReloaded`: the bridge
+/// re-folds and re-resolves the lists on that event.
+#[gpui::test]
+fn a_watchlists_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = shell_of(&window, &mut cx);
+
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let sink = events.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
+    });
+
+    // The fixture's config has no docs, so the list is the reload's only
+    // difference from the running one.
+    let new_config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin(
+                geode_core::config::WATCHLISTS_DOC,
+                "[eu]\ninclude = [\"SPX\"]\n",
+            )
+            .unwrap(),
+        ],
+        desk: None,
+        user: None,
+    });
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::ConfigReloaded)),
+        "a watchlists-only reload must fire ConfigReloaded: {:?}",
+        events.borrow()
+    );
+}
+
+/// A `scopes.toml` edit alone emits `ConfigReloaded`: a watchlist rule
+/// can name a saved scope, so the bridge re-folds the lists on that event.
+#[gpui::test]
+fn a_scopes_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppContext) {
+    cx.update(gpui_component::init);
+
+    let window = cx
+        .update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap();
+    let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let shell = shell_of(&window, &mut cx);
+
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    cx.update(|_, cx| {
+        let sink = events.clone();
+        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
+            sink.borrow_mut().push(e.clone())
+        })
+        .detach();
+    });
+
+    // The fixture's config has no docs, so the scope is the reload's only
+    // difference from the running one.
+    let new_config = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("scopes", "[eu]\n[eu.dimensions]\nbook = [\"BK000\"]\n").unwrap(),
+        ],
+        desk: None,
+        user: None,
+    });
+    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::ConfigReloaded)),
+        "a scopes-only reload must fire ConfigReloaded: {:?}",
+        events.borrow()
+    );
+}
+
 /// The hot-reload path reads the user directory from disk: a `colors.toml`
 /// edit and a still-unrenamed `colours.toml` both land in the `colors` doc,
 /// so either fires `ConfigReloaded` and the modules see the definitions.

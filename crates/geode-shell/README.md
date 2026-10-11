@@ -81,12 +81,17 @@ for palette adaptations, source revisions, and licenses.
 
 ## Globals
 
-The workspace has five module-visible GPUI globals:
+The workspace has six module-visible GPUI globals:
 `linenumbers::UiSettings`, `tips::Chords`, `clock::AppClock`,
-`series::SeriesSettings`, written by the shell, and
-`reference::ReferenceGlobal` (live reference tables), which the shell installs
-empty and the app's bridge replaces whenever a live read changes a table; its
-reads use the reserved `shell::REFERENCE_KEY`. `dimension::UrlOpener` is a test seam
+`series::SeriesSettings`, written by the shell, and two the shell installs
+empty and the app's bridge alone replaces: `reference::ReferenceGlobal` (live
+reference tables), replaced whenever a live read changes a table, its reads
+under the reserved `shell::REFERENCE_KEY`; and `watchlist::WatchlistGlobal`
+(resolved watchlists, a `WatchlistSnapshot`), replaced when a list's
+definition, members or status changes, each list resolved under its own key
+from the `shell::WATCHLIST_KEY_BASE` range (`WATCHLIST_KEY_COUNT` keys,
+`is_watchlist_key`), because the query pool coalesces per key and a shared
+key would let one list's refresh cancel another's. `dimension::UrlOpener` is a test seam
 the shell only reads, in `ActionCx::open_url`: a test sets it to capture
 URLs, and production leaves it unset so the URL goes to the OS. Add another
 only for state that is genuinely app wide and module visible.

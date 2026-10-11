@@ -310,6 +310,7 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
         column: column.to_string(),
         scope: minus_own,
         as_of,
+        dataset: None,
     }));
 }
 

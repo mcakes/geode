@@ -410,7 +410,8 @@ impl TimeseriesTile {
             // re-ranks the completions against the name now at the caret.
             // The echo of the tile's own completion write is neither: the
             // write already placed the list, and an Enter expansion's
-            // refusal must stay up.
+            // refusal must stay up. The help line follows the caret
+            // either way: the write moved it.
             let InputEvent::Change = event else {
                 return;
             };
@@ -419,6 +420,7 @@ impl TimeseriesTile {
                 return;
             };
             if f.echo.take().is_some_and(|echo| echo == text.as_ref()) {
+                this.refresh_expr_help(cx);
                 return;
             }
             f.error = None;
@@ -426,6 +428,14 @@ impl TimeseriesTile {
             cx.notify();
         })
         .detach();
+        // The help line follows the caret as well as the text. A caret
+        // moved by an arrow key or a click emits no Change — gpui hands
+        // the key to the input's bound action and never to the strip's
+        // key listener — but the input notifies, so observe it.
+        // `refresh_expr_help` compares the text and caret it last read
+        // before rebuilding, so a cursor blink repeats nothing.
+        cx.observe(&input, |this, _input, cx| this.refresh_expr_help(cx))
+            .detach();
         input.read(cx).focus_handle(cx).focus(window, cx);
         self.popup = Some(Popup::Expr(ExprField {
             input,
@@ -433,6 +443,8 @@ impl TimeseriesTile {
             error: None,
             completion: Default::default(),
             echo: None,
+            help: None,
+            help_at: None,
         }));
         // A seeded `e` edit emits no Change (`set_value`), so the list is
         // ranked here for the text it opens with.
@@ -464,6 +476,38 @@ impl TimeseriesTile {
             let input = f.input.read(cx);
             let (text, caret) = (input.value().to_string(), input.cursor());
             f.completion.refresh(&text, caret, names);
+            // The list changed under the same text and caret: the help
+            // reads the lit row, so it is rebuilt regardless.
+            f.help_at = None;
+        }
+        self.refresh_expr_help(cx);
+    }
+
+    /// Rebuild the help line from the field's live text and caret and
+    /// the list as it stands. Runs wherever the list is rebuilt, on a
+    /// Change the list skips (the tile's own write echo: the caret
+    /// moved), after a completion write, and whenever the input
+    /// notifies (an arrow key or a click moved the caret). Never in
+    /// render. The text and caret last read are kept, so a notify that
+    /// moved neither (a cursor blink) rebuilds nothing, and the tile is
+    /// notified only when the line changes.
+    pub(super) fn refresh_expr_help(&mut self, cx: &mut Context<Self>) {
+        let Some(Popup::Expr(f)) = &mut self.popup else {
+            return;
+        };
+        let input = f.input.read(cx);
+        let (text, caret) = (input.value(), input.cursor());
+        if f.help_at
+            .as_ref()
+            .is_some_and(|(t, c)| t == text.as_ref() && *c == caret)
+        {
+            return;
+        }
+        let help = help_for(&f.completion, &text, caret);
+        f.help_at = Some((text.to_string(), caret));
+        if f.help != help {
+            f.help = help;
+            cx.notify();
         }
     }
 
@@ -484,6 +528,7 @@ impl TimeseriesTile {
             s.value().to_string()
         });
         f.echo = Some(echo);
+        self.refresh_expr_help(cx);
         cx.notify();
     }
 
@@ -491,7 +536,11 @@ impl TimeseriesTile {
     /// writes the next candidate over the name at the caret and
     /// `shift-tab` the previous one, both cycling the cached list. Both
     /// are consumed while the field is up, even with nothing to offer,
-    /// so neither moves focus out of the field.
+    /// so neither moves focus out of the field. A key the input handles
+    /// through a binding (an arrow, `home`, `end`) never reaches this
+    /// listener — gpui dispatches the bound action instead of the key
+    /// event — so the help line follows the caret through the input
+    /// observer set up in `open_expr`, not from here.
     pub(crate) fn expr_key(
         &mut self,
         event: &KeyDownEvent,

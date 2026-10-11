@@ -48,3 +48,4 @@ pub mod tiling;
 pub mod tips;
 pub mod vimfind;
 pub mod vimnav;
+pub mod watchlist;

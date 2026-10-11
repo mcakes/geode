@@ -1,7 +1,7 @@
 //! Series query round trips over one million stored rows: four identities,
 //! each with 250,000 one-minute bars. Cases request daily output over a year
 //! for one slot or four slots plus a ratio, and minute output over a month with
-//! percentiles and bins.
+//! percentiles and bins, with a rolling expression, and with `ema`.
 //!
 //! Setup appends the data in day-sized chunks outside timing. Each timed call
 //! submits through DataService and waits for its Series event, including
@@ -181,6 +181,43 @@ fn bench(c: &mut Criterion) {
     });
 
     let month = (start, start + Duration::days(31));
+    let resolve = |text: &str| {
+        geode_core::series::expr::parse(text)
+            .unwrap()
+            .resolve(&mut |r| r.identity.strip_prefix('s')?.parse().ok())
+            .unwrap()
+    };
+    let rolling = base(
+        vec![
+            source(1, "A"),
+            SeriesSpec {
+                slot: 2,
+                kind: SlotKind::Expr(resolve("sma(diff(s1), 20) / s1[0]")),
+            },
+        ],
+        Frequency::M1,
+        month,
+        false,
+    );
+    c.bench_function("series_query/1_slot_plus_sma_diff_1m_1mo", |b| {
+        b.iter(|| black_box(round_trip(&svc, &rx, &rolling)))
+    });
+    let ema = base(
+        vec![
+            source(1, "A"),
+            SeriesSpec {
+                slot: 2,
+                kind: SlotKind::Expr(resolve("ema(s1, 20)")),
+            },
+        ],
+        Frequency::M1,
+        month,
+        false,
+    );
+    c.bench_function("series_query/1_slot_plus_ema_1m_1mo", |b| {
+        b.iter(|| black_box(round_trip(&svc, &rx, &ema)))
+    });
+
     let stats = base(
         vec![source(1, "A"), source(2, "B")],
         Frequency::M1,

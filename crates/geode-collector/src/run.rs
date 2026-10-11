@@ -725,6 +725,10 @@ impl Events {
             } => {
                 tracing::warn!(target: TARGET, "{source} {identity}: fetch failed: {reason}");
             }
+            // The collector asks for no watchlist; one arriving is noted, not acted on.
+            DataEvent::Watchlist(outcome) => {
+                tracing::debug!(target: TARGET, "watchlist '{}' resolved; ignored", outcome.name);
+            }
             // Logged by the loop once it knows whether an app explains it.
             DataEvent::ThreadStopped { thread, reason } => {
                 self.stops

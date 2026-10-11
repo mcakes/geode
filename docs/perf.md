@@ -2799,6 +2799,40 @@ previous quarter hour).
 Both sit well inside the 8 ms UI budget: the edit itself (history, the TOML
 object) adds about 0.3 ms to the rows rebuild a values answer or reload pays.
 
+## Watchlist resolution (2026-10-10)
+
+```text
+GEODE_DESK_CONFIG=<dir with app.toml: [log] default = "debug"> \
+    target/debug/geode --demo 1000
+```
+
+The cache (`geode-app/src/watchlists.rs`) stamps each list's latest
+submission and logs the elapsed time on `geode::watchlist` when that tag's
+answer is applied: the round trip from `DataHandle::watchlist` through the
+request queue, the query pool (one scoped distinct per rule, each in its own
+read transaction), the event drain and the global's replacement, as the
+tile will see it. It excludes the fold and the global's observers. Two
+runs, each one sample per figure; the app was killed after 40 s and 60 s.
+
+Conditions: Apple M5 Pro (18 cores, 48 GB), rustc 1.96.0, dev profile (the
+only binary built), load average 41 to 110 across the runs (another build
+running on the machine), the demo's `europe_risk` (one rule, `risk_snapshot`
+where `region = 'Europe'`, plus `SMI` by hand, minus `UKX`) and `us_core`
+(three names, no rule).
+
+| case | `europe_risk` | `us_core` |
+| --- | ---: | ---: |
+| startup, warm store (risk already loaded, no publish follows) | 245 ms | 220 ms |
+| startup, store deleted first (risk files loading during the resolution) | 838 ms | 843 ms |
+| publish of `risk_snapshot/BK001_BK002` (2 books, 120,062 rows), 31 s after launch | 44.8 ms | not resolved (no rule) |
+
+The startup figures are queue wait, not query time: a rule-less list costs
+the same as the one with a rule, and both sit behind the service's startup
+burst (catalog, recovery, the document bus's first documents). The
+publish-triggered figure is the one a running desk sees; it is one sample
+in the dev profile on a loaded machine, so a release-profile median is still
+owed before the number is a reference value.
+
 ## Collector to app store handoff (2026-10-04)
 
 ```text
@@ -2885,3 +2919,44 @@ snapshots and the axis domains are built once outside the timed loop; only
 `pivot_build_40x40`: median 261.2 µs (95% CI 259.8 to 263.0), median
 absolute deviation 6.2 µs, mean 262.8 µs, standard deviation 6.4 µs; one
 mild high outlier in 100 samples. Well under the 8 ms pure-UI budget.
+
+## Series expressions: rolling and `ema` over a month of minutes (2026-10-10)
+
+The two function shapes the expression language gained, measured as the
+existing series bench measures its ratio case: `DataService::series` plus
+the wait for its `DataEvent::Series`, the whole trip a tile pays. Same
+fixture as the "Timeseries series query" entry above: one temporary store of four
+identities × 250 sessions × 1,000 one-minute bars (1,000,000 rows),
+`[series] family = "series"` with no retention or history, `AsOf::Live`,
+`window` equal to the range. Each new case reads one source slot (`A`)
+and one expression slot over it at `1m` across a 31-day range from
+2025-01-06 (44,640 buckets, about 23,000 carrying a bar).
+
+Command: `cargo bench -p geode-data --bench series_query -- --warm-up-time 1
+--measurement-time 5`. Conditions: Apple M5 Pro (arm64, 18 cores, 48 GB),
+rustc 1.96.0, DuckDB crate 1.10505.0, bench profile, Gnuplot absent
+(plotters backend). The machine was otherwise loaded: load averages 65 /
+69 / 43 before the run, 16 / 45 / 38 after it (other builds and test
+binaries running), so the pre-existing three cases came out 8 to 12%
+slower than their reference values in the same run. Criterion
+medians, one run of 100 samples each.
+
+| Benchmark | Result |
+|---|---|
+| `series_query/1_slot_1d_1y` (reference 3.64 ms) | 3.94 ms |
+| `series_query/4_slots_plus_ratio_1d_1y` (reference 9.56 ms) | 10.6 ms |
+| `series_query/1_slot_plus_sma_diff_1m_1mo` (new: `sma(diff(s1), 20) / s1[0]`, a rolling mean over a difference, divided by the window's first point) | 7.76 ms |
+| `series_query/1_slot_plus_ema_1m_1mo` (new: `ema(s1, 20)`, the adjusted span-20 weighted mean over the last 100 points) | 14.3 ms |
+| `series_query/2_slots_1m_1mo_with_stats` (reference 14.5 ms) | 16.3 ms |
+
+Both new cases are inside the 50 ms requery target, `ema` by a factor of
+three and the rolling case by six. `ema` costs about twice the rolling
+case over the same month because its stage materialises a `5n`-element
+list per point (`list(...) over (rows between 5n−1 preceding and current
+row)`) and a per-row copy of the `5n` weights, then a dot product and a
+sum per point: rows × `5n` work, where `sma`/`diff` are plain window
+aggregates. The cost therefore scales with the span: a four-digit `n`
+over a long range would be slow, and the UI never waits for it (the
+request is bounded submission, answered on the pool). Not tuned here; the
+lever, if a desk asks for such spans, is a recursive or `ewm`-style
+running form that keeps one accumulator per row instead of a list.

@@ -57,6 +57,9 @@ pub struct DistinctParams {
     /// the caller does the removal.
     pub scope: Scope,
     pub as_of: AsOf,
+    /// Read one dataset only. `None` unions every dataset carrying the
+    /// column, as the dimension picker does. A watchlist rule names one.
+    pub dataset: Option<String>,
 }
 
 /// The picker's distinct-values result, addressed to the key that asked.
@@ -133,6 +136,49 @@ pub struct ReferenceOutcome {
     pub as_of: AsOf,
     /// `Ok(None)`: no generation exists at `as_of`. `Err` is the failure text.
     pub table: Result<Option<ReferenceTable>, String>,
+}
+
+/// One watchlist rule with its saved scope and named expressions already
+/// folded in: the data layer refuses a scope that still carries names.
+/// `index` is the rule's position in the definition, so a failure is
+/// reported against the rule the trader wrote.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedRule {
+    pub index: usize,
+    pub dataset: String,
+    pub scope: Scope,
+}
+
+/// Resolve one watchlist live: the distinct `underlying_ref` of each rule's
+/// dataset under its scope, unioned, plus `include`, minus `exclude`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatchlistParams {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub name: String,
+    pub rules: Vec<ResolvedRule>,
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+/// A resolved list. A rule that failed to compile or run contributes
+/// nothing and is named in `rules_failed` by its index; the list still
+/// answers over the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WatchlistResult {
+    pub members: Vec<crate::watchlist::members::Member>,
+    pub rules_failed: Vec<(usize, String)>,
+}
+
+/// The watchlist request's answer, addressed to the key that asked. `Err`
+/// is a failure before any rule ran (a drifted dataset, a refused
+/// transaction); its text is the failure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WatchlistOutcome {
+    pub key: QueryKey,
+    pub tag: u64,
+    pub name: String,
+    pub result: Result<WatchlistResult, String>,
 }
 
 /// What the database holds, as of the moment it was read.

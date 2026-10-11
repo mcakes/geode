@@ -823,6 +823,7 @@ fn bench_classification(c: &mut Criterion) {
         column: "underlying_ref".into(),
         scope: Scope::default(),
         as_of: AsOf::Live,
+        dataset: None,
     })
     .unwrap();
     let observed: Vec<String> = loop {

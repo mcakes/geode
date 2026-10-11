@@ -15,6 +15,9 @@ use super::model::Slot;
 
 pub fn resolve(text: &str, slots: &[Slot], default_source: Option<&str>) -> Result<Expr, String> {
     let ast = expr::parse(text).map_err(|e| e.message)?;
+    // The shape check first: `mean(2)` is refused as a shape before any
+    // name in it is looked up, so the message names the function.
+    ast.shape()?;
     let mut err: Option<String> = None;
     let resolved = ast.resolve(&mut |r: &RefName| match find_source(
         &r.identity,
@@ -189,7 +192,33 @@ mod tests {
         let e = resolve("1 + 2", m.slots(), Some("demo_kdb")).unwrap_err();
         assert_eq!(e, "an expression must reference a loaded series");
         let e = resolve("VIX ^ 2", m.slots(), Some("demo_kdb")).unwrap_err();
-        assert!(e.contains("arithmetic only"), "{e}");
+        assert!(e.contains("only + - * /"), "{e}");
+    }
+
+    #[test]
+    fn a_shape_error_is_refused_before_resolution() {
+        let m = model();
+        let default = Some("demo_kdb");
+        assert_eq!(
+            resolve("mean(2) + SPX.close", m.slots(), default).unwrap_err(),
+            "mean needs a series"
+        );
+        assert_eq!(
+            resolve("sma(SPX.close)", m.slots(), default).unwrap_err(),
+            "sma takes a series and a count"
+        );
+        let e = resolve(
+            "SPX.close / SPX.close[0] + sma(SPX.close, 20)",
+            m.slots(),
+            default,
+        )
+        .expect("a well-shaped expression resolves");
+        assert_eq!(e.slots(), vec![1]);
+        assert_eq!(
+            resolve("mean(NOPE)", m.slots(), default).unwrap_err(),
+            resolve("NOPE", m.slots(), default).unwrap_err(),
+            "a missing name inside a call is the same refusal as outside one"
+        );
     }
 
     /// A pair loaded twice (two rules) cannot be told apart by name, so

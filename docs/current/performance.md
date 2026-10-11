@@ -149,6 +149,8 @@ the measurement log for fixture and hardware details.
 | View requery grouped by a classification (`query_classification`) | 1,000,000 rows, `sector > underlying_ref`, two underlying-grain measures; `sector` maps the 10 observed underlyings / 5,000 values (padded); full depth / depth two; loaded machine (load 33 to 58) | 24.0 / 14.3 ms; 55.3 / 51.2 ms |
 | Series query | four slots plus ratio, daily over one year | 9.56 ms |
 | Series query with stats | two minute slots over one month | 14.5 ms |
+| Series query with a rolling expression | one minute slot plus `sma(diff(A), 20) / A[0]` over one month | 7.76 ms |
+| Series query with `ema` | one minute slot plus `ema(A, 20)` over one month | 14.3 ms |
 | Chart path rebuild | 500,000 points into 1,600 columns | 1.51 ms |
 | Timeseries chart model | 500,000 buckets × four slots | 259 µs |
 | Blotter fully expanded flatten | 720,881 result nodes | 1.18 ms |
@@ -175,6 +177,7 @@ the measurement log for fixture and hardware details.
 | Classifications rows rebuild | the same grid, rows and grid only (a values answer or a reload) | 1.21 ms |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |
+| Watchlist resolution, publish-triggered | `--demo 1000`: `europe_risk`, one rule over `risk_snapshot` with a classification scope (`region = 'Europe'`), from the cache's submission to the applied answer, after a 120,062-row publish of that dataset; one sample, dev profile, load 41 to 65 (the startup resolution, queued behind the service's startup burst, measured 245 ms over a warm store and 838 ms while the store loaded) | 44.8 ms |
 | Keybinding rows | builtin + 400 synthetic module actions, 200 user overrides: derive and rank, per input change | 667 µs |
 | Keybinding filter keystroke | the same, prepared re-rank | 113 µs |
 | Object browse rows | 500 views: derive and rank, per input change | 188 µs |
@@ -361,6 +364,10 @@ joined on the unique source value, if the idle figure stays over budget.
 - A timeseries statistics request also recomputes the points over the whole
   range, which a view move does not change. A statistics-only request would
   shorten each refresh during a pan.
+- `ema(A, n)` materialises a `5n`-element list per point plus a per-row copy
+  of the weight list, so its cost grows as rows × `5n`: a four-digit span
+  over a long range is a known cost, which the UI never waits for (14.3 ms at
+  `n = 20` over a month of minutes).
 - Series append deduplication reads every stored version for the pair. Large
   historical pairs may need a narrower live-value index.
 - Measure and feed-document live/archive retention has no production

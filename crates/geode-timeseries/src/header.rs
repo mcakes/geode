@@ -10,12 +10,14 @@
 //! named-color wheel instead of deriving them for each slot or each paint.
 //! Theme and named-color changes invalidate the prepared colors.
 
+use geode_core::colour::readable_on;
 use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
 use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::shell::chip::{Tone, chip_paint};
+use geode_shell::shell::colours::{to_hsla, to_rgb};
 use geode_shell::shell::control::{self, PointerStates};
 use geode_shell::shell::kbd;
 use geode_shell::shell::scale;
@@ -25,7 +27,7 @@ use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString,
-    Stateful, Window, div,
+    Stateful, Window, div, rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -522,9 +524,15 @@ pub(crate) fn render_notice(
     )
 }
 
-/// Inline expression editor between the header and chart. Parse and reference
-/// errors appear beneath the one-line Input and leave the draft open. Model
-/// refusals after resolution close the editor and use the tile's notice.
+/// Inline expression editor between the header and chart. One structural
+/// line under the Input, pinned to a line's height so the strip never
+/// moves as its content comes and goes, carries a parse or reference
+/// error (danger text; the draft stays open), else the prepared help
+/// line (`ExprField::help`: the signature's parts in muted text with the
+/// active argument in `primary` floored to read on the strip's
+/// background, then ` · ` and the tail),
+/// else nothing. Model refusals after resolution close the editor and use
+/// the tile's notice.
 ///
 /// The loaded-name completion list hangs from the strip's bottom-left
 /// corner over the chart, so the chart does not reflow as it grows and
@@ -540,6 +548,50 @@ pub(crate) fn render_expr_field(
     let theme = cx.theme();
     let paint = chip_paint(theme, Tone::DangerText);
     let list = crate::popup::render_expr_list(f, tile, tile_id, cx);
+    // Pinned line height and a matching minimum keep the slot one line
+    // whether it is blank, an error or help; truncation keeps a long
+    // tail from wrapping into a second.
+    let one_line = |el: Div| el.text_xs().line_height(rems(1.)).min_h_4().truncate();
+    // The active argument's emphasis: `primary` floored to the readable
+    // ratio on the strip's own background (the list's accent is floored
+    // on the popover's active row, a different ground).
+    let active = to_hsla(readable_on(
+        to_rgb(theme.primary),
+        to_rgb(theme.background),
+        to_rgb(theme.foreground),
+    ));
+    let slot = match (&f.error, &f.help) {
+        (Some(error), _) => one_line(div())
+            .text_color(paint.text)
+            .debug_selector(move || format!("ts-expr-error-{tile_id}"))
+            .child(error.clone()),
+        (None, Some(help)) => one_line(h_flex())
+            .gap_0()
+            .text_color(theme.muted_foreground)
+            .debug_selector(move || format!("ts-expr-help-{tile_id}"))
+            .when(!help.before.is_empty(), |el| {
+                el.child(div().flex_shrink_0().child(help.before.clone()))
+            })
+            .when(!help.active.is_empty(), |el| {
+                el.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(active)
+                        .debug_selector(move || format!("ts-expr-help-active-{tile_id}"))
+                        .child(help.active.clone()),
+                )
+            })
+            .when(!help.after.is_empty(), |el| {
+                el.child(div().flex_shrink_0().child(help.after.clone()))
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(format!(" · {}", help.tail)),
+            ),
+        (None, None) => one_line(div()),
+    };
     v_flex()
         .relative()
         .w_full()
@@ -558,9 +610,7 @@ pub(crate) fn render_expr_field(
             }
         })
         .child(Input::new(&f.input).appearance(false).w_full())
-        .when_some(f.error.clone(), |el, e| {
-            el.child(div().text_xs().text_color(paint.text).child(e))
-        })
+        .child(slot)
         .when_some(list, |el, list| {
             el.child(div().absolute().left_0().bottom_0().child(list))
         })

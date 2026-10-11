@@ -29,6 +29,10 @@ pub const EXPRESSIONS_DOC: &str = "expressions";
 /// The derived-dimension (classification) document's name.
 pub const DIMENSIONS_DOC: &str = "dimensions";
 
+/// The watchlists document, `watchlists.toml`: one whole object per named
+/// list of underlyings (manual names, exclusions and rules over datasets).
+pub const WATCHLISTS_DOC: &str = "watchlists";
+
 /// Documents whose file was renamed: `(old stem, current doc name)`. A layer
 /// directory still holding only the old file loads it under the current name
 /// with a warning; when a layer holds both, the current file wins and the old

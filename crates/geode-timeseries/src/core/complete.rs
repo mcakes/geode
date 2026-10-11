@@ -2,15 +2,19 @@
 //! is in, which loaded names rank against it, and what Tab, Shift+Tab, a
 //! click and Enter write. Pure; the tile owns the input and the focus.
 //!
-//! An expression may reference only a loaded source series, so the
-//! candidates are [`crate::core::Model::series_names`], ranked with the
-//! `:` line's matcher. Word boundaries come from the expression
+//! An expression may reference only a loaded source series and call only
+//! a grammar function, so the candidates are the loaded series names
+//! ([`crate::core::Model::series_names`]) and the function names, each
+//! with its `(`, ranked with the `:` line's matcher; series names rank
+//! first on ties. Word boundaries come from the expression
 //! tokenizer's own character classes, so the completer never offers to
 //! replace text the parser would read as an operator or a number.
 
 use std::ops::Range;
 
-use geode_core::series::expr::{is_ident_char, is_ident_start, is_source_char};
+use geode_core::series::expr::{
+    Function, INDEX_HELP, is_ident_char, is_ident_start, is_source_char,
+};
 use geode_shell::commandline::{accept, rank_candidates};
 use geode_shell::listfilter::Ranked;
 use gpui::SharedString;
@@ -18,6 +22,12 @@ use gpui::SharedString;
 /// Rows the list paints at once. Cycling reaches every candidate; the
 /// painted window follows the lit row.
 pub const MAX_ROWS: usize = 8;
+
+/// Every function as the list offers it: its name with the `(` a call
+/// needs, so writing one lands the caret inside the call.
+pub fn function_names() -> impl Iterator<Item = String> {
+    Function::ALL.iter().map(|f| format!("{}(", f.name()))
+}
 
 /// The byte range of the series name at `caret`, or `None` when the
 /// caret is in a number, where no name can go.
@@ -83,6 +93,8 @@ pub fn name_at(line: &str, caret: usize) -> Option<Range<usize>> {
 #[derive(Debug, Default)]
 pub struct Completion {
     names: Vec<String>,
+    /// How many of `names` are series names; the rest are functions.
+    series: usize,
     labels: Vec<SharedString>,
     candidates: Vec<Ranked>,
     /// The candidate lit in the list: the first until a Tab writes one,
@@ -129,9 +141,12 @@ fn fits(line: &str, range: &Range<usize>) -> bool {
 }
 
 impl Completion {
-    /// Re-rank `names` against the name at `caret`, lighting the first
-    /// candidate.
+    /// Re-rank the series `names` and the function names against the
+    /// name at `caret`, lighting the first candidate.
     pub fn refresh(&mut self, line: &str, caret: usize, names: Vec<String>) {
+        let series = names.len();
+        let mut names = names;
+        names.extend(function_names());
         self.token = name_at(line, caret);
         self.candidates = match &self.token {
             Some(token) => rank_candidates(&names, &line[token.clone()]),
@@ -139,6 +154,7 @@ impl Completion {
         };
         self.labels = names.iter().map(|n| n.clone().into()).collect();
         self.names = names;
+        self.series = series;
         self.highlighted = 0;
         self.written = None;
         self.caret = None;
@@ -152,10 +168,18 @@ impl Completion {
         self.written.is_none() || self.caret != Some(caret)
     }
 
+    /// Whether the list was ranked over `token`, the name at the live
+    /// caret: a caret moved by arrows or a click does not re-rank, so a
+    /// list ranked elsewhere says nothing about the name the caret now
+    /// touches.
+    pub fn ranked_at(&self, token: &Range<usize>) -> bool {
+        self.token.as_ref() == Some(token)
+    }
+
     /// No unambiguous source names were supplied. This can also happen when
     /// loaded source pairs are duplicated and cannot be named uniquely.
     pub fn nothing_loaded(&self) -> bool {
-        self.names.is_empty()
+        self.series == 0
     }
 
     pub fn candidate_count(&self) -> usize {
@@ -212,10 +236,13 @@ impl Completion {
         if !fits(line, &token) {
             return None;
         }
-        let write = Write {
-            range: token,
-            name: self.names[self.candidates[i].row].clone(),
-        };
+        let mut name = self.names[self.candidates[i].row].clone();
+        // A function completed before its own `(` keeps that one: the
+        // caret lands before it rather than between two.
+        if name.ends_with('(') && line.as_bytes().get(token.end) == Some(&b'(') {
+            name.pop();
+        }
+        let write = Write { range: token, name };
         self.token = Some(write.range.start..write.caret());
         self.caret = Some(write.caret());
         self.written = Some(i);
@@ -244,9 +271,190 @@ pub fn expand_unique(line: &str, caret: usize, names: &[String]) -> Option<Write
     }
 }
 
+/// The innermost function call the caret is inside, and which argument
+/// the caret is in (0-based), or the index brackets it is inside.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Enclosing {
+    Call { function: Function, argument: usize },
+    Index,
+}
+
+/// One open bracket between the line's start and the caret.
+#[derive(Clone, Copy)]
+enum Frame {
+    Call {
+        function: Function,
+        argument: usize,
+    },
+    /// A bare `(`, or a call of a word that is not a function.
+    Plain,
+    Index,
+}
+
+/// Scan `line` to `caret` with the tokenizer's character classes: a word
+/// immediately followed by `(` opens a call frame, a bare `(` (or one
+/// after a word that is not a function) a plain frame, `[` an index
+/// frame; `,` at the top of a call frame advances its argument; `)`/`]`
+/// close. The innermost open call or index frame at the caret answers: a
+/// plain frame nests for `)` matching but is transparent, so
+/// `sma((A + B|), 3)` is still `sma`'s first argument. A comma inside a
+/// plain frame advances nothing (the grammar never puts one there).
+/// Nothing when the caret is at top level or the frames are all closed. A
+/// caret past the end or inside a multi-byte character clamps back like
+/// [`name_at`].
+pub fn enclosing_at(line: &str, caret: usize) -> Option<Enclosing> {
+    let mut caret = caret.min(line.len());
+    while !line.is_char_boundary(caret) {
+        caret -= 1;
+    }
+    let line = &line[..caret];
+    let bytes = line.as_bytes();
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if is_ident_start(c) {
+            let start = i;
+            while i < bytes.len() && is_ident_char(bytes[i] as char) {
+                i += 1;
+            }
+            if bytes.get(i) == Some(&b'(') {
+                frames.push(match Function::parse(&line[start..i]) {
+                    Some(function) => Frame::Call {
+                        function,
+                        argument: 0,
+                    },
+                    None => Frame::Plain,
+                });
+                i += 1;
+            }
+            continue;
+        }
+        match c {
+            '(' => frames.push(Frame::Plain),
+            '[' => frames.push(Frame::Index),
+            ')' | ']' => {
+                frames.pop();
+            }
+            ',' => {
+                if let Some(Frame::Call { argument, .. }) = frames.last_mut() {
+                    *argument += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    let innermost = frames.iter().rev().find(|f| !matches!(f, Frame::Plain));
+    match innermost? {
+        Frame::Call { function, argument } => Some(Enclosing::Call {
+            function: *function,
+            argument: *argument,
+        }),
+        Frame::Index => Some(Enclosing::Index),
+        Frame::Plain => unreachable!("plain frames are filtered above"),
+    }
+}
+
+/// What the help line shows: the parts of a signature around the active
+/// argument, the result shape and the meaning.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Help {
+    /// Signature text before the active argument.
+    pub before: String,
+    /// The active argument's text (painted in the accent color), empty when none.
+    pub active: String,
+    /// Signature text after the active argument.
+    pub after: String,
+    /// `result · describe`, or the series note for a series row.
+    pub tail: String,
+}
+
+impl Help {
+    /// `f`'s signature with argument `i` marked, or with nothing marked
+    /// for `None`. The argument names are the comma-separated pieces
+    /// between the parens; a variadic signature (`min(series, …)`) marks
+    /// its `…` for every argument past the named ones, and a fixed one
+    /// marks nothing past its arity.
+    fn call(f: Function, i: Option<usize>) -> Help {
+        let sig = f.signature();
+        let tail = format!("{} · {}", f.result(), f.describe());
+        let open = sig.find('(').map(|p| p + 1).unwrap_or(sig.len());
+        let close = sig.rfind(')').unwrap_or(sig.len());
+        let args: Vec<&str> = sig[open..close].split(", ").collect();
+        let variadic = args.last() == Some(&"…");
+        let i = match i {
+            Some(i) if i < args.len() => i,
+            Some(_) if variadic => args.len() - 1,
+            _ => {
+                return Help {
+                    before: sig.to_string(),
+                    active: String::new(),
+                    after: String::new(),
+                    tail,
+                };
+            }
+        };
+        let before = format!("{}{}", &sig[..open], args[..i].join(", "));
+        let before = if i > 0 { before + ", " } else { before };
+        let after = if i + 1 < args.len() {
+            format!(", {}{}", args[i + 1..].join(", "), &sig[close..])
+        } else {
+            sig[close..].to_string()
+        };
+        Help {
+            before,
+            active: args[i].to_string(),
+            after,
+            tail,
+        }
+    }
+}
+
+/// The help for the current field state, in priority: the lit completion
+/// candidate while a name is being typed at the caret and the list was
+/// ranked over it (`sma(` → sma's help with no active argument; a series
+/// name → `before: name`, `tail: "series"`), else the enclosing call with
+/// its active argument, else the index note, else `None`. With nothing
+/// typed at the caret the list offers every name, so its first row says
+/// nothing about the place the caret is in; the enclosing call does. The
+/// same holds for a list ranked where the caret was before an arrow key
+/// moved it ([`Completion::ranked_at`]).
+pub fn help_for(completion: &Completion, line: &str, caret: usize) -> Option<Help> {
+    let typing = name_at(line, caret).is_some_and(|r| !r.is_empty() && completion.ranked_at(&r));
+    let lit = completion
+        .candidates()
+        .nth(completion.highlighted())
+        .filter(|_| typing);
+    if let Some(name) = lit {
+        return Some(match name.strip_suffix('(').and_then(Function::parse) {
+            Some(f) => Help::call(f, None),
+            None => Help {
+                before: name.to_string(),
+                active: String::new(),
+                after: String::new(),
+                tail: "series".to_string(),
+            },
+        });
+    }
+    match enclosing_at(line, caret)? {
+        Enclosing::Call { function, argument } => Some(Help::call(function, Some(argument))),
+        Enclosing::Index => {
+            let (before, tail) = INDEX_HELP.split_once(" · ")?;
+            Some(Help {
+                before: before.to_string(),
+                active: String::new(),
+                after: String::new(),
+                tail: tail.to_string(),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::series::expr::Function;
 
     fn names(n: &[&str]) -> Vec<String> {
         n.iter().map(|s| s.to_string()).collect()
@@ -316,14 +524,16 @@ mod tests {
     fn the_list_ranks_loaded_names_and_an_empty_name_offers_all() {
         let all = names(&["SPX.close", "VIX", "VIX@demo_rest", "V2X"]);
         let mut c = Completion::default();
+        let every = all.len() + Function::ALL.len();
         c.refresh("", 0, all.clone());
         assert_eq!(
-            c.candidates().collect::<Vec<_>>(),
+            c.candidates().take(all.len()).collect::<Vec<_>>(),
             all,
-            "empty field: every name"
+            "empty field: every series name first"
         );
+        assert_eq!(c.candidate_count(), every, "then every function");
         c.refresh("SPX.close / ", 12, all.clone());
-        assert_eq!(c.candidate_count(), 4, "after an operator: every name");
+        assert_eq!(c.candidate_count(), every, "after an operator: every name");
         c.refresh("SPX.close / VI", 14, all.clone());
         assert_eq!(
             c.candidates().collect::<Vec<_>>(),
@@ -419,7 +629,11 @@ mod tests {
             ("SPX.close / VIX".to_string(), 15)
         );
         assert_eq!(c.highlighted(), 1);
-        assert_eq!(c.pick("SPX.close / VIX", 5), None, "out of range");
+        assert_eq!(
+            c.pick("SPX.close / VIX", 2 + Function::ALL.len()),
+            None,
+            "out of range"
+        );
     }
 
     /// A range cached against other text is refused, never sliced: its
@@ -432,6 +646,57 @@ mod tests {
         let mut c = Completion::default();
         c.refresh("xx AB", 5, names(&["ABC"]));
         assert_eq!(c.pick("xx", 0), None, "past the end");
+    }
+
+    #[test]
+    fn functions_complete_beside_series_names_with_their_paren() {
+        let all = names(&["SPX.close", "VIX"]);
+        let mut c = Completion::default();
+        c.refresh("", 0, all.clone());
+        let cands: Vec<&str> = c.candidates().collect();
+        assert_eq!(&cands[..2], &["SPX.close", "VIX"], "series first");
+        assert_eq!(cands.len(), 2 + Function::ALL.len());
+        assert!(cands.contains(&"sma("));
+        c.refresh("VIX / sm", 8, all.clone());
+        assert_eq!(c.candidates().next(), Some("sma("));
+        assert!(
+            c.candidates().all(|n| n.ends_with('(')),
+            "no series fits `sm`"
+        );
+        let w = c.cycle("VIX / sm", true).unwrap();
+        assert_eq!(
+            w.apply("VIX / sm"),
+            ("VIX / sma(".to_string(), 10),
+            "the caret lands inside the call"
+        );
+        assert!(!c.nothing_loaded());
+        c.refresh("", 0, vec![]);
+        assert!(
+            c.nothing_loaded(),
+            "functions alone are nothing to reference"
+        );
+        assert_eq!(
+            expand_unique("VIX / sm", 8, &all),
+            None,
+            "Enter's expansion is over series names only"
+        );
+    }
+
+    /// Completing a function name whose `(` is already typed writes the
+    /// name alone, so the caret lands before the existing paren rather
+    /// than doubling it.
+    #[test]
+    fn a_function_before_its_own_paren_completes_without_a_second_one() {
+        let mut c = Completion::default();
+        c.refresh("sma(A, 3)", 2, names(&["A"]));
+        let w = c.cycle("sma(A, 3)", true).unwrap();
+        assert_eq!(w.range, 0..3);
+        assert_eq!(w.name, "sma");
+        assert_eq!(w.apply("sma(A, 3)"), ("sma(A, 3)".to_string(), 3));
+        let mut c = Completion::default();
+        c.refresh("VIX / sm", 8, names(&["VIX"]));
+        let w = c.cycle("VIX / sm", true).unwrap();
+        assert_eq!(w.name, "sma(", "no paren follows: written with its own");
     }
 
     #[test]
@@ -459,5 +724,156 @@ mod tests {
             "a number"
         );
         assert_eq!(expand_unique("QQQ", 3, &all), None, "no match");
+    }
+
+    /// `line` with a `|` marking the caret, as the cases below spell it.
+    fn at(marked: &str) -> Option<Enclosing> {
+        let caret = marked.find('|').expect("a caret mark");
+        let line = marked.replacen('|', "", 1);
+        enclosing_at(&line, caret)
+    }
+
+    fn call(function: Function, argument: usize) -> Option<Enclosing> {
+        Some(Enclosing::Call { function, argument })
+    }
+
+    #[test]
+    fn the_enclosing_call_is_the_innermost_open_frame_at_the_caret() {
+        assert_eq!(at("sma(VI|"), call(Function::Sma, 0));
+        assert_eq!(at("sma(VIX, |"), call(Function::Sma, 1));
+        assert_eq!(at("sma(VIX, 20)|"), None, "closed");
+        assert_eq!(at("sma(diff(A|), 3)"), call(Function::Diff, 0), "innermost");
+        assert_eq!(
+            at("sma(diff(A)|, 3)"),
+            call(Function::Sma, 0),
+            "the inner call closed: back in sma's first argument"
+        );
+        assert_eq!(at("(A + sma(B, |2))"), call(Function::Sma, 1));
+        assert_eq!(at("foo(A|"), None, "an unknown word opens a plain frame");
+        assert_eq!(
+            at("sma((A + B|), 3)"),
+            call(Function::Sma, 0),
+            "a bare paren is transparent: still sma's first argument"
+        );
+        assert_eq!(
+            at("sma((A, B|), 3)"),
+            call(Function::Sma, 0),
+            "a comma inside a plain frame does not advance the call's argument"
+        );
+        assert_eq!(
+            at("sma((A + B), |3)"),
+            call(Function::Sma, 1),
+            "the plain frame closed; the comma at sma's top advances"
+        );
+        assert_eq!(at("foo(sma(A|))"), call(Function::Sma, 0));
+        assert_eq!(
+            at("sma(foo(A|), 3)"),
+            call(Function::Sma, 0),
+            "an unknown call is transparent too"
+        );
+        assert_eq!(at("A[|"), Some(Enclosing::Index));
+        assert_eq!(at("A[-1]|"), None);
+        assert_eq!(at("max(A, B, |"), call(Function::Max, 2));
+        assert_eq!(at("sma |(A"), None, "a space before the paren: not a call");
+        assert_eq!(at("sma|(A"), None, "before the paren: not inside the call");
+        assert_eq!(at("|sma(A"), None, "top level");
+        assert_eq!(enclosing_at("", 0), None);
+        assert_eq!(
+            enclosing_at("sma(é", 5),
+            call(Function::Sma, 0),
+            "a caret inside a multi-byte char clamps back"
+        );
+        assert_eq!(
+            enclosing_at("sma(A", 99),
+            call(Function::Sma, 0),
+            "past the end"
+        );
+    }
+
+    fn help(before: &str, active: &str, after: &str, tail: &str) -> Option<Help> {
+        Some(Help {
+            before: before.into(),
+            active: active.into(),
+            after: after.into(),
+            tail: tail.into(),
+        })
+    }
+
+    const SMA_TAIL: &str = "series · mean of the last n points; blank unless all n have a value";
+
+    #[test]
+    fn help_marks_the_active_argument_of_the_enclosing_call() {
+        let none = Completion::default();
+        assert_eq!(
+            help_for(&none, "sma(VIX, 2", 10),
+            help("sma(series, ", "n", ")", SMA_TAIL)
+        );
+        assert_eq!(
+            help_for(&none, "sma(VIX", 7),
+            help("sma(", "series", ", n)", SMA_TAIL)
+        );
+        assert_eq!(
+            help_for(&none, "min(A, B, 2", 11),
+            help(
+                "min(series, ",
+                "…",
+                ")",
+                "number or series · the smallest: over the range alone, per point with more arguments"
+            ),
+            "past the named arguments of a variadic call: the ellipsis"
+        );
+        assert_eq!(
+            help_for(&none, "sma(A, 2, 3", 11),
+            help("sma(series, n)", "", "", SMA_TAIL),
+            "past the arity: the signature with nothing active"
+        );
+        assert_eq!(
+            help_for(&none, "A[2", 3),
+            help(
+                "A[k]",
+                "",
+                "",
+                "number · the point at offset k, 0 the first, from the end when k is negative"
+            )
+        );
+        assert_eq!(help_for(&none, "A + 2", 5), None, "top level, in a number");
+    }
+
+    /// The lit candidate wins while a name is being typed; with nothing
+    /// typed at the caret (the list then offers every name) the enclosing
+    /// call answers, so `sma(VIX, |` describes `n`, not the first series.
+    #[test]
+    fn help_describes_the_lit_candidate_while_a_name_is_typed() {
+        let all = names(&["SPX.close", "VIX"]);
+        let mut c = Completion::default();
+        c.refresh("sma(VI", 6, all.clone());
+        assert_eq!(c.candidates().next(), Some("VIX"));
+        assert_eq!(
+            help_for(&c, "sma(VI", 6),
+            help("VIX", "", "", "series"),
+            "a lit series row"
+        );
+        c.refresh("VIX / sm", 8, all.clone());
+        assert_eq!(c.candidates().next(), Some("sma("));
+        assert_eq!(
+            help_for(&c, "VIX / sm", 8),
+            help("sma(series, n)", "", "", SMA_TAIL),
+            "a lit function row: its signature with no active argument"
+        );
+        c.refresh("sma(VIX, ", 9, all.clone());
+        assert!(c.candidate_count() > 0, "an empty name offers every name");
+        assert_eq!(
+            help_for(&c, "sma(VIX, ", 9),
+            help("sma(series, ", "n", ")", SMA_TAIL),
+            "nothing typed at the caret: the enclosing call, not the first row"
+        );
+        assert_eq!(
+            help_for(&c, "sma(VIX, ", 7),
+            help("sma(", "series", ", n)", SMA_TAIL),
+            "the caret moved back onto VIX without a re-rank: the list is stale, the call answers"
+        );
+        c.refresh("QQQ", 3, all);
+        assert_eq!(c.candidate_count(), 0);
+        assert_eq!(help_for(&c, "QQQ", 3), None, "no candidate, no call");
     }
 }

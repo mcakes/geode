@@ -41,6 +41,8 @@ geode-timeseries.workspace = true
 # The vol slice viewer's factory shares the bridge's DataHandle.
 geode-volslice.workspace = true
 geode-classifications.workspace = true
+# The watchlist factory takes the bridge's config snapshot and refresh hook.
+geode-watchlist.workspace = true
 # The bridge routes pricing and local-sheet outcomes to this factory.
 geode-pricer.workspace = true
 # Row menu actions registered at the composition root: Open in Nemo.

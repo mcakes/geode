@@ -21413,21 +21413,24 @@ run_mutation "expr: a reference span stops before its source" \
   geode-core \
   references_answer_each_name_with_its_byte_span_in_order
 
-# `max(s1, s2)` is not arithmetic, and the `(` right after a word is the
-# only place the tokenizer can say so in the trader's own words. Without
-# it the word becomes an identity and the parse fails later with
-# "unexpected token", pointing at a paren rather than at the boundary.
-run_mutation "expr: a function call is accepted" \
+# A word right before `(` is a call, and an unknown one is refused by
+# name in the trader's own text. Let it fall through as a reference and
+# the parse fails later with "unexpected token", pointing at the paren
+# rather than at the word that is wrong.
+run_mutation "expr: an unknown function is a name" \
   crates/geode-core/src/series/expr.rs \
-  '                if i < bytes.len() && bytes[i] == b'"'"'('"'"' {
-                    return Err(ParseError {
-                        position: i,
-                        message: ARITHMETIC_ONLY.into(),
-                    });
-                }' \
-  '                let _ = ();' \
+  '                        None => {
+                            return Err(ParseError {
+                                position: start,
+                                message: format!("unknown function '"'"'{word}'"'"'"),
+                            });
+                        }' \
+  '                        None => Token::Ref(RefName {
+                            identity: word.to_string(),
+                            source: None,
+                        }),' \
   geode-core \
-  foreign_tokens_are_refused_with_the_arithmetic_only_message
+  a_word_before_a_paren_is_a_call_and_anywhere_else_a_name
 
 # MAX_DEPTH bounds syntactic nesting, but a flat arithmetic chain still
 # builds a deep tree. The token bound limits recursive resolution, lowering,
@@ -21439,6 +21442,131 @@ run_mutation "expr: the token bound is off" \
   '    if false {' \
   geode-core \
   a_long_chain_is_refused_by_the_token_bound
+
+# A fold needs a series to fold. Accept a scalar and `mean(2)` is no
+# longer refused as a shape by name: it reaches the lowering as a fold
+# over a literal and the trader reads a number for nonsense.
+run_mutation "expr: a fold of a scalar is accepted" \
+  crates/geode-core/src/series/expr.rs \
+  '                Shape::Scalar => Err(format!("{name} needs a series")),' \
+  '                Shape::Scalar => Ok(()),' \
+  geode-core \
+  shape_refusals_name_the_function_and_what_it_takes
+
+# `series_slots` is what the bucket join reads. A fold reads its operand
+# as one number, not as a series, so that operand must stay out of the
+# join: count it and `A / mean(B)` loses every bucket of A that B lacks.
+run_mutation "expr: a fold's operand counts as a series operand" \
+  crates/geode-core/src/series/expr.rs \
+  '                    Kind::Fold => true,' \
+  '                    Kind::Fold => false,' \
+  geode-core \
+  series_slots_leave_out_what_a_fold_or_index_reads
+
+# The grid opens on the join of the SERIES operands alone; `slots` also
+# holds the folded and indexed ones. Join on those too and a fold
+# narrows the buckets it was meant to leave alone, and a scalar line
+# shrinks to the intersection instead of spanning the union.
+run_mutation "series query: a scalar operand narrows the buckets" \
+  crates/geode-data/src/query/series.rs \
+  '        let series = e.series_slots();' \
+  '        let series = e.slots();' \
+  geode-data \
+  a_scalar_line_spans_the_union_of_the_series_it_folds_and_a_fold_never_narrows
+
+# A rolling figure is NULL until the last n points are non-null, never
+# a partial-window figure that reads as a full one. Relax the guard to
+# any point at all and the first n - 1 rows carry an average of fewer
+# points under the name of an n-point one.
+run_mutation "series query: a rolling window answers before it is full" \
+  crates/geode-data/src/query/series.rs \
+  '                let full = format!("count({a}) {w} = {n}");' \
+  '                let full = format!("count({a}) {w} >= 1");' \
+  geode-data \
+  rolling_functions_are_null_until_their_window_is_full_of_points
+
+# `A[k]` counts points, and a NULL value is not a point. Count it and
+# `A[0]` over a series whose first value is NULL answers NULL where the
+# trader asked for its first value.
+run_mutation "series query: an index counts NULL points" \
+  crates/geode-data/src/query/series.rs \
+  '    format!("(select v from {rel} where v is not null order by b{order} offset {offset} limit 1)")' \
+  '    format!("(select v from {rel} order by b{order} offset {offset} limit 1)")' \
+  geode-data \
+  along_functions_follow_point_order_across_gaps_and_nest_by_hoisting
+
+# A negative index counts from the END: `A[-1]` is the last value, the
+# one `A / A[-1]` rebases to. Count from the start and it is the second,
+# which is still a number on the chart.
+run_mutation "series query: a negative index counts from the start" \
+  crates/geode-data/src/query/series.rs \
+  '    let (order, offset) = if k >= 0 { ("", k) } else { (" desc", -k - 1) };' \
+  '    let (order, offset) = ("", k.abs());' \
+  geode-data \
+  folds_and_indexes_read_the_whole_range_and_skip_gaps
+
+# `log` of a non-positive is a gap, not DuckDB's answer: `ln` of zero
+# or of a negative is an engine error, so one bad point fails the whole
+# query and the chart shows a refusal instead of a line.
+run_mutation "series query: log of a non-positive is not guarded" \
+  crates/geode-data/src/query/series.rs \
+  '                    Function::Log => format!("(case when ({a}) > 0 then ln({a}) else null end)"),' \
+  '                    Function::Log => format!("ln({a})"),' \
+  geode-data \
+  pointwise_functions_guard_their_domains_and_join_their_series
+
+# SQL forbids a window inside a window, so `diff(diff(A))` stages the
+# inner value as a column first. Skip the hoist and the statement nests
+# one window in another, which DuckDB refuses; the test reads the stage
+# out of the compiled SQL.
+run_mutation "series query: a window over a window is not hoisted" \
+  crates/geode-data/src/query/series.rs \
+  '                let a = if windowed { self.hoist(a, g) } else { a };' \
+  '                let a = { let _ = windowed; a };' \
+  geode-data \
+  along_functions_follow_point_order_across_gaps_and_nest_by_hoisting
+
+# `pct` over a zero previous value is a gap. Drop the guard and DOUBLE
+# division answers infinity, which the chart draws as a point.
+run_mutation "series query: pct divides by a zero previous value" \
+  crates/geode-data/src/query/series.rs \
+  '            Function::Pct => format!(
+                "(case when lag({a}) {ord} = 0 then null else (({a}) - lag({a}) {ord}) / lag({a}) {ord} end)"
+            ),' \
+  '            Function::Pct => format!("((({a}) - lag({a}) {ord}) / lag({a}) {ord})"),' \
+  geode-data \
+  a_zero_previous_value_is_a_gap_in_pct
+
+# A window runs over the points of the series its operand reads, not
+# over the slot's join grid. Lower it on the join and `sma(A, 2) / B`
+# averages the two JOINED rows of A (two of B's dates) where B is
+# sparser: a plausible wrong number, which the test reads back.
+run_mutation "series query: a window runs over the join grid" \
+  crates/geode-data/src/query/series.rs \
+  '                if !own.is_empty() && own != g.slots {' \
+  '                if false {' \
+  geode-data \
+  a_window_reads_its_operands_own_points_not_the_join_grid
+
+# Guards and division repeat their operand text, so a deep nest lowers
+# to a string that doubles per level, on the UI thread. Drop the cap
+# and the compile builds it instead of refusing.
+run_mutation "series query: the lowered SQL is unbounded" \
+  crates/geode-data/src/query/series.rs \
+  '        if sql.len() > MAX_LOWERED_SQL {' \
+  '        if false {' \
+  geode-data \
+  a_nest_that_would_blow_up_the_sql_is_refused_by_size
+
+# The shape check runs before any name is looked up, so `mean(2)` is
+# refused by the function's name. Drop its result and the expression
+# resolves (it holds no name to miss) and is sent to the data tier.
+run_mutation "timeseries: a shape error reaches resolution" \
+  crates/geode-timeseries/src/core/resolve.rs \
+  '    ast.shape()?;' \
+  '    let _ = ast.shape();' \
+  geode-timeseries \
+  a_shape_error_is_refused_before_resolution
 
 # Expressions accept source-series operands only. Accepting an expression
 # operand without dependency ordering can emit its CTE before its inputs,
@@ -26805,8 +26933,8 @@ run_mutation "modal back: a click is ignored while a confirm is pending" \
 # The expressions document replaces whole objects by name across layers.
 run_mutation "named expr: the user layer replaces an object whole" \
   crates/geode-core/src/config/merge.rs \
-  '        | "expressions" => Some(1),' \
-  '        | "expressions_off" => Some(1),' \
+  '        | "expressions"' \
+  '        | "expressions_off"' \
   geode-core \
   the_user_layer_replaces_a_desk_object_whole
 
@@ -37685,8 +37813,8 @@ run_mutation "value colors: a user none clears the effective color" \
 # A value_colors edit alone reaches the app's reload handler.
 run_mutation "value colors: a change alone emits ConfigReloaded" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                || changed(geode_core::config::VALUE_COLORS_DOC);' \
-  '                ;' \
+  '                || changed(geode_core::config::VALUE_COLORS_DOC)' \
+  '                || false' \
   geode-shell \
   a_value_colors_change_alone_emits_config_reloaded
 
@@ -39335,6 +39463,238 @@ run_mutation "notice dismissal: g c's refusal is transient" \
   '        if false && self.notices.nothing_to_switch && *n == Notice::danger(NOTHING_TO_SWITCH) {' \
   geode-classifications \
   the_switch_refusal_clears_on_a_click_or_escape_and_returns_on_g_c
+
+# ---- Watchlists: seams ----
+#
+# A watchlist is a config object resolved in the data layer. The set
+# algebra, the fold's refusals, the reader's drops and the cache's triggers
+# and answer gates are the contracts.
+
+# An excluded name is never a live member, whatever produced it.
+run_mutation "watchlist: exclude wins" \
+  crates/geode-core/src/watchlist/members.rs \
+  '            let origin = if exclude.iter().any(|e| e == name) {' \
+  '            let origin = if false {' \
+  geode-core \
+  an_excluded_name_is_never_a_live_member_whatever_produced_it
+
+# A name in both include and exclude drops the object.
+run_mutation "watchlist: include and exclude clash drops the object" \
+  crates/geode-core/src/watchlist/mod.rs \
+  '        if let Some(both) = include.iter().find(|n| exclude.contains(n)) {' \
+  '        if let Some(both) = include.iter().find(|n| false && exclude.contains(n)) {' \
+  geode-core \
+  a_name_in_both_include_and_exclude_drops_the_object_with_an_error
+
+# List names clash ignoring case.
+run_mutation "watchlist: names clash ignoring case" \
+  crates/geode-core/src/watchlist/mod.rs \
+  '    if let Some(other) = existing.find(|n| n.to_lowercase() == lower) {' \
+  '    if let Some(other) = existing.find(|n| *n == name) {' \
+  geode-core \
+  a_case_insensitive_clash_keeps_the_first_and_drops_the_second
+
+# A bad rule is reported by index; the others still fold.
+run_mutation "watchlist: a bad rule does not drop the list" \
+  crates/geode-core/src/watchlist/fold.rs \
+  '            Err(reason) => errors.push(RuleError { index, reason }),' \
+  '            Err(reason) => { rules.clear(); errors.push(RuleError { index, reason }) }' \
+  geode-core \
+  an_expression_rule_parses_and_validates_against_its_dataset
+
+# A publish re-resolves only lists with a good rule over that dataset.
+run_mutation "watchlist: publish trigger filters by dataset" \
+  crates/geode-core/src/watchlist/state.rs \
+  '        .filter(|(_, f)| f.rules.iter().any(|r| r.dataset == dataset))' \
+  '        .filter(|(_, f)| !f.rules.is_empty())' \
+  geode-core \
+  a_publish_names_only_lists_with_a_good_rule_over_the_dataset
+
+# A changed classification mapping re-resolves the lists reading it:
+# the rule's scope is the same whatever the mapping, so the mapping itself
+# is part of the comparison.
+run_mutation "watchlist: a changed classification re-resolves" \
+  crates/geode-core/src/watchlist/state.rs \
+  '            o.list == f.list && o.rules == f.rules && o.errors == f.errors && o.dims == f.dims' \
+  '            o.list == f.list && o.rules == f.rules && o.errors == f.errors' \
+  geode-core \
+  a_changed_classification_mapping_resolves_the_list_again
+
+# A name a rule already supplies is refused, naming the rule.
+run_mutation "watchlist: add refused when a rule supplies" \
+  crates/geode-core/src/watchlist/edit.rs \
+  '                return Err(format!("{name} is already here from {}", rule_label(rules)));' \
+  '                let _ = rule_label(rules);' \
+  geode-core \
+  add_refuses_a_name_a_rule_already_supplies_naming_the_rule
+
+# Undo skips a row changed since.
+run_mutation "watchlist: undo skips a row changed since" \
+  crates/geode-core/src/watchlist/edit.rs \
+  '                if manual_of(&next, name) != *after {' \
+  '                if false {' \
+  geode-core \
+  undo_replays_over_the_current_object_and_skips_rows_changed_since
+
+# The dataset filter reads one dataset alone.
+run_mutation "distinct: dataset filter narrows" \
+  crates/geode-data/src/query/distinct.rs \
+  '            .is_some_and(|only| only != ds.name)' \
+  '            .is_some_and(|_only| false)' \
+  geode-data \
+  a_dataset_filter_reads_that_dataset_alone
+
+# A failed rule is reported, not swallowed.
+run_mutation "watchlist query: a failed rule is reported by index" \
+  crates/geode-data/src/query/watchlist.rs \
+  '                Err(reason) => rules_failed.push((rule.index, reason)),' \
+  '                Err(_) => {}' \
+  geode-data \
+  two_rules_union_include_adds_exclude_drops_and_a_bad_rule_is_reported
+
+# An answer to a definition since replaced is beneath the list's tag floor,
+# even while it is still the latest tag because the refresh was refused.
+run_mutation "watchlist cache: answer drops a tag at or below the floor" \
+  crates/geode-app/src/watchlists.rs \
+  '            || outcome.tag <= self.floor.borrow().get(&outcome.name).copied().unwrap_or(0)' \
+  '            || outcome.tag < self.floor.borrow().get(&outcome.name).copied().unwrap_or(0)' \
+  geode-app \
+  a_definition_change_followed_by_busy_drops_the_old_answer
+
+# An answer under another key than the list's own is not its answer.
+run_mutation "watchlist cache: answer drops a foreign key" \
+  crates/geode-app/src/watchlists.rs \
+  '        if self.keys.borrow().get(&outcome.name) != Some(&outcome.key)' \
+  '        if false' \
+  geode-app \
+  only_the_latest_tag_is_applied
+
+# The publish trigger sits on the non-local branch: a local publish never
+# re-resolves a list, and a publish of a rule's dataset does.
+run_mutation "watchlist cache: the publish trigger sits on the non-local branch" \
+  crates/geode-app/src/bridge.rs \
+  '                        if local_datasets.contains(&dataset) {' \
+  '                        if !local_datasets.contains(&dataset) {' \
+  geode-app \
+  a_publish_of_a_rules_dataset_re_resolves_unless_local
+
+# A watchlists.toml edit alone reaches the bridge as ConfigReloaded.
+run_mutation "shell: a watchlists change alone reloads" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                || changed(geode_core::config::WATCHLISTS_DOC)' \
+  '                || false' \
+  geode-shell \
+  a_watchlists_change_alone_emits_config_reloaded
+
+# The range holds exactly WATCHLIST_KEY_COUNT keys and ends below the
+# shell's single reserved keys.
+run_mutation "shell: the watchlist key range's upper edge is exclusive" \
+  crates/geode-shell/src/shell/mod.rs \
+  '    key.0 >= WATCHLIST_KEY_BASE.0 && key.0 < WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT' \
+  '    key.0 >= WATCHLIST_KEY_BASE.0 && key.0 <= WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT' \
+  geode-shell \
+  watchlist_keys_are_the_reserved_range_and_nothing_else
+
+# ---- Watchlists: tile ----
+#
+# The tile shows one list from the global and writes the whole object
+# through the config door. The grid's pending rows and order, the verbs'
+# gates and refusals, the history's reload rule and the emission are the
+# contracts.
+
+# A row whose manual state differs between the pending and the saved
+# definition is marked pending.
+run_mutation "watchlist tile: a pending manual change marks its row" \
+  crates/geode-watchlist/src/core/rows.rs \
+  '                .is_some_and(|p| p.of(&m.name) != saved.of(&m.name));' \
+  '                .is_some_and(|p| false && p.of(&m.name) != saved.of(&m.name));' \
+  geode-watchlist \
+  a_pending_include_adds_a_manual_pending_row
+
+# The default order puts excluded rows last.
+run_mutation "watchlist tile: excluded rows sort last by default" \
+  crates/geode-watchlist/src/core/grid.rs \
+  '            .cmp(&b.is_excluded())' \
+  '            .cmp(&a.is_excluded())' \
+  geode-watchlist \
+  the_default_order_is_by_name_with_excluded_last
+
+# A name a rule already supplies is refused under the field, not written.
+run_mutation "watchlist tile: add refusal stays under the field" \
+  crates/geode-watchlist/src/tile/field.rs \
+  '                match edit::add(&current, &members, &names) {' \
+  '                match edit::add(&current, &members, &names).or_else(|_| edit::add(&current, &[], &names)) {' \
+  geode-watchlist \
+  add_of_a_rule_supplied_name_is_refused_under_the_field
+
+# x on a name that is manual and rule-supplied says it did both.
+run_mutation "watchlist tile: x names both outcomes on a manual-and-rule name" \
+  crates/geode-watchlist/src/tile/verbs.rs \
+  '            Origin::Both(_) => format!("removed and excluded {one}"),' \
+  '            Origin::Both(_) => format!("removed {one}"),' \
+  geode-watchlist \
+  remove_of_a_manual_and_rule_name_writes_once_and_undoes_whole
+
+# A reload equal to the base keeps the pending object: the write is still
+# on its way.
+run_mutation "watchlist tile: a reload equal to the base keeps the pending edit" \
+  crates/geode-watchlist/src/core/history.rs \
+  '        } else if self.base.as_ref() == Some(config) {' \
+  '        } else if false {' \
+  geode-watchlist \
+  an_unrelated_reload_keeps_the_pending_edit
+
+# A clone writes the new object only; the source is never touched.
+run_mutation "watchlist tile: clone never touches the source list" \
+  crates/geode-watchlist/src/tile/objects.rs \
+  '            vec![set_edit(&to, &current)],' \
+  '            vec![set_edit(&to, &current), set_edit(&from, &current)],' \
+  geode-watchlist \
+  clone_writes_one_new_user_object_and_no_fork
+
+# The member verbs are refused while the shown list's revert is on its way.
+run_mutation "watchlist tile: the revert gate refuses the member verbs" \
+  crates/geode-watchlist/src/tile/verbs.rs \
+  '            Some(name) => Err(Self::reverting_text(name)),' \
+  '            Some(_name) => Ok(()),' \
+  geode-watchlist \
+  revert_is_offered_only_over_a_shadowed_user_copy_and_gates_the_verbs
+
+# An expression a rule cannot run is refused before it is written.
+run_mutation "watchlist tile: an unfoldable expression is refused" \
+  crates/geode-watchlist/src/core/prompt.rs \
+  '            let r = rule(dataset, None, Some(text));' \
+  '            let r = rule(dataset, None, Some(text)); return Step::Rules(ctx.with(r, *replace));' \
+  geode-watchlist \
+  the_expression_step_folds_against_the_dataset_and_replaces_in_place
+
+# No row under the cursor posts nothing: the group keeps its scope.
+run_mutation "watchlist tile: no cursor emits nothing" \
+  crates/geode-watchlist/src/tile/mod.rs \
+  '                None => CursorScope::Nothing,' \
+  '                None => CursorScope::Path(underlying_scope("")),' \
+  geode-watchlist \
+  no_cursor_emits_nothing
+
+# The help line describes the innermost call the caret is inside. Answering
+# from the first open frame would describe `sma` while the caret sits in
+# `diff`'s argument.
+run_mutation "expr help: the outermost call wins" \
+  crates/geode-timeseries/src/core/complete.rs \
+  '    let innermost = frames.iter().rev().find(|f| !matches!(f, Frame::Plain));' \
+  '    let innermost = frames.iter().find(|f| !matches!(f, Frame::Plain));' \
+  geode-timeseries \
+  the_enclosing_call_is_the_innermost_open_frame_at_the_caret
+
+# The slot under the expression field is one line shared with the inline
+# error, error first: a help line painted over the refusal would hide why
+# Enter did nothing.
+run_mutation "expr help: help paints over an error" \
+  crates/geode-timeseries/src/header.rs \
+  '    let slot = match (&f.error, &f.help) {' \
+  '    let slot = match (&f.error.clone().filter(|_| f.help.is_none()), &f.help) {' \
+  geode-timeseries \
+  an_error_takes_the_help_lines_slot_until_typing_clears_it
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

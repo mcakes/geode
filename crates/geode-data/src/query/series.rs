@@ -16,7 +16,7 @@ use crate::store::series::{coverage_table, from_micros, micros, series_table};
 use duckdb::types::Value;
 use geode_core::query::AsOf;
 use geode_core::schema::SchemaSpec;
-use geode_core::series::expr::{Ast, Expr, Op};
+use geode_core::series::expr::{Ast, Expr, Function, Kind, Op, count_arg};
 use geode_core::series::{
     BucketRule, MAX_BINS, MIN_BINS, SeriesParams, SeriesResult, SlotKind, SlotProvenance,
     SlotResult,
@@ -65,32 +65,378 @@ fn aggregate(rule: BucketRule) -> &'static str {
     }
 }
 
-/// One expression node as SQL. Every binary node is wrapped in exactly
-/// one pair of parentheses, so the tree's shape — not SQL's precedence —
-/// decides what binds to what; a division carries its own zero guard
-/// inside that pair, because a NULL is the only honest answer for a
-/// bucket whose denominator is zero.
-fn lower(e: &Expr) -> Result<String, StoreError> {
-    Ok(match e {
-        Ast::Ref(n) => format!("s{n}.v"),
-        Ast::Num(x) => {
-            if !x.is_finite() {
-                return Err(refuse(format!("literal {x} is not a finite number")));
+/// One expression slot's CTEs: its grid stages `s{n}_0`, `s{n}_1`, …
+/// then the final `s{n}`. A stage is added where SQL cannot nest (a
+/// window over a window, or a fold over anything but a plain source)
+/// and where the join grid would be wrong (a window whose operand reads
+/// fewer series than the slot joins). Every stage name derives from the
+/// slot number, so two slots never collide.
+struct Lowering {
+    slot: u8,
+    ctes: Vec<String>,
+    stages: usize,
+}
+
+/// The stage chain a series-shaped subtree is lowered on. `name` is
+/// its latest stage; a hoist advances it. `slots` are the series slots
+/// stage 0 joined (empty for a union grid): a window whose operand reads
+/// fewer of them must not run here, where the join has already dropped
+/// the operand's points the other series lack.
+struct Grid {
+    name: String,
+    slots: Vec<u8>,
+}
+
+/// The longest lowered SQL a node may produce. Guards, division and
+/// min/max repeat their operand text, so each lowering level multiplies
+/// the text by a small constant; checking after every node reaches the
+/// cap before the next multiplication, and the largest string ever
+/// built is a few multiples of this. Without it a pasted nest thirty
+/// levels deep builds gigabytes on the UI thread.
+pub const MAX_LOWERED_SQL: usize = 64 * 1024;
+
+/// `(select … )` reading the k-th non-null value of `rel` by bucket
+/// order, from the start for `k >= 0` and from the end otherwise; past
+/// either end the subquery is NULL.
+fn index_sql(rel: &str, k: i64) -> String {
+    let (order, offset) = if k >= 0 { ("", k) } else { (" desc", -k - 1) };
+    format!("(select v from {rel} where v is not null order by b{order} offset {offset} limit 1)")
+}
+
+/// A fold as a scalar subquery over `rel`'s `v`. Every aggregate skips
+/// NULL; `count` is cast because the points reader binds every value
+/// column as a DOUBLE.
+fn fold_sql(f: Function, rel: &str) -> String {
+    match f {
+        Function::First => index_sql(rel, 0),
+        Function::Last => index_sql(rel, -1),
+        Function::Min => format!("(select min(v) from {rel})"),
+        Function::Max => format!("(select max(v) from {rel})"),
+        Function::Mean => format!("(select avg(v) from {rel})"),
+        Function::Median => format!("(select quantile_cont(v, 0.5) from {rel})"),
+        Function::Std => format!("(select stddev_samp(v) from {rel})"),
+        Function::Sum => format!("(select sum(v) from {rel})"),
+        Function::Count => format!("(select cast(count(v) as double) from {rel})"),
+        _ => unreachable!("fold_sql is called for folds only"),
+    }
+}
+
+/// Lower one expression slot. `validate` has already run the shape
+/// check and refused an expression with no slot.
+fn lower_slot(slot: u8, e: &Expr) -> Result<Vec<String>, StoreError> {
+    if e.slots().is_empty() {
+        return Err(refuse(format!(
+            "slot {slot}: an expression must reference at least one slot"
+        )));
+    }
+    let mut l = Lowering {
+        slot,
+        ctes: Vec::new(),
+        stages: 0,
+    };
+    let mut g = l.open_grid(e);
+    let (sql, _) = l.lower(e, &mut g)?;
+    l.ctes.push(format!(
+        "s{slot} as (\n  select b, {sql} as v\n  from {}\n)",
+        g.name
+    ));
+    Ok(l.ctes)
+}
+
+impl Lowering {
+    fn stage_name(&mut self) -> String {
+        let name = format!("s{}_{}", self.slot, self.stages);
+        self.stages += 1;
+        name
+    }
+
+    /// Stage 0 of a grid for `e`: the inner join of the slots `e` reads
+    /// as series, each as a `v{m}` column; or, for a scalar-shaped `e`,
+    /// the union of the buckets of every slot it folds, so the flat line
+    /// spans them all. A fold's operand never narrows the join.
+    fn open_grid(&mut self, e: &Expr) -> Grid {
+        let name = self.stage_name();
+        let series = e.series_slots();
+        let sql = match series.split_first() {
+            Some((anchor, rest)) => {
+                let cols = series
+                    .iter()
+                    .map(|m| format!("s{m}.v as v{m}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let joins: String = rest
+                    .iter()
+                    .map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))
+                    .collect();
+                format!(
+                    "{name} as (\n  select s{anchor}.b as b, {cols}\n  from s{anchor}{joins}\n)"
+                )
             }
-            format!("{x:?}")
+            None => {
+                let union = e
+                    .slots()
+                    .iter()
+                    .map(|m| format!("select b from s{m}"))
+                    .collect::<Vec<_>>()
+                    .join(" union ");
+                format!("{name} as (\n  select b from ({union})\n)")
+            }
+        };
+        self.ctes.push(sql);
+        Grid {
+            name,
+            slots: series,
         }
-        Ast::Neg(inner) => format!("(-({}))", lower(inner)?),
-        Ast::Bin(op, l, r) => {
-            let (l, r) = (lower(l)?, lower(r)?);
-            let inner = match op {
-                Op::Add => format!("({l}) + ({r})"),
-                Op::Sub => format!("({l}) - ({r})"),
-                Op::Mul => format!("({l}) * ({r})"),
-                Op::Div => format!("(case when ({r}) = 0 then null else ({l}) / ({r}) end)"),
-            };
-            format!("({inner})")
+    }
+
+    /// Move `sql`, a value over `g`'s latest stage, into a column of a
+    /// new stage and answer the column, so a window can read it: SQL
+    /// forbids a window inside a window.
+    fn hoist(&mut self, sql: String, g: &mut Grid) -> String {
+        let k = self.stages;
+        let name = self.stage_name();
+        let col = format!("c{k}");
+        self.ctes.push(format!(
+            "{name} as (\n  select *, {sql} as {col}\n  from {}\n)",
+            g.name
+        ));
+        g.name = name;
+        col
+    }
+
+    /// The relation a fold or an index reads, with the value as `v`: the
+    /// source CTE itself for a plain reference, else a stage holding `x`
+    /// lowered on a grid of its own.
+    fn fold_rel(&mut self, x: &Expr) -> Result<String, StoreError> {
+        if let Ast::Ref(m) = x {
+            return Ok(format!("s{m}"));
         }
-    })
+        let mut g = self.open_grid(x);
+        let (sql, _) = self.lower(x, &mut g)?;
+        let name = self.stage_name();
+        self.ctes.push(format!(
+            "{name} as (\n  select b, {sql} as v\n  from {}\n)",
+            g.name
+        ));
+        Ok(name)
+    }
+
+    /// `(sql, windowed)`: the SQL for `e` over `g`'s latest stage, and
+    /// whether it holds a window function, which a window over it must
+    /// hoist. Every binary node is wrapped in exactly one pair of
+    /// parentheses, so the tree's shape — not SQL's precedence — decides
+    /// what binds to what; a division carries its own zero guard inside
+    /// that pair, because a NULL is the only honest answer for a bucket
+    /// whose denominator is zero.
+    fn lower(&mut self, e: &Expr, g: &mut Grid) -> Result<(String, bool), StoreError> {
+        let (sql, windowed) = match e {
+            Ast::Ref(m) => (format!("v{m}"), false),
+            Ast::Num(x) => {
+                if !x.is_finite() {
+                    return Err(refuse(format!("literal {x} is not a finite number")));
+                }
+                (format!("{x:?}"), false)
+            }
+            Ast::Neg(inner) => {
+                let (s, w) = self.lower(inner, g)?;
+                (format!("(-({s}))"), w)
+            }
+            Ast::Bin(op, l, r) => {
+                let (l, wl) = self.lower(l, g)?;
+                let (r, wr) = self.lower(r, g)?;
+                let inner = match op {
+                    Op::Add => format!("({l}) + ({r})"),
+                    Op::Sub => format!("({l}) - ({r})"),
+                    Op::Mul => format!("({l}) * ({r})"),
+                    Op::Div => format!("(case when ({r}) = 0 then null else ({l}) / ({r}) end)"),
+                };
+                (format!("({inner})"), wl || wr)
+            }
+            Ast::Index(x, k) => {
+                let rel = self.fold_rel(x)?;
+                (index_sql(&rel, *k), false)
+            }
+            Ast::Call(f, args) => self.call(e, *f, args, g)?,
+        };
+        if sql.len() > MAX_LOWERED_SQL {
+            return Err(refuse(format!(
+                "slot {}: expression is too large to compile",
+                self.slot
+            )));
+        }
+        Ok((sql, windowed))
+    }
+
+    /// `e` is the call node itself, `f` and `args` its parts: a window
+    /// whose operand reads fewer series than `g` joined is lowered on a
+    /// grid of its own from `e`.
+    fn call(
+        &mut self,
+        e: &Expr,
+        f: Function,
+        args: &[Expr],
+        g: &mut Grid,
+    ) -> Result<(String, bool), StoreError> {
+        let Some(first) = args.first() else {
+            return Err(refuse(format!(
+                "slot {}: {} has no argument",
+                self.slot,
+                f.name()
+            )));
+        };
+        match f.kind() {
+            Kind::Fold => Ok((fold_sql(f, &self.fold_rel(first)?), false)),
+            Kind::MinMax if args.len() == 1 => Ok((fold_sql(f, &self.fold_rel(first)?), false)),
+            Kind::Pointwise => {
+                let (a, w) = self.lower(first, g)?;
+                let sql = match f {
+                    Function::Abs => format!("abs({a})"),
+                    // `exp` overflows the double at about 709.78; past
+                    // it DuckDB answers inf, which a chart would draw.
+                    Function::Exp => format!("(case when ({a}) > 709 then null else exp({a}) end)"),
+                    Function::Log => format!("(case when ({a}) > 0 then ln({a}) else null end)"),
+                    Function::Sqrt => format!("(case when ({a}) < 0 then null else sqrt({a}) end)"),
+                    _ => unreachable!("the pointwise functions are the four above"),
+                };
+                Ok((sql, w))
+            }
+            Kind::MinMax => {
+                let mut parts = Vec::new();
+                let mut windowed = false;
+                for x in args {
+                    let (s, w) = self.lower(x, g)?;
+                    parts.push(s);
+                    windowed |= w;
+                }
+                // `least`/`greatest` skip a NULL operand; a bucket one
+                // operand has no value for is a gap, not the other's
+                // value.
+                let nulls = parts
+                    .iter()
+                    .map(|p| format!("({p}) is null"))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                let list = parts
+                    .iter()
+                    .map(|p| format!("({p})"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let fun = if f == Function::Min {
+                    "least"
+                } else {
+                    "greatest"
+                };
+                Ok((
+                    format!("(case when {nulls} then null else {fun}({list}) end)"),
+                    windowed,
+                ))
+            }
+            Kind::Along { .. } | Kind::Rolling => {
+                // A window runs over the points of the series its operand
+                // reads. On a grid that joined more series than that, the
+                // join has already dropped the operand's points the others
+                // lack, so `sma(A, 2) / B` would average two of B's dates
+                // rather than A's last two points: the call is lowered on
+                // a grid of its own and joined back as a column. The
+                // operand's grid holds every bucket this one does, so the
+                // inner join loses no row.
+                let own = first.series_slots();
+                if !own.is_empty() && own != g.slots {
+                    let rel = self.fold_rel(e)?;
+                    let k = self.stages;
+                    let name = self.stage_name();
+                    let col = format!("c{k}");
+                    self.ctes.push(format!(
+                        "{name} as (\n  select g.*, t.v as {col}\n  from {} g join {rel} t on t.b = g.b\n)",
+                        g.name
+                    ));
+                    g.name = name;
+                    return Ok((col, false));
+                }
+                let (a, windowed) = self.lower(first, g)?;
+                // SQL forbids a window inside a window: the inner value
+                // becomes a stage column first.
+                let a = if windowed { self.hoist(a, g) } else { a };
+                Ok((self.window(f, &a, count_arg(args), g)?, true))
+            }
+        }
+    }
+
+    /// `f` over `a`, a value with no window in it, ordered by bucket.
+    /// "Previous" is the previous point: a bucket with no point is not a
+    /// row of the grid.
+    fn window(
+        &mut self,
+        f: Function,
+        a: &str,
+        n: Option<u32>,
+        g: &mut Grid,
+    ) -> Result<String, StoreError> {
+        let need = |n: Option<u32>| {
+            n.ok_or_else(|| refuse(format!("slot {}: {} needs a count", self.slot, f.name())))
+        };
+        let ord = "over (order by b)";
+        Ok(match f {
+            Function::Diff => format!("(({a}) - lag({a}) {ord})"),
+            Function::Pct => format!(
+                "(case when lag({a}) {ord} = 0 then null else (({a}) - lag({a}) {ord}) / lag({a}) {ord} end)"
+            ),
+            Function::Cum => format!("sum({a}) over (order by b rows unbounded preceding)"),
+            Function::Lag => {
+                let n = need(n)?;
+                format!("lag({a}, {n}) {ord}")
+            }
+            Function::Sma | Function::Rmin | Function::Rmax | Function::Rstd | Function::Z => {
+                let n = need(n)?;
+                let w = format!(
+                    "over (order by b rows between {} preceding and current row)",
+                    n - 1
+                );
+                // NULL until the window holds n non-null points: never a
+                // partial-window figure that reads as a full one.
+                let full = format!("count({a}) {w} = {n}");
+                match f {
+                    Function::Sma => format!("(case when {full} then avg({a}) {w} end)"),
+                    Function::Rmin => format!("(case when {full} then min({a}) {w} end)"),
+                    Function::Rmax => format!("(case when {full} then max({a}) {w} end)"),
+                    Function::Rstd => {
+                        format!("(case when {full} then stddev_samp({a}) {w} end)")
+                    }
+                    _ => format!(
+                        "(case when {full} and stddev_samp({a}) {w} > 0 then (({a}) - avg({a}) {w}) / stddev_samp({a}) {w} end)"
+                    ),
+                }
+            }
+            Function::Ema => {
+                let n = need(n)?;
+                self.ema(a, n, g)
+            }
+            _ => unreachable!("window is called for along and rolling functions only"),
+        })
+    }
+
+    /// `ema(a, n)`: the span-n exponentially weighted mean in its
+    /// adjusted form over the last `5n` points, NULL points skipped
+    /// (pandas `ewm(span=n, adjust=True, ignore_na=True)` up to a weight
+    /// tail under 0.005%). The window's values, the count of the last
+    /// `n`, and the weight list each live in a stage column because the
+    /// result reads them more than once.
+    fn ema(&mut self, a: &str, n: u32, g: &mut Grid) -> String {
+        let k = self.stages;
+        let name = self.stage_name();
+        let span = 5 * n;
+        let q = 1.0 - 2.0 / (f64::from(n) + 1.0);
+        self.ctes.push(format!(
+            "{name} as (\n  select p.*, list({a}) filter (where ({a}) is not null) over (order by b rows between {} preceding and current row) as l{k}, count({a}) over (order by b rows between {} preceding and current row) as d{k}, w.ws as w{k}\n  from {} p, (select list(pow({q:?}, i) order by i) as ws from range({span}) t(i)) w\n)",
+            span - 1,
+            n - 1,
+            g.name
+        ));
+        g.name = name;
+        format!(
+            "(case when d{k} = {n} then list_dot_product(list_reverse(l{k}), w{k}[1:len(l{k})]) / list_sum(w{k}[1:len(l{k})]) end)"
+        )
+    }
 }
 
 /// Every refusal the request can earn, in one place and in one order, so
@@ -140,6 +486,8 @@ fn validate(schema: &SchemaSpec, params: &SeriesParams) -> Result<Vec<u8>, Store
     }
     for s in &params.series {
         if let SlotKind::Expr(e) = &s.kind {
+            e.shape()
+                .map_err(|m| refuse(format!("slot {}: {m}", s.slot)))?;
             let refs = e.slots();
             if refs.is_empty() {
                 return Err(refuse(format!(
@@ -238,24 +586,7 @@ fn ctes(params: &SeriesParams, order: &[u8]) -> Result<(String, Vec<Value>), Sto
         let SlotKind::Expr(e) = &spec.kind else {
             unreachable!("order lists expressions only")
         };
-        let deps = e.slots();
-        // `validate` already refuses a slot-less expression; this is the
-        // second line of defence, with the same message rather than a
-        // panic on an empty `deps`.
-        let Some(&anchor) = deps.first() else {
-            return Err(refuse(format!(
-                "slot {slot}: an expression must reference at least one slot"
-            )));
-        };
-        let joins: String = deps[1..]
-            .iter()
-            .map(|d| format!(" join s{d} on s{d}.b = s{anchor}.b"))
-            .collect();
-        parts.push(format!(
-            "s{n} as (\n  select s{anchor}.b as b, {v} as v\n  from s{anchor}{joins}\n)",
-            n = slot,
-            v = lower(e)?,
-        ));
+        parts.extend(lower_slot(*slot, e)?);
     }
     Ok((format!("with {}", parts.join(",\n")), bound))
 }
@@ -686,7 +1017,13 @@ mod tests {
         let sql = &plan.points.sql;
         assert!(
             sql.contains(
-                "s3 as (\n  select s1.b as b, ((case when (s2.v) = 0 then null else (s1.v) / (s2.v) end)) as v\n  from s1 join s2 on s2.b = s1.b\n)"
+                "s3_0 as (\n  select s1.b as b, s1.v as v1, s2.v as v2\n  from s1 join s2 on s2.b = s1.b\n)"
+            ),
+            "{sql}"
+        );
+        assert!(
+            sql.contains(
+                "s3 as (\n  select b, ((case when (v2) = 0 then null else (v1) / (v2) end)) as v\n  from s3_0\n)"
             ),
             "{sql}"
         );
@@ -728,13 +1065,14 @@ mod tests {
         );
         assert!(s1 < s4 && s2 < s4 && s1 < s3 && s2 < s3, "{sql}");
         assert!(
-            sql.contains("s3 as (\n  select s1.b as b, ((s1.v) * (2.0)) as v\n  from s1\n)"),
+            sql.contains("s3_0 as (\n  select s1.b as b, s1.v as v1\n  from s1\n)")
+                && sql.contains("s3 as (\n  select b, ((v1) * (2.0)) as v\n  from s3_0\n)"),
             "{sql}"
         );
         assert!(
             sql.contains(
-                "s4 as (\n  select s1.b as b, ((s2.v) - (s1.v)) as v\n  from s1 join s2 on s2.b = s1.b\n)"
-            ),
+                "s4_0 as (\n  select s1.b as b, s1.v as v1, s2.v as v2\n  from s1 join s2 on s2.b = s1.b\n)"
+            ) && sql.contains("s4 as (\n  select b, ((v2) - (v1)) as v\n  from s4_0\n)"),
             "{sql}"
         );
         assert!(
@@ -757,7 +1095,7 @@ mod tests {
         assert!(
             plan.points
                 .sql
-                .contains("(((-(((s1.v) + (1.5))))) * (s1.v)) as v"),
+                .contains("(((-(((v1) + (1.5))))) * (v1)) as v"),
             "{}",
             plan.points.sql
         );
@@ -849,6 +1187,14 @@ mod tests {
         ]));
         assert!(e.contains("slot 2") && e.contains("slot 9"), "{e}");
         assert!(refuse(params(vec![expr(2, "2 + 3")])).contains("reference"));
+        let e = refuse(params(vec![
+            source(1, "A", BucketRule::Last),
+            expr(2, "mean(2) + s1"),
+        ]));
+        assert!(
+            e.contains("slot 2") && e.contains("mean needs a series"),
+            "{e}"
+        );
     }
 
     /// An expression names source series only; an operand that is
@@ -954,6 +1300,555 @@ mod tests {
 
     fn nan_or(v: f64) -> Option<f64> {
         if v.is_nan() { None } else { Some(v) }
+    }
+
+    /// One point per day from Jan 5 for `identity`: `values[i]` on
+    /// Jan 5 + i, a NaN being a day with no point (a gap, not a NULL).
+    fn daily(store: &Store, identity: &str, values: &[f64]) {
+        for (i, v) in values.iter().enumerate() {
+            if v.is_nan() {
+                continue;
+            }
+            let day = ts("2026-01-05T14:30:00Z") + chrono::Duration::days(i as i64);
+            append(
+                store,
+                identity,
+                &day.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                &[*v],
+                "2026-01-20T09:00:00Z",
+            );
+        }
+    }
+
+    /// Slot `i` of the result as `Some(value)` per bucket, `None` for a gap.
+    fn vals(r: &SeriesResult, i: usize) -> Vec<Option<f64>> {
+        r.slots[i].values.iter().map(|v| nan_or(*v)).collect()
+    }
+
+    fn close(a: &[Option<f64>], b: &[Option<f64>]) -> bool {
+        a.len() == b.len()
+            && a.iter().zip(b).all(|(x, y)| match (x, y) {
+                (None, None) => true,
+                (Some(x), Some(y)) => (x - y).abs() < 1e-9,
+                _ => false,
+            })
+    }
+
+    #[test]
+    fn folds_and_indexes_read_the_whole_range_and_skip_gaps() {
+        let (_d, store) = store();
+        // Points on Jan 5, 6, 8, 9; Jan 7 is a gap.
+        daily(&store, "A", &[2.0, 4.0, f64::NAN, 8.0, 6.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                expr(2, "s1 / s1[0]"),
+                expr(3, "s1 / s1[-1]"),
+                expr(4, "mean(s1)"),
+                expr(5, "s1[2] + s1[-3]"),
+                expr(6, "s1[4]"),
+                expr(7, "s1[999999] + s1[-999999]"),
+                expr(
+                    8,
+                    "first(s1) + last(s1) + min(s1) + max(s1) + sum(s1) + count(s1) + median(s1)",
+                ),
+                expr(9, "std(s1)"),
+                expr(10, "count(s1)"),
+            ]),
+        );
+        assert_eq!(
+            r.buckets.len(),
+            4,
+            "A's four buckets; a scalar line never widens them"
+        );
+        let line = |v: f64| vec![Some(v); 4];
+        assert!(
+            close(&vals(&r, 1), &[Some(1.0), Some(2.0), Some(4.0), Some(3.0)]),
+            "{:?}",
+            vals(&r, 1)
+        );
+        assert!(
+            close(
+                &vals(&r, 2),
+                &[Some(1.0 / 3.0), Some(2.0 / 3.0), Some(4.0 / 3.0), Some(1.0)]
+            ),
+            "{:?}",
+            vals(&r, 2)
+        );
+        assert!(
+            close(&vals(&r, 3), &line(5.0)),
+            "a flat line over A's buckets: {:?}",
+            vals(&r, 3)
+        );
+        assert!(
+            close(&vals(&r, 4), &line(12.0)),
+            "[2] from the start is 8, [-3] from the end is 4: {:?}",
+            vals(&r, 4)
+        );
+        assert_eq!(vals(&r, 5), vec![None; 4], "past the end is a gap");
+        assert_eq!(
+            vals(&r, 6),
+            vec![None; 4],
+            "far past either end is a gap, not an error"
+        );
+        assert!(
+            close(&vals(&r, 7), &line(47.0)),
+            "2 + 6 + 2 + 8 + 20 + 4 + 5: {:?}",
+            vals(&r, 7)
+        );
+        assert!(
+            close(&vals(&r, 8), &line((20.0f64 / 3.0).sqrt())),
+            "sample deviation of 2, 4, 8, 6: {:?}",
+            vals(&r, 8)
+        );
+        assert!(
+            close(&vals(&r, 9), &line(4.0)),
+            "a count reaches the reader as a double: {:?}",
+            vals(&r, 9)
+        );
+    }
+
+    #[test]
+    fn a_scalar_line_spans_the_union_of_the_series_it_folds_and_a_fold_never_narrows() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, 2.0, f64::NAN, f64::NAN, f64::NAN]);
+        daily(&store, "B", &[f64::NAN, f64::NAN, 10.0, 20.0, 30.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                source(2, "B", BucketRule::Last),
+                expr(3, "mean(s1) + mean(s2)"),
+                expr(4, "s1 * last(s2)"),
+            ]),
+        );
+        assert_eq!(r.buckets.len(), 5);
+        assert!(
+            close(&vals(&r, 2), &[Some(21.5); 5]),
+            "over A's and B's buckets: {:?}",
+            vals(&r, 2)
+        );
+        assert_eq!(
+            vals(&r, 3),
+            vec![Some(30.0), Some(60.0), None, None, None],
+            "B is folded, so it does not narrow A's buckets"
+        );
+    }
+
+    #[test]
+    fn pointwise_functions_guard_their_domains_and_join_their_series() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, -4.0, 0.0, 9.0, f64::NAN]);
+        daily(&store, "B", &[2.0, 2.0, f64::NAN, 2.0, 2.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                source(2, "B", BucketRule::Last),
+                expr(3, "abs(s1)"),
+                expr(4, "log(s1)"),
+                expr(5, "sqrt(s1)"),
+                expr(6, "exp(0 * s1)"),
+                expr(7, "min(s1, s2)"),
+                expr(8, "max(s1, 2)"),
+                expr(9, "max(s1, s2, 5)"),
+                expr(10, "log(mean(s2))"),
+                expr(11, "exp(1000 * s2)"),
+            ]),
+        );
+        assert_eq!(r.buckets.len(), 5);
+        assert_eq!(
+            vals(&r, 2),
+            vec![Some(1.0), Some(4.0), Some(0.0), Some(9.0), None]
+        );
+        assert!(
+            close(
+                &vals(&r, 3),
+                &[Some(0.0), None, None, Some(9f64.ln()), None]
+            ),
+            "log of a non-positive is a gap: {:?}",
+            vals(&r, 3)
+        );
+        assert_eq!(
+            vals(&r, 4),
+            vec![Some(1.0), None, Some(0.0), Some(3.0), None],
+            "sqrt of a negative is a gap"
+        );
+        assert_eq!(
+            vals(&r, 5),
+            vec![Some(1.0), Some(1.0), Some(1.0), Some(1.0), None]
+        );
+        assert_eq!(
+            vals(&r, 6),
+            vec![Some(1.0), Some(-4.0), None, Some(2.0), None],
+            "pointwise min joins its series"
+        );
+        assert_eq!(
+            vals(&r, 7),
+            vec![Some(2.0), Some(2.0), Some(2.0), Some(9.0), None]
+        );
+        assert_eq!(
+            vals(&r, 8),
+            vec![Some(5.0), Some(5.0), None, Some(9.0), None]
+        );
+        assert!(
+            close(
+                &vals(&r, 9),
+                &[
+                    Some(2f64.ln()),
+                    Some(2f64.ln()),
+                    None,
+                    Some(2f64.ln()),
+                    Some(2f64.ln())
+                ]
+            ),
+            "a pointwise function of a scalar is a scalar line over B: {:?}",
+            vals(&r, 9)
+        );
+        assert_eq!(
+            vals(&r, 10),
+            vec![None, None, None, None, None],
+            "beyond the double range is a gap, not an inf the chart draws"
+        );
+    }
+
+    #[test]
+    fn along_functions_follow_point_order_across_gaps_and_nest_by_hoisting() {
+        let (_d, store) = store();
+        // Points on Jan 5, 6, 8, 9: "previous" skips the Jan 7 gap.
+        daily(&store, "A", &[1.0, 3.0, f64::NAN, 6.0, 2.0]);
+        let p = params(vec![
+            source(1, "A", BucketRule::Last),
+            expr(2, "diff(s1)"),
+            expr(3, "pct(s1)"),
+            expr(4, "cum(s1)"),
+            expr(5, "lag(s1, 2)"),
+            expr(6, "diff(diff(s1))"),
+            expr(7, "mean(diff(s1))"),
+            expr(8, "diff(s1)[0]"),
+            expr(9, "s1 - lag(s1, 1)"),
+        ]);
+        let plan = compile_series(&schema(), &p).unwrap();
+        let sql = &plan.points.sql;
+        assert!(
+            sql.contains(
+                "s6_1 as (\n  select *, ((v1) - lag(v1) over (order by b)) as c1\n  from s6_0\n)"
+            ) && sql.contains(
+                "s6 as (\n  select b, ((c1) - lag(c1) over (order by b)) as v\n  from s6_1\n)"
+            ),
+            "a window over a window is hoisted into a stage: {sql}"
+        );
+        assert!(
+            sql.contains("s7_0 as (\n  select b from (select b from s1)\n)")
+                && sql.contains(
+                    "s7_2 as (\n  select b, ((v1) - lag(v1) over (order by b)) as v\n  from s7_1\n)"
+                )
+                && sql.contains(
+                    "s7 as (\n  select b, (select avg(v) from s7_2) as v\n  from s7_0\n)"
+                ),
+            "a fold of a derived series reads a stage of its own: {sql}"
+        );
+        let r = run(&store, &p);
+        assert_eq!(r.buckets.len(), 4);
+        assert_eq!(vals(&r, 1), vec![None, Some(2.0), Some(3.0), Some(-4.0)]);
+        assert!(
+            close(
+                &vals(&r, 2),
+                &[None, Some(2.0), Some(1.0), Some(-2.0 / 3.0)]
+            ),
+            "{:?}",
+            vals(&r, 2)
+        );
+        assert_eq!(
+            vals(&r, 3),
+            vec![Some(1.0), Some(4.0), Some(10.0), Some(12.0)]
+        );
+        assert_eq!(vals(&r, 4), vec![None, None, Some(1.0), Some(3.0)]);
+        assert_eq!(vals(&r, 5), vec![None, None, Some(1.0), Some(-7.0)]);
+        assert!(
+            close(&vals(&r, 6), &[Some(1.0 / 3.0); 4]),
+            "mean of 2, 3, -4: {:?}",
+            vals(&r, 6)
+        );
+        assert!(
+            close(&vals(&r, 7), &[Some(2.0); 4]),
+            "[0] is the first NON-NULL point: {:?}",
+            vals(&r, 7)
+        );
+        assert_eq!(vals(&r, 8), vec![None, Some(2.0), Some(3.0), Some(-4.0)]);
+    }
+
+    #[test]
+    fn a_zero_previous_value_is_a_gap_in_pct() {
+        let (_d, store) = store();
+        daily(&store, "A", &[0.0, 5.0]);
+        let r = run(
+            &store,
+            &params(vec![source(1, "A", BucketRule::Last), expr(2, "pct(s1)")]),
+        );
+        assert_eq!(vals(&r, 1), vec![None, None]);
+    }
+
+    /// A window runs over its operand's own points: `sma(A, 2) / B` is a
+    /// two-point mean of A even where B is sparser, and `diff(A) + B`
+    /// reads A's previous point, not the previous bucket both share.
+    #[test]
+    fn a_window_reads_its_operands_own_points_not_the_join_grid() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        daily(&store, "B", &[f64::NAN, 1.0, f64::NAN, 1.0, f64::NAN]);
+        let p = params(vec![
+            source(1, "A", BucketRule::Last),
+            source(2, "B", BucketRule::Last),
+            expr(3, "sma(s1, 2) / s2"),
+            expr(4, "diff(s1) + s2"),
+            expr(5, "sma(s1, 2) - sma(s2, 1)"),
+            expr(6, "sma(s1 + s2, 2)"),
+        ]);
+        let plan = compile_series(&schema(), &p).unwrap();
+        let sql = &plan.points.sql;
+        assert!(
+            sql.contains("s3_1 as (\n  select s1.b as b, s1.v as v1\n  from s1\n)")
+                && sql.contains(" g join s3_2 t on t.b = g.b\n)"),
+            "the window is staged on A's own grid and joined back: {sql}"
+        );
+        let r = run(&store, &p);
+        assert_eq!(r.buckets.len(), 5);
+        assert!(
+            close(&vals(&r, 2), &[None, Some(1.5), None, Some(3.5), None]),
+            "{:?}",
+            vals(&r, 2)
+        );
+        assert!(
+            close(&vals(&r, 3), &[None, Some(2.0), None, Some(2.0), None]),
+            "{:?}",
+            vals(&r, 3)
+        );
+        assert!(
+            close(&vals(&r, 4), &[None, Some(0.5), None, Some(2.5), None]),
+            "each side over its own points: {:?}",
+            vals(&r, 4)
+        );
+        assert!(
+            close(&vals(&r, 5), &[None, None, None, Some(4.0), None]),
+            "an argument reading both series windows over the join: {:?}",
+            vals(&r, 5)
+        );
+    }
+
+    /// A pasted nest of guards would otherwise lower to a string that
+    /// doubles per level, on the UI thread; the cap turns it into a
+    /// refusal before the next doubling. Twenty-four levels (about
+    /// 700 MiB unchecked) keep the harness's proof of this test bounded.
+    #[test]
+    fn a_nest_that_would_blow_up_the_sql_is_refused_by_size() {
+        let text = "sqrt(".repeat(24) + "s1" + &")".repeat(24);
+        let e = parse(&text).unwrap().resolve(&mut by_s_number).unwrap();
+        let err = compile_series(
+            &schema(),
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                SeriesSpec {
+                    slot: 2,
+                    kind: SlotKind::Expr(e),
+                },
+            ]),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("too large"), "{err}");
+        let text = "sqrt(".repeat(8) + "s1" + &")".repeat(8);
+        let e = parse(&text).unwrap().resolve(&mut by_s_number).unwrap();
+        assert!(
+            compile_series(
+                &schema(),
+                &params(vec![
+                    source(1, "A", BucketRule::Last),
+                    SeriesSpec {
+                        slot: 2,
+                        kind: SlotKind::Expr(e),
+                    },
+                ])
+            )
+            .is_ok(),
+            "eight levels are inside the cap"
+        );
+    }
+
+    #[test]
+    fn rolling_functions_are_null_until_their_window_is_full_of_points() {
+        let (_d, store) = store();
+        // Points on Jan 5, 6, 8, 9.
+        daily(&store, "A", &[1.0, 2.0, f64::NAN, 4.0, 8.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                expr(2, "sma(s1, 2)"),
+                expr(3, "rmin(s1, 3)"),
+                expr(4, "rmax(s1, 3)"),
+                expr(5, "rstd(s1, 2)"),
+                expr(6, "z(s1, 2)"),
+                expr(7, "sma(diff(s1), 2)"),
+                expr(8, "z(s1, 1)"),
+                expr(9, "sma(s1 * 0 + 5, 2)"),
+                expr(10, "sma(s1, 10000)"),
+                expr(11, "z(s1 * 0 + 5, 2)"),
+            ]),
+        );
+        assert_eq!(r.buckets.len(), 4);
+        assert!(
+            close(&vals(&r, 1), &[None, Some(1.5), Some(3.0), Some(6.0)]),
+            "the Jan 8 window is Jan 6 and Jan 8: {:?}",
+            vals(&r, 1)
+        );
+        assert_eq!(vals(&r, 2), vec![None, None, Some(1.0), Some(2.0)]);
+        assert_eq!(vals(&r, 3), vec![None, None, Some(4.0), Some(8.0)]);
+        assert!(
+            close(
+                &vals(&r, 4),
+                &[
+                    None,
+                    Some(0.5f64.sqrt()),
+                    Some(2f64.sqrt()),
+                    Some(8f64.sqrt())
+                ]
+            ),
+            "{:?}",
+            vals(&r, 4)
+        );
+        let z = 0.5 / 0.5f64.sqrt();
+        assert!(
+            close(&vals(&r, 5), &[None, Some(z), Some(z), Some(z)]),
+            "{:?}",
+            vals(&r, 5)
+        );
+        assert!(
+            close(&vals(&r, 6), &[None, None, Some(1.5), Some(3.0)]),
+            "a NULL inside the window is not a point: {:?}",
+            vals(&r, 6)
+        );
+        assert_eq!(
+            vals(&r, 7),
+            vec![None; 4],
+            "a deviation over one point is NULL, so z is"
+        );
+        assert!(
+            close(&vals(&r, 8), &[None, Some(5.0), Some(5.0), Some(5.0)]),
+            "a constant has a mean: {:?}",
+            vals(&r, 8)
+        );
+        assert_eq!(
+            vals(&r, 9),
+            vec![None; 4],
+            "a window longer than the series is all gaps, not an error"
+        );
+        assert_eq!(
+            vals(&r, 10),
+            vec![None; 4],
+            "a zero deviation is a gap, so a constant has no z"
+        );
+    }
+
+    #[test]
+    fn statistics_run_over_a_rolling_slot_and_an_all_null_window_has_none() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, 2.0, f64::NAN, 4.0, 8.0]);
+        let mut p = params(vec![
+            source(1, "A", BucketRule::Last),
+            expr(2, "sma(s1, 2)"),
+            expr(3, "lag(s1, 3)"),
+        ]);
+        p.percentiles = vec![0.5];
+        p.bins = Some(4);
+        let r = run(&store, &p);
+        // The window is Jan 6..Jan 9 (half-open): sma is 1.5 on Jan 6 and
+        // 3 on Jan 8; lag(3) has no value before Jan 9.
+        assert_eq!(r.slots[1].percentiles, vec![(0.5, 2.25)]);
+        assert_eq!(r.slots[1].bins.len(), 4);
+        assert_eq!(
+            r.slots[1].bins.iter().map(|b| b.2).collect::<Vec<_>>(),
+            vec![1, 0, 0, 1]
+        );
+        assert_eq!(
+            r.slots[2].percentiles,
+            vec![],
+            "a window of NULLs has no percentile"
+        );
+        assert_eq!(r.slots[2].bins, vec![], "and no bins");
+    }
+
+    /// The list vocabulary `ema` lowers to, on the pinned DuckDB: a
+    /// window `list` with FILTER, `list_reverse`, a sliced list,
+    /// `list_dot_product` and `list_sum`.
+    #[test]
+    fn duckdb_has_the_list_vocabulary_ema_needs() {
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        let v: f64 = conn
+            .query_row(
+                "select list_dot_product(list_reverse([1.0, 2.0, 3.0]), [1.0, 0.5, 0.25][1:3]) / list_sum([1.0, 0.5, 0.25][1:3])",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!((v - (3.0 + 1.0 + 0.25) / 1.75).abs() < 1e-12, "{v}");
+        let lists: Vec<String> = conn
+            .prepare(
+                "select cast(list(v) filter (where v is not null) over (order by i rows between 1 preceding and current row) as varchar) from (values (1, 1.0), (2, null), (3, 3.0)) t(i, v) order by i",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(lists, vec!["[1.0]", "[1.0]", "[3.0]"]);
+        let ws: String = conn
+            .query_row(
+                "select cast((select list(pow(0.5, i) order by i) from range(3) t(i)) as varchar)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ws, "[1.0, 0.5, 0.25]");
+    }
+
+    #[test]
+    fn ema_is_the_adjusted_weighted_mean_and_skips_null_points() {
+        let (_d, store) = store();
+        daily(&store, "A", &[1.0, 2.0, 3.0, 4.0, 5.0]);
+        let r = run(
+            &store,
+            &params(vec![
+                source(1, "A", BucketRule::Last),
+                expr(2, "ema(s1, 2)"),
+                expr(3, "ema(diff(s1), 2)"),
+            ]),
+        );
+        // pandas `Series([1,2,3,4,5]).ewm(span=2, adjust=True).mean()`:
+        // 1, 1.75, 2.6153…, 3.55, 4.5206…; the first is NULL here because
+        // n = 2 points must exist.
+        assert!(
+            close(
+                &vals(&r, 1),
+                &[
+                    None,
+                    Some(1.75),
+                    Some(34.0 / 13.0),
+                    Some(3.55),
+                    Some(547.0 / 121.0)
+                ]
+            ),
+            "{:?}",
+            vals(&r, 1)
+        );
+        // diff is NULL on Jan 5; the weighted mean of the later 1s is 1,
+        // and the Jan 6 window holds one point, not two.
+        assert!(
+            close(&vals(&r, 2), &[None, None, Some(1.0), Some(1.0), Some(1.0)]),
+            "{:?}",
+            vals(&r, 2)
+        );
     }
 
     #[test]

@@ -639,6 +639,7 @@ impl ClassificationsTile {
             column: asked.from,
             scope: Scope::default(),
             as_of: AsOf::Live,
+            dataset: None,
         };
         match self.data.distinct(params) {
             Ok(()) => self.loading = true,
