@@ -491,15 +491,23 @@ fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
     tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
 }
 
-/// Distinct (source, dataset, extra, missing) combinations remembered for
+/// Distinct (source, dataset, note) combinations remembered for
 /// load-note warnings. A desk's files share a few header shapes, so the key
 /// space is small; the cap bounds a feed whose headers vary without end.
 const LOAD_NOTE_CAP: usize = 256;
 
 #[derive(Debug, Default)]
 struct LoadNoteLog {
-    seen: std::collections::HashSet<(String, String, Vec<String>, Vec<String>)>,
+    seen: std::collections::HashSet<(String, String, NoteKind)>,
     capped: bool,
+}
+
+/// What a load note is about, as its dedup key: a file's column shape
+/// (extra, missing, each sorted), or a history answer's non-finite values.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum NoteKind {
+    Columns(Vec<String>, Vec<String>),
+    NonFinite,
 }
 
 impl LoadNoteLog {
@@ -519,7 +527,50 @@ impl LoadNoteLog {
         let mut missing = notes.missing_optional.clone();
         missing.sort();
         missing.dedup();
-        let key = (source.to_string(), dataset.to_string(), extra, missing);
+        self.admit(
+            source,
+            dataset,
+            NoteKind::Columns(extra, missing),
+            &notes.file,
+            || load_note_warning(load_note_message(dataset, notes)),
+        )
+    }
+
+    /// The warning a history answer with `dropped` non-finite rows earns:
+    /// once per source and dataset this run (the count is this answer's),
+    /// under the same cap. Path names the dataset.
+    fn note_non_finite(
+        &mut self,
+        source: &str,
+        dataset: &str,
+        dropped: usize,
+    ) -> Option<Diagnostic> {
+        self.admit(
+            source,
+            dataset,
+            NoteKind::NonFinite,
+            "a history answer",
+            || Diagnostic {
+                path: Some(format!("datasets.{dataset}")),
+                ..load_note_warning(format!(
+                    "history from '{source}' into '{dataset}': {dropped} row(s) with a \
+                     non-finite value dropped"
+                ))
+            },
+        )
+    }
+
+    /// One warning per new combination, none for a repeat; at the cap, one
+    /// last warning naming `what` and nothing after it.
+    fn admit(
+        &mut self,
+        source: &str,
+        dataset: &str,
+        kind: NoteKind,
+        what: &str,
+        warning: impl FnOnce() -> Diagnostic,
+    ) -> Option<Diagnostic> {
+        let key = (source.to_string(), dataset.to_string(), kind);
         if self.seen.contains(&key) {
             return None;
         }
@@ -530,12 +581,11 @@ impl LoadNoteLog {
             self.capped = true;
             return Some(load_note_warning(format!(
                 "source '{source}' reached {LOAD_NOTE_CAP} distinct load-note combinations \
-                 ('{}' into '{dataset}'); further ones are not reported",
-                notes.file
+                 ('{what}' into '{dataset}'); further ones are not reported"
             )));
         }
         self.seen.insert(key);
-        Some(load_note_warning(load_note_message(dataset, notes)))
+        Some(warning())
     }
 }
 
@@ -717,16 +767,20 @@ fn snapshot_outcome_sink(
 /// A history worker's outcome: rows go to the runner with the coverage the
 /// answer establishes (its append finishes the ticket); a failed call is the
 /// `<dataset>@<source>` load lane plus that call's part of the ticket; an
-/// enumerated key column is remembered in the column's order.
+/// enumerated key column is remembered in the column's order. Rows the
+/// worker dropped for a non-finite value are a load-note warning.
+#[allow(clippy::too_many_arguments)]
 fn history_outcome_sink(
     spec: &SourceSpec,
     dataset: &geode_core::schema::DatasetSpec,
     ingest: &Arc<IngestHandle>,
     history: &Arc<HistoryDispatch>,
     history_keys: &HistoryKeys,
+    load_notes: &Arc<Mutex<LoadNoteLog>>,
     report_load: LoadReportSink,
     sink: &EventSink,
 ) -> HistoryWorkOutcomeSink {
+    let load_notes = Arc::clone(load_notes);
     let ingest = Arc::clone(ingest);
     let history = Arc::clone(history);
     let history_keys = Arc::clone(history_keys);
@@ -743,8 +797,18 @@ fn history_outcome_sink(
             ticket,
             request,
             rows,
-            ..
+            dropped,
         } => {
+            // Before the rows go on, so the warning precedes the answer it
+            // explains.
+            if dropped > 0
+                && let Some(warning) = load_notes
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .note_non_finite(&source, &name, dropped)
+            {
+                let _ = sink(DataEvent::Diagnostics(vec![warning]));
+            }
             let covered = crate::history_dispatch::covered_by(&request, &rows);
             ingest.submit_history(HistoryJob {
                 source: source.clone(),
@@ -1426,11 +1490,14 @@ impl DataService {
         };
         let vol = VolWorker::spawn(config.vol.clone(), vol_sink, Arc::clone(&sink));
 
+        // Shared by the runner's sink (file notes) and the history workers'
+        // sinks (non-finite values dropped), so both dedupe under one cap.
+        let load_notes: Arc<Mutex<LoadNoteLog>> = Arc::default();
         let ingest_sink: IngestSink = {
             let sink = Arc::clone(&sink);
             let health_tracker = Arc::clone(&health_tracker);
             let history = Arc::clone(&history);
-            let load_notes = std::sync::Mutex::new(LoadNoteLog::default());
+            let load_notes = Arc::clone(&load_notes);
             Arc::new(move |e: IngestEvent| match e {
                 IngestEvent::Started {
                     source,
@@ -1904,6 +1971,7 @@ impl DataService {
                         &ingest,
                         &history,
                         &history_keys,
+                        &load_notes,
                         load_report_sink(spec, &sink, &health_tracker),
                         &sink,
                     );
@@ -5118,6 +5186,7 @@ mod tests {
         keys: Option<Vec<String>>,
         fail_once: bool,
         hold: Option<Arc<crate::ingest::history::tests::Hold>>,
+        nan_day: Option<usize>,
     }
 
     impl crate::adapter::Adapter for FakeHistoryAdapter {
@@ -5137,6 +5206,7 @@ mod tests {
                 keys: self.keys.clone(),
                 fail_once: self.fail_once,
                 hold: self.hold.clone(),
+                nan_day: self.nan_day,
                 ..Default::default()
             }))
         }
@@ -5163,6 +5233,7 @@ mod tests {
         keys: Option<Vec<String>>,
         fail_once: bool,
         hold: Option<Arc<crate::ingest::history::tests::Hold>>,
+        nan_day: Option<usize>,
     ) -> (
         tempfile::TempDir,
         HistoryCalls,
@@ -5177,6 +5248,7 @@ mod tests {
             keys,
             fail_once,
             hold,
+            nan_day,
         }));
         let mut schema = SchemaSpec::default();
         schema.datasets.push(ds);
@@ -5221,6 +5293,7 @@ mod tests {
             keys,
             fail_once,
             None,
+            None,
         )
     }
 
@@ -5239,6 +5312,7 @@ mod tests {
             None,
             false,
             Some(Arc::clone(hold)),
+            None,
         )
     }
 
@@ -5354,6 +5428,7 @@ mod tests {
             1,
             None,
             false,
+            None,
             None,
         );
         let now = Utc::now();
@@ -5509,6 +5584,56 @@ mod tests {
         let refused = history_answer(&rx, 2).result.unwrap_err();
         assert!(refused.contains("exact key has 3 columns"), "{refused}");
         assert!(calls.lock().unwrap().is_empty());
+        service.shutdown();
+    }
+
+    #[test]
+    fn non_finite_rows_are_dropped_from_the_answer_and_named_in_a_load_note() {
+        let (_dir, _calls, service, rx) = history_service_over(
+            tempfile::tempdir().unwrap(),
+            unwindowed_history_dataset(),
+            5,
+            None,
+            false,
+            None,
+            Some(1),
+        );
+        let mut notes = Vec::new();
+        service.history(history_ask(9, 1, spx(), jan("05", "10")));
+        let out = until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::History(o) if o.tag == 1 => Some(o),
+            DataEvent::Diagnostics(d) => {
+                notes.extend(d.into_iter().filter(|d| d.severity == Severity::Warning));
+                None
+            }
+            _ => None,
+        })
+        .expect("an answer");
+        let rows = out.result.unwrap().rows;
+        assert_eq!(rows.len(), 4, "the NaN day is not answered");
+        assert!(rows.iter().all(|r| r.ts != ts("2026-01-06T21:00:00Z")));
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(
+            notes[0]
+                .message
+                .contains("1 row(s) with a non-finite value dropped")
+                && notes[0].message.contains("'hanweck'"),
+            "{notes:?}"
+        );
+        assert_eq!(notes[0].path.as_deref(), Some("datasets.vol_surface"));
+        // A second answer with a NaN repeats no warning.
+        service.history(history_ask(9, 2, spx(), jan("10", "15")));
+        let mut again = Vec::new();
+        until_within(&rx, Duration::from_secs(30), |e| match e {
+            DataEvent::History(o) if o.tag == 2 => Some(()),
+            DataEvent::Diagnostics(d) => {
+                again.extend(d);
+                None
+            }
+            _ => None,
+        })
+        .expect("an answer");
+        assert!(again.is_empty(), "deduplicated: {again:?}");
         service.shutdown();
     }
 

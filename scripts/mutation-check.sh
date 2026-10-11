@@ -39857,6 +39857,15 @@ run_mutation "history service: enumerated keys sorted lexically" \
   geode-data \
   a_tenor_key_column_is_enumerated_in_tenor_order
 
+# Rows dropped for a non-finite value reach the user as a load-note warning,
+# not only a log line.
+run_mutation "history service: dropped non-finite rows earn no load note" \
+  crates/geode-data/src/service.rs \
+  '            if dropped > 0' \
+  '            if false && dropped > 0' \
+  geode-data \
+  non_finite_rows_are_dropped_from_the_answer_and_named_in_a_load_note
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
