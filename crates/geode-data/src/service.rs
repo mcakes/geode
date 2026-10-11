@@ -3190,6 +3190,12 @@ impl DataService {
             return refuse(&params, e);
         }
         let mut datasets: Vec<(Role, &DatasetSpec, &(String, String))> = Vec::new();
+        // A declaration error (undeclared, wrong shape) refuses the board for
+        // every role: it names a gap in configuration. A drifted or sourceless
+        // dataset is a runtime condition: the surface is the board, so it
+        // refuses; realized or varswap blanks its columns like a failed fetch
+        // and is never asked.
+        let mut dataset_errors: Vec<(String, String)> = Vec::new();
         for role in Role::ALL {
             let Some(name) = params.dataset(role) else {
                 continue;
@@ -3198,16 +3204,18 @@ impl DataService {
                 Ok(ds) => ds,
                 Err(e) => return refuse(&params, e),
             };
-            if let Err(e) = self.refuse_drifted([name]) {
-                return refuse(&params, e.to_string());
-            }
-            let Some(source) = self.history_sources.get(name) else {
-                return refuse(
-                    &params,
-                    format!("'{name}' is not a history dataset with a source"),
-                );
+            let source = match self.refuse_drifted([name]) {
+                Err(e) => Err(e.to_string()),
+                Ok(()) => self
+                    .history_sources
+                    .get(name)
+                    .ok_or_else(|| format!("'{name}' is not a history dataset with a source")),
             };
-            datasets.push((role, ds, source));
+            match source {
+                Ok(source) => datasets.push((role, ds, source)),
+                Err(e) if role != Role::Surface => dataset_errors.push((name.to_string(), e)),
+                Err(e) => return refuse(&params, e),
+            }
         }
         let now = Utc::now();
         let instants = match params
@@ -3295,7 +3303,7 @@ impl DataService {
             now,
             instants,
             clock: self.config.clock,
-            dataset_errors: Vec::new(),
+            dataset_errors,
         };
         if calls.is_empty() {
             self.history.read_now(Answer::Board(Box::new(plan)));
@@ -5851,7 +5859,24 @@ mod tests {
         DataService,
         std::sync::mpsc::Receiver<DataEvent>,
     ) {
-        let dir = tempfile::tempdir().unwrap();
+        board_service_over(
+            tempfile::tempdir().unwrap(),
+            adapter,
+            &["vol_surface", "realized_vol", "varswap"],
+        )
+    }
+
+    /// A board service over `dir` with a source for each dataset in
+    /// `sourced` only.
+    fn board_service_over(
+        dir: tempfile::TempDir,
+        adapter: FakeBoardAdapter,
+        sourced: &[&str],
+    ) -> (
+        tempfile::TempDir,
+        DataService,
+        std::sync::mpsc::Receiver<DataEvent>,
+    ) {
         let mut adapters = AdapterRegistry::default();
         adapters.register(Arc::new(adapter));
         let source = |name: &str, dataset: &str, table: &str| crate::source::SourceSpec {
@@ -5865,11 +5890,14 @@ mod tests {
             views: Vec::new(),
             dimensions: DerivedDimensions::default(),
             query_workers: 2,
-            sources: vec![
+            sources: [
                 source("hanweck_surface", "vol_surface", "surface"),
                 source("hanweck_realized", "realized_vol", "realized"),
                 source("hanweck_varswap", "varswap", "varswap"),
-            ],
+            ]
+            .into_iter()
+            .filter(|s| sourced.contains(&s.dataset.as_str()))
+            .collect(),
             adapters,
             documents: Default::default(),
             egress: Vec::new(),
@@ -6163,6 +6191,106 @@ mod tests {
         let board = board_answer(&rx, 2).result.unwrap();
         assert!(board.dataset_errors.is_empty());
         assert!(board.rows[0].cells[3].current.is_some());
+    }
+
+    /// The board answer for a realized dataset the service cannot read
+    /// (no source, or drifted): its cells blank like a failed fetch, the
+    /// reason is named once, and the realized table is never asked.
+    fn assert_realized_blanked(
+        service: &DataService,
+        rx: &std::sync::mpsc::Receiver<DataEvent>,
+        calls: &HistoryCalls,
+        reason: &str,
+    ) {
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            changes_measures(),
+            vec![Lookback::D1],
+            None,
+        ));
+        let board = board_answer(rx, 1).result.expect("the board answers");
+        assert_eq!(
+            board.dataset_errors,
+            vec![("realized_vol".to_string(), reason.to_string())]
+        );
+        let cells = &board.rows[0].cells;
+        assert!(cells[0].current.is_some(), "surface cells are current");
+        assert_eq!(cells[3].current, None, "realized blank");
+        assert_eq!(cells[4].current, None, "iv-rv blank");
+        assert!(cells[5].current.is_some(), "varswap unaffected");
+        assert!(
+            calls.lock().unwrap().iter().all(|c| c.table != "realized"),
+            "the realized table was not asked"
+        );
+    }
+
+    #[test]
+    fn a_sourceless_realized_blanks_its_columns_and_names_itself() {
+        let (f, calls) = fake(300);
+        let (_dir, service, rx) =
+            board_service_over(tempfile::tempdir().unwrap(), f, &["vol_surface", "varswap"]);
+        assert_realized_blanked(
+            &service,
+            &rx,
+            &calls,
+            "'realized_vol' is not a history dataset with a source",
+        );
+    }
+
+    #[test]
+    fn a_drifted_realized_blanks_its_columns_with_the_drift() {
+        let dir = tempfile::tempdir().unwrap();
+        let table = {
+            let store = Store::open(dir.path().join("geode.duckdb")).unwrap();
+            let schema = board_schema();
+            let realized = schema.dataset("realized_vol").unwrap();
+            for ds in &schema.datasets {
+                store.apply_schema(ds).unwrap();
+            }
+            let table = crate::store::managed_tables(realized)[0].0.clone();
+            store
+                .writer()
+                .execute_batch(&format!("alter table {table} add column surprise VARCHAR;"))
+                .unwrap();
+            table
+        };
+        let (f, calls) = fake(300);
+        let (_dir, service, rx) =
+            board_service_over(dir, f, &["vol_surface", "realized_vol", "varswap"]);
+        let reason = service
+            .refuse_drifted(["realized_vol"])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            reason.starts_with(&format!("schema drift in 'realized_vol': '{table}' column")),
+            "{reason}"
+        );
+        assert_realized_blanked(&service, &rx, &calls, &reason);
+    }
+
+    #[test]
+    fn a_sourceless_surface_still_refuses_the_board() {
+        let (f, calls) = fake(300);
+        let (_dir, service, rx) = board_service_over(
+            tempfile::tempdir().unwrap(),
+            f,
+            &["realized_vol", "varswap"],
+        );
+        service.vol_board(board_ask(
+            1,
+            1,
+            &["SPX"],
+            changes_measures(),
+            vec![Lookback::D1],
+            None,
+        ));
+        assert_eq!(
+            board_answer(&rx, 1).result.unwrap_err(),
+            "'vol_surface' is not a history dataset with a source"
+        );
+        assert!(calls.lock().unwrap().is_empty(), "nothing was asked");
     }
 
     #[test]

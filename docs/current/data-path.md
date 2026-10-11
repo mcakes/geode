@@ -1575,11 +1575,18 @@ reach of 4, 8 or 31 days); a dataset not declared as history
 (`'<name>' is not a declared history dataset`); a dataset of the wrong shape (the surface needs a
 three-column key and value columns `vol` and `forward`, realized a
 two-column key and `vol`, varswap a two-column key and `strike`: `'x' has
-no value column 'forward'`); `'<name>' is not a history dataset with a
-source`; a drifted dataset; a member or suffix that does not normalize; a
+no value column 'forward'`); a surface that is drifted or `'<name>' is not
+a history dataset with a source`; a member or suffix that does not normalize; a
 lookback instant the clock cannot resolve (`lookback instant: …`); a daily
 span reaching before the representable range (`daily span: out of
 range`); and a coverage read that fails (`reading coverage: …`).
+
+A realized or varswap dataset that is drifted or has no source does not
+refuse the board: it is a runtime condition, not a declaration gap. The
+dataset gets no call, its reason (the drift text, or `'<name>' is not a
+history dataset with a source`) seeds `dataset_errors`, and its cells blank
+as a failed fetch's would. An undeclared or wrongly shaped dataset still
+refuses for every role: that names a gap in configuration.
 
 The calls coverage lacks, across every dataset, run under one ticket, as a
 history request's do. When the last finishes, a failure of the surface is
@@ -1612,7 +1619,10 @@ cell from those: a change is current minus the last observation at or
 before the instant; a rank is the share of the window's daily values
 strictly below the current, carried with their count (fewer than 60 still
 answers; muting is the tile's); a derived measure is combined pointwise
-over the days all its inputs hold. Behind the service's refusal, the read
+over the days all its inputs hold; a cell's `current_at` is the oldest of
+its inputs' current observation times (a derived cell is only as fresh as
+its stalest input), `None` when the cell has no current. The row's `as_of`
+stays the latest surface time. Behind the service's refusal, the read
 also skips a member or suffix that does not normalize (it names no stored
 row), as a guard for a direct `read_board` caller.
 
