@@ -86,7 +86,7 @@ pub(super) fn step_for(
     })
 }
 
-/// Push the step over the screen on top (Current or Saved). A vanished
+/// Push the step over the screen. A vanished
 /// name refuses into the dialog's error line and opens nothing.
 pub(super) fn push(
     shell: &mut ShellView,

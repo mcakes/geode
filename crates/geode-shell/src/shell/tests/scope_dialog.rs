@@ -213,11 +213,27 @@ fn j_and_k_move_the_cursor_and_wrap(cx: &mut gpui::TestAppContext) {
         cursor_id(&shell, &vcx),
         Some(RowId::Term("delta < 5".into(), 0))
     );
+    // The screen walks the current rows then the saved stops as one list:
+    // `k` from the top wraps to the last saved stop, `j` from there to the
+    // first current row.
     vcx.simulate_keystrokes("k k k");
+    let last_saved = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog.as_ref().and_then(|d| {
+            (d.zone == crate::shell::scopedialog::screen::Zone::Saved)
+                .then(|| d.saved.cursor_row().map(|r| r.name.clone()))
+                .flatten()
+        })
+    });
+    assert_eq!(last_saved.as_deref(), Some("liq"), "k from the top wraps");
+    vcx.simulate_keystrokes("j");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.zone)),
+        Some(crate::shell::scopedialog::screen::Zone::Current)
+    );
     assert_eq!(
         cursor_id(&shell, &vcx),
-        Some(RowId::Text),
-        "k from the top wraps"
+        Some(RowId::Dimension("book".into())),
+        "j from the bottom wraps"
     );
 }
 
@@ -616,16 +632,32 @@ fn o_pushes_saved_and_s_pushes_the_save_prompt(cx: &mut gpui::TestAppContext) {
             s.scope_dialog.as_ref().map(|d| d.layers.top().clone())
         })
     };
+    let zone = |shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.zone))
+    };
+    let depth = |shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| {
+            s.scope_dialog.as_ref().map(|d| d.layers.depth())
+        })
+    };
     assert_eq!(
-        top(&shell, &vcx),
-        Some(crate::shell::scopedialog::state::Layer::Saved)
+        zone(&shell, &vcx),
+        Some(crate::shell::scopedialog::screen::Zone::Saved)
     );
+    assert_eq!(depth(&shell, &vcx), Some(1), "one screen");
     draw(&mut vcx);
     vcx.simulate_keystrokes("enter"); // loads `eu`
     assert_eq!(
-        top(&shell, &vcx),
-        Some(crate::shell::scopedialog::state::Layer::Current)
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope),
+        "the dialog stays open"
     );
+    let cursor = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog
+            .as_ref()
+            .and_then(|d| d.saved.cursor_row().map(|r| r.name.clone()))
+    });
+    assert_eq!(cursor.as_deref(), Some("eu"), "on the loaded scope");
     assert_eq!(lane_scope(&shell, &vcx).sole("book"), Some("BK001"));
     draw(&mut vcx);
     vcx.simulate_keystrokes("s");
@@ -639,10 +671,11 @@ fn o_pushes_saved_and_s_pushes_the_save_prompt(cx: &mut gpui::TestAppContext) {
             crate::shell::scopedialog::state::Step::SaveScope
         ))
     );
-    let depth = shell.read_with(&vcx, |s, _| {
-        s.scope_dialog.as_ref().map(|d| d.layers.depth())
-    });
-    assert_eq!(depth, Some(2), "the prompt is pushed over Current");
+    assert_eq!(
+        depth(&shell, &vcx),
+        Some(2),
+        "the prompt is pushed over the screen"
+    );
 }
 
 /// Cursor on term 1 (`delta < 5`), then the lane's expression swapped
@@ -716,7 +749,9 @@ fn t_types_the_text_filter_and_returns(cx: &mut gpui::TestAppContext) {
     );
     draw(&mut vcx);
     assert!(vcx.debug_bounds("scope-dialog-text-field").is_none());
-    assert!(vcx.debug_bounds("scope-dialog-hint-edit-row").is_some());
+    // An empty scope put the cursor in the saved group, where it stays:
+    // the step's footer is gone, the screen's is back.
+    assert!(vcx.debug_bounds("scope-dialog-hint-set-text").is_none());
     assert!(
         vcx.debug_bounds("scope-dialog-row-0").is_some(),
         "the text row paints"

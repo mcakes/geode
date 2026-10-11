@@ -1,8 +1,9 @@
-//! The Scope dialog's Saved screen: saved scopes, then saved expressions,
-//! each in name order. `enter` on a scope replaces the lane's scope with it;
-//! on an expression it adds or removes the reference. Either commit leaves
-//! the screen — back to Current when Saved was entered from there, else the
-//! dialog closes (`Layers::commit_saved_row`).
+//! The Scope dialog's saved group: saved scopes, then saved expressions,
+//! each in name order, painted under the current sections on the one
+//! screen. `enter` on a scope replaces the lane's scope with it; on an
+//! expression it adds or removes the reference. Either commit closes the
+//! dialog when the saved door opened it, and otherwise stays on the screen
+//! with the cursor on the row (`Opener::closes_on_saved_commit`).
 //!
 //! `c` names a copy of the row's definition; `d` and `r` ask before
 //! deleting the user's own copy or reverting it to the lower layer's, and
@@ -15,7 +16,7 @@
 //! summary; membership only, so the two sections and their name order hold.
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, Context, Entity, MouseButton, SharedString, Window, div};
+use gpui::{AnyElement, App, Context, Entity, MouseButton, SharedString, Window, div, px};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use geode_core::named::NamedExpressions;
@@ -23,10 +24,10 @@ use geode_core::scope::Scope;
 use geode_core::scopes::SavedScopes;
 
 use crate::dialogmode::{self, DialogMode};
-use crate::footer::{Hint, HintRow};
 use crate::keymap::{Keystroke, Modifiers};
 
 use super::saved::{self, SavedId, SavedKind, SavedRow};
+use super::screen::Zone;
 use super::state::{After, Layer, Step};
 use super::view::{ScopeDialogState, edit_lane};
 use crate::shell::control::{self, PointerStates as _};
@@ -39,10 +40,10 @@ const NAME_WIDTH: f32 = 120.0;
 const EXPRESSION_GLYPH: &str = "≡";
 const APPLIED_TAG: &str = "applied";
 
-/// Section headers as painted: the copy `Scopes`, `Expressions` in capitals,
-/// as Current paints its own.
-const SCOPES_TITLE: &str = "SCOPES";
-const EXPRESSIONS_TITLE: &str = "EXPRESSIONS";
+/// Section headers as painted: the copy `Saved scopes`, `Saved expressions`
+/// in capitals, as Current paints its own.
+const SCOPES_TITLE: &str = "SAVED SCOPES";
+const EXPRESSIONS_TITLE: &str = "SAVED EXPRESSIONS";
 
 /// Refusal when the saved scope under the cursor was removed since the rows
 /// derived (a reload, another window's write).
@@ -125,7 +126,7 @@ impl SavedDisplay {
     }
 }
 
-/// The Saved screen's state inside the Scope dialog. `visible` indexes
+/// The saved group's state inside the Scope dialog. `visible` indexes
 /// `rows` in row order; `stops` is what paints, section by section (the
 /// visible rows, or an empty section's row); `cursor` indexes `stops`.
 pub(crate) struct SavedScreen {
@@ -164,16 +165,6 @@ impl SavedScreen {
             key: (u64::MAX, u64::MAX),
             texts: Vec::new(),
         }
-    }
-
-    /// A fresh visit: no filter, the cursor on the first row.
-    pub(crate) fn reset(&mut self) {
-        self.mode = DialogMode::Normal;
-        self.query.clear();
-        self.entry_query.clear();
-        self.cursor = 0;
-        self.cursor_id = None;
-        self.refilter();
     }
 
     pub(crate) fn refresh(
@@ -263,22 +254,16 @@ impl SavedScreen {
         self.cursor_id = self.cursor_stop().map(|stop| self.stop_id(stop));
     }
 
-    // Wired in by the one-screen routing; remove with Layer::Saved.
-    #[allow(dead_code)]
     pub(crate) fn stop_count(&self) -> usize {
         self.stops.len()
     }
 
     /// Rest the cursor on stop `at` (clamped) and take its identity.
-    // Wired in by the one-screen routing; remove with Layer::Saved.
-    #[allow(dead_code)]
     pub(crate) fn set_cursor(&mut self, at: usize) {
         self.cursor = at.min(self.stops.len().saturating_sub(1));
         self.cursor_id = self.cursor_stop().map(|stop| self.stop_id(stop));
     }
 
-    // Wired in by the one-screen routing; remove with Layer::Saved.
-    #[allow(dead_code)]
     fn stop_section(&self, stop: Stop) -> Section {
         match stop {
             Stop::Row(i) => section_of(&self.rows[i].id),
@@ -286,8 +271,6 @@ impl SavedScreen {
         }
     }
 
-    // Wired in by the one-screen routing; remove with Layer::Saved.
-    #[allow(dead_code)]
     pub(crate) fn cursor_section(&self) -> Option<Section> {
         self.cursor_stop().map(|stop| self.stop_section(stop))
     }
@@ -295,8 +278,6 @@ impl SavedScreen {
     /// Put the cursor on `section`'s row named `prefer` when it is a stop,
     /// else on the section's first stop. False, with the cursor unmoved, when
     /// the section has no stop (a filter hid every row).
-    // Wired in by the one-screen routing; remove with Layer::Saved.
-    #[allow(dead_code)]
     pub(crate) fn jump_to(&mut self, section: Section, prefer: Option<&str>) -> bool {
         let named = prefer.and_then(|name| {
             self.stops.iter().position(|&stop| {
@@ -320,7 +301,7 @@ impl SavedScreen {
 
     /// Children each section paints under its header: its stops, or its
     /// empty row (painted under a filter too, though not a stop there).
-    // Wired in by the one-screen routing; remove with Layer::Saved.
+    // Read by scrolling the list to the cursor, which lands next.
     #[allow(dead_code)]
     pub(crate) fn painted_counts(&self) -> [usize; 2] {
         [Section::Scopes, Section::Expressions].map(|section| {
@@ -337,7 +318,7 @@ impl SavedScreen {
 
     /// The cursor's section index (Scopes 0, Expressions 1) and its index
     /// among that section's painted children.
-    // Wired in by the one-screen routing; remove with Layer::Saved.
+    // Read by scrolling the list to the cursor, which lands next.
     #[allow(dead_code)]
     pub(crate) fn cursor_within(&self) -> Option<(usize, usize)> {
         let stop = self.cursor_stop()?;
@@ -354,105 +335,30 @@ impl SavedScreen {
     }
 }
 
-pub(crate) fn in_saved(state: &ScopeDialogState) -> bool {
-    matches!(state.layers.top(), Layer::Saved)
-}
-
-/// Whether the shared input is the Saved screen's filter right now.
+/// Whether the shared input is the saved group's filter right now.
 pub(crate) fn filtering(state: &ScopeDialogState) -> bool {
-    in_saved(state) && state.saved.mode == DialogMode::Filter
+    state.on_screen() && state.saved.mode == DialogMode::Filter
 }
 
-/// Push the Saved screen over Current for a fresh visit.
-pub(crate) fn push(state: &mut ScopeDialogState) {
-    debug_assert_eq!(state.layers.top(), &Layer::Current);
-    state.error = None;
-    state.saved.reset();
-    state.layers.push(Layer::Saved);
-}
-
-/// Whether the title row's Back button leads anywhere: only while Saved is
-/// on top with Current beneath it. Saved opened alone has no screen to go
-/// back to; its close button is the way out.
-pub(crate) fn back_available(shell: &ShellView) -> bool {
-    shell
-        .scope_dialog
-        .as_ref()
-        .is_some_and(|s| in_saved(s) && s.layers.depth() > 1 && s.pending.is_none())
-}
-
-/// The Back button's step: what `escape` does from here, all its rungs at
-/// once — a filter is left (reverted) and the screen leaves for Current.
-/// Does nothing when the button is no longer available, since a click can
-/// land after the state changed under it.
-pub(crate) fn back(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    if !back_available(shell) {
-        return;
-    }
-    let Some(state) = shell.scope_dialog.as_mut() else {
-        return;
-    };
-    state.error = None;
-    let saved = &mut state.saved;
-    if saved.mode == DialogMode::Filter {
-        dialogmode::exit_filter(
-            &mut saved.mode,
-            &saved.entry_query,
-            &mut saved.query,
-            dialogmode::FilterExit::Revert,
-        );
-        saved.refilter();
-    }
-    let after = state.layers.escape();
-    finish(shell, after, window, cx);
-}
-
-/// The pointer's route into filter mode: the frozen filter row's press.
+/// Enter the filter (`/`, or the frozen filter row's press): the cursor
+/// moves into the saved group, which the filter narrows. A no-op under a
+/// step or while already filtering.
 pub(crate) fn enter_filter(state: &mut ScopeDialogState) {
-    if !in_saved(state) || state.saved.mode == DialogMode::Filter {
+    if !state.on_screen() || state.saved.mode == DialogMode::Filter {
         return;
     }
     let saved = &mut state.saved;
     dialogmode::enter_filter(&mut saved.mode, &mut saved.entry_query, &saved.query);
-}
-
-pub(crate) fn handle_key(
-    shell: &mut ShellView,
-    ks: &Keystroke,
-    window: &mut Window,
-    cx: &mut Context<ShellView>,
-) -> bool {
-    let Some(state) = shell.scope_dialog.as_mut() else {
-        return false;
-    };
-    // As on Current: every claimed key drops the last refusal; an unclaimed
-    // key puts it back.
-    let prior_error = state.error.take();
-    let claimed = if state.saved.mode == DialogMode::Filter {
-        filter_key(&mut state.saved, ks)
-    } else {
-        match normal_key(shell, ks, window, cx) {
-            Normal::Claimed => true,
-            // The commit or escape already refreshed, synced and notified.
-            Normal::Done => return true,
-            Normal::Declined => false,
-        }
-    };
-    if !claimed {
-        if let Some(state) = shell.scope_dialog.as_mut() {
-            state.error = prior_error;
-        }
-        return false;
+    state.zone = Zone::Saved;
+    if state.saved.stop_count() > 0 && state.saved.cursor >= state.saved.stop_count() {
+        state.saved.set_cursor(0);
     }
-    shell.refresh_dialog_rows(cx);
-    cx.notify();
-    true
 }
 
 /// Keys while the filter owns the input: `escape` restores the entry query,
 /// bare `enter` keeps the typed one, and neither commits a row. Arrows move;
 /// every other key is the field's.
-fn filter_key(saved: &mut SavedScreen, ks: &Keystroke) -> bool {
+pub(super) fn filter_key(saved: &mut SavedScreen, ks: &Keystroke) -> bool {
     if let Some(exit) = dialogmode::filter_exit(ks) {
         if dialogmode::exit_filter(&mut saved.mode, &saved.entry_query, &mut saved.query, exit) {
             saved.refilter();
@@ -473,65 +379,53 @@ fn filter_key(saved: &mut SavedScreen, ks: &Keystroke) -> bool {
                 }))
 }
 
-enum Normal {
-    Claimed,
-    Done,
-    Declined,
-}
-
-fn normal_key(
+/// A row verb on the saved group's cursor stop: `enter` loads or toggles
+/// (or, on an empty row, starts its section's first definition), `e` edits
+/// an expression's definition, `n` names a new one, `c` copies, `d` and `r`
+/// ask. Off a definition (an empty row) `c`/`d`/`r` are declined.
+pub(super) fn row_key(
     shell: &mut ShellView,
-    ks: &Keystroke,
+    key: &str,
     window: &mut Window,
     cx: &mut Context<ShellView>,
-) -> Normal {
+) -> bool {
     let Some(state) = shell.scope_dialog.as_mut() else {
-        return Normal::Declined;
+        return false;
     };
-    if ks.mods.is_chord() || ks.mods.shift {
-        return Normal::Declined;
-    }
+    // As on the current rows: every claimed key drops the last refusal; an
+    // unclaimed key puts it back.
+    let prior_error = state.error.take();
     let stop = state.saved.cursor_stop();
     let cursor = state.saved.cursor_row().map(|r| r.id.clone());
     // The empty Scopes row stands for the scopes section: its verbs give
     // the scope rows' guidance.
     let on_scope =
         matches!(cursor, Some(SavedId::Scope(_))) || stop == Some(Stop::Empty(Section::Scopes));
-    match ks.key.as_str() {
-        "j" | "down" => state.saved.move_cursor(crate::vimnav::NavCommand::Move(1)),
-        "k" | "up" => state.saved.move_cursor(crate::vimnav::NavCommand::Move(-1)),
-        "/" => {
-            let saved = &mut state.saved;
-            dialogmode::enter_filter(&mut saved.mode, &mut saved.entry_query, &saved.query);
-        }
+    match key {
         "e" if on_scope => state.error = Some(EDIT_SCOPE.into()),
         "n" if on_scope => state.error = Some(NEW_SCOPE.into()),
         // On an expression row `e` edits its definition; `n` anywhere off a
         // scope row (an expression, or no row at all) starts a new one.
         "e" => {
             let Some(SavedId::Expression(name)) = cursor else {
-                return Normal::Declined;
+                state.error = prior_error;
+                return false;
             };
             super::definition::push(shell, Some(name), window, cx);
-            return Normal::Done;
+            return true;
         }
         "n" => {
             super::definition::push(shell, None, window, cx);
-            return Normal::Done;
-        }
-        // The empty Scopes row says `s` saves the current scope: the save
-        // prompt is pushed over this screen and returns here.
-        "s" => {
-            super::prompt::push_save(shell, cx);
-            dialog::sync_dialog_text(shell, window, cx);
+            return true;
         }
         // Copy, delete and revert act on a definition: an empty row has none.
         "c" | "d" | "r" => {
             let Some(row) = state.saved.cursor_row().cloned() else {
-                return Normal::Declined;
+                state.error = prior_error;
+                return false;
             };
-            row_verb(shell, ks.key.as_str(), row, window, cx);
-            return Normal::Done;
+            row_verb(shell, key, row, window, cx);
+            return true;
         }
         // An empty row has nothing to load or toggle: `enter` there is the
         // section's way to make a first one.
@@ -540,20 +434,20 @@ fn normal_key(
         }
         "enter" if stop == Some(Stop::Empty(Section::Expressions)) => {
             super::definition::push(shell, None, window, cx);
-            return Normal::Done;
+            return true;
         }
         "enter" => {
             commit_cursor(shell, window, cx);
-            return Normal::Done;
+            return true;
         }
-        "escape" => {
-            let after = state.layers.escape();
-            finish(shell, after, window, cx);
-            return Normal::Done;
+        _ => {
+            state.error = prior_error;
+            return false;
         }
-        _ => return Normal::Declined,
     }
-    Normal::Claimed
+    shell.refresh_dialog_rows(cx);
+    cx.notify();
+    true
 }
 
 /// `c` pushes the copy prompt for `row`; `d` and `r` ask before deleting or
@@ -588,9 +482,10 @@ fn row_verb(
     cx.notify();
 }
 
-/// Load the cursor's scope or toggle the cursor's expression, then leave
-/// the screen. A definition removed since the rows derived refuses here and
-/// the screen re-derives, so the next key sees the rows as they now are.
+/// Load the cursor's scope or toggle the cursor's expression. The saved
+/// door's dialog closes with it; any other door's stays on the screen. A
+/// definition removed since the rows derived refuses here and the screen
+/// re-derives, so the next key sees the rows as they now are.
 fn commit_cursor(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let Some(id) = shell
         .scope_dialog
@@ -627,11 +522,19 @@ fn commit_cursor(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Sh
         cx.notify();
         return;
     }
-    let after = state.layers.commit_saved_row();
-    finish(shell, after, window, cx);
+    if state.opener.closes_on_saved_commit() {
+        shell.close_modal(window, cx);
+        cx.notify();
+        return;
+    }
+    // From `mod+o` the screen stays: the current sections show the change,
+    // and the cursor stays on the saved row by identity.
+    shell.refresh_dialog_rows(cx);
+    dialog::sync_dialog_text(shell, window, cx);
+    cx.notify();
 }
 
-/// Show whatever the Saved screen left for, or close the dialog when it was
+/// Show the screen a step left for, or close the dialog when the step was
 /// the bottom layer.
 pub(super) fn finish(
     shell: &mut ShellView,
@@ -649,9 +552,9 @@ pub(super) fn finish(
     cx.notify();
 }
 
-/// A row press moves the cursor; the second press of a double-click is
-/// `enter`. Ignored unless Saved is the top layer: a step pushed over this
-/// screen owns the pointer.
+/// A row press moves the cursor onto the row; the second press of a
+/// double-click is `enter`. Ignored unless the screen is the top layer: a
+/// step pushed over it owns the pointer.
 fn press_row(
     shell: &mut ShellView,
     at: usize,
@@ -663,14 +566,11 @@ fn press_row(
         return;
     };
     // A question up over the screen owns the pointer too.
-    if !in_saved(state) || state.pending.is_some() {
+    if !state.on_screen() || state.pending.is_some() {
         return;
     }
-    state.saved.cursor = at;
-    state.saved.cursor_id = state
-        .saved
-        .cursor_stop()
-        .map(|stop| state.saved.stop_id(stop));
+    state.zone = Zone::Saved;
+    state.saved.set_cursor(at);
     state.error = None;
     // Exactly 2, so a triple-click does not commit twice.
     if click_count == 2 {
@@ -681,12 +581,12 @@ fn press_row(
 }
 
 /// The empty Expressions row's press: a new expression, as `n` opens.
-/// Ignored unless Saved is on top with no question up.
+/// Ignored unless the screen is on top with no question up.
 fn press_new_expression(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if !shell
         .scope_dialog
         .as_ref()
-        .is_some_and(|s| in_saved(s) && s.pending.is_none())
+        .is_some_and(|s| s.on_screen() && s.pending.is_none())
     {
         return;
     }
@@ -717,11 +617,15 @@ fn section_names(section: Section) -> SectionNames {
     }
 }
 
-pub(crate) fn build(
+/// The saved group, painted under the current sections: a hairline
+/// separator, the filter row (frozen in Normal mode, live in Filter), then
+/// the saved scopes and the saved expressions. The order is
+/// `screen::child_index`'s: it must change with it.
+pub(super) fn group(
     shell: &ShellView,
     state: &ScopeDialogState,
     entity: &Entity<ShellView>,
-    cx: &mut App,
+    cx: &App,
 ) -> AnyElement {
     let screen = &state.saved;
     let theme = cx.theme();
@@ -736,11 +640,34 @@ pub(crate) fn build(
     // Current's are.
     let empty_states = control::paint(theme, control::Rest::Bare, theme.popover, muted);
 
+    // The filter row: live while filtering, frozen (a press enters filter
+    // mode) otherwise.
+    let frozen = (screen.mode == DialogMode::Normal).then(|| dialog::FrozenFilter {
+        query: &screen.query,
+        slash_filters: true,
+        entity: entity.clone(),
+    });
+    // The highlight follows the cursor's group: a saved stop shows it only
+    // while the cursor rests in this group.
+    let cursor = (state.zone == Zone::Saved).then_some(screen.cursor);
     let mut list = v_flex()
         .id("scope-saved-rows")
         .w_full()
         .gap_0p5()
-        .debug_selector(|| "scope-saved".to_string());
+        .debug_selector(|| "scope-saved".to_string())
+        // A hairline: one pixel, not a size the rem scale owns.
+        .child(
+            div()
+                .h(px(1.))
+                .w_full()
+                .bg(border)
+                .debug_selector(|| "scope-saved-separator".to_string()),
+        )
+        .child(
+            div()
+                .debug_selector(|| "scope-saved-filter".to_string())
+                .child(dialog::filter_row(&shell.dialog_input, frozen, cx)),
+        );
     let mut row_i = 0usize;
     for section in [Section::Scopes, Section::Expressions] {
         let names = section_names(section);
@@ -764,7 +691,8 @@ pub(crate) fn build(
                 ),
         );
         if screen.section_is_empty(section) {
-            let highlighted = screen.cursor_stop() == Some(Stop::Empty(section));
+            let highlighted =
+                cursor.and_then(|c| screen.stops.get(c).copied()) == Some(Stop::Empty(section));
             let empty = div()
                 .px_2()
                 .h(scale::design(ROW_HEIGHT))
@@ -821,7 +749,7 @@ pub(crate) fn build(
                 .text_sm()
                 .rounded(radius)
                 .debug_selector(move || format!("scope-saved-row-{i}"));
-            let mut el = crate::shell::listrow::paint_row(el, paint, s == screen.cursor);
+            let mut el = crate::shell::listrow::paint_row(el, paint, cursor == Some(s));
             let detail_color = if shown.broken { danger } else { muted };
             el = el
                 .child(
@@ -874,80 +802,7 @@ pub(crate) fn build(
         }
     }
 
-    // The filter row: live while filtering, frozen (a press enters filter
-    // mode) otherwise.
-    let frozen = (screen.mode == DialogMode::Normal).then(|| dialog::FrozenFilter {
-        query: &screen.query,
-        slash_filters: true,
-        entity: entity.clone(),
-    });
-    let mut body = v_flex()
-        .gap_2()
-        .w(scale::design(super::view::WIDTH))
-        .child(
-            div()
-                .debug_selector(|| "scope-saved-filter".to_string())
-                .child(dialog::filter_row(&shell.dialog_input, frozen, cx)),
-        )
-        .child(list);
-    if let Some(error) = state.error.as_ref() {
-        body = body.child(
-            div()
-                .px_2()
-                .text_xs()
-                .text_color(danger)
-                .debug_selector(|| "scope-dialog-error".to_string())
-                .child(error.clone()),
-        );
-    }
-    let border = cx.theme().border;
-    let footer = match super::prompt::pending_footer(state, entity, cx) {
-        Some(question) => question,
-        None => dialog::hint_rows(&hints(state)),
-    };
-    body.child(
-        v_flex()
-            .w_full()
-            .gap_1()
-            .pt_2()
-            .border_t_1()
-            .border_color(border)
-            .child(footer),
-    )
-    .into_any_element()
-}
-
-fn hints(state: &ScopeDialogState) -> Vec<Hint> {
-    if state.saved.mode == DialogMode::Filter {
-        return vec![
-            Hint::new(HintRow::Go, &["escape"], "restore"),
-            Hint::new(HintRow::Go, &["enter"], "keep"),
-        ];
-    }
-    let leave = if state.layers.depth() > 1 {
-        "back"
-    } else {
-        "close"
-    };
-    // `enter` says what it does on the row under the cursor.
-    let enter = match state.saved.cursor_stop() {
-        Some(Stop::Empty(Section::Expressions)) => {
-            Hint::new(HintRow::Go, &["enter"], "new expression").selector("scope-saved-hint-new")
-        }
-        _ => Hint::new(HintRow::Go, &["enter"], "load / add-remove"),
-    };
-    vec![
-        Hint::new(HintRow::Move, &["j", "k"], "row"),
-        enter,
-        Hint::new(HintRow::Edit, &["e"], "edit expression"),
-        Hint::new(HintRow::Edit, &["n"], "new expression"),
-        Hint::new(HintRow::Edit, &["s"], "save scope"),
-        Hint::new(HintRow::Edit, &["c"], "copy"),
-        Hint::new(HintRow::Edit, &["d"], "delete"),
-        Hint::new(HintRow::Edit, &["r"], "revert"),
-        Hint::new(HintRow::Go, &["/"], "filter"),
-        Hint::new(HintRow::Go, &["escape"], leave),
-    ]
+    list.into_any_element()
 }
 
 /// The saved scopes' config doc, as `Config::layered_docs` keys it.

@@ -56,9 +56,9 @@ fn open_saved(vcx: &mut gpui::VisualTestContext) {
 
 fn saved_open(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> bool {
     shell.read_with(vcx, |s, _| {
-        s.scope_dialog
-            .as_ref()
-            .is_some_and(crate::shell::scopedialog::saved_view::in_saved)
+        s.scope_dialog.as_ref().is_some_and(|d| {
+            d.on_screen() && d.zone == crate::shell::scopedialog::screen::Zone::Saved
+        })
     })
 }
 

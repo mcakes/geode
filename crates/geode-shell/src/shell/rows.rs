@@ -20,16 +20,20 @@ impl ShellView {
             let frame = self.target_frame();
             let key = super::scopedialog::view::rows_key(frame.entity().read(cx));
             let view = frame.read(cx);
-            if let Some(state) = self.scope_dialog.as_mut()
-                && !state.is_current(key)
-            {
-                state.refresh(
-                    view.scope(),
-                    view.named_expressions(),
-                    view.loaded_from(),
-                    view.saved_scopes(),
-                    key,
-                );
+            if let Some(state) = self.scope_dialog.as_mut() {
+                if !state.is_current(key) {
+                    state.refresh(
+                        view.scope(),
+                        view.named_expressions(),
+                        view.loaded_from(),
+                        view.saved_scopes(),
+                        key,
+                    );
+                }
+                // A filter narrows the saved stops without moving the key:
+                // re-zone either way, so no key reads a group with nowhere
+                // to rest.
+                state.normalize_zone();
             }
         }
         // The live object dialog only: a parked one is re-keyed when it is revealed

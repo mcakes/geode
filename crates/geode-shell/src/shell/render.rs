@@ -420,12 +420,17 @@ impl Render for ShellView {
                 super::scopedialog::view::open_save(view, window, cx);
             });
         };
-        // The scope bar's load glyph opens the Scope dialog's Saved screen,
-        // the mouse form of `frame::scope_saved`.
+        // The scope bar's load glyph opens the Scope dialog on its saved
+        // scopes, the mouse form of `frame::scope_saved`.
         let load_chip_entity = cx.entity();
         let on_load = move |window: &mut Window, cx: &mut App| {
             load_chip_entity.update(cx, |view, cx| {
-                super::scopedialog::view::open_saved(view, window, cx);
+                super::scopedialog::view::open_saved(
+                    view,
+                    super::scopedialog::saved_view::Section::Scopes,
+                    window,
+                    cx,
+                );
             });
         };
         // The grouping readout's click — the mouse form of
@@ -497,12 +502,13 @@ impl Render for ShellView {
                         parked.state.domain == objectdialog::Domain::Groupings
                     })
                 });
-        // The load glyph holds its pressed fill while the Saved screen is
-        // the Scope dialog's top layer.
-        let scope_open = self
-            .scope_dialog
-            .as_ref()
-            .is_some_and(super::scopedialog::saved_view::in_saved);
+        // The load glyph reads pressed while the dialog its door opened is
+        // up; the `+` while a dialog any other door opened is.
+        let (scope_open, scope_dialog_open) = match self.scope_dialog.as_ref().map(|s| s.opener) {
+            Some(super::scopedialog::state::Opener::Saved) => (true, false),
+            Some(super::scopedialog::state::Opener::Scope) => (false, true),
+            None => (false, false),
+        };
         // The pin glyph names the active workspace, whose tiles are the
         // ones on screen, not a dialog's target.
         let ws = self.active_ix();
@@ -522,7 +528,7 @@ impl Render for ShellView {
             &bar_model,
             grouping_open,
             scope_open,
-            self.scope_dialog.is_some(),
+            scope_dialog_open,
             on_chip_close,
             on_chip_open,
             on_add,

@@ -607,10 +607,12 @@ pub(crate) fn sync_dialog_text(
                 input.read(cx).focus_handle(cx).focus(window, cx);
                 return;
             }
-            if !super::scopedialog::saved_view::in_saved(state) {
+            if !state.on_screen() {
                 shell.focus_handle.focus(window, cx);
                 return;
             }
+            // The screen's input is the saved group's filter: Normal mode
+            // focuses the shell, Filter the input.
             (state.saved.mode, false, state.saved.query.as_str())
         }
         // Filter-only dialogs keep their own focus path (see `refocus_top`).
@@ -729,8 +731,8 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
             };
             dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
         }
-        // The Saved screen's frozen filter row; a no-op on any other layer
-        // and while a question is up.
+        // The saved group's frozen filter row; a no-op under a step and
+        // while a question is up.
         Some(DialogKind::Scope) => {
             if let Some(state) = shell.scope_dialog.as_mut() {
                 if state.pending.is_some() {

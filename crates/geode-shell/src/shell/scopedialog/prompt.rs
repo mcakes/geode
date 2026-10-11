@@ -377,6 +377,7 @@ fn copy_definition(
     };
     state.prompt = None;
     state.saved.cursor_id = Some(super::saved_view::StopId::Row(copy));
+    state.zone = super::screen::Zone::Saved;
     let after = state.layers.commit_step();
     super::saved_view::finish(shell, after, window, cx);
 }

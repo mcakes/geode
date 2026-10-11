@@ -188,10 +188,10 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// benefit. `grouping_open` is whether the Grouping dialog is up right
 /// now — the readout paints its pressed fill for as long as it is (a
 /// control that owns a popup stays visibly pressed until it closes);
-/// `scope_open` is the same for the load glyph and the Scope dialog's Saved
-/// screen, which `on_load` opens.
-/// `scope_dialog_open` is whether the Scope dialog is up; the `+` that
-/// opens it holds its pressed fill for as long as it is. `on_term_open` and
+/// `scope_open` is the same for the load glyph and the Scope dialog opened
+/// from the load glyph's door (`on_load`).
+/// `scope_dialog_open` is whether the Scope dialog opened from any other
+/// door is up; the `+` holds its pressed fill for as long as it is. `on_term_open` and
 /// `on_term_close` take the expression term's index; `on_named_open` and
 /// `on_named_close` take the named expression's name. `pin` is the active
 /// workspace and whether it is pinned; `on_pin` toggles that pin.

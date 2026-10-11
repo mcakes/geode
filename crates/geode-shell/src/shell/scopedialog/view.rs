@@ -1,10 +1,8 @@
-//! The Scope dialog's Current screen: the lane's scope as rows by
-//! ingredient, refreshed when the frame changes under it. Steps that exist
-//! as their own modals (the dimension picker, the expression dialog) are
-//! pushed over this one; their commits pop back here. The text step and a
-//! name prompt are drawn here; the Saved screen (`saved_view`) and the
-//! definition step (`definition`) are layers of this dialog, and keys and
-//! paint route to them while they are on top.
+//! The Scope dialog's one screen: the lane's scope as rows by ingredient,
+//! then the saved scopes and expressions (`saved_view`), under one cursor
+//! (`screen`). Steps that exist as their own modals are pushed over it; the
+//! text step, name prompts and the definition step are layers of this
+//! dialog.
 
 use std::rc::Rc;
 
@@ -23,7 +21,8 @@ use crate::keymap::Keystroke;
 use super::rows::{
     CONTRADICTION, CurrentRows, NamedState, Row, RowId, RowKind, Section, empty_hint,
 };
-use super::state::{After, Layer, Layers, Step};
+use super::screen::{Jump, Zone};
+use super::state::{After, Layer, Layers, Opener, Step};
 use crate::frame::FrameViewMut;
 use crate::shell::control::{self, PointerStates as _};
 use crate::shell::{ShellView, dialog, scale};
@@ -45,6 +44,10 @@ const TEXT_DETAIL: &str = "textual columns";
 pub(crate) const NAME_ONLY_TERMS: &str = "only an unnamed term can be named";
 /// Refusal when `i` is pressed off a named reference.
 pub(crate) const INLINE_ONLY_NAMED: &str = "only a named reference can be inlined";
+/// `c` off a saved row.
+pub(crate) const COPY_ONLY_SAVED: &str = "only a saved scope or expression can be copied";
+/// `r` off a saved row.
+pub(crate) const REVERT_ONLY_SAVED: &str = "only a saved scope or expression can be reverted";
 
 /// Each row's leading glyph, by kind, in its own fixed-width column.
 const DIMENSION_GLYPH: &str = "▦";
@@ -131,6 +134,13 @@ pub(crate) struct ScopeDialogState {
     pub pending: Option<super::prompt::Pending>,
     /// The definition being edited while the definition step is on top.
     pub definition: Option<super::definition::DefinitionStep>,
+    /// Which group the cursor rests in; `cursor` (Current's rows) and
+    /// `saved.cursor` (Saved's stops) each keep their place while the other
+    /// group holds the cursor.
+    pub zone: Zone,
+    /// The door that opened the dialog: decides whether a saved-row commit
+    /// closes it, and which toolbar glyph reads pressed.
+    pub opener: Opener,
 }
 
 /// What the rows read: the frame generation (every lane value change) and
@@ -140,7 +150,7 @@ pub(crate) fn rows_key(frame: &Frame) -> (u64, u64) {
 }
 
 impl ScopeDialogState {
-    fn new(first: Layer) -> Self {
+    fn new(first: Layer, opener: Opener) -> Self {
         ScopeDialogState {
             layers: Layers::open(first),
             rows: CurrentRows::default(),
@@ -156,11 +166,42 @@ impl ScopeDialogState {
             prompt: None,
             pending: None,
             definition: None,
+            zone: Zone::Current,
+            opener,
         }
     }
 
+    /// The screen is on top: no step drawn over it.
+    pub(crate) fn on_screen(&self) -> bool {
+        matches!(self.layers.top(), Layer::Current)
+    }
+
+    /// Keep the cursor on a group that has somewhere to rest: off Current
+    /// when it has no rows, off Saved when it has no stops — except while
+    /// the filter is open, which owns the saved group even when it matches
+    /// nothing.
+    pub(crate) fn normalize_zone(&mut self) {
+        let filtering = self.saved.mode == crate::dialogmode::DialogMode::Filter;
+        match self.zone {
+            Zone::Current if self.rows.rows.is_empty() && self.saved.stop_count() > 0 => {
+                self.zone = Zone::Saved;
+            }
+            Zone::Saved
+                if !filtering && self.saved.stop_count() == 0 && !self.rows.rows.is_empty() =>
+            {
+                self.zone = Zone::Current;
+            }
+            _ => {}
+        }
+    }
+
+    /// The cursor's Current row; `None` while the cursor is in the saved
+    /// group. Every Current verb reads its row here, so this is their
+    /// dispatch guard: none of them acts while the cursor is on a saved row.
     pub(crate) fn cursor_row(&self) -> Option<&Row> {
-        self.rows.rows.get(self.cursor)
+        (self.zone == Zone::Current)
+            .then(|| self.rows.rows.get(self.cursor))
+            .flatten()
     }
 
     pub(crate) fn is_current(&self, key: (u64, u64)) -> bool {
@@ -188,6 +229,7 @@ impl ScopeDialogState {
         self.cursor_id = self.rows.rows.get(at).map(|r| r.id.clone());
         self.key = key;
         self.saved.refresh(saved, named, scope, key);
+        self.normalize_zone();
     }
 }
 
@@ -196,8 +238,8 @@ pub(crate) fn in_text_step(state: &ScopeDialogState) -> bool {
 }
 
 /// The Change arm's pure half: the text step's draft, the definition
-/// step's draft, a name prompt's draft, or the Saved screen's filter while
-/// it is filtering. Current ignores the field.
+/// step's draft, a name prompt's draft, or the saved group's filter while
+/// it is filtering. The screen ignores the field otherwise.
 pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
     // A question owns the keyboard; the field is not its to edit.
     if state.pending.is_some() {
@@ -215,44 +257,79 @@ pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
     }
 }
 
-/// Open on Current (`frame::scope`, `mod+o`, the scope bar's `+`). A no-op
-/// when the dialog is already on top; refused with a notice when it is lower
-/// in the stack (`dialog::can_open`).
+/// Open on the screen (`frame::scope`, `mod+o`, the scope bar's `+`), the
+/// cursor on the first current row. A no-op when the dialog is already on
+/// top; refused with a notice when it is lower in the stack
+/// (`dialog::can_open`).
 pub(crate) fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    open_on(view, Layer::Current, window, cx);
+    open_on(view, Layer::Current, Opener::Scope, window, cx);
+    follow_cursor(view);
 }
 
-/// Open on the Saved screen (`frame::scope_saved`, the load glyph,
-/// `config::scopes`, `config::expressions`). Saved is the bottom layer, so
-/// a commit or `escape` closes the dialog. With the dialog already on top
-/// on Current, Saved is pushed over it instead, as `o` does; on any other
-/// layer this is a no-op.
-pub(crate) fn open_saved(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+/// The saved door (`frame::scope_saved`, the load glyph, `config::scopes`,
+/// `config::expressions`): the screen with the cursor on `section` — on the
+/// lane's `loaded_from` scope when it is listed. A load or toggle closes the
+/// dialog (`Opener::Saved`). With the dialog already on top on its screen,
+/// the cursor jumps there and the opener stays; on a step this is a no-op.
+pub(crate) fn open_saved(
+    view: &mut ShellView,
+    section: super::saved_view::Section,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
     if view.top_kind() == Some(dialog::DialogKind::Scope) {
-        if let Some(state) = view.scope_dialog.as_mut()
-            && matches!(state.layers.top(), Layer::Current)
+        if view
+            .scope_dialog
+            .as_ref()
+            .is_some_and(|s| s.on_screen() && s.pending.is_none())
         {
-            super::saved_view::push(state);
-            view.refresh_dialog_rows(cx);
-            dialog::sync_dialog_text(view, window, cx);
+            jump_saved(view, section, cx);
             cx.notify();
         }
         return;
     }
-    open_on(view, Layer::Saved, window, cx);
+    if !open_on(view, Layer::Current, Opener::Saved, window, cx) {
+        return;
+    }
+    view.refresh_dialog_rows(cx);
+    jump_saved(view, section, cx);
+    cx.notify();
 }
+
+/// Put the cursor in the saved group on `section` (the lane's `loaded_from`
+/// scope first, for Scopes). A section with no stop (a filter hid every
+/// row) leaves the cursor where it was.
+fn jump_saved(view: &mut ShellView, section: super::saved_view::Section, cx: &App) {
+    let prefer = view
+        .target_frame()
+        .read(cx)
+        .loaded_from()
+        .map(str::to_string);
+    if let Some(state) = view.scope_dialog.as_mut()
+        && state.saved.jump_to(section, prefer.as_deref())
+    {
+        state.zone = Zone::Saved;
+        state.error = None;
+    }
+    follow_cursor(view);
+}
+
+/// Scroll the list to the cursor; Task 3 fills this in.
+fn follow_cursor(_view: &mut ShellView) {}
 
 /// The one-shot save door (the scope bar's save chip,
 /// `scope::save_current`): the save prompt alone, so its commit or `escape`
 /// closes the dialog. An empty scope refuses on the status bar and opens
-/// nothing. With the dialog already on top on Current or Saved the prompt
-/// is pushed over that screen instead, as `s` does there; on any other
-/// layer this is a no-op.
+/// nothing. With the dialog already on top on its screen the prompt is
+/// pushed over it instead, as `s` does there; on any other layer this is a
+/// no-op.
 pub(crate) fn open_save(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if view.top_kind() == Some(dialog::DialogKind::Scope) {
-        if view.scope_dialog.as_ref().is_some_and(|s| {
-            matches!(s.layers.top(), Layer::Current | Layer::Saved) && s.pending.is_none()
-        }) {
+        if view
+            .scope_dialog
+            .as_ref()
+            .is_some_and(|s| s.on_screen() && s.pending.is_none())
+        {
             super::prompt::push_save(view, cx);
             view.refresh_dialog_rows(cx);
             dialog::sync_dialog_text(view, window, cx);
@@ -272,7 +349,13 @@ pub(crate) fn open_save(view: &mut ShellView, window: &mut Window, cx: &mut Cont
         cx.notify();
         return;
     }
-    if !open_on(view, Layer::Step(Step::SaveScope), window, cx) {
+    if !open_on(
+        view,
+        Layer::Step(Step::SaveScope),
+        Opener::Scope,
+        window,
+        cx,
+    ) {
         return;
     }
     if let Some(state) = view.scope_dialog.as_mut() {
@@ -286,8 +369,8 @@ pub(crate) fn open_save(view: &mut ShellView, window: &mut Window, cx: &mut Cont
 /// The one-shot definition door (a `≡` chip's body): the expression's
 /// definition alone, so its commit or `escape` closes the dialog. A name
 /// nothing defines refuses on the status bar and opens nothing. With the
-/// dialog already on top on Current or Saved the step is pushed over that
-/// screen instead; on any other layer this is a no-op.
+/// dialog already on top on its screen the step is pushed over it instead;
+/// on any other layer this is a no-op.
 pub(crate) fn open_definition(
     view: &mut ShellView,
     name: String,
@@ -295,9 +378,11 @@ pub(crate) fn open_definition(
     cx: &mut Context<ShellView>,
 ) {
     if view.top_kind() == Some(dialog::DialogKind::Scope) {
-        if view.scope_dialog.as_ref().is_some_and(|s| {
-            matches!(s.layers.top(), Layer::Current | Layer::Saved) && s.pending.is_none()
-        }) {
+        if view
+            .scope_dialog
+            .as_ref()
+            .is_some_and(|s| s.on_screen() && s.pending.is_none())
+        {
             super::definition::push(view, Some(name), window, cx);
         }
         return;
@@ -313,6 +398,7 @@ pub(crate) fn open_definition(
     if !open_on(
         view,
         Layer::Step(Step::Definition { name: Some(name) }),
+        Opener::Scope,
         window,
         cx,
     ) {
@@ -325,18 +411,20 @@ pub(crate) fn open_definition(
     super::definition::begin(view, window, cx);
 }
 
-/// Open the dialog with `first` as its bottom layer. Returns whether it
-/// opened (`dialog::can_open` refuses one lower in the stack).
+/// Open the dialog with `first` as its bottom layer, recording the door that
+/// opened it. Returns whether it opened (`dialog::can_open` refuses one
+/// lower in the stack).
 fn open_on(
     view: &mut ShellView,
     first: Layer,
+    opener: Opener,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
     if !dialog::can_open(view, dialog::DialogKind::Scope) {
         return false;
     }
-    view.scope_dialog = Some(ScopeDialogState::new(first));
+    view.scope_dialog = Some(ScopeDialogState::new(first, opener));
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
@@ -349,13 +437,6 @@ fn open_on(
         false,
     );
     dialog::set_title_extra(view, title_extra);
-    // Reads the layers, so one registration serves both doors: Back shows
-    // only while Saved sits over Current.
-    dialog::set_back(
-        view,
-        super::saved_view::back_available,
-        super::saved_view::back,
-    );
     true
 }
 
@@ -400,17 +481,28 @@ fn handle_key(
     if super::prompt::in_name_prompt(state) {
         return super::prompt::prompt_key(shell, ks, window, cx);
     }
-    if super::saved_view::in_saved(state) {
-        return super::saved_view::handle_key(shell, ks, window, cx);
+    // The filter owns every key it claims, verb letters included: they
+    // type into the field rather than act.
+    if state.saved.mode == crate::dialogmode::DialogMode::Filter {
+        let prior_error = state.error.take();
+        if !super::saved_view::filter_key(&mut state.saved, ks) {
+            state.error = prior_error;
+            return false;
+        }
+        state.zone = Zone::Saved;
+        shell.refresh_dialog_rows(cx);
+        follow_cursor(shell);
+        cx.notify();
+        return true;
     }
     // The error describes the last action only: every claimed key drops it,
     // and the refusing action sets it again. An unclaimed key puts it back.
     let prior_error = state.error.take();
+    let zone = state.zone;
     let plain = !ks.mods.is_chord();
     match (ks.key.as_str(), plain, ks.mods.shift) {
         ("j" | "down", true, false) => move_cursor(shell, 1),
         ("k" | "up", true, false) => move_cursor(shell, -1),
-        ("d", true, false) => remove_cursor_row(shell, cx),
         ("d", true, true) => {
             edit_lane(shell, cx, |f| f.clear_scope());
         }
@@ -436,23 +528,40 @@ fn handle_key(
             );
             return true;
         }
-        ("o", true, false) => {
-            if let Some(state) = shell.scope_dialog.as_mut() {
-                super::saved_view::push(state);
-            }
+        ("t", true, false) => {
+            enter_text_step(shell, window, cx);
+            return true;
         }
         ("s", true, false) => {
             super::prompt::push_save(shell, cx);
             dialog::sync_dialog_text(shell, window, cx);
         }
+        ("o", true, false) => jump(shell, cx),
+        ("/", true, false) => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                super::saved_view::enter_filter(state);
+            }
+            dialog::sync_dialog_text(shell, window, cx);
+        }
+        // Row verbs: the cursor's group decides.
+        ("enter" | "e" | "n" | "c" | "d" | "r", true, false) if zone == Zone::Saved => {
+            return super::saved_view::row_key(shell, ks.key.as_str(), window, cx);
+        }
+        ("i", true, false) if zone == Zone::Saved => set_error(shell, INLINE_ONLY_NAMED),
+        ("s", false, false) if zone == Zone::Saved && ks.mods == shell.services.mod_alias => {
+            set_error(shell, NAME_ONLY_TERMS)
+        }
+        ("d", true, false) => remove_cursor_row(shell, cx),
         ("enter" | "e", true, false) => {
             open_cursor_row(shell, window, cx);
             return true;
         }
-        ("t", true, false) => {
-            enter_text_step(shell, window, cx);
+        ("n", true, false) => {
+            super::definition::push(shell, None, window, cx);
             return true;
         }
+        ("c", true, false) => set_error(shell, COPY_ONLY_SAVED),
+        ("r", true, false) => set_error(shell, REVERT_ONLY_SAVED),
         ("i", true, false) => inline_cursor_row(shell, cx),
         ("s", false, false) if ks.mods == shell.services.mod_alias => {
             name_cursor_term(shell, window, cx);
@@ -468,6 +577,7 @@ fn handle_key(
     // Every edit above may have changed the lane: re-derive now so the next
     // key and the next paint read the same rows.
     shell.refresh_dialog_rows(cx);
+    follow_cursor(shell);
     cx.notify();
     true
 }
@@ -515,15 +625,57 @@ fn text_step_key(
     true
 }
 
+fn set_error(shell: &mut ShellView, refusal: &str) {
+    if let Some(state) = shell.scope_dialog.as_mut() {
+        state.error = Some(refusal.into());
+    }
+}
+
+/// `j`/`k`: one row over the current rows and the saved stops as one list.
 fn move_cursor(shell: &mut ShellView, delta: i64) {
     let Some(state) = shell.scope_dialog.as_mut() else {
         return;
     };
-    let len = state.rows.rows.len();
-    state.cursor = crate::vimnav::apply(state.cursor, len, crate::vimnav::NavCommand::Move(delta));
-    // Re-take the identity, or a re-derive would put the cursor back on the
-    // row it left.
-    state.cursor_id = state.rows.rows.get(state.cursor).map(|r| r.id.clone());
+    let at = match state.zone {
+        Zone::Current => state.cursor,
+        Zone::Saved => state.saved.cursor,
+    };
+    let (zone, at) = super::screen::step(
+        state.zone,
+        at,
+        state.rows.rows.len(),
+        state.saved.stop_count(),
+        delta,
+    );
+    state.zone = zone;
+    match zone {
+        // Re-take the identity, or a re-derive would put the cursor back on
+        // the row it left.
+        Zone::Current => {
+            state.cursor = at;
+            state.cursor_id = state.rows.rows.get(at).map(|r| r.id.clone());
+        }
+        Zone::Saved => state.saved.set_cursor(at),
+    }
+}
+
+/// `o`: the saved scopes, the saved expressions, the current rows, in turn.
+fn jump(shell: &mut ShellView, cx: &App) {
+    let Some(state) = shell.scope_dialog.as_ref() else {
+        return;
+    };
+    let on_scopes = state.saved.cursor_section() == Some(super::saved_view::Section::Scopes);
+    match super::screen::next_jump(state.zone, on_scopes, state.rows.rows.len()) {
+        Jump::Scopes => jump_saved(shell, super::saved_view::Section::Scopes, cx),
+        Jump::Expressions => jump_saved(shell, super::saved_view::Section::Expressions, cx),
+        Jump::Current => {
+            if let Some(state) = shell.scope_dialog.as_mut() {
+                state.zone = Zone::Current;
+                state.cursor = 0;
+                state.cursor_id = state.rows.rows.first().map(|r| r.id.clone());
+            }
+        }
+    }
 }
 
 /// Remove the cursor's row in one undoable edit. A term passes the term the
@@ -639,11 +791,11 @@ fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
     cx.notify();
 }
 
-/// Whether Current's rows and controls take the pointer: only while Current
-/// itself is on top with no question up. Under a step drawn on this body
-/// (the text step, the save prompt) they are its preview.
+/// Whether the screen's rows and controls take the pointer: only while the
+/// screen itself is on top with no question up. Under a step drawn on this
+/// body (the text step, the save prompt) they are its preview.
 fn takes_pointer(state: &ScopeDialogState) -> bool {
-    matches!(state.layers.top(), Layer::Current) && state.pending.is_none()
+    state.on_screen() && state.pending.is_none()
 }
 
 /// The pointer route to `p`, `x` and `t`: a section header's `add` control
@@ -790,9 +942,6 @@ fn build(
     let Some(state) = shell.scope_dialog.as_ref() else {
         return div().into_any_element();
     };
-    if super::saved_view::in_saved(state) {
-        return super::saved_view::build(shell, state, entity, cx);
-    }
     if super::definition::in_definition(state) {
         return super::definition::build(shell, state, entity, cx);
     }
@@ -890,7 +1039,7 @@ fn build(
             if row.section != section {
                 continue;
             }
-            let highlighted = i == state.cursor;
+            let highlighted = state.zone == Zone::Current && i == state.cursor;
             let el = h_flex()
                 .id(("scope-dialog-row", i))
                 .w_full()
@@ -963,6 +1112,7 @@ fn build(
                         return;
                     }
                     if let Some(state) = shell.scope_dialog.as_mut() {
+                        state.zone = Zone::Current;
                         state.cursor = i;
                         state.cursor_id = state.rows.rows.get(i).map(|r| r.id.clone());
                         state.error = None;
@@ -982,6 +1132,11 @@ fn build(
             });
             list = list.child(el);
         }
+    }
+    // The saved group shares the screen; a step drawn here (the text step,
+    // the save prompt) previews the current sections only.
+    if state.on_screen() {
+        list = list.child(super::saved_view::group(shell, state, entity, cx));
     }
 
     let mut body = v_flex().gap_2().w(scale::design(WIDTH));
@@ -1035,6 +1190,19 @@ fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
     if super::prompt::in_name_prompt(state) {
         return super::prompt::hints(state);
     }
+    if state.saved.mode == crate::dialogmode::DialogMode::Filter {
+        return vec![
+            Hint::new(HintRow::Go, &["escape"], "restore"),
+            Hint::new(HintRow::Go, &["enter"], "keep"),
+        ];
+    }
+    match state.zone {
+        Zone::Current => current_hints(shell, state),
+        Zone::Saved => saved_hints(state),
+    }
+}
+
+fn current_hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
     let mut hints = vec![
         Hint::new(HintRow::Move, &["j", "k"], "row"),
         Hint::new(HintRow::Edit, &["p"], "dimension…"),
@@ -1060,9 +1228,35 @@ fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
     }
     hints.extend([
         Hint::new(HintRow::Go, &["enter"], "edit row").selector("scope-dialog-hint-edit-row"),
-        Hint::new(HintRow::Go, &["o"], "saved…"),
+        Hint::new(HintRow::Go, &["o"], "saved"),
         Hint::new(HintRow::Go, &["s"], "save as…"),
+        Hint::new(HintRow::Go, &["/"], "filter"),
         Hint::new(HintRow::Go, &["escape"], "close"),
     ]);
     hints
+}
+
+fn saved_hints(state: &ScopeDialogState) -> Vec<Hint> {
+    use super::saved_view::{Section as Saved, Stop};
+    // `enter` says what it does on the stop under the cursor.
+    let enter = match state.saved.cursor_stop() {
+        Some(Stop::Empty(Saved::Expressions)) => {
+            Hint::new(HintRow::Go, &["enter"], "new expression").selector("scope-saved-hint-new")
+        }
+        _ => Hint::new(HintRow::Go, &["enter"], "load / add-remove"),
+    };
+    vec![
+        Hint::new(HintRow::Move, &["j", "k"], "row"),
+        enter,
+        Hint::new(HintRow::Edit, &["e"], "edit expression"),
+        Hint::new(HintRow::Edit, &["n"], "new expression"),
+        Hint::new(HintRow::Edit, &["c"], "copy"),
+        Hint::new(HintRow::Edit, &["d"], "delete"),
+        Hint::new(HintRow::Edit, &["r"], "revert"),
+        Hint::new(HintRow::Edit, &["u"], "undo"),
+        Hint::new(HintRow::Go, &["o"], "next section"),
+        Hint::new(HintRow::Go, &["s"], "save as…"),
+        Hint::new(HintRow::Go, &["/"], "filter"),
+        Hint::new(HintRow::Go, &["escape"], "close"),
+    ]
 }
