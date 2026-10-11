@@ -1,4 +1,5 @@
-//! Transport capabilities for subscription, upload, and on-demand history.
+//! Transport capabilities for subscription, upload, on-demand history, and
+//! keyed history.
 //! The application registers adapters by name; the data service resolves the
 //! capability each source requires. ChannelAdapter provides an in-process bus.
 //!
@@ -14,8 +15,10 @@ pub use channel::{ChannelAdapter, ChannelFeed};
 pub use topic::topic_matches;
 
 use chrono::{DateTime, Utc};
+use geode_core::query::{KeySet, Span, normalize_key};
 use geode_core::reference::TableRows;
-use std::collections::HashMap;
+use geode_core::schema::ColumnType;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -286,6 +289,156 @@ pub trait SnapshotQuery: Send {
     fn query(&mut self, table: &str) -> Result<TableRows, AdapterError>;
 }
 
+/// One keyed history ask: the rows of `table` whose key falls inside `keys`
+/// over `span`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryRequest {
+    pub table: String,
+    pub keys: KeySet,
+    pub span: Span,
+}
+
+/// Columnar answer: `keys[c][i]` is row i's value for key column c (f64 keys
+/// as text), `values[v][i]` row i's value column v.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HistoryRows {
+    pub ts: Vec<DateTime<Utc>>,
+    pub keys: Vec<Vec<String>>,
+    pub values: Vec<Vec<f64>>,
+}
+
+impl HistoryRows {
+    pub fn len(&self) -> usize {
+        self.ts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ts.is_empty()
+    }
+
+    /// Row i's key tuple.
+    pub fn key_at(&self, i: usize) -> Vec<String> {
+        self.keys.iter().map(|c| c[i].clone()).collect()
+    }
+
+    /// Rewrites every key value to its canonical spelling, column `c`
+    /// through `key_types[c]`. Must run before `validate_against`: a source
+    /// spelling `0.50` for an asked `0.5` would otherwise be refused as not
+    /// asked for, and a `0.5`/`0.50` pair would slip past the repeat check
+    /// and duplicate at append. `Err` names the row and column; on `Err`
+    /// the rows are partly rewritten and must be discarded.
+    pub fn normalize_keys(&mut self, key_types: &[ColumnType]) -> Result<(), String> {
+        if self.keys.len() != key_types.len() {
+            return Err(format!(
+                "{} key column(s) for a {}-column key",
+                self.keys.len(),
+                key_types.len()
+            ));
+        }
+        for (c, (column, ty)) in self.keys.iter_mut().zip(key_types).enumerate() {
+            for (i, value) in column.iter_mut().enumerate() {
+                *value = normalize_key(value, *ty)
+                    .map_err(|e| format!("row {i}, key column {c}: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Equal lengths, `key_arity` key columns, `value_arity` value columns,
+    /// no repeated `(key tuple, ts)`, and every row's key inside `asked`
+    /// (equal to an Exact tuple, or starting with a Prefix tuple). A row
+    /// outside the ask is refused rather than filed: it would land under a
+    /// key whose coverage the request never established.
+    pub fn validate_against(
+        &self,
+        key_arity: usize,
+        value_arity: usize,
+        asked: &KeySet,
+    ) -> Result<(), AdapterError> {
+        let err = |message: String| AdapterError { message };
+        if self.keys.len() != key_arity {
+            return Err(err(format!(
+                "{} key column(s) for a {key_arity}-column key",
+                self.keys.len()
+            )));
+        }
+        if self.values.len() != value_arity {
+            return Err(err(format!(
+                "{} value column(s) for {value_arity} declared",
+                self.values.len()
+            )));
+        }
+        let n = self.ts.len();
+        if let Some(c) = self.keys.iter().find(|c| c.len() != n) {
+            return Err(err(format!("{} key values for {n} timestamps", c.len())));
+        }
+        if let Some(c) = self.values.iter().find(|c| c.len() != n) {
+            return Err(err(format!("{} values for {n} timestamps", c.len())));
+        }
+        let mut seen = HashSet::with_capacity(n);
+        for i in 0..n {
+            let key = self.key_at(i);
+            let inside = asked.tuples().iter().any(|t| match asked {
+                KeySet::Exact(_) => *t == key,
+                KeySet::Prefix(_) => key.starts_with(t),
+            });
+            if !inside {
+                return Err(err(format!(
+                    "row {i} ({}) was not asked for",
+                    key.join(" / ")
+                )));
+            }
+            if !seen.insert((key, self.ts[i])) {
+                return Err(err(format!(
+                    "repeated observation at row {i}: {} at {}; which value wins is the source's question",
+                    self.key_at(i).join(" / "),
+                    self.ts[i]
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes rows with any NaN or infinite value, keeping every column
+    /// aligned. Returns how many were dropped, for the warning line.
+    pub fn drop_non_finite(&mut self) -> usize {
+        let n = self.ts.len();
+        let keep: Vec<bool> = (0..n)
+            .map(|i| self.values.iter().all(|c| c[i].is_finite()))
+            .collect();
+        let dropped = keep.iter().filter(|k| !**k).count();
+        if dropped == 0 {
+            return 0;
+        }
+        retain_mask(&mut self.ts, &keep);
+        for c in &mut self.keys {
+            retain_mask(c, &keep);
+        }
+        for c in &mut self.values {
+            retain_mask(c, &keep);
+        }
+        dropped
+    }
+}
+
+/// Keeps `v[i]` where `keep[i]`; an element past the mask is dropped.
+fn retain_mask<T>(v: &mut Vec<T>, keep: &[bool]) {
+    let mut k = keep.iter();
+    v.retain(|_| *k.next().unwrap_or(&false));
+}
+
+/// Blocking keyed history read owned by one history worker. Implementations
+/// bound both calls with their own timeouts: the worker has no deadline, and
+/// a call that never returns stops that source's history and can block
+/// shutdown.
+pub trait HistoryQuery: Send {
+    fn query(&mut self, req: &HistoryRequest) -> Result<HistoryRows, AdapterError>;
+
+    /// Distinct values of one key column, for typeahead and the tenor set.
+    /// `None` when the source cannot enumerate.
+    fn keys(&mut self, table: &str, column: &str) -> Option<Vec<String>>;
+}
+
 /// Named transport shared through Arc. Optional capabilities are independent:
 /// None means unavailable, while a returned capability may still refuse an
 /// operation. Availability can change; for example, a closed ChannelAdapter
@@ -322,6 +475,12 @@ pub trait Adapter: Send + Sync {
     /// A FRESH handle per call, like `fetch`. `None` (the default) when the
     /// adapter cannot read tables.
     fn snapshot(&self) -> Option<Box<dyn SnapshotQuery>> {
+        None
+    }
+
+    /// A FRESH handle per call, like `fetch`. `None` (the default) when the
+    /// adapter cannot answer keyed history queries.
+    fn history(&self) -> Option<Box<dyn HistoryQuery>> {
         None
     }
 }
@@ -478,5 +637,146 @@ mod tests {
     fn an_adapter_has_no_fetch_side_by_default() {
         let (adapter, _feed) = ChannelAdapter::new("demo_bus");
         assert!(adapter.fetch().is_none());
+    }
+
+    fn rows(ts: &[&str], keys: &[&[&str]], values: &[&[f64]]) -> HistoryRows {
+        HistoryRows {
+            ts: ts.iter().map(|s| t(s)).collect(),
+            keys: keys
+                .iter()
+                .map(|c| c.iter().map(|s| s.to_string()).collect())
+                .collect(),
+            values: values.iter().map(|c| c.to_vec()).collect(),
+        }
+    }
+
+    #[test]
+    fn history_rows_validate_shape_duplicates_and_the_asked_keys() {
+        let asked = KeySet::Prefix(vec![vec!["SPX".into()]]);
+        let ok = rows(
+            &["2026-01-05T21:00:00Z", "2026-01-06T21:00:00Z"],
+            &[&["SPX", "SPX"], &["3M", "3M"], &["0.5", "0.5"]],
+            &[&[15.0, 15.2], &[7650.0, 7660.0]],
+        );
+        assert!(ok.validate_against(3, 2, &asked).is_ok());
+        assert_eq!(ok.key_at(1), vec!["SPX", "3M", "0.5"]);
+        let mut bad = ok.clone();
+        bad.values.pop();
+        assert!(
+            bad.validate_against(3, 2, &asked)
+                .unwrap_err()
+                .message
+                .contains("value column")
+        );
+        let mut bad = ok.clone();
+        bad.keys.pop();
+        assert!(
+            bad.validate_against(3, 2, &asked)
+                .unwrap_err()
+                .message
+                .contains("key column")
+        );
+        let mut bad = ok.clone();
+        bad.ts[1] = bad.ts[0];
+        assert!(
+            bad.validate_against(3, 2, &asked)
+                .unwrap_err()
+                .message
+                .contains("repeated")
+        );
+        let mut bad = ok.clone();
+        bad.keys[0][1] = "NDX".into();
+        assert!(
+            bad.validate_against(3, 2, &asked)
+                .unwrap_err()
+                .message
+                .contains("not asked for"),
+            "a row for a key outside the request is refused, not filed"
+        );
+        let exact = KeySet::Exact(vec![vec!["SPX".into(), "3M".into(), "0.5".into()]]);
+        assert!(ok.validate_against(3, 2, &exact).is_ok());
+        let mut unequal = ok.clone();
+        unequal.ts.pop();
+        assert!(
+            unequal
+                .validate_against(3, 2, &asked)
+                .unwrap_err()
+                .message
+                .contains("timestamps")
+        );
+    }
+
+    #[test]
+    fn history_rows_drop_non_finite_values_keeping_every_column_aligned() {
+        let mut r = rows(
+            &[
+                "2026-01-05T21:00:00Z",
+                "2026-01-06T21:00:00Z",
+                "2026-01-07T21:00:00Z",
+            ],
+            &[&["SPX", "SPX", "SPX"]],
+            &[&[1.0, f64::NAN, 3.0], &[10.0, 20.0, f64::INFINITY]],
+        );
+        assert_eq!(r.drop_non_finite(), 2);
+        assert_eq!(r.len(), 1);
+        assert_eq!(r.ts, vec![t("2026-01-05T21:00:00Z")]);
+        assert_eq!(r.keys, vec![vec!["SPX".to_string()]]);
+        assert_eq!(r.values, vec![vec![1.0], vec![10.0]]);
+    }
+
+    const VOL_KEY: [ColumnType; 3] = [ColumnType::Utf8, ColumnType::Utf8, ColumnType::F64];
+
+    #[test]
+    fn history_rows_normalize_key_spellings_before_the_asked_keys_are_compared() {
+        let mut r = rows(
+            &["2026-01-05T21:00:00Z"],
+            &[&[" SPX "], &["3M"], &["0.50"]],
+            &[&[15.0]],
+        );
+        let exact = KeySet::Exact(vec![vec!["SPX".into(), "3M".into(), "0.5".into()]]);
+        assert!(
+            r.validate_against(3, 1, &exact).is_err(),
+            "unnormalized spellings differ from the ask"
+        );
+        r.normalize_keys(&VOL_KEY).unwrap();
+        assert_eq!(r.key_at(0), vec!["SPX", "3M", "0.5"]);
+        assert!(r.validate_against(3, 1, &exact).is_ok());
+    }
+
+    #[test]
+    fn history_rows_normalized_spellings_of_one_key_at_one_ts_are_repeats() {
+        let mut r = rows(
+            &["2026-01-05T21:00:00Z", "2026-01-05T21:00:00Z"],
+            &[&["SPX", "SPX"], &["3M", "3M"], &["0.5", "0.50"]],
+            &[&[15.0, 15.1]],
+        );
+        let asked = KeySet::Prefix(vec![vec!["SPX".into()]]);
+        assert!(r.validate_against(3, 1, &asked).is_ok());
+        r.normalize_keys(&VOL_KEY).unwrap();
+        assert!(
+            r.validate_against(3, 1, &asked)
+                .unwrap_err()
+                .message
+                .contains("repeated")
+        );
+    }
+
+    #[test]
+    fn history_rows_normalize_names_the_row_and_column_it_refuses() {
+        let mut r = rows(
+            &["2026-01-05T21:00:00Z", "2026-01-06T21:00:00Z"],
+            &[&["SPX", "SPX"], &["3M", "3M"], &["0.5", "half"]],
+            &[&[15.0, 15.1]],
+        );
+        let e = r.normalize_keys(&VOL_KEY).unwrap_err();
+        assert!(e.contains("row 1") && e.contains("key column 2"), "{e}");
+        let e = r.normalize_keys(&VOL_KEY[..2]).unwrap_err();
+        assert!(e.contains("3 key column(s)"), "{e}");
+    }
+
+    #[test]
+    fn an_adapter_has_no_history_side_by_default() {
+        let (adapter, _feed) = ChannelAdapter::new("demo_bus");
+        assert!(adapter.history().is_none());
     }
 }
