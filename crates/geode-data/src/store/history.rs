@@ -15,7 +15,7 @@
 //! because they share the fixed `staging_history` table.
 
 use crate::adapter::HistoryRows;
-use crate::store::series::{cutoff, micros};
+use crate::store::series::{cutoff, from_micros, merge_spans, micros, missing_spans};
 use crate::store::{Store, StoreError};
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
@@ -155,25 +155,150 @@ fn normalized_covered(
 ) -> Result<Vec<Vec<Option<String>>>, StoreError> {
     covered
         .iter()
-        .map(|c| {
-            if c.asked.len() > keys.len() {
-                return Err(StoreError::History(format!(
-                    "covered key ({}) is longer than the {}-column key",
-                    c.asked.join(" / "),
-                    keys.len()
-                )));
-            }
-            keys.iter()
-                .enumerate()
-                .map(|(i, spec)| match c.asked.get(i) {
-                    Some(v) => normalize_key(v, spec.ty).map(Some).map_err(|e| {
-                        StoreError::History(format!("covered key '{}': {e}", spec.name))
-                    }),
-                    None => Ok(None),
-                })
-                .collect()
+        .map(|c| normalized_tuple(keys, &c.asked, "covered"))
+        .collect()
+}
+
+/// One asked tuple padded to the key's arity with NULLs, values in canonical
+/// spelling. Refuses a tuple longer than the key or a value its column type
+/// cannot read; `what` names the tuple's role in the message.
+fn normalized_tuple(
+    keys: &[&ColumnSpec],
+    asked: &[String],
+    what: &str,
+) -> Result<Vec<Option<String>>, StoreError> {
+    if asked.len() > keys.len() {
+        return Err(StoreError::History(format!(
+            "{what} key ({}) is longer than the {}-column key",
+            asked.join(" / "),
+            keys.len()
+        )));
+    }
+    keys.iter()
+        .enumerate()
+        .map(|(i, spec)| match asked.get(i) {
+            Some(v) => normalize_key(v, spec.ty)
+                .map(Some)
+                .map_err(|e| StoreError::History(format!("{what} key '{}': {e}", spec.name))),
+            None => Ok(None),
         })
         .collect()
+}
+
+/// Spans recorded for `asked` or for any shorter prefix of it: a coverage
+/// row whose non-NULL leading columns equal the asked tuple's leading values
+/// covers it. A row deeper than a prefix ask (an exact tuple under it) does
+/// not cover the prefix, or a fetch of one member would make the whole
+/// prefix look fetched. Merged and ordered.
+pub fn covered_spans(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    asked: &[String],
+) -> Result<Vec<CoverSpan>, StoreError> {
+    let keys = ds.history_key();
+    let tuple = normalized_tuple(&keys, asked, "asked")?;
+    let predicate = keys
+        .iter()
+        .zip(&tuple)
+        .map(|(c, v)| match v {
+            Some(_) => format!(
+                "({0} IS NULL OR {0} = CAST(? AS {1}))",
+                quote(&c.name),
+                c.ty.sql()
+            ),
+            None => format!("{} IS NULL", quote(&c.name)),
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let predicate = if predicate.is_empty() {
+        "true".to_string()
+    } else {
+        predicate
+    };
+    let sql = format!(
+        "select epoch_us(from_ts), epoch_us(to_ts) from {} where {predicate} order by from_ts",
+        history_coverage_table(&ds.name)
+    );
+    let params: Vec<Value> = tuple.into_iter().flatten().map(Value::Text).collect();
+    let mut stmt = conn.prepare(&sql).map_err(sql_err(&sql))?;
+    let mut spans: Vec<CoverSpan> = stmt
+        .query_map(duckdb::params_from_iter(params), |r| {
+            Ok((from_micros(r.get(0)?), from_micros(r.get(1)?)))
+        })
+        .map_err(sql_err(&sql))?
+        .collect::<Result<_, _>>()
+        .map_err(sql_err(&sql))?;
+    merge_spans(&mut spans);
+    Ok(spans)
+}
+
+/// One asked tuple and the parts of a requested span its coverage lacks.
+pub type KeyGaps = (Vec<String>, Vec<CoverSpan>);
+
+/// For each asked tuple, the parts of `requested` its coverage lacks
+/// (`series::missing_spans`), keyed by tuple in input order.
+pub fn missing_by_key(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    asked: &[Vec<String>],
+    requested: CoverSpan,
+) -> Result<Vec<KeyGaps>, StoreError> {
+    asked
+        .iter()
+        .map(|tuple| {
+            let held = covered_spans(conn, ds, tuple)?;
+            Ok((tuple.clone(), missing_spans(requested, &held)))
+        })
+        .collect()
+}
+
+/// Whether the cache can answer an as-of `t` for every asked tuple: each is
+/// an exact tuple (one value per key column), `t` lies inside a merged
+/// coverage span `[a, b)` of it, and a stored observation of that tuple has
+/// `a <= ts <= t`. Coverage alone is not enough: a span can hold `t` while
+/// the tuple's last observation at or before `t` lies before the span, never
+/// fetched; and a prefix names members the cache cannot enumerate, so one
+/// missing member would be invisible. Either way a stale or missing member
+/// would be answered as current, so any prefix tuple makes this false.
+pub fn covers_instant(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    asked: &[Vec<String>],
+    t: DateTime<Utc>,
+) -> Result<bool, StoreError> {
+    let keys = ds.history_key();
+    let key_match = joined(
+        &keys,
+        |c| format!("{} = CAST(? AS {})", quote(&c.name), c.ty.sql()),
+        " AND ",
+    );
+    let sql = format!(
+        "select count(*) > 0 from {} where {key_match} \
+         and epoch_us(ts) >= ? and epoch_us(ts) <= ?",
+        history_table(&ds.name)
+    );
+    for tuple in asked {
+        if tuple.len() != keys.len() {
+            return Ok(false);
+        }
+        let held = covered_spans(conn, ds, tuple)?;
+        let Some(&(a, _)) = held.iter().find(|(a, b)| *a <= t && t < *b) else {
+            return Ok(false);
+        };
+        let mut params: Vec<Value> = normalized_tuple(&keys, tuple, "asked")?
+            .into_iter()
+            .flatten()
+            .map(Value::Text)
+            .collect();
+        params.extend([Value::BigInt(micros(a)), Value::BigInt(micros(t))]);
+        let observed: bool = conn
+            .query_row(&sql, duckdb::params_from_iter(params), |r| r.get(0))
+            .map_err(sql_err(&sql))?;
+        if !observed {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn append_history(
@@ -382,6 +507,7 @@ mod tests {
     use crate::store::catalog::Catalog;
     use crate::store::ddl::tests_support::{history_dataset, ts};
     use crate::store::series::micros;
+    use proptest::prelude::*;
 
     fn fixture() -> (tempfile::TempDir, Store, DatasetSpec) {
         let dir = tempfile::tempdir().unwrap();
@@ -902,5 +1028,317 @@ mod tests {
     fn a_fresh_history_dataset_does_not_drift() {
         let (_d, store, ds) = fixture();
         assert!(store.check_drift(&ds).unwrap().is_none());
+    }
+
+    /// Record coverage for `asked` over `span` with no rows.
+    fn cover(store: &Store, ds: &DatasetSpec, asked: &[&str], span: (&str, &str), at: &str) {
+        let rows = HistoryRows {
+            ts: vec![],
+            keys: vec![vec![]; 3],
+            values: vec![vec![]; 2],
+        };
+        append_history(
+            store,
+            &HistoryAppendRequest {
+                dataset: ds,
+                source: "hanweck",
+                rows: &rows,
+                covered: vec![Covered {
+                    asked: asked.iter().map(|s| s.to_string()).collect(),
+                    span: (ts(span.0), ts(span.1)),
+                }],
+                received_at: ts(at),
+            },
+        )
+        .unwrap();
+    }
+
+    /// Store one observation of the exact `key` at `at_ts`, recording no
+    /// coverage.
+    fn observe(store: &Store, ds: &DatasetSpec, key: [&str; 3], at_ts: DateTime<Utc>) {
+        let rows = HistoryRows {
+            ts: vec![at_ts],
+            keys: key.iter().map(|k| vec![k.to_string()]).collect(),
+            values: vec![vec![15.0], vec![7650.0]],
+        };
+        append_history(
+            store,
+            &HistoryAppendRequest {
+                dataset: ds,
+                source: "hanweck",
+                rows: &rows,
+                covered: vec![],
+                received_at: ts("2026-06-01T00:00:00Z"),
+            },
+        )
+        .unwrap();
+    }
+
+    fn exact(u: &str) -> Vec<String> {
+        vec![u.to_string(), "3M".to_string(), "0.5".to_string()]
+    }
+
+    #[test]
+    fn a_prefix_row_covers_every_deeper_tuple_but_a_deeper_row_never_covers_a_prefix() {
+        let (_d, store, ds) = fixture();
+        cover(
+            &store,
+            &ds,
+            &["SPX"],
+            ("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z"),
+            "2026-01-10T09:00:00Z",
+        );
+        cover(
+            &store,
+            &ds,
+            &["NDX", "3M", "0.5"],
+            ("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z"),
+            "2026-01-10T09:00:00Z",
+        );
+        let conn = store.writer();
+        assert_eq!(
+            covered_spans(conn, &ds, &exact("SPX")).unwrap(),
+            vec![(ts("2026-01-05T00:00:00Z"), ts("2026-01-10T00:00:00Z"))],
+            "the SPX prefix covers its tuples"
+        );
+        assert_eq!(
+            covered_spans(conn, &ds, &["SPX".to_string()])
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            covered_spans(conn, &ds, &["NDX".to_string()])
+                .unwrap()
+                .is_empty(),
+            "an exact NDX tuple does not cover the NDX prefix"
+        );
+        assert_eq!(covered_spans(conn, &ds, &exact("NDX")).unwrap().len(), 1);
+        assert!(
+            covered_spans(conn, &ds, &["SX5E".to_string()])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_f64_key_asked_in_another_spelling_finds_its_coverage() {
+        let (_d, store, ds) = fixture();
+        cover(
+            &store,
+            &ds,
+            &["SPX", "3M", "0.50"],
+            ("2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z"),
+            "2026-01-06T09:00:00Z",
+        );
+        assert_eq!(
+            covered_spans(store.writer(), &ds, &exact("SPX"))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn missing_by_key_subtracts_each_tuple_s_own_coverage() {
+        let (_d, store, ds) = fixture();
+        cover(
+            &store,
+            &ds,
+            &["SPX"],
+            ("2026-01-05T00:00:00Z", "2026-01-07T00:00:00Z"),
+            "2026-01-07T09:00:00Z",
+        );
+        let asked = vec![vec!["SPX".to_string()], vec!["SX5E".to_string()]];
+        let gaps = missing_by_key(
+            store.writer(),
+            &ds,
+            &asked,
+            (ts("2026-01-05T00:00:00Z"), ts("2026-01-10T00:00:00Z")),
+        )
+        .unwrap();
+        assert_eq!(
+            gaps[0],
+            (
+                vec!["SPX".to_string()],
+                vec![(ts("2026-01-07T00:00:00Z"), ts("2026-01-10T00:00:00Z"))]
+            )
+        );
+        assert_eq!(
+            gaps[1],
+            (
+                vec!["SX5E".to_string()],
+                vec![(ts("2026-01-05T00:00:00Z"), ts("2026-01-10T00:00:00Z"))]
+            )
+        );
+    }
+
+    #[test]
+    fn covers_instant_needs_every_tuple_and_a_point_span_counts() {
+        let (_d, store, ds) = fixture();
+        cover(
+            &store,
+            &ds,
+            &["SPX"],
+            ("2026-01-05T00:00:00Z", "2026-01-07T00:00:00Z"),
+            "2026-01-07T09:00:00Z",
+        );
+        observe(
+            &store,
+            &ds,
+            ["SPX", "3M", "0.5"],
+            ts("2026-01-05T21:00:00Z"),
+        );
+        let at = ts("2026-01-06T21:00:00Z");
+        let point = (at, at + chrono::Duration::microseconds(1));
+        cover(
+            &store,
+            &ds,
+            &["SX5E", "3M", "0.5"],
+            (&point.0.to_rfc3339(), &point.1.to_rfc3339()),
+            "2026-01-07T09:00:00Z",
+        );
+        observe(&store, &ds, ["SX5E", "3M", "0.5"], at);
+        let both = vec![exact("SPX"), exact("SX5E")];
+        assert!(covers_instant(store.writer(), &ds, &both, at).unwrap());
+        assert!(!covers_instant(store.writer(), &ds, &both, ts("2026-01-08T21:00:00Z")).unwrap());
+        assert!(!covers_instant(store.writer(), &ds, &[exact("NDX")], at).unwrap());
+    }
+
+    #[test]
+    fn covers_instant_is_false_when_the_span_holds_t_but_no_row_at_or_before_it() {
+        let (_d, store, ds) = fixture();
+        cover(
+            &store,
+            &ds,
+            &["SPX", "3M", "0.5"],
+            ("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z"),
+            "2026-01-10T09:00:00Z",
+        );
+        // A row after t, and one before the span: neither is an observation
+        // the cache really holds as the last at or before t.
+        observe(
+            &store,
+            &ds,
+            ["SPX", "3M", "0.5"],
+            ts("2026-01-08T21:00:00Z"),
+        );
+        observe(
+            &store,
+            &ds,
+            ["SPX", "3M", "0.5"],
+            ts("2026-01-02T21:00:00Z"),
+        );
+        // Another tuple's row inside [a, t] does not count either.
+        observe(
+            &store,
+            &ds,
+            ["SPX", "3M", "0.25"],
+            ts("2026-01-05T21:00:00Z"),
+        );
+        assert!(
+            !covers_instant(
+                store.writer(),
+                &ds,
+                &[exact("SPX")],
+                ts("2026-01-06T12:00:00Z")
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn covers_instant_is_true_with_a_row_between_the_span_start_and_t() {
+        let (_d, store, ds) = fixture();
+        cover(
+            &store,
+            &ds,
+            &["SPX", "3M", "0.5"],
+            ("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z"),
+            "2026-01-10T09:00:00Z",
+        );
+        observe(
+            &store,
+            &ds,
+            ["SPX", "3M", "0.5"],
+            ts("2026-01-05T00:00:00Z"),
+        );
+        let w = store.writer();
+        assert!(
+            covers_instant(w, &ds, &[exact("SPX")], ts("2026-01-06T12:00:00Z")).unwrap(),
+            "a row at the span start"
+        );
+        assert!(
+            covers_instant(w, &ds, &[exact("SPX")], ts("2026-01-05T00:00:00Z")).unwrap(),
+            "a row exactly at t"
+        );
+        // The f64 key asked in another spelling is the same tuple.
+        let spelled = vec!["SPX".to_string(), "3M".to_string(), "0.50".to_string()];
+        assert!(covers_instant(w, &ds, &[spelled], ts("2026-01-06T12:00:00Z")).unwrap());
+    }
+
+    #[test]
+    fn covers_instant_is_false_for_a_prefix_ask_whatever_its_coverage() {
+        let (_d, store, ds) = fixture();
+        cover(
+            &store,
+            &ds,
+            &["SPX"],
+            ("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z"),
+            "2026-01-10T09:00:00Z",
+        );
+        observe(
+            &store,
+            &ds,
+            ["SPX", "3M", "0.5"],
+            ts("2026-01-05T21:00:00Z"),
+        );
+        let t = ts("2026-01-06T12:00:00Z");
+        let w = store.writer();
+        assert!(!covers_instant(w, &ds, &[vec!["SPX".to_string()]], t).unwrap());
+        assert!(!covers_instant(w, &ds, &[vec!["SPX".to_string(), "3M".to_string()]], t).unwrap());
+        assert!(
+            covers_instant(w, &ds, &[exact("SPX")], t).unwrap(),
+            "the exact tuple under it is held"
+        );
+    }
+
+    proptest! {
+        /// Coverage written through any sequence of prefix and exact spans,
+        /// with observations on any days, never reports a tuple answerable
+        /// at an instant unless its coverage holds every moment from a
+        /// stored observation of it up to that instant; a prefix never is.
+        #[test]
+        fn coverage_never_over_reports(
+            spans in proptest::collection::vec((0u32..40, 1u32..10, 0u8..2), 0..8),
+            rows in proptest::collection::vec(0u32..50, 0..4),
+            probe in 0u32..50,
+        ) {
+            let (_d, store, ds) = fixture();
+            let base = ts("2026-01-01T00:00:00Z");
+            let day = |d: u32| base + chrono::Duration::days(d as i64);
+            let mut truth: Vec<(bool, u32, u32)> = Vec::new(); // (is_prefix, first day, end day)
+            for (start, len, kind) in spans {
+                let asked: Vec<&str> = if kind == 0 { vec!["SPX"] } else { vec!["SPX", "3M", "0.5"] };
+                cover(&store, &ds, &asked, (&day(start).to_rfc3339(), &day(start + len).to_rfc3339()), "2026-06-01T00:00:00Z");
+                truth.push((kind == 0, start, start + len));
+            }
+            for &d in &rows {
+                observe(&store, &ds, ["SPX", "3M", "0.5"], day(d) + chrono::Duration::hours(6));
+            }
+            // Spans are whole days and rows and the probe sit inside a day,
+            // so [row, t] is covered exactly when every day it touches is.
+            let day_covered = |d: u32| truth.iter().any(|&(_, f, to)| f <= d && d < to);
+            let expect_exact = rows.iter().any(|&r| r <= probe && (r..=probe).all(day_covered));
+            let t = day(probe) + chrono::Duration::hours(12);
+            let w = store.writer();
+            prop_assert_eq!(covers_instant(w, &ds, &[exact("SPX")], t).unwrap(), expect_exact);
+            let prefix = vec![vec!["SPX".to_string()]];
+            prop_assert!(!covers_instant(w, &ds, &prefix, t).unwrap(), "a prefix is never answered as current");
+            // The prefix's own coverage sees prefix rows only.
+            let expect_prefix = truth.iter().any(|&(p, f, to)| p && f <= probe && probe < to);
+            let held = covered_spans(w, &ds, &["SPX".to_string()]).unwrap();
+            prop_assert_eq!(held.iter().any(|(f, to)| *f <= t && t < *to), expect_prefix);
+        }
     }
 }

@@ -19963,6 +19963,57 @@ run_mutation "history: managed_tables omits the history tables" \
   geode-data \
   a_history_dataset_has_no_live_archive_pair_and_two_managed_tables
 
+# A coverage row deeper than a prefix ask does not cover the prefix.
+# Mutated to ignore the trailing columns, one member's fetch makes the
+# whole prefix look fetched.
+run_mutation "history: an exact coverage row covers its prefix" \
+  crates/geode-data/src/store/history.rs \
+  '            None => format!("{} IS NULL", quote(&c.name)),' \
+  '            None => "true".to_string(),' \
+  geode-data \
+  a_prefix_row_covers_every_deeper_tuple_but_a_deeper_row_never_covers_a_prefix
+
+# A prefix coverage row covers every tuple under it. Mutated to require an
+# equal value, a prefix fetch never counts for its members.
+run_mutation "history: a prefix coverage row covers no deeper tuple" \
+  crates/geode-data/src/store/history.rs \
+  '                "({0} IS NULL OR {0} = CAST(? AS {1}))",' \
+  '                "({0} = CAST(? AS {1}))",' \
+  geode-data \
+  a_prefix_row_covers_every_deeper_tuple_but_a_deeper_row_never_covers_a_prefix
+
+# An as-of answer from the cache needs a stored observation in [a, t].
+# Mutated to trust coverage alone, a member with no row since the span
+# began is answered as current.
+run_mutation "history: covers_instant trusts coverage without a row" \
+  crates/geode-data/src/store/history.rs \
+  '        if !observed {' \
+  '        if false && !observed {' \
+  geode-data \
+  covers_instant_is_false_when_the_span_holds_t_but_no_row_at_or_before_it
+
+run_mutation "history: covers_instant counts a row before the span" \
+  crates/geode-data/src/store/history.rs \
+  '        params.extend([Value::BigInt(micros(a)), Value::BigInt(micros(t))]);' \
+  '        params.extend([Value::BigInt(i64::MIN), Value::BigInt(micros(t))]);' \
+  geode-data \
+  covers_instant_is_false_when_the_span_holds_t_but_no_row_at_or_before_it
+
+run_mutation "history: covers_instant counts a row after t" \
+  crates/geode-data/src/store/history.rs \
+  '        params.extend([Value::BigInt(micros(a)), Value::BigInt(micros(t))]);' \
+  '        params.extend([Value::BigInt(micros(a)), Value::BigInt(i64::MAX)]);' \
+  geode-data \
+  covers_instant_is_false_when_the_span_holds_t_but_no_row_at_or_before_it
+
+# `t` must lie inside a span, not merely after one's start.
+run_mutation "history: covers_instant ignores the span end" \
+  crates/geode-data/src/store/history.rs \
+  '        let Some(&(a, _)) = held.iter().find(|(a, b)| *a <= t && t < *b) else {' \
+  '        let Some(&(a, _)) = held.iter().find(|(a, _)| *a <= t) else {' \
+  geode-data \
+  covers_instant_needs_every_tuple_and_a_point_span_counts
+
 # `DataService::fetch` answers a fully covered span itself. Mutated to
 # ask for the requested span whole, a second look at the same range is a
 # round trip to the vendor.
