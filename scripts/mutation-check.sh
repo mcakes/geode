@@ -40399,6 +40399,25 @@ run_mutation "volboard: the current is the earliest observation" \
   geode-data \
   the_board_reads_current_changes_rank_spark_and_lists_the_missing_member
 
+# A drifted or sourceless realized or varswap blanks its columns: the
+# surface is the board, the others are not. Mutated back to refusing, a
+# realized dataset with no source refuses the whole board.
+run_mutation "volboard: a sourceless realized refuses the board" \
+  crates/geode-data/src/service.rs \
+  '                Err(e) if role != Role::Surface => dataset_errors.push((name.to_string(), e)),' \
+  '                Err(e) if false => dataset_errors.push((name.to_string(), e)),' \
+  geode-data \
+  a_sourceless_realized_blanks_its_columns_and_names_itself
+
+# A cell is only as fresh as its stalest input. Mutated to the newest, an
+# IV-RV cell claims the surface's time over an older realized observation.
+run_mutation "volboard: a cell's current_at is its newest input's time" \
+  crates/geode-core/src/volboard/reduce.rs \
+  '        current.and_then(|_| found.iter().filter_map(|o| o.current.map(|(t, _)| t)).min());' \
+  '        current.and_then(|_| found.iter().filter_map(|o| o.current.map(|(t, _)| t)).max());' \
+  geode-core \
+  a_cell_carries_its_oldest_inputs_observation_time
+
 # A tuple no span holds is uncovered; treating it as covered would read a
 # stale or absent row as the answer.
 run_mutation "history: a tuple no coverage span holds is read locally" \
