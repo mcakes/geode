@@ -2344,3 +2344,44 @@ fn a_refresh_that_moves_nothing_keeps_a_wheel_scroll(cx: &mut gpui::TestAppConte
         "{row:?} inside {list:?}"
     );
 }
+
+/// A step drawn over the screen previews the current sections alone, so
+/// the list's offset clamps while it is up: leaving it brings the saved
+/// cursor back into view, though its row and child never changed.
+#[gpui::test]
+fn leaving_the_text_step_brings_the_saved_cursor_back_into_view(cx: &mut gpui::TestAppContext) {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&scopes));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    // `o` to `big`, far below the fold, then `k` to s39.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("k");
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("s39"));
+    vcx.simulate_keystrokes("t");
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("scope-saved").is_none(),
+        "the step hides saved"
+    );
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current));
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("s39"));
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(&mut vcx, "scope-saved-row-39".to_string()).expect("s39 paints");
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "{row:?} inside {list:?}"
+    );
+}

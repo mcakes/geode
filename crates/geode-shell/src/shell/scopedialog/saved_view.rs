@@ -28,7 +28,7 @@ use crate::keymap::{Keystroke, Modifiers};
 
 use super::saved::{self, SavedId, SavedKind, SavedRow};
 use super::screen::{SEPARATOR_AND_FILTER, Zone};
-use super::state::{After, Layer, Step};
+use super::state::{After, Step};
 use super::view::{ScopeDialogState, edit_lane};
 use crate::shell::control::{self, PointerStates as _};
 use crate::shell::{ShellView, dialog, scale};
@@ -475,9 +475,7 @@ fn row_verb(
         "c" => {
             if let Some(state) = shell.scope_dialog.as_mut() {
                 state.prompt = Some(super::prompt::copy_prompt(&row));
-                state
-                    .layers
-                    .push(Layer::Step(Step::CopyName { from: row.id }));
+                state.push_step(Step::CopyName { from: row.id });
             }
             Ok(())
         }

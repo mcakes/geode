@@ -164,12 +164,23 @@ pub(crate) struct ScopeDialogState {
     /// first ingredient edits that row instead of loading a saved scope over
     /// it. Any user-chosen move (`rest_in`) clears it.
     forced_saved: bool,
-    /// The list child `follow_cursor` last scrolled to; `None` before the
-    /// first follow and while a step hides the saved group. A re-derive that
-    /// leaves the cursor's child where it was (a data tick, an unchanged
-    /// key) must not scroll: the user may have wheeled the list away from
-    /// the cursor, and a refresh snapping it back is a defect.
-    followed: Option<usize>,
+    /// What `follow_cursor` last scrolled to; `None` before the first
+    /// follow and from the moment a step is pushed over the screen
+    /// (`push_step`), whose paint drops the saved group and may clamp the
+    /// offset. A re-derive that leaves the cursor on the same row at the
+    /// same child (a data tick, an unchanged key) must not scroll: the user
+    /// may have wheeled the list away from the cursor, and a refresh
+    /// snapping it back is a defect.
+    followed: Option<Followed>,
+}
+
+/// The list child `follow_cursor` scrolled to and the row on it. A filter
+/// edit can put a different row at the same child; the identity catches it.
+#[derive(PartialEq)]
+struct Followed {
+    ix: usize,
+    current: Option<RowId>,
+    saved: Option<super::saved::SavedId>,
 }
 
 /// What the rows read: the frame generation (every lane value change) and
@@ -200,6 +211,14 @@ impl ScopeDialogState {
             forced_saved: false,
             followed: None,
         }
+    }
+
+    /// Push `step` over the screen. The step's paint drops the saved group
+    /// and may clamp the list's offset, so the screen's return follows the
+    /// cursor afresh: every push goes through here.
+    pub(crate) fn push_step(&mut self, step: Step) {
+        self.layers.push(Layer::Step(step));
+        self.followed = None;
     }
 
     /// Put the cursor in `zone` by the user's choice (a move, a jump, a
@@ -382,8 +401,7 @@ pub(crate) fn follow_cursor(shell: &mut ShellView) {
         return;
     };
     if !state.on_screen() {
-        // The step's paint drops the saved group and may clamp the offset:
-        // the screen's return must follow afresh.
+        // A step's push already cleared `followed`; its return follows.
         state.followed = None;
         return;
     }
@@ -429,9 +447,21 @@ pub(crate) fn follow_cursor(shell: &mut ShellView) {
     let Some(ix) = at.map(|at| super::screen::child_index(&layout, &at)) else {
         return;
     };
-    // Only a cursor whose child moved scrolls; see `followed`.
-    if state.followed != Some(ix) {
-        state.followed = Some(ix);
+    let now = match state.zone {
+        Zone::Current => Followed {
+            ix,
+            current: state.rows.rows.get(state.cursor).map(|r| r.id.clone()),
+            saved: None,
+        },
+        Zone::Saved => Followed {
+            ix,
+            current: None,
+            saved: state.saved.cursor_row().map(|r| r.id.clone()),
+        },
+    };
+    // Only a cursor whose child or row changed scrolls; see `followed`.
+    if state.followed.as_ref() != Some(&now) {
+        state.followed = Some(now);
         shell.scope_dialog_scroll.scroll_to_item(ix);
     }
 }
@@ -902,7 +932,7 @@ fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
     if let Some(state) = shell.scope_dialog.as_mut() {
         state.text_draft = seed;
         state.error = None;
-        state.layers.push(Layer::Step(Step::Text));
+        state.push_step(Step::Text);
     }
     dialog::sync_dialog_text(shell, window, cx);
     cx.notify();

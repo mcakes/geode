@@ -102,7 +102,7 @@ pub(super) fn push(
         Ok(step) => {
             state.error = None;
             state.definition = Some(step);
-            state.layers.push(Layer::Step(Step::Definition { name }));
+            state.push_step(Step::Definition { name });
             begin(shell, window, cx);
         }
         Err(refusal) => {

@@ -213,7 +213,7 @@ pub(super) fn push_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
     state.error = None;
     state.prompt = Some(save_prompt(seed));
-    state.layers.push(Layer::Step(Step::SaveScope));
+    state.push_step(Step::SaveScope);
 }
 
 /// The Change arm's half for a name prompt: the field is the draft.
