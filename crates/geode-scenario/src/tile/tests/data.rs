@@ -698,7 +698,14 @@ fn a_snapshot_that_does_not_fit_keeps_the_last_picture(cx: &mut gpui::TestAppCon
     let first = chrono::DateTime::parse_from_rfc3339("2026-10-09T14:00:00Z")
         .unwrap()
         .with_timezone(&chrono::Utc);
-    assert_eq!(h.tile.read_with(&vcx, |t, _| t.times.clone()), [first]);
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t
+            .times
+            .iter()
+            .map(|t| t.at)
+            .collect::<Vec<_>>()),
+        [Some(first)]
+    );
     h.publish(&mut vcx, "spot_ladder");
     let reqs = h.requests();
     let tag = distincts(&reqs)[0].tag;
@@ -721,8 +728,12 @@ fn a_snapshot_that_does_not_fit_keeps_the_last_picture(cx: &mut gpui::TestAppCon
         "the picture stays"
     );
     assert_eq!(
-        h.tile.read_with(&vcx, |t, _| t.times.clone()),
-        [first],
+        h.tile.read_with(&vcx, |t, _| t
+            .times
+            .iter()
+            .map(|t| t.at)
+            .collect::<Vec<_>>()),
+        [Some(first)],
         "the stale timer keeps the painted picture's times"
     );
     vcx.simulate_keystrokes("c");
@@ -819,19 +830,13 @@ fn the_session_round_trips_through_the_factory(cx: &mut gpui::TestAppContext) {
     assert_eq!(vcx2.update(|_, cx| restored.content.serialize(cx)), t);
 }
 
-/// A native sum over mixed currencies: the picture says so and the chip
-/// (Task 9) reads it from `currency_mixed`.
-#[gpui::test]
-fn a_mixed_native_picture_is_flagged(cx: &mut gpui::TestAppContext) {
+/// A builtin spot ladder's main snapshot over one shift whose rows sum
+/// more than one currency (`currency#mixed` set): a native picture over it
+/// is flagged mixed.
+pub(super) fn mixed_ladder_snapshot() -> Snapshot {
     use crate::core::pivot::fixtures::{dim, sum};
     use geode_core::snapshot::{ColumnMeta, TestColumn};
-    let (h, mut vcx) = open_bound(cx, "spot_ladder", None);
-    h.show(&mut vcx);
-    let reqs = h.requests();
-    let tag = distincts(&reqs)[0].tag;
-    h.answer_distinct(&mut vcx, tag, "spot_shift", &["0.0"]);
-    let _ = h.requests();
-    let snapshot = Snapshot::for_tests_with_provenance(
+    Snapshot::for_tests_with_provenance(
         vec![
             (
                 dim("spot_shift", 1),
@@ -862,7 +867,20 @@ fn a_mixed_native_picture_is_flagged(cx: &mut gpui::TestAppContext) {
         ],
         1,
         crate::core::pivot::fixtures::provenance("spot_ladder", Some(1)),
-    );
+    )
+}
+
+/// A native sum over mixed currencies: the picture says so and the chip
+/// (Task 9) reads it from `currency_mixed`.
+#[gpui::test]
+fn a_mixed_native_picture_is_flagged(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, "spot_ladder", None);
+    h.show(&mut vcx);
+    let reqs = h.requests();
+    let tag = distincts(&reqs)[0].tag;
+    h.answer_distinct(&mut vcx, tag, "spot_shift", &["0.0"]);
+    let _ = h.requests();
+    let snapshot = mixed_ladder_snapshot();
     h.answer_query(&mut vcx, tag, snapshot);
     assert!(h.delegate(&vcx, |d| d.pivot.as_ref().unwrap().currency_mixed));
 }

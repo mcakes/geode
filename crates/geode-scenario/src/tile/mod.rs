@@ -12,7 +12,7 @@ use crate::core::pivot::{Currency, Pivot};
 use crate::core::readout::{cursor_readout, tile_title};
 use crate::core::session::{self, State, TileAsOf};
 use crate::delegate::{CellPointer, ScenarioDelegate};
-use crate::header;
+use crate::header::{self, Chip};
 use geode_core::clock::Clock;
 use geode_core::colour::NamedColours;
 use geode_core::dimensions::DerivedDimensions;
@@ -22,7 +22,8 @@ use geode_core::query::{AsOf, QueryKey, parse_as_of};
 use geode_core::scenario::{Paint, ShapeSpec};
 use geode_core::schema::SchemaSpec;
 use geode_core::schema::axis::AxisKind;
-use geode_core::scope::{Scope, parse_expr};
+use geode_core::scope::{Scope, filter_summary, parse_expr};
+use geode_core::view::Scale;
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::colfit::{
@@ -32,9 +33,11 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{FrameRef, PublicationWatch};
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{CloseHandle, StackHandle};
+use geode_shell::shell::chip::Tone;
 use geode_shell::tiling::TileId;
 use geode_tile::following::FollowingQuery;
-use geode_tile::header::HealthWatch;
+use geode_tile::header::{DatasetTime, HealthWatch, TimeRun, pinned_chip_text};
+use geode_tile::menu::MenuIds;
 use geode_tile::notice::{Dismissals, Notice};
 use geode_tile::stale::StaleTimer;
 use gpui::prelude::*;
@@ -68,14 +71,24 @@ pub struct ScenarioTile {
     pub(crate) standing: Option<Notice>,
     pub(crate) dismissed: Dismissals,
     pub(crate) menu: Option<menu::MenuState>,
+    /// The `⋯` control's selector and the menu's element names, prepared
+    /// once.
+    pub(crate) menu_selector: SharedString,
+    pub(crate) menu_ids: MenuIds,
+    /// The header chips, prepared whenever the state they read changes.
+    chips: Vec<Chip>,
+    /// The clock and local day a pinned as-of chip was formatted on: a
+    /// new day or a zone change re-prepares it.
+    chips_day: (Clock, chrono::NaiveDate),
     pub(crate) stack: Option<StackHandle>,
     pub(crate) close: Option<CloseHandle>,
     /// The age past which a dataset time reads stale, shared with the
     /// factory so a reload reaches every tile.
     pub(crate) stale_after: Rc<Cell<Duration>>,
     pub(crate) stale_timer: StaleTimer,
-    /// The painted picture's source times, which the stale timer arms on.
-    pub(crate) times: Vec<chrono::DateTime<chrono::Utc>>,
+    /// The painted picture's dataset times, labelled on the display clock;
+    /// the stale timer arms on their parsed source times.
+    pub(crate) times: Vec<DatasetTime>,
     pub(crate) following: FollowingQuery<Arc<data::Fetched>>,
     pub(crate) fetch: data::Fetch,
     pub(crate) domains: data::Domains,
@@ -170,6 +183,13 @@ impl ScenarioTile {
             }
         })
         .detach();
+        // The dataset times and a pinned as-of chip read the display clock.
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.prepare_times(cx);
+            this.prepare_chips(cx);
+            cx.notify();
+        })
+        .detach();
         cx.observe_global::<gpui_component::theme::Theme>(|this, cx| {
             let theme = cx.theme().clone();
             if this
@@ -180,7 +200,10 @@ impl ScenarioTile {
             }
         })
         .detach();
-        ScenarioTile {
+        let (menu_selector, menu_ids) = menu::menu_ids(tile.0);
+        let now = chrono::Utc::now();
+        let clock = clock(cx);
+        let mut this = ScenarioTile {
             tile,
             shape,
             state,
@@ -197,6 +220,10 @@ impl ScenarioTile {
             standing: None,
             dismissed: Dismissals::default(),
             menu: None,
+            menu_selector,
+            menu_ids,
+            chips: Vec::new(),
+            chips_day: (clock, clock.today(now)),
             stack: None,
             close: None,
             stale_after,
@@ -211,7 +238,9 @@ impl ScenarioTile {
             visible: false,
             #[cfg(test)]
             dispatch_log: Vec::new(),
-        }
+        };
+        this.prepare_chips(cx);
+        this
     }
 
     /// The key every read of this tile is submitted and cancelled under.
@@ -368,8 +397,155 @@ impl ScenarioTile {
                 return false;
             }
         }
-        cx.notify();
+        self.state_changed(cx);
         true
+    }
+
+    /// After a verb or a `:` line: the chips and an open menu's ticks
+    /// follow the state.
+    fn state_changed(&mut self, cx: &mut Context<Self>) {
+        self.prepare_chips(cx);
+        self.refresh_menu(cx);
+        cx.notify();
+    }
+
+    /// The header chips, as prepared.
+    pub(crate) fn chips(&self) -> &[Chip] {
+        &self.chips
+    }
+
+    /// Prepare the header chips in spec order: currency, scale, `filtered`,
+    /// `diff`, `unscoped`, the as-of pin. Every string is formatted here,
+    /// never in render.
+    pub(crate) fn prepare_chips(&mut self, cx: &App) {
+        let id = self.tile.0;
+        let chip = |key: &'static str,
+                    text: SharedString,
+                    tone: Tone,
+                    tip: SharedString,
+                    action: Option<&'static str>| Chip {
+            key,
+            text,
+            tone,
+            tip,
+            action,
+            selector: format!("tip-{key}-{id}").into(),
+        };
+        let mut out = Vec::new();
+        let native = self.state.currency == Currency::Native;
+        let mixed = native && self.currency_mixed(cx);
+        out.push(chip(
+            "scenario-chip-currency",
+            if native { "native" } else { "USD" }.into(),
+            if mixed { Tone::Warning } else { Tone::Neutral },
+            if mixed {
+                "native sums across currencies"
+            } else if native {
+                "Native currency; `c` for USD"
+            } else {
+                "USD twins; `c` for native"
+            }
+            .into(),
+            Some("scenario::currency"),
+        ));
+        if let Some(scale) = self.state.scale {
+            out.push(chip(
+                "scenario-chip-scale",
+                match scale {
+                    Scale::Thousands => "k",
+                    Scale::Millions => "m",
+                    Scale::None => "1",
+                }
+                .into(),
+                Tone::Neutral,
+                ":scale 1 restores each column's own".into(),
+                None,
+            ));
+        }
+        if !self.state.filter.is_empty() {
+            out.push(chip(
+                "scenario-chip-filtered",
+                "filtered".into(),
+                Tone::Neutral,
+                format!(
+                    "{}; :filter clear removes it",
+                    filter_summary(&self.state.filter)
+                )
+                .into(),
+                None,
+            ));
+        }
+        if self.shape.diff.is_some() && self.state.diff {
+            out.push(chip(
+                "scenario-chip-diff",
+                "diff".into(),
+                Tone::Neutral,
+                "value minus the base row; `m` for absolutes".into(),
+                Some("scenario::diff"),
+            ));
+        }
+        if self.state.unscoped {
+            out.push(chip(
+                "scenario-chip-unscoped",
+                "unscoped".into(),
+                Tone::Warning,
+                "Ignores the shared scope; :unscoped re-attaches it".into(),
+                None,
+            ));
+        }
+        let clock = clock(cx);
+        let now = chrono::Utc::now();
+        match &self.state.as_of {
+            TileAsOf::Follow => {}
+            TileAsOf::Pinned(AsOf::Live) => out.push(chip(
+                "scenario-chip-asof",
+                "LIVE".into(),
+                Tone::Neutral,
+                "Pinned to live; :asof clear follows the frame".into(),
+                None,
+            )),
+            TileAsOf::Pinned(AsOf::At(at)) => out.push(chip(
+                "scenario-chip-asof",
+                pinned_chip_text(*at, now, clock).into(),
+                Tone::Neutral,
+                format!(
+                    "Pinned to {}; :asof clear follows the frame",
+                    clock.full(*at)
+                )
+                .into(),
+                None,
+            )),
+        }
+        self.chips = out;
+        self.chips_day = (clock, clock.today(now));
+    }
+
+    /// A native sum over rows in more than one currency (spec §5.3): the
+    /// currency chip warns.
+    pub(crate) fn currency_mixed(&self, cx: &App) -> bool {
+        self.table
+            .read(cx)
+            .delegate()
+            .pivot
+            .as_ref()
+            .is_some_and(|p| p.currency_mixed)
+    }
+
+    /// The dataset times as the cluster paints them: stale past
+    /// `stale_after`, or once the stale timer fired for that time.
+    pub(crate) fn time_runs(&self, now: chrono::DateTime<chrono::Utc>) -> Vec<TimeRun> {
+        let after = self.stale_after.get();
+        self.times
+            .iter()
+            .map(|t| TimeRun {
+                label: t.label.clone(),
+                stale_label: None,
+                stale: t.at.is_some_and(|at| {
+                    now.signed_duration_since(at).to_std().unwrap_or_default() > after
+                        || self.stale_timer.fired_for(at, after)
+                }),
+            })
+            .collect()
     }
 
     /// The notices as the footer reports them, most urgent first: the
@@ -476,7 +652,7 @@ impl ScenarioTile {
                 self.sync_paint(cx);
             }
         }
-        cx.notify();
+        self.state_changed(cx);
         Ok(())
     }
 
@@ -583,6 +759,14 @@ impl gpui::Render for ScenarioTile {
                     t.refresh(cx);
                 }
             });
+        }
+        // A pinned as-of chip elides today's date: a new local day (or a
+        // zone the clock observer has not yet seen) re-prepares it.
+        if matches!(self.state.as_of, TileAsOf::Pinned(AsOf::At(_))) {
+            let clock = clock(cx);
+            if self.chips_day != (clock, clock.today(chrono::Utc::now())) {
+                self.prepare_chips(cx);
+            }
         }
         header::render(self, cx)
     }

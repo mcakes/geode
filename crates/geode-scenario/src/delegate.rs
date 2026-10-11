@@ -25,10 +25,10 @@ use geode_tile::motion::Motion;
 use gpui::prelude::*;
 use gpui::{
     App, Context, Div, EventEmitter, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, SharedString, Stateful, Window, div, px,
+    MouseUpEvent, Pixels, SharedString, Stateful, Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
-use gpui_component::table::{Column, ColumnFixed, TableDelegate, TableState};
+use gpui_component::table::{Column, ColumnFixed, ColumnGroup, TableDelegate, TableState};
 use gpui_component::theme::Theme;
 use std::ops::Range;
 use std::sync::Arc;
@@ -434,6 +434,30 @@ impl ScenarioDelegate {
         }
     }
 
+    /// The two-level header's groups: consecutive columns sharing an outer
+    /// label, in column order, as `(outer, count)`. Empty unless every
+    /// column carries an outer label (a one-level header, a ladder, no
+    /// picture).
+    pub fn band_groups(&self) -> Vec<(String, usize)> {
+        let Some(p) = &self.pivot else {
+            return Vec::new();
+        };
+        let mut groups: Vec<(String, usize)> = Vec::new();
+        for column in &p.columns {
+            let Head::Axis {
+                outer: Some(outer), ..
+            } = &column.head
+            else {
+                return Vec::new();
+            };
+            match groups.last_mut() {
+                Some((last, n)) if *last == outer.text => *n += 1,
+                _ => groups.push((outer.text.clone(), 1)),
+            }
+        }
+        groups
+    }
+
     /// The cursor in table coordinates (the label column is column 0), or
     /// `None` while there are no data cells to stand on.
     pub fn table_cursor(&self) -> Option<(usize, usize)> {
@@ -542,6 +566,64 @@ impl TableDelegate for ScenarioDelegate {
     ) {
         self.requested.record(visible_range.clone());
         self.fill_window(visible_range);
+    }
+
+    /// One group row over a two-level header: an empty group over the
+    /// label column, one per outer value over its inner columns, an empty
+    /// one over Σ. The table lays the row with the leaf columns (the label
+    /// group with the pinned column, the rest scrolling with theirs) and
+    /// re-reads it on `refresh`, which every new picture and width change
+    /// already calls.
+    fn group_headers(&self, _cx: &App) -> Option<Vec<Vec<ColumnGroup>>> {
+        let groups = self.band_groups();
+        if groups.is_empty() {
+            return None;
+        }
+        let mut row = Vec::with_capacity(groups.len() + 2);
+        row.push(ColumnGroup::new(SharedString::default(), 1));
+        row.extend(
+            groups
+                .into_iter()
+                .map(|(outer, count)| ColumnGroup::new(outer, count)),
+        );
+        if self.layout.sigma_col {
+            row.push(ColumnGroup::new(SharedString::default(), 1));
+        }
+        Some(vec![row])
+    }
+
+    /// An outer value centred over its columns, in the leaf headers' muted
+    /// mono, with a hairline closing each group; the empty label and Σ
+    /// groups paint no rule.
+    fn render_group_th(
+        &mut self,
+        label: &SharedString,
+        _col_span: usize,
+        width: Pixels,
+        _window: &mut Window,
+        cx: &mut Context<TableState<Self>>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let named = !label.is_empty();
+        let selector = label.clone();
+        div()
+            .w(width)
+            .h_full()
+            .flex_shrink_0()
+            .flex()
+            .items_end()
+            .justify_center()
+            .px_1()
+            .overflow_hidden()
+            .whitespace_nowrap()
+            .font_family(fonts::MONO)
+            .text_color(theme.muted_foreground)
+            .when(named, |el| {
+                el.border_r_1()
+                    .border_color(theme.border)
+                    .debug_selector(move || format!("scenario-band-{selector}"))
+            })
+            .child(label.clone())
     }
 
     fn render_th(

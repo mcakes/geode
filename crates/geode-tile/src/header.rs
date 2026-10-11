@@ -27,7 +27,9 @@
 
 use std::rc::Rc;
 
+use geode_core::clock::Clock;
 use geode_core::link::Group;
+use geode_core::snapshot::Provenance;
 use geode_shell::diagnostics::{Diagnostics, Health, TileHealth};
 use geode_shell::frame::FrameRef;
 use geode_shell::link::group_color;
@@ -250,6 +252,67 @@ pub fn time_selector(tile: u64, i: usize, stale: bool) -> String {
         format!("tile-time-{tile}-{i}-stale")
     } else {
         format!("tile-time-{tile}-{i}")
+    }
+}
+
+/// One dataset's source time for the cluster's times: its label
+/// (`risk 14:00`, or `risk —` when the dataset has none) and the source
+/// time, parsed once when a snapshot lands so render only compares it
+/// against the stale threshold.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatasetTime {
+    pub label: SharedString,
+    /// The parsed source time render compares against `stale_after` and the
+    /// stale timer arms on; `None` for a missing or unparsable time, which is
+    /// never stale.
+    pub at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl DatasetTime {
+    /// A snapshot's dataset times, oldest source time first (a dataset
+    /// without one sorts ahead), labelled on the display clock.
+    pub fn from_provenance(p: &Provenance, clock: Clock) -> Vec<DatasetTime> {
+        let mut sorted: Vec<_> = p.datasets.iter().collect();
+        sorted.sort_by(|a, b| a.as_of.cmp(&b.as_of));
+        sorted
+            .into_iter()
+            .map(|f| DatasetTime {
+                label: match &f.as_of {
+                    Some(t) => format!("{} {}", f.dataset, short_time(t, clock)).into(),
+                    None => format!("{} \u{2014}", f.dataset).into(),
+                },
+                at: f
+                    .as_of
+                    .as_deref()
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .map(|t| t.with_timezone(&chrono::Utc)),
+            })
+            .collect()
+    }
+}
+
+/// An RFC 3339 freshness timestamp as `HH:MM` on the display clock. A
+/// malformed value is echoed intact, so unexpected input cannot panic by
+/// slicing.
+pub fn short_time(t: &str, clock: Clock) -> String {
+    match chrono::DateTime::parse_from_rfc3339(t) {
+        Ok(at) => clock.hm(at.to_utc()),
+        Err(_) => t.to_string(),
+    }
+}
+
+/// A tile-pinned as-of chip's text on the display clock: `AS OF HH:MM` for
+/// today, `AS OF YYYY-MM-DD HH:MM` for another date.
+pub fn pinned_chip_text(
+    at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+    clock: Clock,
+) -> String {
+    let local = clock.local(at);
+    if local.date_naive() == clock.local(now).date_naive() {
+        format!("AS OF {}", local.format("%H:%M"))
+    } else {
+        format!("AS OF {}", local.format("%Y-%m-%d %H:%M"))
     }
 }
 
@@ -732,6 +795,35 @@ mod tests {
     use std::time::SystemTime;
 
     const TILE: TileId = TileId(3);
+
+    #[test]
+    fn short_time_formats_an_rfc3339_instant_on_the_clock_and_echoes_garbage() {
+        let utc = Clock::utc();
+        assert_eq!(short_time("2026-08-30T14:32:00Z", utc), "14:32");
+        let shifted = Clock::in_zone_named("Asia/Tokyo");
+        assert_eq!(
+            short_time("2026-08-30T14:32:00Z", shifted),
+            "23:32",
+            "Tokyo is UTC+9"
+        );
+        // Not a time: echoed, never a panic.
+        assert_eq!(short_time("2026", utc), "2026");
+        assert_eq!(short_time("", utc), "");
+    }
+
+    /// The pinned chip omits the date for today on the configured clock and
+    /// includes it for other dates.
+    #[test]
+    fn pinned_chip_text_elides_todays_date() {
+        let now = chrono::Utc::now();
+        let clock = Clock::utc();
+        let today = pinned_chip_text(now, now, clock);
+        assert!(today.starts_with("AS OF "), "{today}");
+        assert_eq!(today.len(), "AS OF HH:MM".len(), "{today}");
+        let old = now - chrono::Duration::days(3);
+        let past = pinned_chip_text(old, now, clock);
+        assert_eq!(past.len(), "AS OF YYYY-MM-DD HH:MM".len(), "{past}");
+    }
 
     fn failing(d: &mut Diagnostics, source: &str, health: Health, detail: &str) {
         d.describe_source(source, SourceSummary::for_dataset("risk"));

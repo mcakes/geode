@@ -19,6 +19,7 @@ use geode_core::snapshot::Snapshot;
 use geode_data::{QueryParams, Refusal};
 use geode_shell::frame::FrameVersions;
 use geode_tile::following::{Arrival, DeferredDoor, Delivered, FrameDoor, Promotion, Unanswered};
+use geode_tile::header::DatasetTime;
 use geode_tile::notice::Notice;
 use geode_tile::stale::StaleTimer;
 use gpui::{App, Context};
@@ -417,22 +418,23 @@ impl ScenarioTile {
         match self.build(&fetched) {
             Ok(pivot) => {
                 self.error = None;
-                self.times = fetched
-                    .main
-                    .provenance()
-                    .datasets
-                    .iter()
-                    .filter_map(|f| f.as_of.as_deref())
-                    .filter_map(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                    .map(|t| t.with_timezone(&chrono::Utc))
-                    .collect();
+                self.picture = Some(fetched.clone());
+                self.prepare_times(cx);
                 self.show_pivot(&fetched.main, pivot, cx);
-                self.picture = Some(fetched);
                 self.arm_stale(cx);
             }
             Err(e) => self.set_error(Notice::danger(format!("picture: {e}"))),
         }
         cx.notify();
+    }
+
+    /// The painted picture's dataset times, labelled on the display clock:
+    /// at install and when the clock changes.
+    pub(crate) fn prepare_times(&mut self, cx: &App) {
+        self.times = match &self.picture {
+            Some(p) => DatasetTime::from_provenance(p.main.provenance(), super::clock(cx)),
+            None => Vec::new(),
+        };
     }
 
     fn build(&self, p: &Fetched) -> Result<Pivot, String> {
@@ -449,9 +451,13 @@ impl ScenarioTile {
         let pivot = Arc::new(pivot);
         self.table.update(cx, |t, cx| {
             t.delegate_mut().set_picture(Some(pivot));
+            // `refresh` re-lays the columns and, with them, the two-level
+            // header's groups (`refresh_header_layout`'s own work).
             t.refresh(cx);
         });
         self.prune_dismissed();
+        // The currency chip reads the new pivot's mixed flag.
+        self.prepare_chips(cx);
     }
 
     /// Rebuild the pivot for the current mode over the last picture and
@@ -558,12 +564,14 @@ impl ScenarioTile {
         self.fetch = Fetch::Idle;
         self.following.reset();
         self.picture = None;
+        self.times.clear();
         self.standing = None;
         self.prune_dismissed();
         self.table.update(cx, |t, cx| {
             t.delegate_mut().set_picture(None);
             t.refresh(cx);
         });
+        self.prepare_chips(cx);
         cx.notify();
         true
     }
@@ -615,7 +623,7 @@ impl ScenarioTile {
             self.stale_timer.disarm();
             return;
         }
-        let times = self.times.clone();
+        let times = self.times.iter().filter_map(|t| t.at).collect();
         self.stale_timer.arm_each(
             times,
             self.stale_after.get(),

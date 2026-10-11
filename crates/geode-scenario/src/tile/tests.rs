@@ -2,6 +2,7 @@
 //! stand-in that routes keys through the production keymap, and driven
 //! only through the shell's doors.
 
+mod chrome;
 mod data;
 mod keys;
 
@@ -133,9 +134,7 @@ struct Built {
     shell_focus: gpui::FocusHandle,
 }
 
-// Every shell door is kept, so each test file drives the same set;
-// `factory` and `diagnostics` are read only by the chrome tests.
-#[allow(dead_code)]
+// Every shell door is kept, so each test file drives the same set.
 struct Harness {
     tile: Entity<ScenarioTile>,
     /// Driven through the trait, never by poking the entity: the shell's

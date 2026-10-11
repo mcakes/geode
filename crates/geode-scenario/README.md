@@ -46,7 +46,12 @@ builtin five, the pivot and the tile.
   (at construction and on a theme change, never in render); `render_td`
   only reads them. The cursor and a rows or block selection live over
   data cells only; the selection's per-column totals are unsummable down
-  a scenario rows axis.
+  a scenario rows axis. A two-level header (two columns axes) adds one
+  group row through the table's own `group_headers`: an empty group over
+  the label column, one per outer value over its consecutive inner columns
+  (`band_groups`), an empty one over Σ. The table lays it with the leaf
+  columns, so it scrolls with them, and re-reads it on every `refresh`
+  (each new picture, width or rem change).
 - `tile/mod.rs`: `ScenarioTile`: keys (`V`/`v` selections, `y`/`ctrl+c`
   yank as TSV, `c` currency without a requery, `p` paint, `m` diff, `.`
   menu, and the shell's grid motions with counts), the `:` commands
@@ -57,8 +62,20 @@ builtin five, the pivot and the tile.
   unhandled. Motions and presses scroll the cursor cell into view.
   The footer reports the refusal, then a query error, then the picture's
   own notice; a query error stands until a picture installs, so `c` and
-  `m` (which rebuild the pivot) never hide it. `tile/menu.rs` holds the
-  `.` menu (open and close only so far).
+  `m` (which rebuild the pivot) never hide it. The header chips are
+  prepared after every verb, `:` line and picture (and on a clock change
+  or a new local day for a pinned as-of), in spec order: currency
+  (`USD`/`native`, warning while native sums mixed currencies; a click is
+  `c`), scale, `filtered` (its tip spells the filter), `diff` (a click is
+  `m`), `unscoped` (warning), the as-of pin (`LIVE`, `AS OF …`). The
+  dataset times are labelled when a picture lands or the clock changes,
+  and take the warning tone past `stale_after`. `tile/menu.rs` holds the
+  `.` menu (also `⋯`), hung under the header's right edge: the verbs with
+  their live chords (currency, heat and diff ticked while on; currency
+  and diff disabled with their keys' refusal where the shape cannot take
+  them), then the parameterless `:` commands (`:unscoped`, `:scale k|m|1`,
+  `:filter clear`), whose rows run their line through `command`. Ticks
+  follow the state while the menu is up; a pick closes it first.
 - `tile/data.rs`: the read chain. The axis domains (one distinct per
   axis, unscoped, restricted to the shape's dataset, read again only when
   a publication on the dataset or the as-of moved), the main query at full
@@ -79,9 +96,11 @@ builtin five, the pivot and the tile.
   generation nor a source time; a historical read has only the time). An
   empty scope over published data is an empty grid with the domains
   painted and no notice.
-- `header.rs`: the shared header strip (title and readout; mode, links,
-  health, ×), the table, and the footer (the reported notice; the
-  selection's totals or the cursor readout).
+- `header.rs`: the shared header strip (the shape title, the scope
+  readout, `all` muted and `nothing` in the danger tone, and the chips;
+  mode, `…` while a chain is out, dataset times, links, health, `⋯`, ×),
+  the `.` menu under it, the table, and the footer (the reported notice;
+  the selection's totals or the cursor readout).
 - `lib.rs`: `CONTEXT` (`scenario`, the keymap context and action prefix)
   and `init`, which binds the keys gpui-component's DataTable would
   otherwise swallow.

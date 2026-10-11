@@ -21657,12 +21657,12 @@ run_mutation "clock: a reload republishes AppClock" \
   geode-shell \
   a_time_zone_reload_republishes_the_clock_without_a_requery
 
-# The blotter's freshness readout formats on the clock, not by slicing UTC.
-run_mutation "clock: the blotter's short_time reads on the clock" \
-  crates/geode-blotter/src/tile.rs \
+# A tile header's freshness readout formats on the clock, not by slicing UTC.
+run_mutation "clock: the shared short_time reads on the clock" \
+  crates/geode-tile/src/header.rs \
   '        Ok(at) => clock.hm(at.to_utc()),' \
   '        Ok(at) => at.format("%H:%M").to_string(),' \
-  geode-blotter \
+  geode-tile \
   short_time_formats_an_rfc3339_instant_on_the_clock_and_echoes_garbage
 
 # A time-zone reload must repaint the AS OF chip even when the calendar
@@ -35161,7 +35161,7 @@ run_mutation "blotter footer: a fold leaves the rows label" \
   the_footer_rows_label_follows_a_fold_and_is_unchanged_by_a_render
 
 run_mutation "blotter stale: an unparsable time parses as the epoch" \
-  crates/geode-blotter/src/header.rs \
+  crates/geode-tile/src/header.rs \
   '                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())' \
   '                    .map(|t| chrono::DateTime::parse_from_rfc3339(t).unwrap_or(chrono::DateTime::UNIX_EPOCH.fixed_offset()))' \
   geode-blotter \
