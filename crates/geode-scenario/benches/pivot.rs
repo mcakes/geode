@@ -1,18 +1,22 @@
-//! Pivot build for a 40 × 40 matrix with its Σ companion: the work a
-//! delivery does before the table repaints. The snapshots are built once,
-//! outside the timed loop; only `Pivot::build` is measured. Target: under
-//! the 8 ms pure-UI budget by a wide margin (expect well under 1 ms).
+//! One delivery's pure-UI cost for a 40 × 40 matrix with its Σ companion:
+//! the pivot build, then the delegate preparing a 40-row window of cells.
+//! The snapshots, domains and (for the window bench) the pivot are built
+//! once, outside the timed loop. Target: together under the 8 ms pure-UI
+//! budget by a wide margin.
 
 use std::hint::black_box;
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::attribution::{Attribution, ScopeSemantics};
+use geode_core::colour::Rgb;
 use geode_core::scenario::{AxisInfo, Columns, MeasureColumn, Paint, ShapeSpec};
 use geode_core::schema::ColumnType;
 use geode_core::schema::axis::{AxisKind, AxisOrder};
 use geode_core::snapshot::{ColumnMeta, Freshness, Provenance, Snapshot, TestColumn};
 use geode_core::view::ColumnFormat;
 use geode_scenario::core::pivot::{AxisDomains, Currency, Mode, Pivot};
+use geode_scenario::core::prepare::{self, Inputs, Layout, Palette, PreparedCell};
+use geode_tile::grid::WindowCache;
 
 const N: usize = 40;
 
@@ -142,17 +146,24 @@ fn totals_snapshot() -> Snapshot {
     )
 }
 
+fn domains() -> AxisDomains {
+    let mut domains = AxisDomains::default();
+    domains.insert("tenor", tenors());
+    domains.insert("moneyness", buckets());
+    domains
+}
+
+const USD: Mode = Mode {
+    currency: Currency::Usd,
+    diff: false,
+};
+
 fn build(c: &mut Criterion) {
     let shape = shape();
     let main = main_snapshot();
     let totals = totals_snapshot();
-    let mut domains = AxisDomains::default();
-    domains.insert("tenor", tenors());
-    domains.insert("moneyness", buckets());
-    let mode = Mode {
-        currency: Currency::Usd,
-        diff: false,
-    };
+    let domains = domains();
+    let mode = USD;
     c.bench_function("pivot_build_40x40", |bch| {
         bch.iter(|| {
             let p = Pivot::build(
@@ -168,5 +179,50 @@ fn build(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, build);
+/// Preparing a 40-row window of the 40 × 40 matrix with its Σ edges:
+/// text, sign, heat fill and readable color per cell, over a built pivot
+/// (the delegate's `fill_window`, from an empty cache as after a new
+/// picture). Together with `pivot_build_40x40` this is one delivery's
+/// pure-UI cost; the paint itself (`to_hsla`, elements) is not measured.
+fn prepare_window(c: &mut Criterion) {
+    let shape = shape();
+    let main = main_snapshot();
+    let totals = totals_snapshot();
+    let pivot = Pivot::build(&main, Some(&totals), &shape, USD, &domains()).unwrap();
+    let g = |v: f32| Rgb { r: v, g: v, b: v };
+    let palette = Palette {
+        bullish: Rgb {
+            r: 0.1,
+            g: 0.8,
+            b: 0.3,
+        },
+        bearish: Rgb {
+            r: 0.9,
+            g: 0.2,
+            b: 0.2,
+        },
+        background: g(0.1),
+        foreground: g(0.95),
+        muted: g(0.6),
+    };
+    let inputs = Inputs {
+        pivot: &pivot,
+        palette: &palette,
+        scale: None,
+        heat: true,
+    };
+    let layout = Layout::of(&pivot);
+    assert_eq!((layout.rows(), layout.cols()), (N + 1, N + 2));
+    c.bench_function("prepare_window_40x40", |bch| {
+        bch.iter(|| {
+            let mut cache: WindowCache<PreparedCell> = WindowCache::default();
+            cache.set_window(0..N, layout.cols(), |r, col| {
+                prepare::cell(black_box(&inputs), r, col)
+            });
+            black_box(cache.get(N - 1, N + 1).map(|c| c.text.len()))
+        })
+    });
+}
+
+criterion_group!(benches, build, prepare_window);
 criterion_main!(benches);
