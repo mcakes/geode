@@ -11,8 +11,10 @@ use super::ShapeSpec;
 use crate::schema::{ColumnRole, DatasetSpec};
 use crate::view::{ViewColumn, ViewSpec};
 
-/// Derived view names: `scenario:<kind>`. A configured view of this name
-/// refuses the shape (the service answers the first view of a name).
+/// Derived view names: `scenario:<kind>`. The service answers the first
+/// view of a name, so the two never share one: at startup a configured
+/// view of this name refuses the shape; one configured by a later reload
+/// meets a running shape and is dropped from the hand-off with a Warning.
 pub const VIEW_PREFIX: &str = "scenario:";
 
 impl ShapeSpec {

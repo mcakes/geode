@@ -587,8 +587,9 @@ const ADD_PLACEMENTS: [(&str, &str); 4] = [
 ];
 
 /// Register four Tiles actions per module kind, ids `tile::add_<kind>`
-/// with optional `_horizontal`, `_vertical`, or `_stacked` suffixes.
-/// Registration precedes keymap compilation.
+/// with optional `_horizontal`, `_vertical`, or `_stacked` suffixes, each
+/// titled `{title}: {placement}` from the kind's paired title
+/// (`ModuleRoster::titled_kinds`). Registration precedes keymap compilation.
 ///
 /// Kinds come from configuration (market-data panels) as well as code, so
 /// uniqueness is not by construction. A kind ending in a placement suffix
@@ -597,9 +598,9 @@ const ADD_PLACEMENTS: [(&str, &str); 4] = [
 /// naming it, returned for the caller's diagnostics; the startup does not
 /// panic. The kind's rows are refused whole, so its palette never offers
 /// some placements and not others.
-pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) -> Vec<Diagnostic> {
+pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[(&str, String)]) -> Vec<Diagnostic> {
     let mut diags = Vec::new();
-    for kind in kinds {
+    for (kind, title) in kinds {
         let ids: Vec<String> = ADD_PLACEMENTS
             .iter()
             .map(|(suffix, _)| format!("tile::add_{kind}{suffix}"))
@@ -626,7 +627,6 @@ pub fn register_add_actions(reg: &mut ActionRegistry, kinds: &[&str]) -> Vec<Dia
             });
             continue;
         }
-        let title = capitalize(kind);
         for (id, (_, placement)) in ids.iter().zip(ADD_PLACEMENTS) {
             action(reg, id, &format!("{title}: {placement}"), "Tiles");
         }
@@ -944,7 +944,13 @@ mod tests {
     #[test]
     fn register_add_actions_registers_four_rows_per_kind_in_the_tiles_category() {
         let mut reg = ActionRegistry::default();
-        register_add_actions(&mut reg, &["blotter", "pricer"]);
+        register_add_actions(
+            &mut reg,
+            &[
+                ("blotter", capitalize("blotter")),
+                ("pricer", "Line pricer".to_string()),
+            ],
+        );
         let expect = |id: &str, title: &str| {
             let def = reg
                 .iter()
@@ -957,7 +963,8 @@ mod tests {
         expect("tile::add_blotter_horizontal", "Blotter: Split Horizontal");
         expect("tile::add_blotter_vertical", "Blotter: Split Vertical");
         expect("tile::add_blotter_stacked", "Blotter: Stack");
-        expect("tile::add_pricer", "Pricer: Split");
+        expect("tile::add_pricer", "Line pricer: Split");
+        expect("tile::add_pricer_stacked", "Line pricer: Stack");
         assert_eq!(reg.iter().count(), 8);
         let mut empty = ActionRegistry::default();
         register_add_actions(&mut empty, &[]);
@@ -989,7 +996,11 @@ mod tests {
     #[test]
     fn register_add_actions_refuses_a_colliding_kind_without_panicking() {
         let mut reg = ActionRegistry::default();
-        let diags = register_add_actions(&mut reg, &["cvi", "cvi_stacked", "vol_vertical", "ok"]);
+        let kinds: Vec<(&str, String)> = ["cvi", "cvi_stacked", "vol_vertical", "ok"]
+            .into_iter()
+            .map(|k| (k, capitalize(k)))
+            .collect();
+        let diags = register_add_actions(&mut reg, &kinds);
         assert_eq!(diags.len(), 2, "{diags:?}");
         assert!(diags.iter().all(|d| d.severity == Severity::Error));
         assert!(
@@ -1021,7 +1032,7 @@ mod tests {
             category: "Test".into(),
         })
         .unwrap();
-        let diags = register_add_actions(&mut reg, &["rec"]);
+        let diags = register_add_actions(&mut reg, &[("rec", capitalize("rec"))]);
         assert_eq!(diags.len(), 1, "{diags:?}");
         assert!(
             diags[0]

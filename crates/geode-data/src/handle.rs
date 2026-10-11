@@ -529,6 +529,18 @@ impl DataHandle {
             .as_ref()
             .map(|r| r.dimensions.clone())
     }
+
+    /// The views of the replacement waiting in the mailbox, if any, under
+    /// the same terms as [`Self::pending_dimensions_for_tests`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pending_views_for_tests(&self) -> Option<Vec<ViewSpec>> {
+        self.inner
+            .pending_views
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(|r| r.views.clone())
+    }
 }
 
 impl DataService {

@@ -2518,6 +2518,7 @@ dependencies = [
  "geode-positions",
  "geode-pricer",
  "geode-pricing",
+ "geode-scenario",
  "geode-shell",
  "geode-timeseries",
  "geode-volslice",

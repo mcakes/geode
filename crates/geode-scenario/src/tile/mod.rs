@@ -58,6 +58,9 @@ pub struct ScenarioTile {
     pub(crate) frame: FrameRef,
     schema: Rc<RefCell<SchemaSpec>>,
     dims: Rc<RefCell<DerivedDimensions>>,
+    /// The named colors, shared with the factory: a reload's colors reach
+    /// the paint with the next picture (every applied reload requeries).
+    pub(crate) colours: Rc<RefCell<Arc<NamedColours>>>,
     pub(crate) health: HealthWatch,
     /// The window's rem the delegate's default widths were laid at.
     last_rem: f32,
@@ -134,7 +137,7 @@ impl ScenarioTile {
         stale_after: Rc<Cell<Duration>>,
         schema: Rc<RefCell<SchemaSpec>>,
         dims: Rc<RefCell<DerivedDimensions>>,
-        colours: NamedColours,
+        colours: Rc<RefCell<Arc<NamedColours>>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -145,7 +148,11 @@ impl ScenarioTile {
         let rows_axis_is_scenario = shape
             .axis(&shape.rows)
             .is_some_and(|a| a.kind == AxisKind::Scenario);
-        let mut delegate = ScenarioDelegate::new(&shape.rows, rows_axis_is_scenario, colours);
+        let mut delegate = ScenarioDelegate::new(
+            &shape.rows,
+            rows_axis_is_scenario,
+            Arc::clone(&colours.borrow()),
+        );
         delegate.fitted = widths_from_record(restored);
         delegate.set_paint(state.paint == Paint::Heat, state.scale);
         // The palette is resolved here and on every theme change, never in
@@ -212,6 +219,7 @@ impl ScenarioTile {
             frame,
             schema,
             dims,
+            colours,
             health,
             last_rem: 0.0,
             // A malformed record's first dropped key is the opening notice.

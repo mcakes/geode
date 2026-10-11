@@ -16707,6 +16707,9 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
         fn kind(&self) -> &'static str {
             self.inner.kind()
         }
+        fn title(&self) -> String {
+            self.inner.title()
+        }
         fn register_actions(&self, registry: &mut geode_shell::actions::ActionRegistry) {
             self.inner.register_actions(registry)
         }
@@ -16769,7 +16772,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
         let (config, builtin) = ShellServices::config_and_builtin(ConfigSources::default());
         let mut registry = geode_shell::actions::ActionRegistry::default();
         register_builtin_actions(&mut registry);
-        register_add_actions(&mut registry, &["cvi"]);
+        register_add_actions(&mut registry, &[("cvi", factory.title())]);
         let mut roster = geode_shell::module::ModuleRoster::new();
         roster.add(Box::new(factory));
         roster.register_actions(&mut registry);

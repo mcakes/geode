@@ -87,7 +87,7 @@ pub struct ScenarioFactory {
     stale_after: Rc<Cell<Duration>>,
     schema: Rc<RefCell<SchemaSpec>>,
     dims: Rc<RefCell<DerivedDimensions>>,
-    colours: NamedColours,
+    colours: Rc<RefCell<Arc<NamedColours>>>,
 }
 
 impl ScenarioFactory {
@@ -103,11 +103,12 @@ impl ScenarioFactory {
             stale_after: Rc::new(Cell::new(stale_after)),
             schema: Rc::new(RefCell::new(SchemaSpec::default())),
             dims: Rc::new(RefCell::new(DerivedDimensions::default())),
-            colours: NamedColours::default(),
+            colours: Rc::new(RefCell::new(Arc::new(NamedColours::default()))),
         }
     }
 
-    /// The startup schema and derived dimensions `:filter` validates against.
+    /// The schema and derived dimensions `:filter` validates against,
+    /// shared with the app, which writes them on every reload.
     pub fn with_schema(
         mut self,
         schema: Rc<RefCell<SchemaSpec>>,
@@ -118,8 +119,10 @@ impl ScenarioFactory {
         self
     }
 
-    /// The startup named colors a shape's `format.color` resolves against.
-    pub fn with_colours(mut self, colours: NamedColours) -> Self {
+    /// The named colors a shape's `format.color` resolves against, shared
+    /// with every tile this factory builds: each paints a new picture
+    /// against what the cell holds when the picture installs.
+    pub fn with_colours(mut self, colours: Rc<RefCell<Arc<NamedColours>>>) -> Self {
         self.colours = colours;
         self
     }
@@ -145,6 +148,11 @@ impl ScenarioFactory {
 impl ModuleFactory for ScenarioFactory {
     fn kind(&self) -> &'static str {
         self.kind
+    }
+
+    /// The shape's `title`: `Vega K/T: Split` and `Open Vega K/T`.
+    fn title(&self) -> String {
+        self.shape.title.clone()
     }
 
     fn register_actions(&self, registry: &mut ActionRegistry) {

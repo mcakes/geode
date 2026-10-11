@@ -10,7 +10,6 @@ use std::collections::BTreeSet;
 use geode_core::context::DimensionContext;
 use gpui::SharedString;
 
-use crate::defaults::capitalize;
 use crate::menu::{ActionRow, MenuPick, Row};
 use crate::module::ModuleRoster;
 use crate::shell::row_menu::ActionCx;
@@ -110,7 +109,7 @@ pub fn menu_rows(
                 placed.push(kind);
                 section.push(Row::Action(ActionRow::new(
                     RowPick::Open { kind },
-                    format!("Open {}", capitalize(kind)),
+                    format!("Open {}", f.title()),
                 )));
             }
         }
@@ -169,6 +168,8 @@ mod tests {
         let mut r = ModuleRoster::new();
         let mut cvi = RecordingFactory::new("cvi");
         cvi.accepts = &["underlying_ref"];
+        // A configured kind's row reads its title, not the capitalised kind.
+        cvi.title = Some("CVI (wide)");
         let mut dividend = RecordingFactory::new("dividend");
         dividend.accepts = &["underlying_ref"];
         r.add(Box::new(cvi));
@@ -208,7 +209,7 @@ mod tests {
             shape(&menu_rows(&ctx, &roster(), &BTreeSet::new())),
             vec![
                 "# underlying_ref \u{b7} SPX",
-                "Open Cvi",
+                "Open CVI (wide)",
                 "Open Dividend",
                 "|",
                 "# position_ref \u{b7} P7",

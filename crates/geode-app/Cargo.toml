@@ -36,6 +36,8 @@ geode-pricing.workspace = true
 geode-blotter = { path = "../geode-blotter" }
 # Market-data factories share the bridge's DataHandle for document requests.
 geode-marketdata = { path = "../geode-marketdata" }
+# One scenario tile kind per accepted shape, sharing the bridge's DataHandle.
+geode-scenario.workspace = true
 # The bridge owns the series factory's data handle and config reload routing.
 geode-timeseries.workspace = true
 # The vol slice viewer's factory shares the bridge's DataHandle.

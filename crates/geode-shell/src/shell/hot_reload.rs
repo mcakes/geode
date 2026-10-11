@@ -234,6 +234,7 @@ impl ShellView {
                 ("egress", &self.egress_baseline),
                 ("positions", &self.positions_baseline),
                 ("panels", &self.panels_baseline),
+                ("scenarios", &self.scenarios_baseline),
             ]
             .into_iter()
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))

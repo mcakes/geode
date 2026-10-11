@@ -791,6 +791,9 @@ pub struct ShellView {
     /// the `panels` doc: panels become tile kinds once at startup, so
     /// `panels.toml` is restart-required.
     panels_baseline: Vec<LayerDoc>,
+    /// The same, for the `scenarios` doc: each accepted shape becomes a
+    /// tile kind (and its derived view a service view) once at startup.
+    scenarios_baseline: Vec<LayerDoc>,
     /// The startup `[pricing] adapter` value used to build the data engine.
     /// Reload compares against this baseline to determine whether a restart is
     /// required. The rest of `[pricing]`, including `refresh`, remains live.
@@ -1546,6 +1549,10 @@ impl ShellView {
             .config
             .layered_docs(geode_core::panel::PANELS_DOC)
             .to_vec();
+        let scenarios_baseline = services
+            .config
+            .layered_docs(geode_core::scenario::SCENARIOS_DOC)
+            .to_vec();
         // Same reasoning, for the `[pricing] adapter` key the data
         // engine's pricer was chosen from — see
         // `pricing_baseline`'s field doc.
@@ -1634,6 +1641,7 @@ impl ShellView {
             egress_baseline,
             positions_baseline,
             panels_baseline,
+            scenarios_baseline,
             pricing_baseline,
             vol_baseline,
             pickable,

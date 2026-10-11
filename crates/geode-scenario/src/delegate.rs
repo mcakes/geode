@@ -91,14 +91,14 @@ pub struct ScenarioDelegate {
     pub fitted: FittedWidths,
     /// The window's rem in pixels; default widths are design pixels at it.
     rem_px: f32,
-    colours: NamedColours,
+    colours: Arc<NamedColours>,
     named: ColourCache,
     drag_last: Option<(usize, usize)>,
     drag_origin: bool,
 }
 
 impl ScenarioDelegate {
-    pub fn new(rows_axis: &str, rows_axis_is_scenario: bool, colours: NamedColours) -> Self {
+    pub fn new(rows_axis: &str, rows_axis_is_scenario: bool, colours: Arc<NamedColours>) -> Self {
         ScenarioDelegate {
             pivot: None,
             layout: EMPTY,
@@ -125,6 +125,16 @@ impl ScenarioDelegate {
 
     /// A new picture: keep the cursor where it was if it still exists,
     /// re-resolve the selection, refill the window.
+    /// Resolve named colors against `colours` from now on. New definitions
+    /// drop every resolved name, so none of the old mapping paints.
+    pub fn set_colours(&mut self, colours: Arc<NamedColours>) {
+        if Arc::ptr_eq(&self.colours, &colours) {
+            return;
+        }
+        self.colours = colours;
+        self.named = ColourCache::new();
+    }
+
     pub fn set_picture(&mut self, pivot: Option<Arc<Pivot>>) {
         self.layout = pivot.as_deref().map(Layout::of).unwrap_or(EMPTY);
         self.pivot = pivot;
@@ -740,7 +750,7 @@ mod tests {
     use geode_core::view::Scale;
 
     fn ladder() -> ScenarioDelegate {
-        ScenarioDelegate::new("tenor", false, NamedColours::default())
+        ScenarioDelegate::new("tenor", false, Arc::new(NamedColours::default()))
     }
 
     fn with_layout(mut d: ScenarioDelegate, rows: usize, cols: usize) -> ScenarioDelegate {
@@ -751,6 +761,48 @@ mod tests {
             sigma_col: true,
         };
         d
+    }
+
+    /// A reload's colors reach the paint: new definitions drop the names
+    /// resolved under the old ones, and the same definitions keep them.
+    #[test]
+    fn new_named_colours_resolve_afresh_and_the_same_ones_are_kept() {
+        use geode_core::colour::{Definition, Token};
+        use gpui_component::Theme;
+        let mut d = ladder();
+        // Distinct tokens: the default theme's colors can coincide.
+        d.ensure_palette(&Theme {
+            colors: gpui_component::ThemeColor {
+                info: gpui::green(),
+                danger: gpui::red(),
+                ..Theme::default().colors
+            },
+            ..Theme::default()
+        });
+        let named = CellColor::Named {
+            name: "delta".into(),
+            sign: Some(geode_core::format::Sign::Positive),
+        };
+        let fg = gpui::black();
+        assert_eq!(d.text_color(&named, None, fg), fg, "undefined: foreground");
+        let colours = |token| {
+            let mut c = NamedColours::default();
+            c.insert("delta".into(), Definition::token(token));
+            Arc::new(c)
+        };
+        let info = colours(Token::Info);
+        d.set_colours(info.clone());
+        let resolved = d.text_color(&named, None, fg);
+        assert_ne!(resolved, fg, "the reloaded definition paints");
+        d.set_colours(info);
+        assert_eq!(
+            d.text_color(&named, None, fg),
+            resolved,
+            "the same definitions"
+        );
+        d.set_colours(colours(Token::Danger));
+        let danger = d.text_color(&named, None, fg);
+        assert_ne!(danger, resolved, "nothing of the old mapping paints");
     }
 
     #[test]

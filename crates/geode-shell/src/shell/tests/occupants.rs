@@ -139,7 +139,10 @@ fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestA
     roster.register_actions(&mut services.registry);
     // Add the watching kind explicitly; the shared recorder binding would create a
     // placeholder because this roster has no "rec" factory.
-    crate::defaults::register_add_actions(&mut services.registry, &["watching"]);
+    crate::defaults::register_add_actions(
+        &mut services.registry,
+        &[("watching", crate::defaults::capitalize("watching"))],
+    );
     services.keymap = test_keymap(&services.registry, &[]);
     services.roster = roster;
 

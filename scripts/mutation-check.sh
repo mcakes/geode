@@ -19674,7 +19674,7 @@ run_mutation "tilepicker: the door skips the click-to-focus tail" \
 # The placeholder kind is never a row.
 run_mutation "tilepicker: the placeholder is not a row" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            .filter(|k| *k != PLACEHOLDER_KIND)' \
+  '            .filter(|(k, _)| *k != PLACEHOLDER_KIND)' \
   '            .filter(|_| true)' \
   geode-shell \
   tile_rows_are_the_roster_kinds_titled_minus_the_placeholder

@@ -449,7 +449,12 @@ impl ScenarioTile {
     fn show_pivot(&mut self, main: &Snapshot, pivot: Pivot, cx: &mut Context<Self>) {
         self.standing = self.picture_notice(main, &pivot);
         let pivot = Arc::new(pivot);
+        let colours = Arc::clone(&self.colours.borrow());
         self.table.update(cx, |t, cx| {
+            // The definitions a `format.color` resolves against, refreshed
+            // with the picture, so a reloaded `colours.toml` reaches the
+            // paint on the requery the reload triggers.
+            t.delegate_mut().set_colours(colours);
             t.delegate_mut().set_picture(Some(pivot));
             // `refresh` re-lays the columns and, with them, the two-level
             // header's groups (`refresh_header_layout`'s own work).
