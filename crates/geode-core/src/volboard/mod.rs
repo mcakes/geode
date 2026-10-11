@@ -170,6 +170,10 @@ pub struct Change {
 pub struct Cell {
     pub measure: Measure,
     pub current: Option<f64>,
+    /// When `current` was observed: the oldest of its inputs' current
+    /// observation times, since a derived cell is only as fresh as its
+    /// stalest input. `None` when `current` is `None`.
+    pub current_at: Option<DateTime<Utc>>,
     /// Parallel to the request's `lookbacks`.
     pub changes: Vec<Option<Change>>,
     /// Rank in `[0, 1]` (the share of the window's daily observations

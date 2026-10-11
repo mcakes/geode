@@ -102,6 +102,7 @@ fn cell(
     let blank = Cell {
         measure: measure.clone(),
         current: None,
+        current_at: None,
         changes: vec![None; params.lookbacks.len()],
         pctl: None,
     };
@@ -113,6 +114,10 @@ fn cell(
         .map(|o| o.current.map(|(_, v)| v))
         .collect::<Option<Vec<f64>>>()
         .map(|v| measure.combine(&v));
+    // The oldest of the inputs' current times: a derived cell is only as
+    // fresh as its stalest input.
+    let current_at =
+        current.and_then(|_| found.iter().filter_map(|o| o.current.map(|(t, _)| t)).min());
     let changes = (0..params.lookbacks.len())
         .map(|i| {
             let current = current?;
@@ -145,6 +150,7 @@ fn cell(
     Cell {
         measure: measure.clone(),
         current,
+        current_at,
         changes,
         pctl,
     }
@@ -525,6 +531,49 @@ mod tests {
         );
         assert_eq!(r.rows[0].cells[0].current, Some(0.15));
         assert_eq!(r.rows[0].as_of, None);
+    }
+
+    /// A cell is only as fresh as its stalest input: a point cell carries
+    /// its observation's time, an IV-RV cell whose realized current is older
+    /// than the surface's carries the realized time, and a blank cell none.
+    #[test]
+    fn a_cell_carries_its_oldest_inputs_observation_time() {
+        let p = params(vec![
+            Measure::atfm("3M"),
+            Measure::IvRv {
+                tenor: "3M".into(),
+                window: "20D".into(),
+            },
+            Measure::Skew { tenor: "3M".into() },
+        ]);
+        let mut obs = Observations {
+            window_from_day: None,
+            spark_from_day: None,
+            instants: instants(),
+            ..Default::default()
+        };
+        obs.by_input
+            .insert(("SPX".into(), point("3M", "0.5", "vol")), observed_atfm());
+        obs.by_input
+            .insert(("SPX".into(), realized_20d()), observed_realized());
+        let r = reduce(&p, &obs, &Clock::utc());
+        let cells = &r.rows[0].cells;
+        assert_eq!(
+            cells[0].current_at,
+            Some(ts("2026-01-10T21:00:00Z")),
+            "a point cell carries its observation time"
+        );
+        assert_eq!(
+            cells[1].current_at,
+            Some(ts("2026-01-10T20:00:00Z")),
+            "IV-RV carries the older realized time"
+        );
+        assert_eq!(cells[2].current, None, "no skew legs");
+        assert_eq!(cells[2].current_at, None, "a blank cell carries none");
+        assert_eq!(
+            r.rows[1].cells[0].current_at, None,
+            "a missing member's cell carries none"
+        );
     }
 
     /// The notes name dates on the clock's calendar: a lookback instant is
