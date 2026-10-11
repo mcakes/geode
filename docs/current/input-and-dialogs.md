@@ -298,7 +298,10 @@ them, and the menu also opens on a right press over a grid row, at the
 pointer, with the cursor moved to that row. The file verbs open the
 platform's save or open dialog, which is modeless and keyboard-driven by
 the platform; the tile awaits its answer without blocking and binds it to
-the classification shown when the verb ran.
+the classification shown when the verb ran. The Watchlist tile follows the
+same pattern: `Watchlist: Commit field` and `Watchlist: Cancel` own its
+prompt field, and `Watchlist: New…`, `Clone…`, `Rename…`, `Delete…`,
+`Revert…` and `Rules…` have no default chord.
 
 Binding badges are indicative: the palette takes the first compiled binding
 for an action without resolving current contexts or later shadows. They are

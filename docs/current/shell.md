@@ -40,7 +40,9 @@ application setting.
 
 The shell writes the first four. It installs `ReferenceGlobal` and
 `WatchlistGlobal` empty, and the app's bridge alone replaces them; modules
-only read and observe them. At attach
+only read and observe them (the watchlist tile observes both: its lists
+from `WatchlistGlobal`, the reference name beside each member from
+`ReferenceGlobal`). At attach
 the bridge reads every reference dataset of the startup schema at
 `AsOf::Live` under the reserved `REFERENCE_KEY`, and it reads a dataset again
 on each of its publishes. Only a dataset's latest-tagged answer

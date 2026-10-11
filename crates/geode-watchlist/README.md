@@ -16,11 +16,12 @@ request and never depends on `geode-data`.
   `set_config` stores it and calls `config_changed` on every live tile;
   `set_refresh` installs the bridge's cache refresh, by list name, as the
   tile's `shift+r` route (the factory's hook is the tile's only route to
-  the bridge). Also the tile's `TileContent` door, `ACTIONS` (category
-  `Watchlist`) and the `DEFAULT_KEYMAP` fragment (contexts `normal`,
-  `visual`, `insert`, `menu` and `rules`). New, Clone, Rename, Delete and
-  Revert have no default chord, and Rules… none either: the palette and
-  the `⋯` menu reach them.
+  the bridge). Also the tile's `TileContent` door (keys, commands, the
+  link-group capability and emission: `emits`, `follows`, `emission`,
+  `watch_emission`), `ACTIONS` (category `Watchlist`) and the
+  `DEFAULT_KEYMAP` fragment (contexts `normal`, `visual`, `insert`, `menu`
+  and `rules`). New, Clone, Rename, Delete and Revert have no default
+  chord, and Rules… none either: the palette and the `⋯` menu reach them.
 - `core/session.rs`: the session table (`version`, `name`,
   `sort = [column, "asc" | "desc"]` over `name`, `origin` or `reference`,
   `cursor` holding a member name). An unreadable key is dropped with a
@@ -347,6 +348,22 @@ time: an open field first (it owns the keys), then a menu (the surface on
 top, which may be acting on the selection), then the rules popup, then a
 live selection, then the warning and danger notices showing, each as a
 click on one would; with nothing to dismiss it is unhandled.
+
+## Link groups
+
+The tile emits and never follows (`emits` is `true`, `follows` is
+`false`: a list reads no scope). `emission` posts the name under the
+cursor as a one-value `underlying_ref` path (`link::underlying_scope`), so
+a market-data panel or a vol slice following the group shows that name;
+only the cursor row is read, never the selection, and an excluded row is
+still the name the cursor rests on. With no row under the cursor (nothing
+shown, an empty list, a filter keeping nothing) it posts
+`CursorScope::Nothing` and the group keeps its scope. The tile has no
+`:filter` layer, no `:unscoped` flag and no board. `watch_emission`
+observes the tile entity: every cursor move and row rebuild notifies it,
+so the shell pulls once per change, and a pull that finds the emission
+unchanged costs no write. The header paints the link chips from the frame
+handle (`geode_tile::header::link_chips`) as every tile does.
 
 ## Performance
 

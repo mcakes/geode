@@ -675,10 +675,6 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
-- `validate_name` does not yet refuse names the watchlist actions will
-  reserve; add that refusal when Part 2 registers the actions.
-- The tile's `shift+r` refresh trigger (spec §4.3) arrives with the tile in
-  Part 2; the cache has no caller for a manual refresh yet.
 - A release-profile median for the publish-triggered watchlist resolution:
   the recorded 44.8 ms is one dev-profile sample on a loaded machine
   (`docs/perf.md`, 2026-10-10).
@@ -686,12 +682,57 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   harness anchors the `watchlists` conjunct of `views_changed` in
   `hot_reload.rs` and the `dims` term of the fold comparison, not the
   `scopes` and `expressions` conjuncts.
+- The grid rebuild bench (`watchlist_rebuild_after_edit_5k` 4.0 ms,
+  `watchlist_rows_and_grid_5k` 1.7 ms) was taken on a loaded machine;
+  re-measure quiet.
+- `resolve_members` scans `include` once per name (O(m×n)); a set over the
+  manual names would make it linear.
+- A `/` filter hiding a waiting seed's row lets the next `Current` snapshot
+  forget the seed (untested).
+- `edit::undo` puts a restored name back at the end of `include` rather
+  than its old position, so the file's order moves.
+- `History::unsaved` is cleared only when the history is forgotten, so a
+  name refused once reads `not saved` on a later foreign skip instead of
+  `changed elsewhere`.
+- The chord-to-text `spell` helper in the watchlist tile is the first of
+  its kind and belongs on `geode_shell::keymap::Keystroke`.
+- The tile's choice painter is a third per-module copy (classifications,
+  pricer have their own) and should fold into `geode_tile`.
+- `rule_config()` clones the saved scopes and named expressions on every
+  rule commit and prompt open; an `Rc<WatchlistConfig>` on the factory
+  removes the copy.
+- `own` and `revertible` return differently shaped results.
+- Untested object paths: a withdraw when the asked-about list vanishes, a
+  `New…` field surviving a snapshot change, the refused-delete restore,
+  `not renamed: <why>` on a late clash, `not cloned: … no longer exists`.
+- `geode::watchlist` is not a `[log]` target: its lines follow `default`.
+- The expression completion offers no categorical values (the tile issues
+  no distinct query).
+- The rules popup binds its own keys only: `u`, `ctrl+r`, `shift+r`, `g w`
+  and `.` act after it is closed, or from the palette.
 
 ### Display checks
 
-- The demo lists (`us_core`, `europe_risk`) on first open. Part 1 has no
-  tile; the `geode::watchlist` debug line (resolution time and live member
-  count) is the only check so far.
+- The header: counts, the resolution state (`resolving…` / `as of` /
+  `failed`), the layer badge.
+- Excluded rows at the foot in the muted tone, and the `not in reference`
+  mark beside the name.
+- The add field's typeahead under the prompt bar.
+- The rules popup hung from the `<k> rules` item, and painted inline under
+  the prompt bar while a rule prompt is open with the field's completion
+  rows over it.
+- Expression completion rows, the error line, and the `values not
+  suggested here` hint tones.
+- The confirm bar wrapping on a narrow tile.
+- The empty, `saving <name>…` and removed states, and the switcher after
+  Delete.
+- The header sort icon reaching the sort.
+- Tile focus loss leaving the rules popup open (consistent with the `⋯`
+  menu).
+- The demo walk-through: switch to `europe_risk`, `o` add HSI, `x` on DAX,
+  `r` → `o` → a dataset → whole dataset, `u` twice, Clone… as `eu_copy`,
+  Rename… and Delete… the copy, reading the `geode::watchlist` log line
+  for each re-resolution.
 
 ## Diagnostics page
 

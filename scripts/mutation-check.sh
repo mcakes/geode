@@ -39413,6 +39413,87 @@ run_mutation "shell: the watchlist key range's upper edge is exclusive" \
   geode-shell \
   watchlist_keys_are_the_reserved_range_and_nothing_else
 
+# ---- Watchlists: tile ----
+#
+# The tile shows one list from the global and writes the whole object
+# through the config door. The grid's pending rows and order, the verbs'
+# gates and refusals, the history's reload rule and the emission are the
+# contracts.
+
+# A row whose manual state differs between the pending and the saved
+# definition is marked pending.
+run_mutation "watchlist tile: a pending manual change marks its row" \
+  crates/geode-watchlist/src/core/rows.rs \
+  '                .is_some_and(|p| p.of(&m.name) != saved.of(&m.name));' \
+  '                .is_some_and(|p| false && p.of(&m.name) != saved.of(&m.name));' \
+  geode-watchlist \
+  a_pending_include_adds_a_manual_pending_row
+
+# The default order puts excluded rows last.
+run_mutation "watchlist tile: excluded rows sort last by default" \
+  crates/geode-watchlist/src/core/grid.rs \
+  '            .cmp(&b.is_excluded())' \
+  '            .cmp(&a.is_excluded())' \
+  geode-watchlist \
+  the_default_order_is_by_name_with_excluded_last
+
+# A name a rule already supplies is refused under the field, not written.
+run_mutation "watchlist tile: add refusal stays under the field" \
+  crates/geode-watchlist/src/tile/field.rs \
+  '                match edit::add(&current, &members, &names) {' \
+  '                match edit::add(&current, &members, &names).or_else(|_| edit::add(&current, &[], &names)) {' \
+  geode-watchlist \
+  add_of_a_rule_supplied_name_is_refused_under_the_field
+
+# x on a name that is manual and rule-supplied says it did both.
+run_mutation "watchlist tile: x names both outcomes on a manual-and-rule name" \
+  crates/geode-watchlist/src/tile/verbs.rs \
+  '            Origin::Both(_) => format!("removed and excluded {one}"),' \
+  '            Origin::Both(_) => format!("removed {one}"),' \
+  geode-watchlist \
+  remove_of_a_manual_and_rule_name_writes_once_and_undoes_whole
+
+# A reload equal to the base keeps the pending object: the write is still
+# on its way.
+run_mutation "watchlist tile: a reload equal to the base keeps the pending edit" \
+  crates/geode-watchlist/src/core/history.rs \
+  '        } else if self.base.as_ref() == Some(config) {' \
+  '        } else if false {' \
+  geode-watchlist \
+  an_unrelated_reload_keeps_the_pending_edit
+
+# A clone writes the new object only; the source is never touched.
+run_mutation "watchlist tile: clone never touches the source list" \
+  crates/geode-watchlist/src/tile/objects.rs \
+  '            vec![set_edit(&to, &current)],' \
+  '            vec![set_edit(&to, &current), set_edit(&from, &current)],' \
+  geode-watchlist \
+  clone_writes_one_new_user_object_and_no_fork
+
+# The member verbs are refused while the shown list's revert is on its way.
+run_mutation "watchlist tile: the revert gate refuses the member verbs" \
+  crates/geode-watchlist/src/tile/verbs.rs \
+  '            Some(name) => Err(Self::reverting_text(name)),' \
+  '            Some(_name) => Ok(()),' \
+  geode-watchlist \
+  revert_is_offered_only_over_a_shadowed_user_copy_and_gates_the_verbs
+
+# An expression a rule cannot run is refused before it is written.
+run_mutation "watchlist tile: an unfoldable expression is refused" \
+  crates/geode-watchlist/src/core/prompt.rs \
+  '            let r = rule(dataset, None, Some(text));' \
+  '            let r = rule(dataset, None, Some(text)); return Step::Rules(ctx.with(r, *replace));' \
+  geode-watchlist \
+  the_expression_step_folds_against_the_dataset_and_replaces_in_place
+
+# No row under the cursor posts nothing: the group keeps its scope.
+run_mutation "watchlist tile: no cursor emits nothing" \
+  crates/geode-watchlist/src/tile/mod.rs \
+  '                None => CursorScope::Nothing,' \
+  '                None => CursorScope::Path(underlying_scope("")),' \
+  geode-watchlist \
+  no_cursor_emits_nothing
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

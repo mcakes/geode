@@ -339,6 +339,7 @@ pulls:
 | Market data | Yes, by underlying | Its base, then its underlying as a one-value `underlying_ref` path | Its draft document, while the draft is not clean | The panel has no underlying, or it follows the group it emits into (its board still posts) |
 | Timeseries | No | Does not emit | | |
 | Vol slice | Yes | Does not emit | | |
+| Watchlist | No | Its base, then the cursor row's name as a one-value `underlying_ref` path | None | No row is under the cursor: nothing shown, an empty list, or a filter keeping nothing |
 
 The shell composes each posting as `base ∧ layer ∧ path`
 ([composition](shell.md#link-groups)): the base is the emitter's lane
@@ -3132,17 +3133,186 @@ delivery; it does not call a pricing implementation directly.
 
 ## Watchlists
 
-The watchlist model is in place without a tile: `watchlists.toml` (see
-[watchlists](typed-documents.md#watchlists)) defines named lists of
-underlyings from manual names, exclusions and rules over a dataset, the
-data service resolves each list live (see
-[queries and time travel](data-path.md#queries-and-time-travel)), and the
-app's bridge keeps the resolved snapshot in `WatchlistGlobal` for any module
-to read and observe (see [state ownership](shell.md#state-ownership)). The
-demo defines `us_core` and `europe_risk` in
-`examples/demo-config/watchlists.toml`. Nothing paints a list yet; a
-resolution shows only as a `geode::watchlist` debug line naming the list
-and its live member count.
+`geode-watchlist` shows and edits one watchlist per tile: a named list of
+underlyings in `watchlists.toml` (see
+[watchlists](typed-documents.md#watchlists)) built from manual names,
+exclusions and rules over a dataset. The data service resolves each list
+live (see [queries and time travel](data-path.md#queries-and-time-travel))
+and the app's bridge keeps the resolved snapshot in `WatchlistGlobal` (see
+[state ownership](shell.md#state-ownership)). The tile reads and observes
+that global and `ReferenceGlobal`, issues no data request of its own, and
+writes the whole object back through the shell's
+[config door](shell.md#the-config-door); the list model itself is
+`geode_core::watchlist`. It opens from the add-tile picker; a new tile
+opens its switcher at once. The demo defines `us_core` (three names by
+hand) and `europe_risk` (every underlying the risk snapshot puts in the
+`region` classification's Europe, plus SMI, minus UKX) in
+`examples/demo-config/watchlists.toml`; each resolution logs one
+`geode::watchlist` debug line with the list's name, its time and its live
+member count.
+
+**Header.** `Watchlist: <name> ▾` is the switch control (a press, or
+`g w`): the switcher lists every list alphabetically with the shown one
+ticked. Beside it `<n> names` (the live members, whatever a filter shows),
+`<k> rules` (in the warning tone while any rule is bad; a press opens the
+rules popup), the resolution state (`resolving…`; `as of <time>` on the
+display clock; `failed` with the last good time after a failed
+resolution), the winning layer's badge, then the shared cluster with the
+link chips, `⋯` and ×. A tile showing nothing says why in its empty state
+and names the switch chord as the keymap binds it; with no list defined it
+names `Watchlist: New…` instead. A reload that removes the shown list
+leaves an empty state naming it, opens the switcher, forgets the history
+and writes nothing.
+
+**Grid.** Three columns: the name (with a muted `not in reference` beside
+one the `underlyings` reference table does not hold), the table's name for
+it (blank when absent or NULL) and its origin: `manual`, `rule 1`, `rules
+1, 3`, `manual + rule 2`, or `excluded (rule 1)`, `excluded (manual)` and
+bare `excluded` for an exclusion nothing supplies; rules are numbered from
+1. Excluded rows paint in the muted tone. The default order is by name
+with excluded rows last; `:sort <name|origin|reference> [asc|desc]` orders the grid
+(`origin` by its text as shown) and bare `:sort` restores the default; a
+header sort control cycles desc → asc → default as every grid tile's does.
+A missing reference name sorts last either way. `/` narrows over the name
+and the reference name as the query is typed, keeping the order; `enter`
+keeps the filter, `escape` restores the one in force when the search
+began, and the header counts ignore it.
+
+The shell's grid motions move a cursor held by name, so a snapshot or
+reference change keeps it on its row; `v`/`shift+v` start a row selection
+and `escape` ends it. After a member verb the cursor keeps its visible
+index, so removing the top row leaves the cursor on the next one. A row
+press moves the cursor and shift-press extends a selection to it; a right
+press moves the cursor there (a row of a live selection keeps the
+selection) and opens the `⋯` menu at the pointer, as `.` opens it from the
+header. The menu lists every verb with its live chord; a row that cannot
+act says why in its lane and in full when picked.
+
+**Members.** The verbs act on the selection, else the cursor's row.
+
+| Key | Verb | What it does |
+|---|---|---|
+| `o`, `enter` | Add name | Opens the add field under the header, a typeahead over the reference table's keys and every list's names. `enter` writes the highlighted name when the highlight was moved or equals the typed text ignoring case, else the text as typed; a name a rule already supplies is refused under the field, naming the rule (`DAX is already here from rule 1`); an excluded name is restored. `escape`, a press on the grid or any other verb closes the field unwritten. |
+| `x` | Remove name | By origin: a manual name leaves `include`; a rule-supplied one is excluded (`excluded DAX — rule 1 still supplies it; x again restores`); one that is both does both in one write; an excluded one is restored. A selection is counted (`removed 2 names, excluded 1 name`); nothing to change says so and writes nothing. |
+| `u`, `ctrl+r` | Undo, Redo | Replay one step over the current object (`undid 1 change`). A name another surface changed since is skipped (`— 1 changed elsewhere`); one the tile's own refused write left is `— 1 not saved`; a replay that skips everything writes nothing. |
+| `shift+r` | Resolve now | Asks the bridge to resolve the shown list again; the header reads `resolving…` with the next snapshot. |
+| `r` | Rules… | Opens the rules popup (below). |
+| `g w` | Switch | Opens the switcher on the shown list. |
+| `.` | Menu | The `⋯` menu, with New…, Clone…, Rename…, Delete… and Revert… at its foot. |
+
+Every edit is the whole object written through the config door and shown
+at once as a pending object (`manual · pending` in the origin column, a
+pending exclusion muted), so two edits before the reload compose; a reload
+carrying an earlier write of the tile's own keeps the later ones, and any
+other change to the object is the truth and drops them. A members answer
+under the same definition keeps the pending object, so a manual add
+survives the resolution that follows it. The shell's refusal drops the
+pending object and replaces the verb's word. Undo puts a name back by hand,
+at the end of `include`: the object is restored, not the file's order.
+
+**Rules.** `r`, the `<k> rules` item and the menu's Rules… open the rules
+popup hung from the header: one row per rule, `rule <i> · <dataset> ·
+<scope>` (`whole dataset`, `scope <name>` or the expression as written),
+with the fold's reason in the warning tone beneath a rule the startup
+schema refuses, and `no rules — o adds one` with none. While it is open
+`j`/`k` move its cursor, `o` adds a rule, `enter` edits the cursor rule's
+scope, `x` removes it (`removed rule 2`), and `escape` or `r` closes it; a
+press outside it or any verb that is not the popup's closes it first. A
+rule is asked in steps in the prompt field with the popup painted beneath:
+the dataset (those carrying `underlying_ref`, in schema order; `no dataset
+carries underlying_ref` refuses `o` when there is none), then the scope:
+`whole dataset`, each saved scope that folds clean over that dataset, or
+`expression…`, which opens an expression field completing over that
+dataset's columns and the derived dimensions, then operators, values for
+bool and derived columns, and connectives, with the completion's hint or
+warning on a line under the field; `enter` on a moved highlight writes the
+row over the word at the caret and keeps the field open, on an unmoved one
+it is the answer. Every answer is folded over a one-rule list against the
+startup schema, dimensions, saved scopes and named expressions before it is
+written and refused under the field with the fold's reason (`scope
+references unknown column 'pair'`), so a rule the popup lists is one the
+data layer will run. Editing replaces the rule in place (`changed rule
+2`), adding appends (`added rule 3`), the same rule again writes nothing;
+a rules write is one whole-object write and one undo step, and the
+snapshot's rule errors apply only while the rules are the snapshot's.
+
+**New, clone, rename, delete, revert.** Registered actions, reached from
+the palette and the `⋯` menu, never `:` commands and with no default
+chord. Each name is asked in the prompt field (`New watchlist`, `clone
+<from> as`, `rename <from> to`, the rename's seeded with the current name
+and selected) and validated before anything is written: an identifier, no
+reserved word of the scope grammar, no clash with another list ignoring
+case (`'Europe' already exists ('europe')`); a refusal stays under the
+field. The action ids are namespaced (`watchlist::new`), so a list's name
+can never collide with one. New writes an empty list and shows it. Clone
+writes the shown list as the tile has it, pending edits included, under
+the new name and never touches the source, so a desk list is not forked by
+its clone. Rename, Delete and Revert then ask y/n on the confirm bar under
+the header (`rename <from> → <to> — y renames`): `y` or the Yes button
+confirms; `n`, any other key, the No button, a press elsewhere in the tile
+or focus leaving cancels (`<name> not renamed`), and the key that answered
+does nothing else. A rename writes the new object and removes the old in
+one batch, so the shell writes both or neither; nothing names a watchlist
+yet, so there is no reference count to ask about. Delete removes the user
+definition and leaves the empty state with the switcher open. Revert is
+offered only over a user copy with a lower copy beneath it and names the
+layer it restores; until its reload lands, the member and rules verbs on
+that list are refused with `reverting <name>…`, since an edit built on the
+user copy would replace the removal in the shell's batch. Rename and delete
+act only on a list the user layer owns outright: a desk or builtin one is
+refused (`<name> is defined in desk config; Geode cannot …`), as is a user
+copy over a lower one (Revert… removes that) and one whose layer is
+unknown; the menu shows each refusal in its row's lane. The tile shows a
+written list ahead of the reload that carries it (the title, `saving
+<name>…` in the body, the old name left out of the switcher); a refusal
+puts back what was shown before.
+
+**Notices.** The tile hears the door's outcome on its frame notification:
+a fork (`copied '<name>' to your config — Revert… restores the <layer>
+copy`) shows as status, a refusal as danger, dropping the pending edit or
+restoring what a refused create, clone, rename or delete replaced. Beneath
+the verb's own word stand the resolution notices from the snapshot: `not
+resolved: <error> — shift+r retries` (danger) after a failed resolution and
+`rule <i> failed: <reason> — shift+r retries` (warning) per bad rule, until
+the next resolution changes them; dismissed, they hide until their text
+changes. A verb's notices last until the next verb or another list is
+shown; the session restore's until the trader's first key or press in the
+tile. `escape` peels one layer at a time: the confirm bar, an open field, a
+menu, the rules popup, a live selection, then the warning and danger
+notices showing.
+
+**Link groups.** The tile emits into a [link group](#link-groups) and never
+follows one: the name under the cursor is posted as a one-value
+`underlying_ref` path, so a market-data panel or a vol slice following the
+group shows that name. Only the cursor row is read, never the selection,
+and an excluded row is still the name the cursor rests on. With no row
+under the cursor (nothing shown, an empty list, a filter keeping nothing)
+it posts nothing and the group keeps its scope. The tile has no `:filter`
+layer, no `:unscoped` flag and no board.
+
+**Session.** The table saves the list's name, the sort and the cursor's
+name. An unreadable key is dropped with a notice and the rest kept; a
+restored cursor waits for the snapshot that holds its row.
+
+Known limitations:
+
+- The expression field's completion offers no categorical values: the tile
+  issues no distinct query, so at a value position for such a column the
+  hint reads `values not suggested here`.
+- Rename does not rewrite references, and none exist: nothing names a
+  watchlist yet.
+- The add field is a bar under the header, not a popup; its typeahead rows
+  do not close on a press outside them, only on a press on the grid or a
+  verb.
+- `shift+r` needs the bridge's refresh hook on the factory; a tile hosted
+  without it says `resolve now is not wired`.
+- While the rules popup is open only its own keys are bound: `u`,
+  `ctrl+r`, `shift+r` and the member verbs act once it is closed, or from
+  the palette, which closes it first.
+- `geode::watchlist` is not a `[log]` target: its lines follow `default`.
+
+See the [crate guide](../../crates/geode-watchlist/README.md) for the
+module map.
 
 ## Demo and application composition
 
