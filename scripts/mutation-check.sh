@@ -19907,12 +19907,21 @@ run_mutation "history: dedupe compares against the oldest version" \
 # text through, an unparsable f64 key fails inside the transaction as SQL.
 run_mutation "history: an unparsable key reaches SQL" \
   crates/geode-data/src/store/history.rs \
-  '                    normalize_key(v, spec.ty)
-                        .map_err(|e| err(format!("row {i}, key' \
-  '                    Ok::<String, String>(v.to_string())
-                        .map_err(|e| err(format!("row {i}, key' \
+  '    rows.normalized_key_columns(&types)
+        .map_err(StoreError::History)' \
+  '    Ok::<_, StoreError>(rows.keys.clone())' \
   geode-data \
   an_unparsable_f64_key_refuses_the_whole_append_before_any_sql
+
+# The append checks the answer's shape before staging. Mutated to skip it,
+# a short value column reaches the appender's row indexing.
+run_mutation "history: the append skips the shape check" \
+  crates/geode-data/src/store/history.rs \
+  '    rows.check_shape(keys.len(), n_values)
+        .map_err(StoreError::History)?;' \
+  '    let _ = n_values;' \
+  geode-data \
+  a_short_value_column_is_refused_before_any_sql
 
 # Retention removes only superseded versions. Mutated to `>=`, every row
 # matches itself and a lone live version older than the window goes.

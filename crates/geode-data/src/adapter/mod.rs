@@ -325,9 +325,21 @@ impl HistoryRows {
     /// through `key_types[c]`. Must run before `validate_against`: a source
     /// spelling `0.50` for an asked `0.5` would otherwise be refused as not
     /// asked for, and a `0.5`/`0.50` pair would slip past the repeat check
-    /// and duplicate at append. `Err` names the row and column; on `Err`
-    /// the rows are partly rewritten and must be discarded.
+    /// and duplicate at append. `Err` names the row and column and leaves
+    /// the rows unchanged.
     pub fn normalize_keys(&mut self, key_types: &[ColumnType]) -> Result<(), String> {
+        self.keys = self.normalized_key_columns(key_types)?;
+        Ok(())
+    }
+
+    /// The key columns in canonical spelling, column-major, without
+    /// rewriting `self`: the one mapping both `normalize_keys` and the
+    /// store's append use, so the adapter boundary and the store agree on
+    /// what a key reads as.
+    pub fn normalized_key_columns(
+        &self,
+        key_types: &[ColumnType],
+    ) -> Result<Vec<Vec<String>>, String> {
         if self.keys.len() != key_types.len() {
             return Err(format!(
                 "{} key column(s) for a {}-column key",
@@ -335,11 +347,45 @@ impl HistoryRows {
                 key_types.len()
             ));
         }
-        for (c, (column, ty)) in self.keys.iter_mut().zip(key_types).enumerate() {
-            for (i, value) in column.iter_mut().enumerate() {
-                *value = normalize_key(value, *ty)
-                    .map_err(|e| format!("row {i}, key column {c}: {e}"))?;
-            }
+        self.keys
+            .iter()
+            .zip(key_types)
+            .enumerate()
+            .map(|(c, (column, ty))| {
+                column
+                    .iter()
+                    .enumerate()
+                    .map(|(i, value)| {
+                        normalize_key(value, *ty)
+                            .map_err(|e| format!("row {i}, key column {c}: {e}"))
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// `key_arity` key columns, `value_arity` value columns, and every
+    /// column as long as `ts`. The shape half of `validate_against`, shared
+    /// with the store's append so both refuse the same answers.
+    pub fn check_shape(&self, key_arity: usize, value_arity: usize) -> Result<(), String> {
+        if self.keys.len() != key_arity {
+            return Err(format!(
+                "{} key column(s) for a {key_arity}-column key",
+                self.keys.len()
+            ));
+        }
+        if self.values.len() != value_arity {
+            return Err(format!(
+                "{} value column(s) for {value_arity} declared",
+                self.values.len()
+            ));
+        }
+        let n = self.ts.len();
+        if let Some(c) = self.keys.iter().find(|c| c.len() != n) {
+            return Err(format!("{} key values for {n} timestamps", c.len()));
+        }
+        if let Some(c) = self.values.iter().find(|c| c.len() != n) {
+            return Err(format!("{} values for {n} timestamps", c.len()));
         }
         Ok(())
     }
@@ -356,25 +402,8 @@ impl HistoryRows {
         asked: &KeySet,
     ) -> Result<(), AdapterError> {
         let err = |message: String| AdapterError { message };
-        if self.keys.len() != key_arity {
-            return Err(err(format!(
-                "{} key column(s) for a {key_arity}-column key",
-                self.keys.len()
-            )));
-        }
-        if self.values.len() != value_arity {
-            return Err(err(format!(
-                "{} value column(s) for {value_arity} declared",
-                self.values.len()
-            )));
-        }
+        self.check_shape(key_arity, value_arity).map_err(err)?;
         let n = self.ts.len();
-        if let Some(c) = self.keys.iter().find(|c| c.len() != n) {
-            return Err(err(format!("{} key values for {n} timestamps", c.len())));
-        }
-        if let Some(c) = self.values.iter().find(|c| c.len() != n) {
-            return Err(err(format!("{} values for {n} timestamps", c.len())));
-        }
         let mut seen = HashSet::with_capacity(n);
         for i in 0..n {
             let key = self.key_at(i);

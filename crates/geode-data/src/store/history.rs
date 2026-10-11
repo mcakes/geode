@@ -21,7 +21,7 @@ use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::query::normalize_key;
-use geode_core::schema::{ColumnSpec, DatasetSpec};
+use geode_core::schema::{ColumnSpec, ColumnType, DatasetSpec};
 
 pub const STAGING_TABLE: &str = "staging_history";
 
@@ -132,47 +132,19 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
 
 /// The rows' key columns in canonical spelling, column-major. Refuses a
 /// shape that does not match the dataset or a key its type cannot read, so a
-/// bad answer leaves the store exactly as it was, coverage included.
+/// bad answer leaves the store exactly as it was, coverage included. The
+/// checks and the mapping are `HistoryRows`' own, so the store and the
+/// adapter boundary agree on what a valid answer is.
 fn normalized_keys(
     keys: &[&ColumnSpec],
     n_values: usize,
     rows: &HistoryRows,
 ) -> Result<Vec<Vec<String>>, StoreError> {
-    let err = StoreError::History;
-    if rows.keys.len() != keys.len() {
-        return Err(err(format!(
-            "{} key column(s) for a {}-column key",
-            rows.keys.len(),
-            keys.len()
-        )));
-    }
-    if rows.values.len() != n_values {
-        return Err(err(format!(
-            "{} value column(s) for {n_values} declared",
-            rows.values.len()
-        )));
-    }
-    let n = rows.ts.len();
-    if let Some(c) = rows.keys.iter().find(|c| c.len() != n) {
-        return Err(err(format!("{} key values for {n} timestamps", c.len())));
-    }
-    if let Some(c) = rows.values.iter().find(|c| c.len() != n) {
-        return Err(err(format!("{} values for {n} timestamps", c.len())));
-    }
-    rows.keys
-        .iter()
-        .zip(keys)
-        .map(|(column, spec)| {
-            column
-                .iter()
-                .enumerate()
-                .map(|(i, v)| {
-                    normalize_key(v, spec.ty)
-                        .map_err(|e| err(format!("row {i}, key '{}': {e}", spec.name)))
-                })
-                .collect()
-        })
-        .collect()
+    rows.check_shape(keys.len(), n_values)
+        .map_err(StoreError::History)?;
+    let types: Vec<ColumnType> = keys.iter().map(|c| c.ty).collect();
+    rows.normalized_key_columns(&types)
+        .map_err(StoreError::History)
 }
 
 /// Each covered key padded to the key's arity with NULLs, values in
@@ -764,6 +736,27 @@ mod tests {
                 rows: &rows,
                 covered: vec![],
                 received_at: ts("2026-01-06T09:00:00Z"),
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, StoreError::History(_)), "{err}");
+        assert!(all_rows(&store).is_empty());
+        assert_eq!(coverage_count(&store), 0, "coverage untouched");
+    }
+
+    #[test]
+    fn a_short_value_column_is_refused_before_any_sql() {
+        let (_d, store, ds) = fixture();
+        let mut rows = surface_rows("2026-01-05", 2, 15.0);
+        rows.values[1].pop();
+        let err = append_history(
+            &store,
+            &HistoryAppendRequest {
+                dataset: &ds,
+                source: "hanweck",
+                rows: &rows,
+                covered: spx("2026-01-05T00:00:00Z", "2026-01-07T00:00:00Z"),
+                received_at: ts("2026-01-07T09:00:00Z"),
             },
         )
         .unwrap_err();
