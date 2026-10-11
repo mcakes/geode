@@ -446,9 +446,10 @@ pub(crate) fn follow_cursor(shell: &mut ShellView) {
                 within,
             }),
     };
-    let Some(ix) = at.map(|at| super::screen::child_index(&layout, &at)) else {
+    let Some(at) = at else {
         return;
     };
+    let ix = super::screen::child_index(&layout, &at);
     let now = match state.zone {
         Zone::Current => Followed {
             ix,
@@ -464,8 +465,28 @@ pub(crate) fn follow_cursor(shell: &mut ShellView) {
     // Only a cursor whose child or row changed scrolls; see `followed`.
     if state.followed.as_ref() != Some(&now) {
         state.followed = Some(now);
-        shell.scope_dialog_scroll.scroll_to_item(ix);
+        let first_current = state.zone == Zone::Current && state.cursor == 0;
+        let target = super::screen::follow_target(
+            &at,
+            ix,
+            first_current,
+            header_above(&shell.scope_dialog_scroll, ix),
+        );
+        shell.scope_dialog_scroll.scroll_to_item(target);
     }
+}
+
+/// Whether the header painted just above child `ix` lies above the list's
+/// viewport, read from the handle's last layout. The children before a
+/// cursor change little between two frames (a row added or removed above
+/// moves it by one row), so the last layout answers for the next; a list
+/// not laid out yet (no bounds) reads as not above, and the row is
+/// scrolled to directly.
+fn header_above(scroll: &gpui::ScrollHandle, ix: usize) -> bool {
+    let Some(header) = ix.checked_sub(1).and_then(|h| scroll.bounds_for_item(h)) else {
+        return false;
+    };
+    header.top() + scroll.offset().y < scroll.bounds().top()
 }
 
 /// The one-shot save door (the scope bar's save chip,
@@ -576,6 +597,11 @@ fn open_on(
         return false;
     }
     view.scope_dialog = Some(ScopeDialogState::new(first, opener));
+    // The handle outlives a close: a fresh dialog opens at the top, not at
+    // the offset the last visit left (an offset the minimal follow scroll
+    // would keep, hiding the first header). Set now, before opening derives
+    // the rows and follows the cursor from it.
+    view.scope_dialog_scroll.set_offset(gpui::Point::default());
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
@@ -813,8 +839,22 @@ fn jump(shell: &mut ShellView, cx: &App) {
     let Some(state) = shell.scope_dialog.as_ref() else {
         return;
     };
-    let on_scopes = state.saved.cursor_section() == Some(super::saved_view::Section::Scopes);
-    match super::screen::next_jump(state.zone, on_scopes, state.rows.rows.len()) {
+    use super::saved_view::Section as Saved;
+    let on_scopes = state.saved.cursor_section() == Some(Saved::Scopes);
+    // A target with nowhere to land (a kept filter emptied its section)
+    // passes the jump on to the next, so repeated `o` always reaches what
+    // is visible.
+    let lands = |jump: Jump| match jump {
+        Jump::Scopes => state.saved.has_stop(Saved::Scopes),
+        Jump::Expressions => state.saved.has_stop(Saved::Expressions),
+        Jump::Current => !state.rows.rows.is_empty(),
+    };
+    let Some(target) =
+        super::screen::jump_target(state.zone, on_scopes, state.rows.rows.len(), lands)
+    else {
+        return;
+    };
+    match target {
         Jump::Scopes => jump_saved(shell, super::saved_view::Section::Scopes, cx),
         Jump::Expressions => jump_saved(shell, super::saved_view::Section::Expressions, cx),
         Jump::Current => {
@@ -945,7 +985,7 @@ fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
 /// Under a step drawn on this body (the text step, the save prompt) they are
 /// its preview; while filtering, the field owns the keyboard and a press
 /// here would act behind it.
-fn takes_pointer(state: &ScopeDialogState) -> bool {
+pub(super) fn takes_pointer(state: &ScopeDialogState) -> bool {
     state.on_screen()
         && state.pending.is_none()
         && state.saved.mode != crate::dialogmode::DialogMode::Filter
@@ -1415,11 +1455,25 @@ fn saved_hints(state: &ScopeDialogState) -> Vec<Hint> {
         }
         _ => Hint::new(HintRow::Go, &["enter"], "load / add-remove"),
     };
-    vec![
-        Hint::new(HintRow::Move, &["j", "k"], "row"),
-        enter,
-        Hint::new(HintRow::Edit, &["e"], "edit expression"),
-        Hint::new(HintRow::Edit, &["n"], "new expression"),
+    // `e` and `n` act only on an expression row (`n` on the empty
+    // Expressions row too); on a scope row both refuse, so neither shows.
+    let on_expression = matches!(
+        state.saved.cursor_row().map(|r| &r.id),
+        Some(super::saved::SavedId::Expression(_))
+    );
+    let on_empty_expressions = state.saved.cursor_stop() == Some(Stop::Empty(Saved::Expressions));
+    let mut hints = vec![Hint::new(HintRow::Move, &["j", "k"], "row"), enter];
+    if on_expression {
+        hints.push(
+            Hint::new(HintRow::Edit, &["e"], "edit expression").selector("scope-saved-hint-e"),
+        );
+    }
+    if on_expression || on_empty_expressions {
+        hints.push(
+            Hint::new(HintRow::Edit, &["n"], "new expression").selector("scope-saved-hint-n"),
+        );
+    }
+    hints.extend([
         Hint::new(HintRow::Edit, &["c"], "copy"),
         Hint::new(HintRow::Edit, &["d"], "delete"),
         Hint::new(HintRow::Edit, &["r"], "revert"),
@@ -1428,5 +1482,6 @@ fn saved_hints(state: &ScopeDialogState) -> Vec<Hint> {
         Hint::new(HintRow::Go, &["s"], "save as…"),
         Hint::new(HintRow::Go, &["/"], "filter"),
         Hint::new(HintRow::Go, &["escape"], "close"),
-    ]
+    ]);
+    hints
 }

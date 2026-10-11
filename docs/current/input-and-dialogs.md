@@ -440,7 +440,8 @@ Dimensions opens the picker's Columns list as `p` does, Expressions the
 expression dialog's Add mode as `x` does, Text the text step as `t` does. A
 single press on an empty current section's muted row opens the same step,
 since that row has no cursor to move. While the text step is open or the
-filter is live, the current rows and the add controls ignore the pointer. A
+filter is live, the current rows, the add controls and the empty
+`SAVED EXPRESSIONS` row ignore the pointer. A
 reference the frame cannot resolve paints in the danger tone with its reason,
 or with `'<name>' is not defined` for a missing name. When the scope records
 a contradiction (`Scope::impossible`), the line `nothing can match —
@@ -458,9 +459,14 @@ The rows are prepared when the frame generation or the configuration version
 changes, never during paint, so an edit made elsewhere while the dialog is
 open (a chip's `×`, an undo, a save, a copy, a reload that redefines a name)
 shows at once. The list is at most sixteen rows tall and scrolls beyond
-that; it follows the cursor whenever the cursor's row or its place in the list
-changes, and a refresh that moves neither leaves a mouse-wheel scroll alone.
-Leaving a step for the screen follows the cursor afresh.
+that. Every opening starts it at the top, whatever offset the last visit
+left. It follows the cursor whenever the cursor's row or its place in the
+list changes, and a refresh that moves neither leaves a mouse-wheel scroll
+alone. Following scrolls the least that shows the cursor's row, except that
+a section's first row brings its header into view with it when the header
+lies above the list, and the first current row scrolls the list to its top
+so the contradiction line shows too. Leaving a step for the screen follows
+the cursor afresh.
 
 One cursor walks every stop in paint order, wrapping: the current rows, then
 the saved rows and, while no filter is typed, the saved sections' empty rows.
@@ -500,7 +506,7 @@ Keys that do not depend on the row:
 | Key | Effect |
 |---|---|
 | `j` / `k`, `up` / `down` | Move the cursor, wrapping across both groups |
-| `o` | Jump: from a current row to the saved scopes (the lane's `loaded_from` scope when it is listed, else the first), from there to the saved expressions, from there to the first current row (to the saved scopes again when the scope is empty). A saved section the filter emptied leaves the cursor where it is |
+| `o` | Jump: from a current row to the saved scopes (the lane's `loaded_from` scope when it is listed, else the first), from there to the saved expressions, from there to the first current row (to the saved scopes again when the scope is empty). A target the filter emptied passes the jump on to the next one in the cycle, so repeated `o` reaches whatever is visible; with nowhere to land the cursor stays |
 | `shift+d` | Clear the whole scope in one undoable edit |
 | `u` / `ctrl+r` | Undo / redo the lane's scope |
 | `p` | Add a dimension: the picker's Columns list |
@@ -513,8 +519,10 @@ Keys that do not depend on the row:
 A single row press moves the cursor; the second press of a double-click
 acts as `enter` (a third press does not act twice). The footer follows the
 cursor's group: on a current row it offers `i` only on a `≡` row and
-`mod+s` only on a term row; on a saved stop it lists the saved verbs, and
-`enter` reads `new expression` on the empty `SAVED EXPRESSIONS` row.
+`mod+s` only on a term row; on a saved stop it lists the saved verbs, with
+`e` only on a saved expression and `n` only on a saved expression or the
+empty `SAVED EXPRESSIONS` row (where they act), and `enter` reads
+`new expression` on the empty `SAVED EXPRESSIONS` row.
 
 A commit on a saved row (a load or a toggle) depends on the door that opened
 the dialog. Opened by the saved door (the load glyph, `frame::scope_saved`,

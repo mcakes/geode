@@ -309,6 +309,14 @@ impl SavedScreen {
         }
     }
 
+    /// Whether `section` has a stop for the cursor (a filter can hide every
+    /// row, and its empty row is no stop under a filter).
+    pub(crate) fn has_stop(&self, section: Section) -> bool {
+        self.stops
+            .iter()
+            .any(|&stop| self.stop_section(stop) == section)
+    }
+
     /// Children each section paints under its header: its stops, or its
     /// empty row (painted under a filter too, though not a stop there).
     pub(crate) fn painted_counts(&self) -> [usize; 2] {
@@ -589,12 +597,14 @@ fn press_row(
 }
 
 /// The empty Expressions row's press: a new expression, as `n` opens.
-/// Ignored unless the screen is on top with no question up.
+/// Ignored unless the screen is on top with no question up and no filter
+/// live (`view::takes_pointer`): while filtering the field owns the
+/// keyboard, and a step opened here would cover the typing.
 fn press_new_expression(shell: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     if !shell
         .scope_dialog
         .as_ref()
-        .is_some_and(|s| s.on_screen() && s.pending.is_none())
+        .is_some_and(super::view::takes_pointer)
     {
         return;
     }

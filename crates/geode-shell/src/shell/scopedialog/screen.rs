@@ -64,6 +64,50 @@ pub(crate) fn next_jump(zone: Zone, on_scopes: bool, current_len: usize) -> Jump
     }
 }
 
+/// Where `o` lands: `next_jump`'s target when it has somewhere to rest
+/// (`lands`), else the next target in the cycle (scopes → expressions →
+/// current → scopes) that does, so a kept filter that emptied a saved
+/// section never stalls the jump. `None` after one full cycle with nowhere
+/// to land.
+pub(crate) fn jump_target(
+    zone: Zone,
+    on_scopes: bool,
+    current_len: usize,
+    lands: impl Fn(Jump) -> bool,
+) -> Option<Jump> {
+    let after = |jump: Jump| match jump {
+        Jump::Scopes => Jump::Expressions,
+        Jump::Expressions => Jump::Current,
+        Jump::Current => Jump::Scopes,
+    };
+    let mut jump = next_jump(zone, on_scopes, current_len);
+    for _ in 0..3 {
+        if lands(jump) {
+            return Some(jump);
+        }
+        jump = after(jump);
+    }
+    None
+}
+
+/// The child `follow_cursor` scrolls to for a cursor painted at child `ix`.
+/// The first current row scrolls to child 0, so the contradiction line and
+/// the first section header show with it. Any other first row of a section
+/// (`within == 0`) scrolls to its header when the header lies above the
+/// viewport (`header_above`): `scroll_to_item` scrolls the least that shows
+/// its target, which would pin the row to the top edge and hide the header.
+/// A header in view or below scrolls to the row itself; the header, one
+/// child above, comes along.
+pub(crate) fn follow_target(at: &At, ix: usize, first_current: bool, header_above: bool) -> usize {
+    if first_current {
+        0
+    } else if at.within == 0 && header_above {
+        ix - 1
+    } else {
+        ix
+    }
+}
+
 /// The separator and the filter row, painted between the two groups.
 pub(crate) const SEPARATOR_AND_FILTER: usize = 2;
 
@@ -136,6 +180,70 @@ mod tests {
             Jump::Scopes,
             "no current rows: back to the scopes"
         );
+    }
+
+    #[test]
+    fn o_skips_a_target_with_nowhere_to_land() {
+        let only = |ok: &'static [Jump]| move |j: Jump| ok.contains(&j);
+        // A kept filter emptied the saved scopes: on to the expressions.
+        assert_eq!(
+            jump_target(
+                Zone::Current,
+                false,
+                2,
+                only(&[Jump::Expressions, Jump::Current])
+            ),
+            Some(Jump::Expressions)
+        );
+        // From an expression with both saved sections emptied, the current
+        // rows; from a current row, round to the current rows again.
+        assert_eq!(
+            jump_target(Zone::Saved, false, 2, only(&[Jump::Current])),
+            Some(Jump::Current)
+        );
+        assert_eq!(
+            jump_target(Zone::Current, false, 2, only(&[Jump::Current])),
+            Some(Jump::Current)
+        );
+        // From a scope with the expressions emptied: the current rows.
+        assert_eq!(
+            jump_target(Zone::Saved, true, 2, only(&[Jump::Scopes, Jump::Current])),
+            Some(Jump::Current)
+        );
+        // The target that lands is taken as is.
+        assert_eq!(
+            jump_target(Zone::Current, false, 2, |_| true),
+            Some(Jump::Scopes)
+        );
+        // Nowhere to land: one cycle, then nothing.
+        assert_eq!(jump_target(Zone::Saved, false, 0, |_| false), None);
+    }
+
+    #[test]
+    fn follow_shows_a_section_header_with_its_first_row() {
+        let first = At {
+            zone: Zone::Saved,
+            section: 0,
+            within: 0,
+        };
+        let second = At {
+            zone: Zone::Saved,
+            section: 0,
+            within: 1,
+        };
+        assert_eq!(follow_target(&first, 10, false, true), 9, "the header");
+        assert_eq!(
+            follow_target(&first, 10, false, false),
+            10,
+            "header in view"
+        );
+        assert_eq!(follow_target(&second, 11, false, true), 11);
+        let row0 = At {
+            zone: Zone::Current,
+            section: 0,
+            within: 0,
+        };
+        assert_eq!(follow_target(&row0, 2, true, false), 0, "child 0");
     }
 
     #[test]

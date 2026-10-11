@@ -827,7 +827,8 @@ pub struct ShellView {
     as_of_scroll: ScrollHandle,
     /// Scroll handle for the Scope dialog's one list (current sections,
     /// separator, filter row, saved sections). `scopedialog::view::follow_cursor`
-    /// keeps the cursor's row in view after every re-derive of its rows.
+    /// keeps the cursor's row in view after every re-derive of its rows; it
+    /// outlives a close, so every opening resets its offset to the top.
     pub(crate) scope_dialog_scroll: ScrollHandle,
     /// The frame data version used to build the open as-of dialog's rows.
     /// `on_frame_changed` refreshes them only when this version changes. Set on

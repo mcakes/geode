@@ -2421,3 +2421,194 @@ fn the_current_rows_ignore_the_pointer_while_the_filter_is_live(cx: &mut gpui::T
     let mode = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.saved.mode));
     assert_eq!(mode, Some(crate::dialogmode::DialogMode::Filter));
 }
+
+/// Forty saved scopes as builtin TOML: the saved group overflows the list.
+fn forty_scopes() -> String {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    scopes
+}
+
+/// Whether the element under `selector` paints wholly inside the list.
+fn in_list(vcx: &mut gpui::VisualTestContext, selector: &str) -> bool {
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let el = bounds(vcx, selector.to_string()).unwrap_or_else(|| panic!("{selector} paints"));
+    el.top() >= list.top() && el.bottom() <= list.bottom()
+}
+
+/// The list's offset survives a close on the shell's handle: a reopened
+/// dialog still starts at the top, from either door, with the Dimensions
+/// header in view — not where the last visit left it.
+#[gpui::test]
+fn the_dialog_reopens_at_the_top_after_a_scrolled_visit(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&forty_scopes()));
+    let shell = shell_of(&window, &mut vcx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(liq_scope());
+        f.shared_mut().clear_history();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let scroll_away = |vcx: &mut gpui::VisualTestContext| {
+        // The saved scopes, then `big`, far below the fold.
+        vcx.simulate_keystrokes("o");
+        draw(vcx);
+        vcx.simulate_keystrokes("o");
+        draw(vcx);
+        let offset = shell.read_with(vcx, |s, _| s.scope_dialog_scroll.offset());
+        assert!(offset.y < gpui::px(-200.), "scrolled away: {offset:?}");
+        vcx.simulate_keystrokes("escape");
+        draw(vcx);
+        assert!(shell.read_with(vcx, |s, _| s.scope_dialog.is_none()));
+    };
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    scroll_away(&mut vcx);
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    assert!(
+        in_list(&mut vcx, "scope-dialog-section-dimensions"),
+        "mod+o reopens with the Dimensions header in view"
+    );
+    scroll_away(&mut vcx);
+    // The saved door lands on s00, a few rows down: from the top the list
+    // need not move, so the current sections stay in view above it.
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("s00"));
+    assert!(
+        in_list(&mut vcx, "scope-dialog-section-dimensions"),
+        "the saved door reopens with the Dimensions header in view"
+    );
+    assert!(in_list(&mut vcx, "scope-saved-row-0"), "and its row");
+}
+
+/// Following the cursor up onto a section's first row shows the section's
+/// header with it, and the first current row shows the contradiction line
+/// above its header: a minimal scroll to the row alone would pin it to the
+/// top edge with both hidden above.
+#[gpui::test]
+fn following_up_to_a_section_start_shows_its_header(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&forty_scopes()));
+    let shell = shell_of(&window, &mut vcx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(Scope {
+            impossible: true,
+            ..liq_scope()
+        });
+        f.shared_mut().clear_history();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    assert!(in_list(&mut vcx, "scope-dialog-contradiction"));
+    // Down to `big`, then `k` up through all forty scopes to s00.
+    vcx.simulate_keystrokes("o o");
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    for _ in 0..40 {
+        vcx.simulate_keystrokes("k");
+        draw(&mut vcx);
+    }
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("s00"));
+    assert!(in_list(&mut vcx, "scope-saved-row-0"));
+    assert!(
+        in_list(&mut vcx, "scope-saved-section-scopes"),
+        "the SAVED SCOPES header shows with its first row"
+    );
+    // Down to `big` again, then `o` back to the first current row.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    assert!(!in_list(&mut vcx, "scope-saved-row-0"), "scrolled down");
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert!(!on_saved(&shell, &vcx));
+    assert!(in_list(&mut vcx, "scope-dialog-row-0"));
+    assert!(
+        in_list(&mut vcx, "scope-dialog-section-dimensions"),
+        "the first header shows above the first current row"
+    );
+    assert!(
+        in_list(&mut vcx, "scope-dialog-contradiction"),
+        "and the contradiction line above it"
+    );
+}
+
+/// A kept filter that emptied the saved scopes: `o` from a current row
+/// passes over them to the saved expressions instead of stalling.
+#[gpui::test]
+fn o_passes_over_a_section_a_kept_filter_emptied(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("/");
+    vcx.simulate_input("liq");
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(visible_names(&shell, &vcx), ["liq"]);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("liq"));
+    // liq → the current row → past the empty scopes to liq again.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert!(!on_saved(&shell, &vcx), "on the current row");
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert!(on_saved(&shell, &vcx), "o reached the saved expressions");
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("liq"));
+}
+
+/// The saved footer shows `e` and `n` only where they act: neither on a
+/// scope row (where both refuse), both on an expression row, and `n` alone
+/// on the empty Expressions row.
+#[gpui::test]
+fn the_saved_footer_shows_e_and_n_only_where_they_act(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_saved_from_current(cx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("asia"));
+    assert!(vcx.debug_bounds("scope-saved-hint-e").is_none());
+    assert!(vcx.debug_bounds("scope-saved-hint-n").is_none());
+    vcx.simulate_keystrokes("j j"); // big
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    assert!(vcx.debug_bounds("scope-saved-hint-e").is_some());
+    assert!(vcx.debug_bounds("scope-saved-hint-n").is_some());
+
+    let (shell, mut vcx) = saved_without_expressions(cx, true);
+    vcx.simulate_keystrokes("j j");
+    draw(&mut vcx);
+    assert!(on_saved(&shell, &vcx));
+    assert!(
+        vcx.debug_bounds("scope-saved-hint-new").is_some(),
+        "on the empty row"
+    );
+    assert!(vcx.debug_bounds("scope-saved-hint-e").is_none());
+    assert!(vcx.debug_bounds("scope-saved-hint-n").is_some());
+}
+
+/// While the filter is live a press on the empty Expressions row would open
+/// the definition step over the typing: it is ignored, as the current rows'
+/// presses are.
+#[gpui::test]
+fn the_empty_expressions_row_ignores_the_pointer_while_the_filter_is_live(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) = saved_without_expressions(cx, true);
+    vcx.simulate_keystrokes("/");
+    draw(&mut vcx);
+    let empty = vcx
+        .debug_bounds("scope-saved-empty-expressions")
+        .expect("the empty row paints under the filter");
+    vcx.simulate_click(empty.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(depth(&shell, &vcx), 1, "no step pushed");
+    let mode = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.saved.mode));
+    assert_eq!(mode, Some(crate::dialogmode::DialogMode::Filter));
+}
