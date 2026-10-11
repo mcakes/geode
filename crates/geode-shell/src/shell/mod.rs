@@ -827,7 +827,7 @@ pub struct ShellView {
     as_of_scroll: ScrollHandle,
     /// Scroll handle for the Scope dialog's one list (current sections,
     /// separator, filter row, saved sections). `scopedialog::view::follow_cursor`
-    /// keeps the cursor's row in view after every claimed key and door.
+    /// keeps the cursor's row in view after every re-derive of its rows.
     pub(crate) scope_dialog_scroll: ScrollHandle,
     /// The frame data version used to build the open as-of dialog's rows.
     /// `on_frame_changed` refreshes them only when this version changes. Set on
@@ -1085,12 +1085,6 @@ impl ShellView {
             }
             // Typing changed the top dialog's query: re-rank its prepared rows.
             view.refresh_dialog_rows(cx);
-            // A re-filtered saved group may have moved the Scope dialog's
-            // cursor (and `normalize_zone` its group): follow it after the
-            // re-derive, not before.
-            if view.top_kind() == Some(dialog::DialogKind::Scope) {
-                scopedialog::view::follow_cursor(view);
-            }
             cx.notify();
         })
         .detach();

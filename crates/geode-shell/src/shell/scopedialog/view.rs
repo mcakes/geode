@@ -302,8 +302,8 @@ pub(crate) fn on_query_changed(state: &mut ScopeDialogState, text: &str) {
 /// top; refused with a notice when it is lower in the stack
 /// (`dialog::can_open`).
 pub(crate) fn open(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
+    // Opening derived the rows, which followed the cursor.
     open_on(view, Layer::Current, Opener::Scope, window, cx);
-    follow_cursor(view);
 }
 
 /// The saved door (`frame::scope_saved`, the load glyph, `config::scopes`,
@@ -355,18 +355,26 @@ fn jump_saved(view: &mut ShellView, section: super::saved_view::Section, cx: &Ap
         state.rest_in(Zone::Saved);
         state.error = None;
     }
+    // The saved door jumps after opening derived the rows: no re-derive
+    // follows this move.
     follow_cursor(view);
 }
 
-/// Scroll the list so the cursor's row is in view. Called after every key
-/// the screen claims and every door that places the cursor; never from
-/// `build`. The child index comes from `screen::child_index`, which must
-/// agree with `build`'s paint order; a step drawn over the screen paints the
-/// current sections alone, which leaves every current index unchanged.
+/// Scroll the list so the cursor's row is in view. Runs at the end of every
+/// `refresh_dialog_rows` (keys, loads and toggles, refilters, reloads and
+/// `normalize_zone` all pass there) and after the moves that no re-derive
+/// follows (the saved door's jump, the frozen filter row's press); never
+/// from `build`. The child index comes from `screen::child_index`, which
+/// must agree with `build`'s paint order. Only while the screen is on top:
+/// a step drawn over it does not paint the saved group, so an index into
+/// it would be left pending against the wrong children.
 pub(crate) fn follow_cursor(shell: &mut ShellView) {
     let Some(state) = shell.scope_dialog.as_ref() else {
         return;
     };
+    if !state.on_screen() {
+        return;
+    }
     let layout = super::screen::Layout {
         contradiction: state.rows.contradiction,
         current: [Section::Dimensions, Section::Expressions, Section::Text].map(|section| {
@@ -587,7 +595,6 @@ fn handle_key(
         }
         state.rest_in(Zone::Saved);
         shell.refresh_dialog_rows(cx);
-        follow_cursor(shell);
         cx.notify();
         return true;
     }
@@ -673,7 +680,6 @@ fn handle_key(
     // Every edit above may have changed the lane: re-derive now so the next
     // key and the next paint read the same rows.
     shell.refresh_dialog_rows(cx);
-    follow_cursor(shell);
     cx.notify();
     true
 }

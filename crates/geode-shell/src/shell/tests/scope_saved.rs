@@ -2217,8 +2217,26 @@ fn the_list_scrolls_to_a_saved_row_below_the_fold(cx: &mut gpui::TestAppContext)
     let shell = shell_of(&window, &mut vcx);
     dispatch_action(&shell, "frame::scope_saved", &mut vcx);
     draw(&mut vcx);
-    // From s00: `o` to the first expression (`big`), `k` back to s39.
-    vcx.simulate_keystrokes("o k");
+    // From s00: `o` to the first expression (`big`), far below the fold.
+    // The list scrolls the least that shows it, so it sits on the bottom
+    // edge: an index one child too high would leave `liq` there instead.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let big = bounds(&mut vcx, "scope-saved-row-40".to_string()).expect("big paints");
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    assert!(
+        big.top() >= list.top() && big.bottom() <= list.bottom(),
+        "{big:?} inside {list:?}"
+    );
+    assert!(
+        (list.bottom() - big.bottom()).abs() < gpui::px(1.),
+        "{big:?} on the bottom edge of {list:?}"
+    );
+    // `k` back to s39.
+    vcx.simulate_keystrokes("k");
     draw(&mut vcx);
     let at = shell.read_with(&vcx, |s, _| {
         let d = s.scope_dialog.as_ref().expect("dialog open");
@@ -2229,6 +2247,50 @@ fn the_list_scrolls_to_a_saved_row_below_the_fold(cx: &mut gpui::TestAppContext)
         .debug_bounds("scope-dialog-scroll")
         .expect("the list paints");
     let row = bounds(&mut vcx, "scope-saved-row-39".to_string()).expect("the row paints");
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "{row:?} inside {list:?}"
+    );
+}
+
+/// A toggle from `mod+o` adds a current row above the saved cursor: the
+/// list follows the cursor's row down rather than leaving it under the fold.
+#[gpui::test]
+fn a_toggle_that_adds_a_current_row_keeps_the_saved_row_in_view(cx: &mut gpui::TestAppContext) {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&scopes));
+    let shell = shell_of(&window, &mut vcx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(liq_scope());
+        f.shared_mut().clear_history();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    // The saved scopes, then the saved expressions: `big`, on the bottom edge.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(
+        lane_scope(&shell, &vcx).named.iter().any(|n| n == "big"),
+        "big toggled on"
+    );
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current), "stays open");
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(&mut vcx, "scope-saved-row-40".to_string()).expect("big paints");
     assert!(
         row.top() >= list.top() && row.bottom() <= list.bottom(),
         "{row:?} inside {list:?}"

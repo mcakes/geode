@@ -741,6 +741,9 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
                 state.error = None;
                 super::scopedialog::saved_view::enter_filter(state);
             }
+            // Entering the filter may clamp the cursor into the saved group;
+            // no re-derive follows this press.
+            super::scopedialog::view::follow_cursor(shell);
         }
         _ => {}
     }

@@ -848,28 +848,74 @@ fn loading_from_a_forced_saved_rest_keeps_the_cursor_on_the_scope(cx: &mut gpui:
     assert_eq!(at.as_deref(), Some("eu"));
 }
 
-/// `follow_cursor`'s child index for a current row is the painted row's:
-/// scrolling to it moves nothing when the row is already in view. The
-/// contradiction line is off here; `rich_scope` has dimensions, terms, a
-/// named reference and text.
-#[gpui::test]
-fn the_cursor_child_index_matches_the_painted_row(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = open_on(cx, rich_scope());
-    vcx.simulate_keystrokes("j j j");
-    draw(&mut vcx);
-    let row = vcx
-        .debug_bounds("scope-dialog-row-3")
-        .expect("row 3 paints");
-    let highlighted = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.cursor));
-    assert_eq!(highlighted, Some(3));
-    shell.update(&mut vcx, |s, _| {
-        crate::shell::scopedialog::view::follow_cursor(s)
+/// Twenty unnamed terms: the current sections alone overflow the list.
+fn many_terms(impossible: bool) -> Scope {
+    let text = (0..20)
+        .map(|i| format!("npv > {i}"))
+        .collect::<Vec<_>>()
+        .join(" and ");
+    Scope {
+        expression: Some(parse_expr(&text).unwrap()),
+        impossible,
+        ..Scope::default()
+    }
+}
+
+/// Whether the current row `i` paints wholly inside the scroll list.
+fn row_in_view(vcx: &mut gpui::VisualTestContext, i: usize) -> bool {
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(vcx, format!("scope-dialog-row-{i}")).expect("the row paints");
+    row.top() >= list.top() && row.bottom() <= list.bottom()
+}
+
+/// The list follows the cursor down to the last current row, out into the
+/// saved group and back to the first current row. With the contradiction
+/// line painted, every current child index is one higher: an index that
+/// drops it scrolls one child short and leaves the last row below the fold.
+fn follows_through_current_rows(cx: &mut gpui::TestAppContext, impossible: bool) {
+    let (shell, mut vcx) = open_on(cx, many_terms(impossible));
+    let rows = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog.as_ref().map(|d| d.rows.rows.len())
     });
+    assert_eq!(rows, Some(20), "twenty term rows");
+    assert_eq!(
+        vcx.debug_bounds("scope-dialog-contradiction").is_some(),
+        impossible
+    );
+    assert!(
+        !row_in_view(&mut vcx, 19),
+        "the last term starts below the fold"
+    );
+    vcx.simulate_keystrokes(&["j"; 19].join(" "));
     draw(&mut vcx);
-    let after = vcx
-        .debug_bounds("scope-dialog-row-3")
-        .expect("row 3 paints");
-    assert_eq!(row.top(), after.top(), "already in view: no scroll");
+    let cursor = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.cursor));
+    assert_eq!(cursor, Some(19));
+    assert!(row_in_view(&mut vcx, 19), "scrolled down to the last term");
+    assert!(!row_in_view(&mut vcx, 0), "the first term scrolled out");
+    // Saved scopes, saved expressions, then back to the first current row.
+    for _ in 0..3 {
+        vcx.simulate_keystrokes("o");
+        draw(&mut vcx);
+    }
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Current));
+    let cursor = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.cursor));
+    assert_eq!(cursor, Some(0));
+    assert!(
+        row_in_view(&mut vcx, 0),
+        "scrolled back up to the first term"
+    );
+}
+
+#[gpui::test]
+fn the_list_follows_the_cursor_through_overflowing_current_rows(cx: &mut gpui::TestAppContext) {
+    follows_through_current_rows(cx, false);
+}
+
+#[gpui::test]
+fn the_list_follows_the_cursor_under_a_contradiction_line(cx: &mut gpui::TestAppContext) {
+    follows_through_current_rows(cx, true);
 }
 
 #[gpui::test]

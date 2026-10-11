@@ -36,6 +36,11 @@ impl ShellView {
                 state.normalize_zone();
             }
         }
+        // Every re-derive may move the Scope dialog's cursor: a key, a
+        // load or toggle adding current rows above a saved cursor, a
+        // refilter, a reload, `normalize_zone` changing its group. Follow
+        // it here, the one place they all pass.
+        super::scopedialog::view::follow_cursor(self);
         // The live object dialog only: a parked one is re-keyed when it is revealed
         // (`close_modal`), since nothing reads it while it is covered.
         let Some(domain) = self.object_dialog.as_ref().map(|state| state.domain) else {
