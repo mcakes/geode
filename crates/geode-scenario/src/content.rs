@@ -108,7 +108,8 @@ impl ScenarioFactory {
     }
 
     /// The schema and derived dimensions `:filter` validates against,
-    /// shared with the app, which writes them on every reload.
+    /// shared with the app: the schema the service serves, and the
+    /// dimensions it writes on every reload.
     pub fn with_schema(
         mut self,
         schema: Rc<RefCell<SchemaSpec>>,

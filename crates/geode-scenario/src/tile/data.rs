@@ -438,11 +438,13 @@ impl ScenarioTile {
     }
 
     fn build(&self, p: &Fetched) -> Result<Pivot, String> {
-        let mode = Mode {
-            currency: self.state.currency,
-            diff: self.state.diff,
-        };
-        Pivot::build(&p.main, p.totals.as_deref(), &self.shape, mode, &p.domains)
+        Pivot::build(
+            &p.main,
+            p.totals.as_deref(),
+            &self.shape,
+            self.mode(),
+            &p.domains,
+        )
     }
 
     /// Paint `pivot` and recompute the notice the picture carries.
@@ -468,20 +470,32 @@ impl ScenarioTile {
     /// Rebuild the pivot for the current mode over the last picture and
     /// recompute the notice the picture itself carries (the missing diff
     /// base, no data yet). A query error is not the picture's and stays.
-    pub(crate) fn rebuild_pivot(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// A picture that cannot be built in the new mode (a snapshot without
+    /// the USD twin `c` reads) puts `previous` back and refuses the verb:
+    /// the chips and the cells keep describing the same picture, never a
+    /// new mode over the old numbers.
+    pub(crate) fn rebuild_pivot(&mut self, previous: Mode, cx: &mut Context<Self>) {
         let Some(p) = self.picture.clone() else {
             return;
         };
         match self.build(&p) {
             Ok(pivot) => self.show_pivot(&p.main, pivot, cx),
-            // The installed picture fit the shape; a mode cannot unfit it.
-            // Said rather than dropped, should it ever happen.
             Err(e) => {
-                self.standing = Some(Notice::danger(format!("picture: {e}")));
-                self.prune_dismissed();
+                self.state.currency = previous.currency;
+                self.state.diff = previous.diff;
+                self.refuse(e, cx);
             }
         }
         cx.notify();
+    }
+
+    /// The mode the installed picture is drawn in.
+    pub(crate) fn mode(&self) -> Mode {
+        Mode {
+            currency: self.state.currency,
+            diff: self.state.diff,
+        }
     }
 
     /// Spec §7: diff with no base row in scope is a warning naming the axis

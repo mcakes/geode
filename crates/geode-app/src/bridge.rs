@@ -688,7 +688,8 @@ pub struct Bridge {
     /// configured views.
     pub scenario_views: Vec<ViewSpec>,
     /// The schema, dimensions and named colors every scenario factory and
-    /// tile shares; the reload observer writes them.
+    /// tile shares; the reload observer writes the dimensions and colors,
+    /// and the schema stays the startup one.
     scenario_cells: ScenarioCells,
     events: crate::events::Receiver,
     dropped: Arc<AtomicU64>,
@@ -746,8 +747,8 @@ fn panel_factories(
 }
 
 /// What every scenario factory and its tiles share with the reload
-/// observer: `:filter`'s schema and dimensions, and the named colors a
-/// `format.color` resolves against.
+/// observer: `:filter`'s schema (the startup one, fixed for the run) and
+/// dimensions, and the named colors a `format.color` resolves against.
 #[derive(Clone, Default)]
 struct ScenarioCells {
     schema: Rc<RefCell<SchemaSpec>>,
@@ -1499,9 +1500,12 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 {
                     pin_diags.extend(geode_compose::pin_app_datasets(&mut schema, config));
                     pinned = Some(Rc::new(schema.clone()));
-                    *scenario_cells.schema.borrow_mut() = schema.clone();
                     factory.set_schema(schema);
                 }
+                // The scenario cell keeps the startup schema: the shapes and
+                // their derived views are fixed for the run, and `:filter`
+                // must compile against the datasets the service serves, not
+                // an edited `datasets` doc awaiting restart.
                 *scenario_cells.dims.borrow_mut() = dims.clone();
                 factory.set_dims(dims.clone());
                 // Watchlist rules fold against the schema the service
@@ -8074,6 +8078,51 @@ grain = "underlying"
                 .get("delta")
                 .is_some(),
             "the reload hands the scenario tiles the config's colors"
+        );
+    }
+
+    /// The scenario tiles validate `:filter` against the schema the service
+    /// serves: a reload carrying an edited `datasets` doc, which waits for
+    /// a restart, leaves their schema cell on the startup schema.
+    #[gpui::test]
+    fn a_reload_leaves_the_scenario_schema_cell_on_the_startup_schema(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin(
+                    "datasets",
+                    "[rho_curves.columns.tenor]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        assert!(
+            bridge
+                .scenario_cells
+                .schema
+                .borrow()
+                .dataset("rho_curves")
+                .is_none(),
+            "the edited datasets doc waits for a restart"
         );
     }
 

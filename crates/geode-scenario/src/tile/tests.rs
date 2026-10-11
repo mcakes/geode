@@ -196,11 +196,15 @@ fn open_framed(
     cx.update(gpui_component::init);
     cx.update(crate::init);
     let (data, rx) = DataHandle::for_tests();
-    let factory = Rc::new(ScenarioFactory::new(
-        data.clone(),
-        shape.clone(),
-        Duration::from_secs(60),
-    ));
+    // The schema `:filter` compiles against: the demo datasets the builtin
+    // shapes and the pivot fixtures are written over, as the app hands its
+    // startup schema over.
+    let factory = Rc::new(
+        ScenarioFactory::new(data.clone(), shape.clone(), Duration::from_secs(60)).with_schema(
+            Rc::new(RefCell::new(crate::core::spec::demo::demo_schema())),
+            Rc::new(RefCell::new(Default::default())),
+        ),
+    );
     let keymap = Rc::new(app_keymap(&factory));
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let window = cx

@@ -347,11 +347,12 @@ impl ScenarioTile {
             "currency" => {
                 let twinned = self.shape.measures().iter().any(|m| m.usd_twin.is_some());
                 if twinned {
+                    let previous = self.mode();
                     self.state.currency = match self.state.currency {
                         Currency::Usd => Currency::Native,
                         Currency::Native => Currency::Usd,
                     };
-                    self.rebuild_pivot(cx);
+                    self.rebuild_pivot(previous, cx);
                 } else {
                     let first = self
                         .shape
@@ -373,8 +374,9 @@ impl ScenarioTile {
                 if self.shape.diff.is_none() {
                     self.refuse("this shape has no diff", cx);
                 } else {
+                    let previous = self.mode();
                     self.state.diff = !self.state.diff;
-                    self.rebuild_pivot(cx);
+                    self.rebuild_pivot(previous, cx);
                 }
             }
             "escape" => {
@@ -665,11 +667,16 @@ impl ScenarioTile {
     }
 
     /// The filter must compile against the shape's dataset; an unknown
-    /// column is refused here, never dropped or widened (spec §7).
+    /// column is refused here, never dropped or widened (spec §7). With no
+    /// such dataset in the schema nothing can be checked, so the filter is
+    /// refused rather than passed unchecked.
     fn validate_filter(&self, scope: &Scope) -> Result<(), String> {
         let schema = self.schema.borrow();
         let Some(dataset) = schema.dataset(&self.shape.dataset) else {
-            return Ok(());
+            return Err(format!(
+                "dataset '{}' is not declared: nothing to check the filter against",
+                self.shape.dataset
+            ));
         };
         let dims = self.dims.borrow();
         match scope.validate(dataset, &dims).into_iter().next() {

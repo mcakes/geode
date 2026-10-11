@@ -364,6 +364,88 @@ fn a_scope_only_change_reuses_the_domains(cx: &mut gpui::TestAppContext) {
     assert_eq!(q[0].scope, underlying_scope("SPX"));
 }
 
+/// `:unscoped` submits the tile's own filter alone, never the frame's
+/// scope, and a frame scope change no longer asks again: the tile never
+/// reads `unscoped` over scoped numbers.
+#[gpui::test]
+fn an_unscoped_tile_queries_its_filter_alone_and_ignores_the_scope(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, "vega_kt", None);
+    h.show_picture(&mut vcx);
+    h.follow_a(&mut vcx);
+    let _ = h.requests();
+    h.post(&mut vcx, scope_of("SPX"));
+    h.answer_vega(&mut vcx);
+    let run = |vcx: &mut gpui::VisualTestContext, line: &str| {
+        let out = vcx.update(|w, cx| h.content.command(line, w, cx));
+        vcx.run_until_parked();
+        out
+    };
+    // Main, then totals, for a chain whose requests were drained.
+    let finish = |vcx: &mut gpui::VisualTestContext, tag: u64| {
+        h.answer_query(vcx, tag, vega_main().snapshot("vega_buckets", Some(1)));
+        let _ = h.requests();
+        h.answer_query(vcx, tag, vega_totals().snapshot("vega_buckets", Some(1)));
+    };
+    run(&mut vcx, "filter vega > 0").unwrap();
+    let reqs = h.requests();
+    let scoped = queries(&reqs)[0].scope.clone();
+    assert_ne!(scoped, h.state(&vcx).filter, "scoped: the frame's SPX too");
+    finish(&mut vcx, queries(&reqs)[0].tag);
+    run(&mut vcx, "unscoped").unwrap();
+    let reqs = h.requests();
+    let q = queries(&reqs);
+    assert_eq!(q.len(), 1, "{reqs:?}");
+    let filter = h.state(&vcx).filter;
+    assert!(filter.expression.is_some());
+    assert_eq!(q[0].scope, filter, "the tile's filter alone");
+    finish(&mut vcx, q[0].tag);
+    h.post(&mut vcx, scope_of("NDX"));
+    assert!(
+        h.requests().is_empty(),
+        "unscoped: the frame's scope is not followed"
+    );
+}
+
+/// `:filter <expr>` compiles against the shape's dataset (spec §7): an
+/// unknown column is refused and changes nothing, never dropped or
+/// widened; a valid expression reaches the main query's scope.
+#[gpui::test]
+fn a_filter_expression_is_checked_and_reaches_the_query(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_bound(cx, "vega_kt", None);
+    h.show_picture(&mut vcx);
+    let _ = h.requests();
+    let run = |vcx: &mut gpui::VisualTestContext, line: &str| {
+        let out = vcx.update(|w, cx| h.content.command(line, w, cx));
+        vcx.run_until_parked();
+        out
+    };
+    let err = run(&mut vcx, "filter nonesuch > 0").unwrap_err();
+    assert!(err.contains("nonesuch"), "{err}");
+    assert!(h.state(&vcx).filter.is_empty(), "the filter is unchanged");
+    assert!(h.requests().is_empty(), "a refused filter asks nothing");
+    run(&mut vcx, "filter vega > 0").unwrap();
+    let reqs = h.requests();
+    let q = queries(&reqs);
+    assert_eq!(q.len(), 1, "{reqs:?}");
+    let expression = h.state(&vcx).filter.expression;
+    assert!(expression.is_some());
+    assert_eq!(q[0].scope.expression, expression);
+}
+
+/// A shape whose dataset the schema does not declare has nothing to check
+/// a filter against: the filter is refused, not passed unchecked.
+#[gpui::test]
+fn a_filter_over_an_undeclared_dataset_is_refused(cx: &mut gpui::TestAppContext) {
+    let mut shape = (*crate::core::spec::builtin_shape_checked("vega_kt")).clone();
+    shape.dataset = "nonesuch".into();
+    let (h, mut vcx) = open_bound_with(cx, shape, None);
+    let err = vcx
+        .update(|w, cx| h.content.command("filter vega > 0", w, cx))
+        .unwrap_err();
+    assert!(err.contains("'nonesuch' is not declared"), "{err}");
+    assert!(h.state(&vcx).filter.is_empty());
+}
+
 /// A publication on the dataset moves the data counter: the domains are
 /// read again before the main query.
 #[gpui::test]
@@ -545,6 +627,57 @@ fn a_query_error_is_a_standing_notice_and_keeps_the_picture(cx: &mut gpui::TestA
             .read_with(&vcx, |t, _| t.dismissed.visible(t.reported_notices()).len()
                 == 1),
         "news is shown again"
+    );
+}
+
+/// A mode the installed picture cannot be drawn in is a refused verb: a
+/// snapshot carrying only the USD twin (a tile opens in USD) keeps USD
+/// under `c`, the chip and the cells unchanged, rather than a native chip
+/// over USD numbers.
+#[gpui::test]
+fn a_mode_the_picture_cannot_take_is_refused_and_the_mode_stays(cx: &mut gpui::TestAppContext) {
+    use crate::core::pivot::fixtures::Rows;
+    use crate::core::pivot::{Currency, Mode};
+    let usd_only = |mut rows: Rows| {
+        rows.measures.remove(0);
+        for row in &mut rows.rows {
+            row.2.remove(0);
+        }
+        rows.snapshot("vega_buckets", Some(1))
+    };
+    let (h, mut vcx) = open_bound(cx, "vega_kt", None);
+    h.show(&mut vcx);
+    let reqs = h.requests();
+    let tag = distincts(&reqs)[0].tag;
+    h.answer_distinct(&mut vcx, tag, "tenor", &["1Y", "18M", "2Y"]);
+    let _ = h.requests();
+    h.answer_distinct(&mut vcx, tag, "moneyness", &["90.0", "100.0"]);
+    let _ = h.requests();
+    h.answer_query(&mut vcx, tag, usd_only(vega_main()));
+    let _ = h.requests();
+    h.answer_query(&mut vcx, tag, usd_only(vega_totals()));
+    let before = h
+        .delegate(&vcx, |d| d.pivot.clone())
+        .expect("a USD picture installs without the native column");
+    vcx.simulate_keystrokes("c");
+    let (mode, refusal) = h.tile.read_with(&vcx, |t, _| (t.mode(), t.refusal.clone()));
+    assert_eq!(
+        mode,
+        Mode {
+            currency: Currency::Usd,
+            diff: false
+        },
+        "the mode is put back"
+    );
+    assert_eq!(refusal.as_deref(), Some("snapshot lacks 'vega'"));
+    assert!(
+        h.delegate(&vcx, |d| Arc::ptr_eq(d.pivot.as_ref().unwrap(), &before)),
+        "the picture is the one installed"
+    );
+    assert_eq!(
+        h.notices(&vcx),
+        ["snapshot lacks 'vega'"],
+        "the refusal alone: the picture carries no new notice"
     );
 }
 
