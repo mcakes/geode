@@ -218,11 +218,11 @@ impl HistoryDispatch {
             Answer::Board(mut plan) => {
                 // The surface is the board: its failure is the request's.
                 // Any other dataset's failure blanks its cells and names
-                // itself; the board is otherwise current. Kept on one line
-                // (a mutation entry anchors on it).
-                #[rustfmt::skip]
-                let (surface, others): (Vec<_>, Vec<_>) =
-                    p.failures.into_iter().partition(|(ds, _)| *ds == plan.params.surface);
+                // itself; the board is otherwise current.
+                let (surface, others): (Vec<_>, Vec<_>) = p
+                    .failures
+                    .into_iter()
+                    .partition(|(ds, _)| *ds == plan.params.surface);
                 if !surface.is_empty() {
                     let reasons: Vec<String> = surface.into_iter().map(|(_, r)| r).collect();
                     self.answer_err(&Answer::Board(plan), reasons.join("; "));
