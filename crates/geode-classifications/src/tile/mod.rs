@@ -1865,7 +1865,7 @@ impl ClassificationsTile {
         self.close_prompt(window, cx);
         let seed = match &prompt {
             Prompt::Rename { from } => from.clone(),
-            Prompt::NewName | Prompt::NewColumn { .. } => String::new(),
+            Prompt::NewName | Prompt::NewColumn { .. } | Prompt::Add { .. } => String::new(),
         };
         let placeholder = editor::placeholder(&prompt);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
@@ -1942,6 +1942,9 @@ impl ClassificationsTile {
                 self.close_prompt(window, cx);
                 self.ask_rename(from, to, window, cx);
             }
+            // Only `submit_add` answers with these, never `submit`; closing
+            // keeps a stray one from leaving the field open on nothing.
+            Step::Existing(_) | Step::Draft(_) => self.close_prompt(window, cx),
         }
         cx.notify();
     }

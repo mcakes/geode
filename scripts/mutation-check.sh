@@ -11176,6 +11176,14 @@ run_mutation "document: a document with no rows is refused" \
 
 # ---- Reference snapshot publishing ------------------------------------
 
+# A compound-keyed table's joined keys are not values of its first column.
+run_mutation "reference: keys by column skip compound keys" \
+  crates/geode-core/src/reference.rs \
+  '            .filter(|t| t.key_columns == 1 && t.columns.first().is_some_and(|c| c == column))' \
+  '            .filter(|t| t.columns.first().is_some_and(|c| c == column))' \
+  geode-core \
+  keys_by_column_takes_only_tables_keyed_by_that_one_column
+
 # Unchanged must mean live holds exactly the staged rows. Skipping the
 # comparison reports every repeat poll as unchanged, so a changed snapshot
 # never publishes.

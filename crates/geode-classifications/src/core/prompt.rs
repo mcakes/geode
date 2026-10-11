@@ -17,6 +17,8 @@ pub enum Prompt {
     NewColumn { name: String },
     /// The new name for `from`.
     Rename { from: String },
+    /// A value to add to the shown classification, over column `from`.
+    Add { from: String },
 }
 
 /// What an answer leads to.
@@ -28,12 +30,33 @@ pub enum Step {
     Create { name: String, from: String },
     /// Rename `from` to `to`.
     Rename { from: String, to: String },
+    /// The added value already has a row: go there and edit its label.
+    Existing(String),
+    /// A value no row holds: add it as a draft and edit its label.
+    Draft(String),
     /// The answer is refused: the prompt stays open and says why.
     Refuse(String),
 }
 
 /// What the rename prompt says when the typed name is the current one.
 pub const SAME_NAME: &str = "that is already its name";
+
+/// What the add field says to a blank answer.
+pub const ADD_BLANK: &str = "type a value";
+
+/// The step an added value leads to. Source values are matched exactly:
+/// `dax` is not `DAX` in the data, so it is a new value.
+pub fn submit_add(text: &str, shown: &[&str]) -> Step {
+    let text = text.trim();
+    if text.is_empty() {
+        return Step::Refuse(ADD_BLANK.into());
+    }
+    if shown.contains(&text) {
+        Step::Existing(text.to_string())
+    } else {
+        Step::Draft(text.to_string())
+    }
+}
 
 /// The step `text` (trimmed) leads to from `prompt`.
 pub fn submit(prompt: &Prompt, text: &str, schema: &SchemaSpec, dims: &DerivedDimensions) -> Step {
@@ -60,6 +83,9 @@ pub fn submit(prompt: &Prompt, text: &str, schema: &SchemaSpec, dims: &DerivedDi
             },
             Err(why) => Step::Refuse(why),
         },
+        // The tile routes the add field to `submit_add`; refusing here keeps
+        // a slipped route an on-screen refusal rather than a crash.
+        Prompt::Add { .. } => Step::Refuse("the add field answers through submit_add".into()),
     }
 }
 
@@ -177,6 +203,18 @@ grain = "underlying"
             }
         );
         assert!(matches!(submit_(&prompt, "book"), Step::Refuse(_)));
+    }
+
+    #[test]
+    fn an_added_value_is_trimmed_and_goes_to_its_row_or_a_draft() {
+        assert_eq!(submit_add("  ", &["DAX"]), Step::Refuse(ADD_BLANK.into()));
+        assert_eq!(submit_add(" DAX ", &["DAX"]), Step::Existing("DAX".into()));
+        assert_eq!(
+            submit_add("dax", &["DAX"]),
+            Step::Draft("dax".into()),
+            "values are case-sensitive"
+        );
+        assert_eq!(submit_add("KOSPI2", &["DAX"]), Step::Draft("KOSPI2".into()));
     }
 
     #[test]

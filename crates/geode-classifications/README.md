@@ -54,10 +54,13 @@ the frame's config door.
   import question, `nothing_to_change`, `rejected_notice` (the first
   `REJECTED_LISTED` = 20 rows, then `and <k> more`), `imported`, the
   `not applied` refusals, `ready` (a held plan) and `replaced`.
-- `core/prompt.rs`: `Prompt` (`NewName`, `NewColumn`, `Rename`) and
+- `core/prompt.rs`: `Prompt` (`NewName`, `NewColumn`, `Rename`, `Add`) and
   `submit`, which validates the trimmed answer (`validate_name`,
   `validate_source`) into the next `Step`: the column question, a create,
-  a rename, or a refusal that keeps the prompt open.
+  a rename, or a refusal that keeps the prompt open. The add field answers
+  through `submit_add` instead: blank refuses (`ADD_BLANK`), a value a
+  shown row holds exactly (case-sensitive) is `Existing`, any other is a
+  `Draft`.
 - `tile/`: the hosted entity. `tile/header.rs` paints the header: the
   switch control (`Classification: <name> ▾`, also `g c`), the source
   column, `<n> values` and `<k> unclassified` from the grid, and the winning

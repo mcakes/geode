@@ -318,6 +318,7 @@ fn label(prompt: &Prompt) -> String {
         Prompt::NewName => "New classification".to_string(),
         Prompt::NewColumn { name } => format!("Source column for {name}"),
         Prompt::Rename { from } => format!("Rename {from} to"),
+        Prompt::Add { from } => format!("Add {from} value"),
     }
 }
 
@@ -326,6 +327,7 @@ pub(crate) fn placeholder(prompt: &Prompt) -> &'static str {
     match prompt {
         Prompt::NewName | Prompt::Rename { .. } => "name",
         Prompt::NewColumn { .. } => "source column",
+        Prompt::Add { .. } => "value",
     }
 }
 
