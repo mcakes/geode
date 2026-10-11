@@ -3,6 +3,7 @@
 
 pub mod coalesce;
 pub mod fetch;
+pub mod history;
 pub mod load;
 pub mod plan;
 pub(crate) mod recover;
