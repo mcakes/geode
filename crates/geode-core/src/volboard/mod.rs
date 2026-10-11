@@ -189,9 +189,9 @@ pub struct VolRow {
 }
 
 /// One answered board: a row per member in request order (a member the
-/// surface lacks keeps its row, every cell `None`, and is named in
-/// `missing`), the datasets that failed and blanked their cells, and
-/// notes (`<dataset>: history starts <date>`).
+/// surface lacks keeps its row, `as_of: None` and its surface cells
+/// `None`, and is named in `missing`), the datasets that failed and
+/// blanked their cells, and notes (`<dataset>: history starts <date>`).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct VolBoard {
     pub rows: Vec<VolRow>,
