@@ -30810,6 +30810,20 @@ run_mutation "pricer group edit: the editor stays behind in a merged group (qty)
   '            let why = match if self.row_at(at).is_some() { LeadPlace::On(at.clone()) } else { self.lead_place(frozen) } {' \
   geode-pricer a_qty_step_through_an_existing_group_follows_the_lead_line
 
+# A change of the effective grouping chain closes a grouping-row editor:
+# the lead row it would follow onto stands for other lines than it writes.
+run_mutation "pricer group edit: a chain change keeps the group editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.chain != frozen.chain {' \
+  '            if false && self.chain != frozen.chain {' \
+  geode-pricer a_chain_change_closes_a_stepped_group_editor
+
+run_mutation "pricer group edit: a chain change keeps the unstepped group editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.chain != frozen.chain {' \
+  '            if false && self.chain != frozen.chain {' \
+  geode-pricer a_chain_change_closes_a_group_editor
+
 # A block's columns are frozen with its targets: a selection cleared
 # mid-edit must not shrink the next press to the cursor's column.
 run_mutation "pricer group edit: block columns are read live" \

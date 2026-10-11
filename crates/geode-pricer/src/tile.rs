@@ -298,6 +298,11 @@ pub(crate) const STEPS_KEPT_HIDDEN: &str =
 pub(crate) const STEPS_KEPT_CLOSED: &str = "edit closed: the line is in a closed group; steps kept";
 pub(crate) const STEPS_KEPT_GONE: &str = "edit closed: the line went away; steps kept";
 
+/// A grouping-row editor closed because the effective grouping chain
+/// changed under it (`FrozenTargets::chain`), without and with steps.
+pub(crate) const CHAIN_CHANGED: &str = "edit closed: the grouping changed";
+pub(crate) const STEPS_KEPT_CHAIN: &str = "edit closed: the grouping changed; steps kept";
+
 /// A package row whose legs the frame's scope partly hides paints only
 /// its shown legs, so anything acting through it would reach legs the
 /// trader cannot see: every cell edit onto it (the editor, a selection's
@@ -410,15 +415,19 @@ pub(crate) struct FrozenTargets {
     /// the anchor follows it when the editor's own write moves its group
     /// (`PricerTile::refresh_selection`).
     pub(crate) anchor_lead: Option<LineId>,
+    /// The effective grouping chain the editor opened under. A rebuild
+    /// under another chain (a frame slot switch, a pin) closes the editor:
+    /// the row it would follow onto stands for other lines than it writes,
+    /// and a commit there would be confirmed on a row whose meaning
+    /// changed.
+    pub(crate) chain: rollup::EffectiveChain,
 }
 
 /// Where a grouping-row editor's lead line paints now
 /// (`PricerTile::lead_place`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LeadPlace {
-    /// The row at the editor's depth on the lead line's chain; on a
-    /// shallower chain after a regroup, its deepest group row or the line
-    /// itself.
+    /// The group row at the editor's depth on the lead line's chain.
     On(At),
     /// The row at that depth is inside a closed group: `At` is the
     /// nearest painted row above it.
@@ -2677,10 +2686,8 @@ impl PricerTile {
 
     /// Where a grouping-row editor following `frozen.lead` belongs now:
     /// the row at `frozen.depth` on the lead line's chain — the group row
-    /// that holds it at that depth, wherever a step, a delivery or a
-    /// regroup put it. A chain shallower than that depth after a regroup
-    /// gives its deepest group row, or with no group at all the line's
-    /// own row (its package's, while that is closed). One rule for the
+    /// that holds it at that depth, wherever a step or a delivery put it
+    /// (a regroup closes the editor first, `follow_editor`). One rule for the
     /// open editor, for the cursor after a commit, and for the cursor
     /// after `escape` takes steps back: the rollback returns the lead
     /// line to its group, so the rule puts the cursor home.
@@ -2699,19 +2706,12 @@ impl PricerTile {
         else {
             return LeadPlace::Gone;
         };
+        // Under the chain the editor opened with (another chain closes it
+        // first, `follow_editor`) every line sits at least that deep.
         let chain = &leaf.path;
-        let depth = frozen.depth.min(chain.len());
-        if depth == 0 {
-            let id = frozen.lead;
-            let package = self.sheet.parent(row).map(|p| self.sheet.id(p));
-            return match (self.model.grid_row_of(id), package) {
-                (Some(_), _) => LeadPlace::On(At::Line { id, within: None }),
-                (None, Some(p)) if self.model.grid_row_of(p).is_some() => LeadPlace::On(At::Line {
-                    id: p,
-                    within: None,
-                }),
-                _ => LeadPlace::Gone,
-            };
+        let depth = frozen.depth;
+        if depth == 0 || chain.len() < depth {
+            return LeadPlace::Gone;
         }
         let target = chain[..depth].to_vec();
         if self.group_row(&target).is_some() {
@@ -5677,8 +5677,9 @@ impl PricerTile {
     /// SCOPE_DROPPED_EDIT when the frame's scope hid its line.
     ///
     /// A grouping-row editor follows its lead line, never a path: after
-    /// every rebuild (its own step, a delivery, a regroup, a rollback) it
-    /// and the cursor sit on the row `lead_place` names. It drops only
+    /// every rebuild (its own step, a delivery, a rollback) it and the
+    /// cursor sit on the row `lead_place` names. It drops when the
+    /// effective grouping chain is no longer the one it opened under, or
     /// when the lead line cannot be painted at all — gone, hidden by the
     /// scope, or inside a closed group — and then, with steps already
     /// taken, the footer says they stand (`drop_orphaned_editor` records
@@ -5694,6 +5695,18 @@ impl PricerTile {
                 self.editor.as_ref(),
                 Some(Editor::Text { bulk: Some(b), .. }) if !b.undo.inverse.is_empty()
             );
+            // Another chain gives the lead line's row another meaning: the
+            // editor would write its frozen lines from a row that now
+            // stands for others. Deliveries, folds, the scope and the
+            // editor's own writes keep the chain, so never close it here.
+            if self.chain != frozen.chain {
+                let why = if stepped {
+                    STEPS_KEPT_CHAIN
+                } else {
+                    CHAIN_CHANGED
+                };
+                return self.drop_orphaned_editor(why, cx);
+            }
             let why = match self.lead_place(frozen) {
                 LeadPlace::On(to) => {
                     if let Some(editor) = self.editor.as_mut() {

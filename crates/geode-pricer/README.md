@@ -110,9 +110,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
   not the grid), and the lead line it follows with its depth. One rule,
   `lead_place`, says where the editor belongs: the row at that depth on the
   lead line's chain. `follow_editor` applies it after every rebuild, own
-  write or not, and drops the editor only when the lead line cannot paint
-  (gone, hidden, under a closed group; the `STEPS_KEPT_*` footers when
-  steps already stand). A typed commit releases the editor before its
+  write or not. It drops the editor when the effective chain is no longer
+  `FrozenTargets::chain`, the one it opened under (`CHAIN_CHANGED` /
+  `STEPS_KEPT_CHAIN`: the lead row would stand for other lines than it
+  writes), or when the lead line cannot paint (gone, hidden, under a
+  closed group; the `STEPS_KEPT_*` footers when steps already stand). A typed commit releases the editor before its
   write and `place_cursor_by_lead` puts the cursor by the same rule (or
   the closed group above); `close_editor` does the same after an
   `escape` rollback. `as_own_write` marks the editor's own writes so a

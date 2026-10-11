@@ -2739,10 +2739,9 @@ takes the steps back and `enter` keeps them as one undo entry.
 
 The editor follows a lead line, never the group's path: the first line the
 group row paints when the editor opens. After every rebuild while it is
-open (its own step, a delivery, a regroup, a rollback) the editor and the
-cursor sit on the group row that holds the lead line at the editor's
-original depth; after a regroup to a shallower chain, its deepest group
-row, or with no grouping the line's own row. So editing the group's own
+open (its own step, a delivery, a rollback) the editor and the cursor sit
+on the group row that holds the lead line at the editor's original depth.
+So editing the group's own
 grouped column, or an enclosing group's shown on a nested row, carries
 them to the group the lines moved into, one they merged with or one they
 then left again, press by press, and under a `status` grouping (where any
@@ -2752,7 +2751,12 @@ puts the cursor home with the lines. A typed commit closes the editor with
 no footer and puts the cursor on the lead line's row by the same rule, or
 the nearest painted row above it when that is inside a closed group.
 Undoing a re-tag moves the lines back but leaves the cursor where it is.
-The editor closes only when the lead line cannot paint at all: deleted, the
+A change of the grouping chain itself (a frame slot switch, a pin) closes
+the editor, since the row it would follow onto stands for other lines than
+it writes: `edit closed: the grouping changed`, or `edit closed: the
+grouping changed; steps kept` with the steps kept as one undo entry. A line
+editor is unaffected. Otherwise the editor closes only when the lead line
+cannot paint at all: deleted, the
 sheet replaced, hidden by the scope, or inside a closed group. With no step
 taken the footer reads `the cell moved; edit refused`, `the line is hidden
 by the scope; edit dropped` or `the line moved to another group; edit

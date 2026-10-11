@@ -1441,35 +1441,103 @@ fn a_block_step_keeps_every_block_column_across_a_retag(cx: &mut gpui::TestAppCo
     assert_eq!(line_texts(&h, &vcx), THREE, "one undo");
 }
 
-/// A frame regroup between presses clears the block selection (its anchor
-/// group is gone); the editor follows its lead line, and the next press
-/// still steps every block column the editor opened with.
+/// A delivery between presses clears the block selection (under a
+/// `status` grouping it moves the anchor group's lines, and that is not
+/// the editor's own write); the editor follows its lead line, and the next
+/// press still steps every block column the editor opened with.
 #[gpui::test]
 fn a_block_step_keeps_its_columns_when_the_selection_clears(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &THREE);
-    slots(&h, &mut vcx, &[(1, &["strike"]), (2, &["underlying_ref"])]);
-    activate(&h, &mut vcx, Some(1));
-    cursor_to(&h, &mut vcx, "3000");
+    price_distinctly(&h, &mut vcx);
+    // The 3000 P to `pricing…` through an ordinary edit of its own.
+    cursor_to_row(&h, &mut vcx, 0);
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "1");
+    h.dispatch(&mut vcx, "commit", None);
+    h.command(&mut vcx, "group status").unwrap();
+    cursor_to_group_of(&h, &mut vcx, 0); // pricing…: the 3000 P
     goto_column(&h, &mut vcx, "qty");
     h.dispatch(&mut vcx, "visual_block", None);
-    cursor_to(&h, &mut vcx, "5000");
+    cursor_to_group_of(&h, &mut vcx, 1); // fresh: the 4000 P, 5000 C
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "edit", None);
     h.dispatch(&mut vcx, "insert_up", None);
-    activate(&h, &mut vcx, Some(2));
+    price_distinctly(&h, &mut vcx); // every line fresh: the anchor's group goes
     assert!(
         h.tile.read_with(&vcx, |t, _| t.selection.is_none()),
-        "fixture: the regroup cleared the selection"
+        "fixture: the delivery cleared the selection"
     );
     assert!(editor_open(&h, &vcx), "the lead line still paints");
-    assert_eq!(cursor_group(&h, &vcx), path(&["SPX"]));
     h.dispatch(&mut vcx, "insert_up", None);
     let notice = edit_notice(&h, &vcx).unwrap_or_default();
     assert!(notice.starts_with("stepped 6 cells +2"), "{notice}");
-    assert_eq!(
-        line_texts(&h, &vcx),
-        ["3 SPX Z26 3002 P", "3 SPX Z26 4002 P", "3 SPX Z26 5002 C"]
+    let lines = line_texts(&h, &vcx);
+    for (row, strike) in [(0, "3002"), (1, "4002"), (2, "5002")] {
+        assert_eq!(qty(&h, &vcx, row), 3, "{lines:?}");
+        assert!(lines[row].contains(strike), "{lines:?}");
+    }
+}
+
+/// [SPX 5000 C, NDX 5000 P, SPX 4000 P]: regrouped by `strike,
+/// underlying_ref`, the SPX lines' lead row [5000] would also hold NDX.
+const REGROUPED: [&str; 3] = ["SPX Z26 5000 C", "NDX Z26 5000 P", "SPX Z26 4000 P"];
+
+/// A frame slot switch changes the chain under a group editor that has
+/// stepped: the editor closes, the steps stand as one undo entry and the
+/// footer says so; enter afterwards writes nothing.
+#[gpui::test]
+fn a_chain_change_closes_a_stepped_group_editor(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &REGROUPED);
+    slots(
+        &h,
+        &mut vcx,
+        &[(1, &["underlying_ref"]), (2, &["strike", "underlying_ref"])],
     );
+    activate(&h, &mut vcx, Some(1));
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    let stepped = spots(&h, &vcx);
+    assert_eq!(stepped[1], None, "fixture: NDX not stepped");
+    activate(&h, &mut vcx, Some(2));
+    assert!(!editor_open(&h, &vcx), "the editor closed");
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("edit closed: the grouping changed; steps kept")
+    );
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(spots(&h, &vcx), stepped, "enter writes nothing");
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(spots(&h, &vcx), [None; 3], "the steps were one undo entry");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
+/// With no step taken, a chain change closes the group editor with the
+/// plain footer and writes nothing.
+#[gpui::test]
+fn a_chain_change_closes_a_group_editor(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &REGROUPED);
+    slots(
+        &h,
+        &mut vcx,
+        &[(1, &["underlying_ref"]), (2, &["strike", "underlying_ref"])],
+    );
+    activate(&h, &mut vcx, Some(1));
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "7");
+    activate(&h, &mut vcx, Some(2));
+    assert!(!editor_open(&h, &vcx));
+    assert_eq!(
+        h.footer(&vcx).as_deref(),
+        Some("edit closed: the grouping changed")
+    );
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(spots(&h, &vcx), [None; 3], "nothing written");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
 }
 
 /// The editor follows its lead line, not a path: stepping through a group

@@ -413,6 +413,7 @@ impl PricerTile {
             lead: self.sheet.id(lead),
             depth: path.len(),
             anchor_lead: anchor_lead.map(|r| self.sheet.id(r)),
+            chain: self.chain.clone(),
         })
     }
 
