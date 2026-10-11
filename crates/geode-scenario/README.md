@@ -4,14 +4,19 @@ Scenario tiles: five tile kinds that paint aggregated scenario risk (vega
 K/T, vega by maturity, spot ladder, by maturity, rho) for whatever the frame
 or a followed link group selects. The shapes are configuration
 (`scenarios.toml`, read by `geode_core::scenario`); this crate ships the
-builtin five and the pivot. The tile itself is not built yet.
+builtin five and the pivot. The tile itself is being built: `tile`,
+`delegate`, `header`, `content` and the `core` modules `commands`,
+`session`, `readout` and `prepare` are placeholders for now.
 
 ## Module map
 
 - `core/spec.rs`: `BUILTIN_SCENARIOS` (`builtin_scenarios.toml`) and
-  `BUILTIN_KINDS`; `builtin_shape` reads one structurally for tests and
-  benches. The tests here check the five against the demo
-  `datasets.toml`, so a renamed demo column refuses a builtin in CI.
+  `BUILTIN_KINDS`. Behind `test-support` (and in tests): `builtin_shape`
+  reads one structurally, `builtin_shape_checked` returns one as
+  `load_scenarios` hands it over against the demo schema, and `demo`
+  holds that schema (`DEMO_DATASETS`, `demo_schema`). The tests here check
+  the five against the demo `datasets.toml`, so a renamed demo column
+  refuses a builtin in CI.
 - `core/pivot.rs`: `Pivot::build` turns the tile's grouped snapshot (and
   the second, column-totals snapshot) into cells, Σ, diff and heat domain.
   Every Σ comes from the snapshot's subtotal and total rows, never from the
@@ -29,7 +34,13 @@ builtin five and the pivot. The tile itself is not built yet.
   the shape has not been checked against the schema, a measure or its
   USD twin column is missing, the shape paints no measure, or the totals
   snapshot is grouped wrongly (or lacks `row_depth`).
+  `fixtures` (behind `test-support`) builds shapes and snapshots for the
+  tile's tests and the bench.
+- `lib.rs`: `CONTEXT` (`scenario`, the keymap context and action prefix)
+  and `init`, which binds the keys gpui-component's DataTable would
+  otherwise swallow.
 - `benches/pivot.rs`: build for a 40 × 40 matrix.
 
-Dependencies: `geode-core` only. `cargo tree -p geode-scenario -e normal |
-grep -c gpui` prints `0`.
+Dependencies: `geode-core`, `geode-shell`, `geode-tile`, `geode-data`,
+gpui and gpui-component. The `test-support` feature turns on geode-core's
+own, which the fixtures' snapshot builders need.

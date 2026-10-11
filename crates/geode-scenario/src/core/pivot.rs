@@ -573,8 +573,8 @@ fn axis_columns(
     let col_of = keys.into_iter().enumerate().map(|(i, k)| (k, i)).collect();
     (columns, col_of)
 }
-#[cfg(test)]
-pub(crate) mod fixtures {
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures {
     use geode_core::attribution::{Attribution, ScopeSemantics};
     use geode_core::scenario::{
         AxisInfo, Columns, Diff, DiffBase, MeasureColumn, Paint, ShapeSpec,

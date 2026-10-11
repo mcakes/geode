@@ -2771,8 +2771,15 @@ dependencies = [
 name = "geode-scenario"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "criterion",
  "geode-core",
+ "geode-data",
+ "geode-scenario",
+ "geode-shell",
+ "geode-tile",
+ "gpui-component",
+ "gpui-pre",
  "toml 1.1.4+spec-1.1.0",
 ]
 

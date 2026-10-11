@@ -8,16 +8,34 @@ publish.workspace = true
 [lib]
 bench = false
 
-# The pure half of the scenario tiles: the builtin shapes document and the
-# pivot. Shared vocabulary (shapes, snapshots, axes, the heat scale) lives in
-# geode-core. The tile, with its geode-shell and geode-tile dependencies,
-# arrives with the module; nothing here needs gpui.
+[features]
+# `builtin_shape` and the pivot fixtures for tests and benches; production
+# loads shapes through `geode_core::scenario::load_scenarios` only. The
+# fixtures build snapshots with geode-core's test-support builders.
+test-support = ["geode-core/test-support"]
+
+# Shared vocabulary (shapes, snapshots, axes, the heat scale) lives in
+# geode-core; geode-shell supplies hosting, geode-tile the header, menu,
+# notices and the window cache, and DataHandle is the module's interface to
+# geode-data. Pure state in `core` is tested without gpui.
 [dependencies]
 geode-core.workspace = true
+geode-shell.workspace = true
+geode-tile.workspace = true
+geode-data = { path = "../geode-data" }
+gpui.workspace = true
+gpui-component.workspace = true
+chrono = "0.4.42"
 toml = "1.1.4"
 
 [dev-dependencies]
+# Match the test-support feature enabled by downstream hosting tests, so
+# crate-only runs see the same gated items.
+geode-scenario = { path = ".", features = ["test-support"] }
 geode-core = { workspace = true, features = ["test-support"] }
+geode-shell = { workspace = true, features = ["test-support"] }
+geode-data = { path = "../geode-data", features = ["test-support"] }
+gpui = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
 
 [[bench]]
