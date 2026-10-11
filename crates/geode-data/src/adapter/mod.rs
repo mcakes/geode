@@ -404,13 +404,18 @@ impl HistoryRows {
         let err = |message: String| AdapterError { message };
         self.check_shape(key_arity, value_arity).map_err(err)?;
         let n = self.ts.len();
+        // Membership in O(1) per row: the asked tuples hashed once. A
+        // prefix ask of arity `a` matches a row by its first `a` values
+        // (`KeySet::validate` holds every tuple in one set to one arity).
+        let arity = asked.arity().unwrap_or(0);
+        let asked_set: HashSet<&[String]> = asked.tuples().iter().map(Vec::as_slice).collect();
         let mut seen = HashSet::with_capacity(n);
         for i in 0..n {
             let key = self.key_at(i);
-            let inside = asked.tuples().iter().any(|t| match asked {
-                KeySet::Exact(_) => *t == key,
-                KeySet::Prefix(_) => key.starts_with(t),
-            });
+            let inside = match asked {
+                KeySet::Exact(_) => asked_set.contains(key.as_slice()),
+                KeySet::Prefix(_) => key.len() >= arity && asked_set.contains(&key[..arity]),
+            };
             if !inside {
                 return Err(err(format!(
                     "row {i} ({}) was not asked for",
@@ -732,6 +737,26 @@ mod tests {
                 .unwrap_err()
                 .message
                 .contains("timestamps")
+        );
+    }
+
+    #[test]
+    fn an_exact_ask_refuses_a_row_that_only_starts_with_a_tuple() {
+        let rows = HistoryRows {
+            ts: vec![t("2026-01-05T21:00:00Z")],
+            keys: vec![vec!["SPX".into()], vec!["3M".into()], vec!["0.25".into()]],
+            values: vec![vec![0.2]],
+        };
+        let asked = KeySet::Exact(vec![vec!["SPX".into(), "3M".into(), "0.5".into()]]);
+        let err = rows.validate_against(3, 1, &asked).unwrap_err().message;
+        assert!(
+            err.contains("row 0 (SPX / 3M / 0.25) was not asked for"),
+            "{err}"
+        );
+        let prefix = KeySet::Prefix(vec![vec!["SPX".into(), "3M".into()]]);
+        assert!(
+            rows.validate_against(3, 1, &prefix).is_ok(),
+            "the same row is inside a two-column prefix"
         );
     }
 
