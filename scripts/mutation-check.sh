@@ -18936,13 +18936,13 @@ run_mutation "scope dialog: a saved-door commit closes the dialog" \
   geode-shell \
   the_load_glyph_opens_saved_alone_and_enter_closes
 
-# Saved as the bottom layer: its commit closes the dialog.
+# A step opened alone is the bottom layer: its commit closes the dialog.
 run_mutation "scope dialog: a one-shot Saved commit closes the dialog" \
   crates/geode-shell/src/shell/scopedialog/saved_view.rs \
   '        After::Close => shell.close_modal(window, cx),' \
   '        After::Close => {}' \
   geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
+  the_save_chip_opens_the_prompt_alone_and_enter_closes
 
 # e and n on a scope row say how to do it instead.
 run_mutation "scope dialog: e on a saved scope refuses with the way" \
@@ -19019,7 +19019,7 @@ run_mutation "scope dialog: a chosen saved position is not forced" \
         self.forced_saved = false;' \
   '        self.zone = zone;' \
   geode-shell \
-  a_chosen_saved_position_survives_an_add
+  a_move_within_a_forced_saved_rest_survives_an_add
 
 # c and r off a saved row refuse with a line.
 run_mutation "scope dialog: c on a current row refuses" \
