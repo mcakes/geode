@@ -1,5 +1,4 @@
-//! The toolbar's load glyph as the door to the Scope dialog's Saved screen
-//! on its own: filter and load, undo, live saved scopes, a row
+//! The toolbar's load glyph as the Scope dialog's saved door, one-shot: filter and load, undo, live saved scopes, a row
 //! double-click, the empty state and the glyph's tip. The screen itself is
 //! covered from `o` in `scope_saved.rs`.
 
@@ -42,7 +41,8 @@ fn text_scope(text: &str) -> Scope {
     }
 }
 
-/// Open the Saved screen through the toolbar's load glyph.
+/// Open the Scope dialog on its saved scopes through the toolbar's load
+/// glyph.
 fn open_saved(vcx: &mut gpui::VisualTestContext) {
     let glyph = vcx
         .debug_bounds("scope-load-chip")
@@ -73,7 +73,7 @@ fn visible_names(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Ve
     })
 }
 
-/// The load glyph opens Saved; the filter narrows it, `enter` keeps the
+/// The load glyph lands on the saved scopes; the filter narrows it, `enter` keeps the
 /// filter, a second `enter` loads that saved scope and closes; `mod+z`
 /// then restores the scope before it — the load went through the undoable
 /// `load_saved_scope` path.
@@ -163,9 +163,9 @@ fn with_no_saved_scopes_the_saved_screen_says_how_to_save_one(cx: &mut gpui::Tes
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
-/// Hovering the load glyph names the Saved screen; `frame::scope_saved`
+/// Hovering the load glyph names the saved scopes; `frame::scope_saved`
 /// has no default binding, so the tip names no chord (`mod+o` is
-/// `frame::scope`, the Current screen).
+/// `frame::scope`, the other door).
 #[gpui::test]
 fn hovering_the_load_glyph_names_no_chord(cx: &mut gpui::TestAppContext) {
     let (mut vcx, _shell, _frame) = open_with_scopes(cx);

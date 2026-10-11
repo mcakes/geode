@@ -5,6 +5,7 @@ use super::*;
 use geode_core::scope::{DimensionSelection, Scope, parse_expr};
 
 use crate::shell::scopedialog::rows::RowId;
+use crate::shell::scopedialog::screen::Zone;
 use crate::shell::scopedialog::state::Layer;
 
 /// `book` and `desk` are dimensions; `npv` and `delta` measures; one
@@ -749,13 +750,60 @@ fn t_types_the_text_filter_and_returns(cx: &mut gpui::TestAppContext) {
     );
     draw(&mut vcx);
     assert!(vcx.debug_bounds("scope-dialog-text-field").is_none());
-    // An empty scope put the cursor in the saved group, where it stays:
-    // the step's footer is gone, the screen's is back.
-    assert!(vcx.debug_bounds("scope-dialog-hint-set-text").is_none());
+    assert!(vcx.debug_bounds("scope-dialog-hint-edit-row").is_some());
     assert!(
         vcx.debug_bounds("scope-dialog-row-0").is_some(),
         "the text row paints"
     );
+}
+
+fn zone(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option<Zone> {
+    shell.read_with(vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.zone))
+}
+
+/// An empty scope rests the cursor in the saved group only because Current
+/// has nothing to rest on: the first ingredient added takes it back, so the
+/// next `enter` edits that row instead of loading a saved scope over it.
+#[gpui::test]
+fn the_first_ingredient_takes_the_cursor_back_from_saved(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::default());
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Saved), "nothing current");
+    vcx.simulate_keystrokes("t");
+    vcx.simulate_input("spx");
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(lane_scope(&shell, &vcx).text.as_deref(), Some("spx"));
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Current));
+    assert_eq!(cursor_id(&shell, &vcx), Some(RowId::Text));
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    let top = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog.as_ref().map(|d| d.layers.top().clone())
+    });
+    assert_eq!(
+        top,
+        Some(Layer::Step(crate::shell::scopedialog::state::Step::Text)),
+        "enter edits the new row"
+    );
+    assert_eq!(
+        lane_scope(&shell, &vcx).sole("book"),
+        None,
+        "no saved scope loaded"
+    );
+}
+
+/// A saved position the user chose survives an add to the current scope.
+#[gpui::test]
+fn a_chosen_saved_position_survives_an_add(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_on(cx, Scope::one("book", "BK002"));
+    vcx.simulate_keystrokes("o");
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Saved));
+    vcx.simulate_keystrokes("t");
+    vcx.simulate_input("spx");
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(lane_scope(&shell, &vcx).text.as_deref(), Some("spx"));
+    assert_eq!(zone(&shell, &vcx), Some(Zone::Saved));
 }
 
 #[gpui::test]

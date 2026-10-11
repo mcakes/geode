@@ -1,6 +1,6 @@
-//! The Scope dialog's Saved screen: saved scopes then saved expressions,
-//! `enter` loading a scope or toggling an expression, the filter, and the
-//! doors that open the screen.
+//! The Scope dialog's saved group: saved scopes then saved expressions
+//! under the current sections on one screen, `enter` loading a scope or
+//! toggling an expression, the filter, and the doors that land on it.
 
 use super::*;
 use geode_core::scope::Scope;
@@ -106,7 +106,7 @@ fn depth(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> usize {
     })
 }
 
-/// The Saved screen's visible rows' names, in painted order.
+/// The saved group's visible rows' names, in painted order.
 fn visible_names(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Vec<String> {
     shell.read_with(cx, |s, _| {
         let saved = &s.scope_dialog.as_ref().expect("dialog open").saved;
@@ -278,6 +278,11 @@ fn a_filter_matching_nothing_over_an_empty_scope_leaves_keys_inert(cx: &mut gpui
         shell.read_with(&vcx, |s, _| s.top_kind()),
         Some(dialog::DialogKind::Scope)
     );
+    assert_eq!(
+        top_layer(&shell, &vcx),
+        definition_step(None),
+        "the final `n` opened a new definition"
+    );
 }
 
 #[gpui::test]
@@ -311,7 +316,7 @@ fn the_save_prompt_hides_the_saved_group(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("escape");
     draw(&mut vcx);
     assert!(vcx.debug_bounds("scope-saved").is_some());
-    let _ = shell;
+    let _shell = shell;
 }
 
 #[gpui::test]
@@ -412,7 +417,7 @@ fn the_load_glyph_opens_saved_alone_and_enter_closes(cx: &mut gpui::TestAppConte
     assert_eq!(depth(&shell, &vcx), 1, "one screen");
     assert!(
         vcx.debug_bounds("scope-load-chip-open").is_some(),
-        "the glyph reads pressed while Saved is up"
+        "the glyph reads pressed while its dialog is up"
     );
     vcx.simulate_keystrokes("enter"); // asia
     vcx.run_until_parked();
@@ -1193,7 +1198,7 @@ impl SaveFixture {
         text
     }
 
-    /// Open `liq`'s definition from Saved and change it to `npv > 5`.
+    /// Open `liq`'s definition from the saved group and change it to `npv > 5`.
     fn edit_liq_to_npv_gt_5(&mut self) -> Option<String> {
         self.open_saved_over_liq();
         self.keys("j j j e");
@@ -1207,7 +1212,7 @@ impl SaveFixture {
 
 /// `e` on an expression row opens its definition, seeded with its text and
 /// a note saying who uses it; `enter` writes it, resolved in the frame at
-/// once, and Saved shows again.
+/// once, and the screen shows again with the cursor in the saved group.
 #[gpui::test]
 fn e_on_an_expression_edits_its_definition_with_a_used_by_note(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -1450,8 +1455,8 @@ fn an_empty_or_broken_definition_refuses_inline(cx: &mut gpui::TestAppContext) {
 }
 
 /// `n` opens an empty definition; `enter` turns it into a name prompt in
-/// place; naming it writes it without touching the lane's scope, and Saved
-/// shows again.
+/// place; naming it writes it without touching the lane's scope, and the
+/// screen shows again with the cursor in the saved group.
 #[gpui::test]
 fn n_names_a_new_expression_without_applying_it(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -1556,7 +1561,8 @@ fn the_named_chip_opens_its_definition_alone(cx: &mut gpui::TestAppContext) {
     assert_eq!(f.named_text("liq").as_deref(), Some("npv > 5"));
 }
 
-/// Saved opened alone over a frame with `scopes` and no saved expressions.
+/// The saved door's dialog over a frame with `scopes` and no saved
+/// expressions.
 fn saved_without_expressions(
     cx: &mut gpui::TestAppContext,
     keep_scopes: bool,
@@ -1724,7 +1730,7 @@ impl SaveFixture {
     }
 
     /// Fork `desk_eu` into the user layer with book BK002 (the desk copy
-    /// holds BK003), flush it, and open Saved over Current on `desk_eu`.
+    /// holds BK003), flush it, and `o` to the saved scopes, on `desk_eu`.
     fn fork_desk_eu_and_open_saved(&mut self) {
         self.set_lane(book("BK002"));
         self.open_current();
@@ -1768,8 +1774,8 @@ fn copy_step(from: SavedId) -> Option<Layer> {
 
 /// `c` names a copy of the scope under the cursor: the prompt says what it
 /// copies and previews its summary; a taken name refuses; `enter` writes
-/// the source's definition under the new name and Saved shows again with
-/// the cursor on the copy.
+/// the source's definition under the new name and the screen shows again
+/// with the cursor on the copy.
 #[gpui::test]
 fn c_copies_a_scope_under_a_new_name(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -1886,7 +1892,8 @@ fn deleting_a_used_expression_leaves_a_broken_reference(cx: &mut gpui::TestAppCo
     assert_eq!(f.named_text("mine"), None);
     // The current sections share the screen: the broken reference shows
     // without leaving the saved group.
-    assert_eq!(f.top(), Some(Layer::Current));
+    assert!(on_saved(&f.shell, &f.vcx));
+    assert_eq!(depth(&f.shell, &f.vcx), 1, "the screen, no step over it");
     assert_eq!(
         lane_scope(&f.shell, &f.vcx).named,
         ["mine"],
@@ -2032,7 +2039,7 @@ fn a_question_over_saved_ignores_the_pointer(cx: &mut gpui::TestAppContext) {
     assert_eq!(mode, Some(crate::dialogmode::DialogMode::Normal));
 }
 
-// ---- `s` on Saved, unchanged writes, a definition deleted under its step --
+// ---- `s` on a saved row, unchanged writes, a definition deleted under its step --
 
 fn owner(f: &SaveFixture, doc: &str, name: &str) -> crate::shell::objectdialog::apply::Owner {
     f.shell.read_with(&f.vcx, |s, _| {
@@ -2040,9 +2047,9 @@ fn owner(f: &SaveFixture, doc: &str, name: &str) -> crate::shell::objectdialog::
     })
 }
 
-/// The empty Scopes row says `s` saves the current scope, so `s` on Saved
+/// The empty Scopes row says `s` saves the current scope, so `s` there
 /// pushes the save prompt over the screen, previewing the lane's scope;
-/// `enter` saves and Saved shows again, the new scope listed.
+/// `enter` saves and the screen shows again, the new scope listed.
 #[gpui::test]
 fn s_on_saved_pushes_the_save_prompt_and_returns_to_saved(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -2069,11 +2076,14 @@ fn s_on_saved_pushes_the_save_prompt_and_returns_to_saved(cx: &mut gpui::TestApp
     f.keys("s");
     assert_eq!(f.top(), save_step());
     f.keys("escape");
-    assert!(on_saved(&f.shell, &f.vcx), "escape returns to Saved too");
+    assert!(
+        on_saved(&f.shell, &f.vcx),
+        "escape returns to the saved group too"
+    );
 }
 
 /// The save door (`scope::save_current`, the save chip) with the dialog on
-/// top on Saved pushes the prompt over it, as `s` does there.
+/// top on its screen pushes the prompt over it, as `s` does there.
 #[gpui::test]
 fn the_save_door_over_saved_pushes_the_prompt(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -2089,7 +2099,7 @@ fn the_save_door_over_saved_pushes_the_prompt(cx: &mut gpui::TestAppContext) {
     assert!(on_saved(&f.shell, &f.vcx));
 }
 
-/// The empty Expressions row names the key that works on Saved.
+/// The empty Expressions row names the key that works on it.
 #[gpui::test]
 fn the_empty_expressions_row_names_n(cx: &mut gpui::TestAppContext) {
     assert_eq!(

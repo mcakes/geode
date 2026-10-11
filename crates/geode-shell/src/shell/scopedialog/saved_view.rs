@@ -349,7 +349,7 @@ pub(crate) fn enter_filter(state: &mut ScopeDialogState) {
     }
     let saved = &mut state.saved;
     dialogmode::enter_filter(&mut saved.mode, &mut saved.entry_query, &saved.query);
-    state.zone = Zone::Saved;
+    state.rest_in(Zone::Saved);
     if state.saved.stop_count() > 0 && state.saved.cursor >= state.saved.stop_count() {
         state.saved.set_cursor(0);
     }
@@ -392,6 +392,10 @@ pub(super) fn row_key(
     let Some(state) = shell.scope_dialog.as_mut() else {
         return false;
     };
+    // A verb on a saved row is the user's use of the saved group: a cursor
+    // only forced here by an empty Current stays, so a load from `mod+o`
+    // keeps it on the row it loaded.
+    state.rest_in(Zone::Saved);
     // As on the current rows: every claimed key drops the last refusal; an
     // unclaimed key puts it back.
     let prior_error = state.error.take();
@@ -569,7 +573,7 @@ fn press_row(
     if !state.on_screen() || state.pending.is_some() {
         return;
     }
-    state.zone = Zone::Saved;
+    state.rest_in(Zone::Saved);
     state.saved.set_cursor(at);
     state.error = None;
     // Exactly 2, so a triple-click does not commit twice.

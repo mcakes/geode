@@ -141,6 +141,12 @@ pub(crate) struct ScopeDialogState {
     /// The door that opened the dialog: decides whether a saved-row commit
     /// closes it, and which toolbar glyph reads pressed.
     pub opener: Opener,
+    /// The cursor is in the saved group only because Current had no rows
+    /// (`normalize_zone`), not because the user put it there: the first
+    /// current row to appear takes it back, so an `enter` after adding a
+    /// first ingredient edits that row instead of loading a saved scope over
+    /// it. Any user-chosen move (`rest_in`) clears it.
+    forced_saved: bool,
 }
 
 /// What the rows read: the frame generation (every lane value change) and
@@ -168,7 +174,16 @@ impl ScopeDialogState {
             definition: None,
             zone: Zone::Current,
             opener,
+            forced_saved: false,
         }
+    }
+
+    /// Put the cursor in `zone` by the user's choice (a move, a jump, a
+    /// press, a door's landing, the filter): `normalize_zone` no longer
+    /// treats the saved group as a stand-in for an empty Current.
+    pub(crate) fn rest_in(&mut self, zone: Zone) {
+        self.zone = zone;
+        self.forced_saved = false;
     }
 
     /// The screen is on top: no step drawn over it.
@@ -179,12 +194,21 @@ impl ScopeDialogState {
     /// Keep the cursor on a group that has somewhere to rest: off Current
     /// when it has no rows, off Saved when it has no stops — except while
     /// the filter is open, which owns the saved group even when it matches
-    /// nothing.
+    /// nothing. A cursor forced off an empty Current returns to its first
+    /// row once there is one. Runs after every `refresh_dialog_rows`, the
+    /// one place that re-derives or re-filters before the next key.
     pub(crate) fn normalize_zone(&mut self) {
         let filtering = self.saved.mode == crate::dialogmode::DialogMode::Filter;
         match self.zone {
             Zone::Current if self.rows.rows.is_empty() && self.saved.stop_count() > 0 => {
                 self.zone = Zone::Saved;
+                self.forced_saved = true;
+            }
+            Zone::Saved if self.forced_saved && !self.rows.rows.is_empty() => {
+                self.zone = Zone::Current;
+                self.forced_saved = false;
+                self.cursor = 0;
+                self.cursor_id = self.rows.rows.first().map(|r| r.id.clone());
             }
             Zone::Saved
                 if !filtering && self.saved.stop_count() == 0 && !self.rows.rows.is_empty() =>
@@ -229,7 +253,6 @@ impl ScopeDialogState {
         self.cursor_id = self.rows.rows.get(at).map(|r| r.id.clone());
         self.key = key;
         self.saved.refresh(saved, named, scope, key);
-        self.normalize_zone();
     }
 }
 
@@ -288,27 +311,31 @@ pub(crate) fn open_saved(
         }
         return;
     }
+    // Opening derived the rows (`open_shell_dialog_with_key`).
     if !open_on(view, Layer::Current, Opener::Saved, window, cx) {
         return;
     }
-    view.refresh_dialog_rows(cx);
     jump_saved(view, section, cx);
     cx.notify();
 }
 
-/// Put the cursor in the saved group on `section` (the lane's `loaded_from`
-/// scope first, for Scopes). A section with no stop (a filter hid every
-/// row) leaves the cursor where it was.
+/// Put the cursor in the saved group on `section`: on the lane's
+/// `loaded_from` scope for Scopes when it is listed, else on the section's
+/// first stop. A section with no stop (a filter hid every row) leaves the
+/// cursor where it was.
 fn jump_saved(view: &mut ShellView, section: super::saved_view::Section, cx: &App) {
-    let prefer = view
-        .target_frame()
-        .read(cx)
-        .loaded_from()
-        .map(str::to_string);
+    let prefer = (section == super::saved_view::Section::Scopes)
+        .then(|| {
+            view.target_frame()
+                .read(cx)
+                .loaded_from()
+                .map(str::to_string)
+        })
+        .flatten();
     if let Some(state) = view.scope_dialog.as_mut()
         && state.saved.jump_to(section, prefer.as_deref())
     {
-        state.zone = Zone::Saved;
+        state.rest_in(Zone::Saved);
         state.error = None;
     }
     follow_cursor(view);
@@ -489,7 +516,7 @@ fn handle_key(
             state.error = prior_error;
             return false;
         }
-        state.zone = Zone::Saved;
+        state.rest_in(Zone::Saved);
         shell.refresh_dialog_rows(cx);
         follow_cursor(shell);
         cx.notify();
@@ -647,7 +674,7 @@ fn move_cursor(shell: &mut ShellView, delta: i64) {
         state.saved.stop_count(),
         delta,
     );
-    state.zone = zone;
+    state.rest_in(zone);
     match zone {
         // Re-take the identity, or a re-derive would put the cursor back on
         // the row it left.
@@ -670,7 +697,7 @@ fn jump(shell: &mut ShellView, cx: &App) {
         Jump::Expressions => jump_saved(shell, super::saved_view::Section::Expressions, cx),
         Jump::Current => {
             if let Some(state) = shell.scope_dialog.as_mut() {
-                state.zone = Zone::Current;
+                state.rest_in(Zone::Current);
                 state.cursor = 0;
                 state.cursor_id = state.rows.rows.first().map(|r| r.id.clone());
             }
@@ -791,11 +818,15 @@ fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
     cx.notify();
 }
 
-/// Whether the screen's rows and controls take the pointer: only while the
-/// screen itself is on top with no question up. Under a step drawn on this
-/// body (the text step, the save prompt) they are its preview.
+/// Whether the current rows and add controls take the pointer: only while
+/// the screen itself is on top with no question up and no filter live.
+/// Under a step drawn on this body (the text step, the save prompt) they are
+/// its preview; while filtering, the field owns the keyboard and a press
+/// here would act behind it.
 fn takes_pointer(state: &ScopeDialogState) -> bool {
-    state.on_screen() && state.pending.is_none()
+    state.on_screen()
+        && state.pending.is_none()
+        && state.saved.mode != crate::dialogmode::DialogMode::Filter
 }
 
 /// The pointer route to `p`, `x` and `t`: a section header's `add` control
@@ -1112,7 +1143,7 @@ fn build(
                         return;
                     }
                     if let Some(state) = shell.scope_dialog.as_mut() {
-                        state.zone = Zone::Current;
+                        state.rest_in(Zone::Current);
                         state.cursor = i;
                         state.cursor_id = state.rows.rows.get(i).map(|r| r.id.clone());
                         state.error = None;
