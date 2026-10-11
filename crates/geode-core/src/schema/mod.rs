@@ -3033,7 +3033,7 @@ role = "value"
         // Each case is the valid SURFACE with one thing wrong, and the path
         // of the diagnostic that explains the drop:
         // (name, replace-from, replace-to, path).
-        let cases: [(&str, &str, &str, &str); 7] = [
+        let cases: [(&str, &str, &str, &str); 8] = [
             (
                 "no key",
                 "key = [\"underlying_ref\", \"tenor\", \"delta\"]\n",
@@ -3057,6 +3057,13 @@ role = "value"
                 "role = \"value\"",
                 "role = \"attribute\"",
                 "datasets.vol_surface.columns.vol",
+            ),
+            (
+                "key columns only",
+                "[vol_surface.columns.vol]\ntype = \"f64\"\nrole = \"value\"\n\
+                 [vol_surface.columns.forward]\ntype = \"f64\"\nrole = \"value\"\n",
+                "",
+                "datasets.vol_surface.columns.underlying_ref",
             ),
             (
                 "i64 value",

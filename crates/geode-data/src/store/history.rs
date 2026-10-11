@@ -1316,6 +1316,10 @@ mod tests {
         assert!(covers_instant(store.writer(), &ds, &both, at).unwrap());
         assert!(!covers_instant(store.writer(), &ds, &both, ts("2026-01-08T21:00:00Z")).unwrap());
         assert!(!covers_instant(store.writer(), &ds, &[exact("NDX")], at).unwrap());
+        assert!(
+            !covers_instant(store.writer(), &ds, &[exact("SPX"), exact("NDX")], at).unwrap(),
+            "one held tuple does not answer for an unheld one beside it"
+        );
     }
 
     #[test]

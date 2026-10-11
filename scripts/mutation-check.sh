@@ -19911,8 +19911,12 @@ run_mutation "history: dedupe ignores a value column" \
 # original values offered again after a correction are taken as live.
 run_mutation "history: dedupe compares against the oldest version" \
   crates/geode-data/src/store/history.rs \
-  '        |c| format!("arg_max({0}, received_at) as {0}", quote(&c.name)),' \
-  '        |c| format!("arg_min({0}, received_at) as {0}", quote(&c.name)),' \
+  '    let live_values = joined(
+        values,
+        |c| format!("arg_max({0}, received_at) as {0}", quote(&c.name)),' \
+  '    let live_values = joined(
+        values,
+        |c| format!("arg_min({0}, received_at) as {0}", quote(&c.name)),' \
   geode-data \
   a_third_append_of_the_original_values_re_appends_because_live_is_the_correction
 
@@ -37379,8 +37383,10 @@ run_mutation "sources: a snapshot source shows a priority row" \
 
 run_mutation "diagnostics sources: a snapshot source row names a priority" \
   crates/geode-diagnostics/src/model.rs \
-  '                vec![format!("adapter: {}", spec.adapter)],' \
-  '                vec![format!("adapter: {}", spec.adapter), format!("priority: {}", spec.priority)],' \
+  '                "snapshot".to_string(),
+                vec![format!("adapter: {}", spec.adapter)],' \
+  '                "snapshot".to_string(),
+                vec![format!("adapter: {}", spec.adapter), format!("priority: {}", spec.priority)],' \
   geode-diagnostics a_snapshot_source_row_names_no_priority_and_no_ready_count
 
 run_mutation "diagnostics sources: a snapshot source reads Ready 0" \
@@ -39951,6 +39957,165 @@ run_mutation "demo hanweck: At serves an instant after now" \
   '            Span::At(t) => observation_at(t).into_iter().collect(),' \
   geode-compose \
   latest_and_at_answer_the_last_business_close_or_an_intraday_point
+
+# ---- History family: reader, adapter boundary, store reads, worker ----
+
+# A history dataset with key columns and no value column has nothing to
+# cache. Mutated to keep it, the store creates a table of keys alone and
+# every answer is empty rows.
+run_mutation "history: a dataset without a value column is kept" \
+  crates/geode-core/src/schema/mod.rs \
+  '    if values == 0 && keep {' \
+  '    if false {' \
+  geode-core \
+  a_history_dataset_is_dropped_on_each_shape_error
+
+# `order = "tenor"` is read on a dimension. Mutated to read lexical there,
+# the tenor key column enumerates 1Y before 3M.
+run_mutation "order: a dimension's order is read as lexical" \
+  crates/geode-core/src/schema/mod.rs \
+  '            (Some(o), ColumnRole::Dimension { .. }) => o,' \
+  '            (Some(_o), ColumnRole::Dimension { .. }) => TextOrder::Lexical,' \
+  geode-core \
+  order_is_read_on_a_dimension_and_refused_elsewhere
+
+# A parsable tenor sorts ahead of an unparsable label. Mutated, `ON` and
+# `spot` interleave with the tenors.
+run_mutation "order: an unparsable label sorts among the tenors" \
+  crates/geode-core/src/schema/order.rs \
+  '            (Some(_), None) => std::cmp::Ordering::Less,' \
+  '            (Some(_), None) => std::cmp::Ordering::Greater,' \
+  geode-core \
+  tenor_order_ignores_case_and_puts_unparsable_values_last
+
+# An overflowing tenor is unparsable, not a wrapped small number that
+# sorts as a short tenor.
+run_mutation "order: an overflowing tenor wraps" \
+  crates/geode-core/src/schema/order.rs \
+  '    n.checked_mul(per)' \
+  '    Some(n.wrapping_mul(per))' \
+  geode-core \
+  tenor_days_reads_day_week_month_and_year_labels
+
+# Two rows for one (key, ts) in one answer leave the live value to row
+# order. Mutated to accept them, both are filed and either wins.
+run_mutation "history: a repeated (key, ts) from the source is filed" \
+  crates/geode-data/src/adapter/mod.rs \
+  '            if !seen.insert((key, self.ts[i])) {' \
+  '            if false {' \
+  geode-data \
+  history_rows_validate_shape_duplicates_and_the_asked_keys
+
+# A row under a key the request never named would be filed under a key
+# whose coverage nobody established.
+run_mutation "history: a row for an unasked key is filed" \
+  crates/geode-data/src/adapter/mod.rs \
+  '            if !inside {' \
+  '            if false {' \
+  geode-data \
+  history_rows_validate_shape_duplicates_and_the_asked_keys
+
+# At(t) answers the last observation at or before t: an observation
+# exactly at t is the answer, not the one before it.
+run_mutation "history: At reads strictly before t" \
+  crates/geode-data/src/store/history.rs \
+  '            " and ts <= make_timestamp(?)".to_string()' \
+  '            " and ts < make_timestamp(?)".to_string()' \
+  geode-data \
+  at_answers_the_last_observation_at_or_before_t_with_the_live_version
+
+# Between is half-open: a point at `to` belongs to the next span, or two
+# adjacent reads both show it.
+run_mutation "history: Between includes its end" \
+  crates/geode-data/src/store/history.rs \
+  '            " and ts >= make_timestamp(?) and ts < make_timestamp(?)".to_string()' \
+  '            " and ts >= make_timestamp(?) and ts <= make_timestamp(?)".to_string()' \
+  geode-data \
+  between_is_half_open_and_ordered_by_key_then_ts
+
+# A read answers the live version, the greatest received_at per (key, ts).
+# Mutated to the oldest, a correction is never seen.
+run_mutation "history: a read answers the oldest version" \
+  crates/geode-data/src/store/history.rs \
+  '        &values,
+        |c| format!("arg_max({0}, received_at) as {0}", quote(&c.name)),' \
+  '        &values,
+        |c| format!("arg_min({0}, received_at) as {0}", quote(&c.name)),' \
+  geode-data \
+  at_answers_the_last_observation_at_or_before_t_with_the_live_version
+
+# Every asked tuple must be held for the cache to answer an as-of. Mutated
+# to skip an unheld tuple, the held ones answer for the whole ask and the
+# unheld member is silently missing.
+run_mutation "history: covers_instant skips an unheld tuple" \
+  crates/geode-data/src/store/history.rs \
+  '        let Some(&(a, _)) = held.iter().find(|(a, b)| *a <= t && t < *b) else {
+            return Ok(false);
+        };' \
+  '        let Some(&(a, _)) = held.iter().find(|(a, b)| *a <= t && t < *b) else {
+            continue;
+        };' \
+  geode-data \
+  covers_instant_needs_every_tuple_and_a_point_span_counts
+
+# Retention removes superseded versions received before its cutoff only.
+# Mutated to ignore the cutoff, a correction made yesterday erases the
+# version it replaced while the window still promises it.
+run_mutation "history: retention ignores its cutoff" \
+  crates/geode-data/src/store/history.rs \
+  '            "delete from {table} t where epoch_us(received_at) < ? \' \
+  '            "delete from {table} t where (epoch_us(received_at) < ? or true) \' \
+  geode-data \
+  retention_keeps_a_superseded_version_inside_its_window
+
+# The worker normalizes an answer's keys before checking them against the
+# ask. Dropped, a source spelling `0.50` for an asked `0.5` is refused.
+run_mutation "history worker: the answer's keys are not normalized" \
+  crates/geode-data/src/ingest/history.rs \
+  '    rows.normalize_keys(key_types)
+        .map_err(|message| AdapterError { message })?;
+    rows.validate_against' \
+  '    rows.validate_against' \
+  geode-data \
+  a_key_spelled_differently_by_the_source_is_normalized_before_validation
+
+# ... and it normalizes BEFORE it validates: the other order compares the
+# source's raw spelling with the normalized ask.
+run_mutation "history worker: validate runs before normalize" \
+  crates/geode-data/src/ingest/history.rs \
+  '    rows.normalize_keys(key_types)
+        .map_err(|message| AdapterError { message })?;
+    rows.validate_against(key_types.len(), value_arity, &request.keys)?;' \
+  '    rows.validate_against(key_types.len(), value_arity, &request.keys)?;
+    rows.normalize_keys(key_types)
+        .map_err(|message| AdapterError { message })?;' \
+  geode-data \
+  a_key_spelled_differently_by_the_source_is_normalized_before_validation
+
+# A request with no table names the source's configured one. Dropped, the
+# adapter is asked for table "".
+run_mutation "history worker: an empty table is not filled" \
+  crates/geode-data/src/ingest/history.rs \
+  '                    if request.table.is_empty() {' \
+  '                    if false {' \
+  geode-data \
+  a_query_yields_fetched_rows_with_non_finite_values_dropped
+
+# A panicking key listing is its own outcome, so the service reports it
+# against the source. Mutated to a quiet empty listing, the panic is a
+# log line only.
+run_mutation "history worker: a key listing panic reads as no listing" \
+  crates/geode-data/src/ingest/history.rs \
+  '                    Err(column) => sink(HistoryWorkOutcome::KeysPanicked {
+                        column,
+                        payload: message,
+                    }),' \
+  '                    Err(column) => sink(HistoryWorkOutcome::Keys {
+                        column,
+                        values: None,
+                    }),' \
+  geode-data \
+  a_panicking_key_listing_is_an_outcome_for_its_column
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
