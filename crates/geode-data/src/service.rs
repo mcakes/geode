@@ -3012,8 +3012,16 @@ impl DataService {
 
     /// Queue a history request. Every outcome arrives as one
     /// `DataEvent::History` for the key and tag, except that a request
-    /// superseded by a newer one for its key (or cancelled) before it is
-    /// answered answers nothing; refusals decided here answer at once.
+    /// superseded by a newer one for its key (or cancelled) while its
+    /// adapter calls run answers nothing; refusals decided here answer at
+    /// once. A superseded request whose read already reached the pool still
+    /// answers, before the newer one, while the newer request waits on
+    /// adapter calls; a newer request read at once from the cache replaces
+    /// or interrupts that read, and a newer refusal or a cancel cancels it.
+    ///
+    /// Use a `QueryKey` no other pool request uses: the pool coalesces and
+    /// cancels by key, so a view query under the same key would replace
+    /// this request's read or be cancelled by it.
     ///
     /// The asked keys are normalized first, then what the coverage table
     /// lacks is asked of the dataset's history source (see

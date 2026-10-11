@@ -391,6 +391,16 @@ impl DataHandle {
     /// longer serve and no outcome is owed. An admitted request is answered
     /// by one keyed/tagged DataEvent::History, refusals included, unless a
     /// newer request or a cancel for its key supersedes it first.
+    ///
+    /// Superseded, a request whose adapter calls are still running answers
+    /// nothing. One whose read already reached the pool still answers,
+    /// before the newer one, while the newer request waits on adapter
+    /// calls; a newer request read at once from the cache replaces or
+    /// interrupts that read, and a newer refusal or a cancel cancels it.
+    ///
+    /// Use a `QueryKey` no other pool request uses: the pool coalesces and
+    /// cancels by key, so a view query under the same key would replace
+    /// this request's read or be cancelled by it.
     pub fn history(&self, params: HistoryParams) -> Result<(), Refusal> {
         self.send(Request::History(params))
     }

@@ -423,7 +423,7 @@ impl ViewSpec {
         let Some(ds) = schema.dataset(&self.dataset) else {
             return Vec::new();
         };
-        if ds.is_document() || ds.is_series() || ds.is_reference() {
+        if ds.is_document() || ds.is_series() || ds.is_reference() || ds.is_history() {
             return Vec::new();
         }
         self.columns
@@ -462,7 +462,7 @@ impl ViewSpec {
         let Some(ds) = schema.dataset(&self.dataset) else {
             return Vec::new();
         };
-        if ds.is_document() || ds.is_series() || ds.is_reference() {
+        if ds.is_document() || ds.is_series() || ds.is_reference() || ds.is_history() {
             return Vec::new();
         }
         let mut out: Vec<UngroupedDimension<'a>> = Vec::new();
@@ -554,6 +554,17 @@ impl ViewSpec {
             diags.push(bad(format!("unknown dataset '{}'", self.dataset)));
             return diags;
         };
+        // A history dataset has no view tables: it is read by key through a
+        // history request. Refused here, by name, rather than as a column
+        // error or a binder failure at query time.
+        if ds.is_history() {
+            diags.push(bad(format!(
+                "'{}' is a history dataset, read by key through a history request; \
+                 a view cannot show it",
+                self.dataset
+            )));
+            return diags;
+        }
 
         // A derived dimension reads its source as text: the projection probes
         // a map of text keys, while scope narrowing binds the same keys
@@ -1992,6 +2003,43 @@ grain = "position"
             view.ungrouped_dimensions(&schema, &dimensions(""))
                 .is_empty()
         );
+    }
+
+    /// A history dataset has no grains or view tables: a view over one is
+    /// refused with a message naming the family, never left to fail as a
+    /// binder error, and it supplies no ungrouped or context dimensions.
+    #[test]
+    fn a_view_over_a_history_dataset_is_refused_and_supplies_no_dimensions() {
+        let schema = schema_with(
+            "[vol_surface]\nfamily = \"history\"\nkey = [\"underlying_ref\"]\n\
+             [vol_surface.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [vol_surface.columns.vol]\ntype = \"f64\"\nrole = \"value\"\n",
+        );
+        assert!(
+            schema
+                .dataset("vol_surface")
+                .is_some_and(|d| d.is_history())
+        );
+        let mut view = ViewSpec::from_doc(&doc("[v]\ndataset = \"vol_surface\"\n\
+             [[v.columns]]\nname = \"underlying_ref\"\nkind = \"dimension\"\n"))
+        .0
+        .remove(0);
+        let diags = view.validate(&schema, &dimensions(""));
+        assert_eq!(diags.len(), 1, "{diags:?}");
+        assert_eq!(diags[0].severity, Severity::Error);
+        assert!(
+            diags[0]
+                .message
+                .contains("'vol_surface' is a history dataset"),
+            "{diags:?}"
+        );
+        assert!(
+            view.ungrouped_dimensions(&schema, &dimensions(""))
+                .is_empty()
+        );
+        view.context = vec!["underlying_ref".to_string()];
+        view.columns.clear();
+        assert!(view.context_dimensions(&schema, &dimensions("")).is_empty());
     }
 
     /// The unanimity rule supplies an ungrouped dimension from a grain that

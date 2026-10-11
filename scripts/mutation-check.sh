@@ -40236,6 +40236,25 @@ run_mutation "history: coalesced coverage keeps the oldest received_at" \
   geode-data \
   repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
 
+
+# A view naming a history dataset is refused by name. Unrefused, it is
+# taken for a measures view and fails on a column or at bind time.
+run_mutation "history view: a view over a history dataset is not refused" \
+  crates/geode-core/src/view.rs \
+  '        if ds.is_history() {' \
+  '        if false {' \
+  geode-core \
+  a_view_over_a_history_dataset_is_refused_and_supplies_no_dimensions
+
+# The coverage table's span columns are storage names. Accepted on a key
+# column, the coverage DDL gets a duplicate column and apply_schema fails.
+run_mutation "schema/history: a coverage column name is accepted" \
+  crates/geode-core/src/schema/mod.rs \
+  '        "from_ts",' \
+  '        "from_ts_not",' \
+  geode-core \
+  storage_names_and_timestamps_are_refused_on_a_history_dataset
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

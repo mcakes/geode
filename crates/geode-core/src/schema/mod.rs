@@ -844,7 +844,10 @@ fn validate_reference(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
 /// the key, at least one f64 `value`, no other roles, no timestamp
 /// columns, no `axes`, no storage names.
 fn validate_history(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
-    const STORAGE: [&str; 7] = [
+    // Payload, coverage (`from_ts`, `to_ts`), staging (`ts_us`) and read
+    // (`rn`) names: a key column so named collides in the store's DDL or SQL
+    // instead of failing here as a reader diagnostic.
+    const STORAGE: [&str; 11] = [
         "ts",
         "received_at",
         "source",
@@ -852,6 +855,10 @@ fn validate_history(ds: &mut DatasetSpec) -> Vec<Diagnostic> {
         "source_file_id",
         "gen_id",
         "source_time",
+        "from_ts",
+        "to_ts",
+        "ts_us",
+        "rn",
     ];
     let name = ds.name.clone();
     let err = |message: String, path: String| Diagnostic {
@@ -3110,6 +3117,22 @@ role = "value"
         let (schema, diags) = series_schema(&text);
         assert!(schema.dataset("vol_surface").is_none());
         assert!(diags.iter().any(|d| d.message.contains("storage column")));
+        // The coverage table's span columns, the staging table's `ts_us` and
+        // the read's `rn` alias: declared, each would collide in DDL or SQL.
+        for storage in ["from_ts", "to_ts", "ts_us", "rn"] {
+            let text = SURFACE.replace(
+                "[vol_surface.columns.forward]\ntype = \"f64\"",
+                &format!("[vol_surface.columns.{storage}]\ntype = \"f64\""),
+            );
+            let (schema, diags) = series_schema(&text);
+            assert!(schema.dataset("vol_surface").is_none(), "{storage} kept");
+            assert!(
+                diags.iter().any(|d| d
+                    .message
+                    .contains(&format!("'{storage}' is a storage column"))),
+                "{storage}: {diags:?}"
+            );
+        }
         let text = SURFACE.replace(
             "[vol_surface.columns.delta]\ntype = \"f64\"",
             "[vol_surface.columns.delta]\ntype = \"timestamp\"",

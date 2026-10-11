@@ -128,7 +128,8 @@ attributes for a whole table a snapshot source replaces on each poll; their
 rules are in [dataset families](typed-documents.md#dataset-families-and-validation).
 History datasets (`family = "history"`) declare a `key` of utf8 or f64
 dimensions and f64 values for timestamped observations a history source
-answers per key on demand; the rules are in the same section.
+answers per key on demand; the rules are in the same section. A view
+cannot name a history dataset: it is read by key through a history request.
 Views refer to those declarations and may narrow presentation without changing
 the underlying dataset.
 
