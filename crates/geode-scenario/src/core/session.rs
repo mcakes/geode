@@ -84,7 +84,7 @@ pub fn to_table(shape: &ShapeSpec, state: &State) -> Table {
         TileAsOf::Pinned(AsOf::At(at)) => {
             t.insert(
                 "as_of".into(),
-                Value::String(at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+                Value::String(at.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)),
             );
         }
     }
@@ -180,10 +180,15 @@ pub fn from_table(shape: &ShapeSpec, restored: &Table) -> (State, Vec<String>) {
 }
 
 /// `[filter]`: `expr`, `text` and `[filter.dimensions]`. A syntax error in
-/// `expr` drops the whole filter, as the blotter's restore does.
+/// `expr`, or any part of the wrong type, drops the whole filter with the
+/// `filter` notice naming the part, as the blotter's restore does: a
+/// partly read filter would narrow the grid differently from the saved one.
 fn read_filter(f: &Table) -> Result<Scope, String> {
     let mut scope = Scope::default();
-    if let Some(expr) = f.get("expr").and_then(Value::as_str) {
+    if let Some(v) = f.get("expr") {
+        let expr = v
+            .as_str()
+            .ok_or_else(|| format!("expr: expected a string, got {v}"))?;
         let parsed = parse_expr(expr).map_err(|e| {
             format!(
                 "expr '{expr}' failed to parse at column {}: {}",
@@ -193,10 +198,16 @@ fn read_filter(f: &Table) -> Result<Scope, String> {
         })?;
         scope.expression = Some(parsed);
     }
-    if let Some(text) = f.get("text").and_then(Value::as_str) {
+    if let Some(v) = f.get("text") {
+        let text = v
+            .as_str()
+            .ok_or_else(|| format!("text: expected a string, got {v}"))?;
         scope.text = (!text.is_empty()).then(|| text.to_string());
     }
-    if let Some(dims) = f.get("dimensions").and_then(Value::as_table) {
+    if let Some(v) = f.get("dimensions") {
+        let dims = v
+            .as_table()
+            .ok_or_else(|| format!("dimensions: expected a table, got {v}"))?;
         for (column, values) in dims {
             let values: Vec<String> = values
                 .as_array()
@@ -331,6 +342,42 @@ text = "ok"
             notices.iter().all(|n| n.starts_with("session: dropped ")),
             "{notices:?}"
         );
+    }
+
+    #[test]
+    fn a_pinned_instant_keeps_its_fractional_seconds() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-10-10T14:30:00.750Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut s = State::fresh(&vega_kt());
+        s.as_of = TileAsOf::Pinned(AsOf::At(at));
+        let t = to_table(&vega_kt(), &s);
+        assert_eq!(
+            t.get("as_of").and_then(Value::as_str),
+            Some("2026-10-10T14:30:00.750Z")
+        );
+        assert_eq!(from_table(&vega_kt(), &t).0.as_of, s.as_of);
+    }
+
+    #[test]
+    fn a_filter_part_of_the_wrong_type_drops_the_filter_with_a_notice() {
+        for (record, part) in [
+            ("[filter]\nexpr = 1\ntext = \"ok\"\n", "expr"),
+            ("[filter]\ntext = true\nexpr = \"vega > 0\"\n", "text"),
+            (
+                "[filter]\ndimensions = \"SPX\"\ntext = \"ok\"\n",
+                "dimensions",
+            ),
+        ] {
+            let t: Table = record.parse().unwrap();
+            let (s, notices) = from_table(&spot_ladder(), &t);
+            assert!(s.filter.is_empty(), "{part}: nothing of the filter is kept");
+            assert_eq!(notices.len(), 1, "{part}: {notices:?}");
+            assert!(
+                notices[0].starts_with(&format!("session: dropped filter: {part}: expected")),
+                "{notices:?}"
+            );
+        }
     }
 
     #[test]
