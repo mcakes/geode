@@ -187,6 +187,16 @@ the measurement log for fixture and hardware details.
 | Diagnostics Log settled rebuild | the same tail under a held narrowing (records or gates changed, query unchanged; unfiltered 0.47 ms) | 0.60 to 0.95 ms |
 | Diagnostics Log cache fill | `LogCache::sync` formatting and lowering all 4,096 records cold, on the UI thread: paid when the Log is first shown over a full tail and after a clock change, then only for new records (load 29 to 31) | 5.14 ms |
 | Diagnostics Log narrowing, off the UI thread | the same: `log_cache::Narrowed::run`, two words / three / five / one 19-character word | 6.1 / 10.2 / 12.1 / 8.5 ms |
+| Vol board read, Changes view (`board_read/changes_view_25`) | 25 members over a 400-day cache (285 closes): the SQL projection plus `reduce` on one connection; excludes the fetches and paint (load 8) | 17.7 ms |
+| Vol board read, Rich/cheap view (`board_read/rich_cheap_view_25`) | the same, 365-day percentile window over three datasets; over the 50 ms budget (see Known gaps) | 51.9 ms |
+| Vol board round trip, Changes view (`vol_board/changes_view_25`) | `DataService::vol_board` to its event: a prefix `Latest` fetch and append, the D1 exact `At` from coverage, the 30-day sparkline `Between` (`missing_by_key` plus a tail fetch), the read; excludes paint | 534 ms |
+| History prefix `Latest` (`history/prefix_latest_25`) | 25 members: fetch, append (all deduped), read | 113 ms |
+| History prefix `At` (`history/prefix_at_25_always_fetches`) | 25 members; a prefix `At` never reads from coverage: fetch, append, read | 120 ms |
+| History exact `At` from coverage (`history/exact_at_250_from_coverage`) | 250 exact tuples: `uncovered_at` and the read, no fetch | 195 ms |
+| History exact `Between` from coverage (`history/exact_between_30d_250_from_coverage`) | 250 exact tuples, 30 days to now: `missing_by_key`, the recent-tail fetch and append, the read | 655 ms |
+| History append (`append/between_400d_prefix_answer_deduped`) | one member's 400-day surface answer (about 11,400 rows, all equal to live) into the full table: dedupe, coverage coalescing, retention sweep | 18 to 23 ms |
+| History answer validation (`validate/286k_rows_vs_25_prefix`) | `validate_against`, 285,000 rows against a 25-member prefix; in the history worker, not the UI | 59 to 79 ms |
+| Demo Hanweck prefix `Latest` (`demo_hanweck/prefix_latest_10` / `single_latest_x10`) | the demo adapter alone: one call over ten underlyings / ten single-member calls; excludes the store and service | 785 µs / 1.32 ms |
 
 Production view queries also carry the roster's context columns
 (`underlying_ref`, `position_ref`, `instrument_ref`; see
@@ -332,10 +342,14 @@ joined on the unique source value, if the idle figure stays over budget.
 - The vol board's history path pays per-tuple costs on the service thread:
   `missing_by_key` reads coverage one statement per asked tuple, so a
   board's window `Between` over 250 exact tuples is the largest part of a
-  refresh, and `validate_against` still allocates a key per row
-  (`key_at`). The board read's `live` CTE groups every version of the
-  asked tuples on every read; a materialized latest-version table is the
-  lever if a desk's cache grows past the bench's.
+  refresh (the Rich/cheap round trip measured 978 ms), and
+  `validate_against` still allocates a key per row (`key_at`).
+- The vol board read for the Rich/cheap view (365-day percentile window
+  over three datasets) measured 51.9 ms on a quiet machine, about 4% over
+  the 50 ms budget; the Changes view reads in 17.7 ms. The read's `live`
+  CTE groups every version of the asked tuples on every read; a
+  materialized latest-version table is the lever, and grows in value if a
+  desk's cache grows past the bench's.
 
 - The Diagnostics Log's fuzzy narrowing over a full tail exceeds the 8 ms UI
   budget for phrase queries (6 to 12 ms on the reference machine, loaded, and

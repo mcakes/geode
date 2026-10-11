@@ -379,7 +379,8 @@ windows, and `order = "tenor"` on a tenor or window key column.
   (one close per day) would be the lever.
 - That one `Latest` prefix call per dataset per refresh, with no per-call
   size cap, is acceptable. On the demo adapter one prefix call over ten
-  underlyings is cheaper than ten single-member calls (`docs/perf.md`); a
+  underlyings took 785 µs against 1.32 ms for ten single-member calls
+(`docs/perf.md`); a
   real adapter with a size limit splits inside its shim.
 
 ### Reference data

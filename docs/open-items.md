@@ -646,7 +646,7 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   would split into two buckets).
 - History family: `missing_by_key` reads coverage one statement per asked
   tuple on the service thread (`store/history.rs`); a board's window
-  `Between` over 250 exact tuples measured 700 ms per refresh on a loaded machine
+  `Between` over 250 exact tuples measured 655 ms per refresh
   (`history/exact_between_30d_250_from_coverage`); batch it as `uncovered_at`
   is batched.
 - History family: an exact tuple the source never answers refetches on every
@@ -663,9 +663,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   whole payload table (the dedupe now groups the staged keys only), and a
   prefix ask still fans out to one adapter call per distinct gap list,
   uncapped. Neither is on the board's path; measure before acting.
-- Vol board: the board read's `live` CTE groups every version of the asked
-  tuples on every read. A materialized latest-version table is the lever if
-  a desk's cache grows past the bench's 400 days of closes.
+- Vol board: the Rich/cheap board read measured 51.9 ms, about 4% over the
+  50 ms budget (`board_read/rich_cheap_view_25`). The read's `live` CTE
+  groups every version of the asked tuples on every read; a materialized
+  latest-version table is the lever, more so if a desk's cache grows past
+  the bench's 400 days of closes.
 - History family: `HISTORY_SETTLE` (30 minutes) is a guess at the vendors'
   publication lag. Tune it against the real Hanweck and KDB sources once they
   are reachable: too short and a late-published observation is lost behind
