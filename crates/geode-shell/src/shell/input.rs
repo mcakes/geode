@@ -505,7 +505,7 @@ impl ShellView {
             // An unknown name (hand-bound, or removed since startup) is a no-op.
             let _ = self.load_saved_scope(name, cx);
         } else if action.0 == "frame::scope" {
-            // The Scope dialog on Current: the lane's scope by ingredient.
+            // The Scope dialog, the cursor on the lane's scope by ingredient.
             super::scopedialog::view::open(self, window, cx);
         } else if action.0 == "frame::scope_saved" {
             // The Scope dialog on its saved scopes, one-shot: a load, a

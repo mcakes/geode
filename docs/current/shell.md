@@ -816,8 +816,8 @@ paints whatever the scope holds, empty included; a click opens the Scope
 dialog (`frame::scope_saved`) with the cursor on its
 [saved scopes](input-and-dialogs.md#saved), on the lane's `loaded_from`
 scope when it is listed, and a load or toggle there closes the dialog, so a
-load by pointer is two clicks. The glyph holds its pressed fill while the
-dialog it opened is up. Its tooltip, `Saved scopes and expressions`, names
+load by pointer is the glyph, then a double-click on the scope's row. The
+glyph holds its pressed fill while the dialog it opened is up. Its tooltip, `Saved scopes and expressions`, names
 `frame::scope_saved`'s chord once one is bound; it has none by default, and
 from the keyboard the saved scopes are also `o` in the Scope dialog. The save glyph, when
 the scope is savable, comes after it, so its appearance never moves the load

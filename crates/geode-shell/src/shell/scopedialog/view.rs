@@ -732,10 +732,10 @@ fn handle_key(
 }
 
 /// Keys while the text step is open. Enter commits the trimmed draft (empty
-/// clears the filter) and returns to Current; Escape returns with nothing
+/// clears the filter) and returns to the screen; Escape returns with nothing
 /// changed, and is claimed here so the shell's unclaimed-escape fallback
 /// does not close the whole dialog. Every other key is the field's, so
-/// Current's verbs type as text.
+/// the screen's verbs type as text.
 fn text_step_key(
     shell: &mut ShellView,
     ks: &Keystroke,
@@ -915,7 +915,7 @@ fn open_term_row(
     true
 }
 
-/// Open the text step over Current, seeded with the lane's text so `enter`
+/// Open the text step over the screen, seeded with the lane's text so `enter`
 /// on the text row edits it rather than retyping it.
 ///
 /// A no-op when the step is already open: re-seeding would drop what was
@@ -1275,7 +1275,7 @@ fn build(
                 click.update(cx, |shell, cx| {
                     // The rows painted under a step drawn here (the text
                     // step, the save prompt) are its preview, not controls: a
-                    // press there would move Current's cursor under the
+                    // press there would move the cursor under the
                     // field, and a double-click would open a row's step
                     // over the typing.
                     if !shell.scope_dialog.as_ref().is_some_and(takes_pointer) {
@@ -1350,7 +1350,7 @@ fn build(
 }
 
 fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
-    // Inside the text step only its own two keys act; Current's verbs type.
+    // Inside the text step only its own two keys act; the screen's verbs type.
     if in_text_step(state) {
         return vec![
             Hint::new(HintRow::Go, &["enter"], "set text").selector("scope-dialog-hint-set-text"),

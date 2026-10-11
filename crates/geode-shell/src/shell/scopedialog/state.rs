@@ -3,7 +3,7 @@
 //! a step directly (`mod+p`, `mod+x`, a chip) makes that step the bottom, so
 //! its commit or escape empties the stack and the dialog closes: those doors
 //! stay one-shot. A step pushed over a screen returns to that screen, so a
-//! visit that started on Current can build several ingredients.
+//! visit that started on the screen can build several ingredients.
 //!
 //! Doors: `mod+o` and `+` open `Current`. The saved door (the load glyph,
 //! `frame::scope_saved`, `config::scopes`, `config::expressions`) opens the

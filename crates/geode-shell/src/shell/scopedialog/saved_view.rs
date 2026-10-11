@@ -10,7 +10,7 @@
 //! refuse when the user holds nothing to remove (`prompt::ask_delete`,
 //! `prompt::ask_revert`).
 //!
-//! The rows derive with Current's under one key (`view::rows_key`): saved
+//! The rows derive with the current rows under one key (`view::rows_key`): saved
 //! scopes and named expressions both bump the frame's config version, and
 //! the `applied` tags read the lane's scope. `/` filters them by name and
 //! summary; membership only, so the two sections and their name order hold.
@@ -34,7 +34,7 @@ use crate::shell::control::{self, PointerStates as _};
 use crate::shell::{ShellView, dialog, scale};
 
 const ROW_HEIGHT: f32 = 28.0;
-/// The glyph column, as Current's: scopes leave it empty so names line up.
+/// The glyph column, as the current rows': scopes leave it empty so names line up.
 const GLYPH_WIDTH: f32 = 16.0;
 const NAME_WIDTH: f32 = 120.0;
 const EXPRESSION_GLYPH: &str = "≡";
@@ -648,7 +648,7 @@ pub(super) fn group(
     let border = theme.border;
     let mono = crate::fonts::MONO;
     // The clickable empty row is a muted label on the modal panel, as
-    // Current's are.
+    // the current sections' are.
     let empty_states = control::paint(theme, control::Rest::Bare, theme.popover, muted);
 
     // The filter row: live while filtering, frozen (a press enters filter

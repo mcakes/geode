@@ -18765,8 +18765,8 @@ run_mutation "scope dialog: the load glyph opens Saved" \
   geode-shell \
   the_load_glyph_opens_saved_alone_and_enter_closes
 
-# The load glyph reads pressed while Saved is up.
-run_mutation "scope dialog: the load glyph holds its pressed state while Saved is up" \
+# The load glyph reads pressed while the dialog it opened is up.
+run_mutation "scope dialog: the load glyph holds its pressed state while its dialog is up" \
   crates/geode-shell/src/shell/toolbar.rs \
   '            scope_open.then_some("scope-load-chip-open"),' \
   '            None,' \
@@ -18817,7 +18817,7 @@ run_mutation "scope dialog: frame::scope_saved is listed as a dialog opener" \
   geode-shell \
   opens_dialog_matches_what_dispatch_pushes
 
-# The Saved rows derive with Current's under one key.
+# The saved rows derive with the current rows under one key.
 run_mutation "scope dialog: a refresh derives the Saved rows" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
   '        self.saved.refresh(saved, named, scope, key);' \
@@ -18871,7 +18871,7 @@ run_mutation "scope dialog: a restored Saved query re-filters" \
   geode-shell \
   the_filter_keeps_sections_and_escape_restores
 
-# Typing in Saved's filter reaches its query.
+# Typing in the saved group's filter reaches its query.
 run_mutation "scope dialog: the field's Change sets the Saved query" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
   '        state.saved.set_query(text);' \
@@ -18879,7 +18879,7 @@ run_mutation "scope dialog: the field's Change sets the Saved query" \
   geode-shell \
   the_filter_keeps_sections_and_escape_restores
 
-# Saved's filter mode puts focus in the shared input.
+# The saved filter's mode puts focus in the shared input.
 run_mutation "scope dialog: Saved's filter mode focuses the input" \
   crates/geode-shell/src/shell/dialog.rs \
   '            (state.saved.mode, false, state.saved.query.as_str())' \
@@ -18887,7 +18887,7 @@ run_mutation "scope dialog: Saved's filter mode focuses the input" \
   geode-shell \
   the_filter_keeps_sections_and_escape_restores
 
-# A press on Saved's frozen filter row enters filter mode.
+# A press on the saved group's frozen filter row enters filter mode.
 run_mutation "scope dialog: the Saved filter row's press enters filter mode" \
   crates/geode-shell/src/shell/dialog.rs \
   '                super::scopedialog::saved_view::enter_filter(state);' \
@@ -18913,7 +18913,7 @@ run_mutation "scope dialog: a vanished expression refuses" \
 
 # A saved-row commit closes only when the saved door opened the dialog: from
 # mod+o it stays on the screen.
-run_mutation "scope dialog: a Saved commit returns to Current" \
+run_mutation "scope dialog: a saved commit from mod+o stays open" \
   crates/geode-shell/src/shell/scopedialog/state.rs \
   '        self == Opener::Saved' \
   '        true' \
@@ -18937,7 +18937,7 @@ run_mutation "scope dialog: a saved-door commit closes the dialog" \
   the_load_glyph_opens_saved_alone_and_enter_closes
 
 # A step opened alone is the bottom layer: its commit closes the dialog.
-run_mutation "scope dialog: a one-shot Saved commit closes the dialog" \
+run_mutation "scope dialog: a step opened alone closes on commit" \
   crates/geode-shell/src/shell/scopedialog/saved_view.rs \
   '        After::Close => shell.close_modal(window, cx),' \
   '        After::Close => {}' \
@@ -19411,7 +19411,7 @@ run_mutation "scope dialog: only the save prompt previews the scope" \
   geode-shell \
   naming_a_new_expression_previews_its_text_not_the_scope
 
-# ---- Scope dialog: copy, delete and revert in Saved ----
+# ---- Scope dialog: copy, delete and revert on saved rows ----
 
 # Delete asks only over the user's own definition: an inherited one has
 # nothing of the user's to remove, and refuses naming its layer.
@@ -19506,7 +19506,7 @@ run_mutation "scope dialog: a removal refreshes the frame at once" \
   geode-shell \
   d_deletes_a_user_scope_after_yes
 
-# Saved shows again with the cursor on the copy.
+# The screen shows again with the cursor on the copy.
 run_mutation "scope dialog: the cursor lands on the copy" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
   '    state.saved.cursor_id = Some(super::saved_view::StopId::Row(copy));' \
@@ -19538,7 +19538,7 @@ run_mutation "scope dialog: rows under a question ignore presses" \
   geode-shell \
   a_question_over_saved_ignores_the_pointer
 
-# A question over Saved owns the pointer: the filter row would enter filter mode.
+# A question over the saved group owns the pointer: the filter row would enter filter mode.
 run_mutation "scope dialog: the filter row ignores presses under a question" \
   crates/geode-shell/src/shell/dialog.rs \
   '                if state.pending.is_some() {
@@ -19554,7 +19554,7 @@ run_mutation "scope dialog: the filter row ignores presses under a question" \
 # The empty Scopes row says `s` saves the current scope: with the cursor on
 # a saved stop, `s` pushes the save prompt over the screen, or the row names
 # a dead key.
-run_mutation "scope dialog: s on Saved pushes the save prompt" \
+run_mutation "scope dialog: s on a saved row pushes the save prompt" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
   '        ("s", true, false) => {
             super::prompt::push_save(shell, cx);' \

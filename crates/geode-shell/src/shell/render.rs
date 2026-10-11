@@ -403,7 +403,7 @@ impl Render for ShellView {
                 picker::open(view, Some(column), window, cx);
             });
         };
-        // The scope bar's `+` opens the Scope dialog on Current, the same
+        // The scope bar's `+` opens the Scope dialog on its current rows, the same
         // door as `frame::scope`.
         let add_entity = cx.entity();
         let on_add = move |window: &mut Window, cx: &mut App| {
