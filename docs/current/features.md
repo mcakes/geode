@@ -2168,7 +2168,7 @@ Normal-mode keys:
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
-| `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's tree cell, or anywhere on a group row, opens or closes it instead) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
+| `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's or group row's tree cell opens or closes it instead; on a group row's value cell the edit writes the group's lines, see [grouping](#grouping)) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `I` (`shift+i`) | Edit the cell with its whole text selected: typing replaces it, one backspace clears it; date fields and choice pickers open as usual |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -2697,27 +2697,51 @@ cells and find key cover only those legs, as for a package the scope partly
 hides. A selection total counts each split row's own legs, so the two rows
 of a calendar add up to the whole package.
 
-**What is read-only.** A group row has no line behind it; a split package
-row would reach legs another group paints. Both refuse cell edits (`i`,
-`enter`, double-click, a selection's typed commit or live step) and the
+**What is read-only.** A group row has no line behind it for a structural
+verb; a split package row would reach legs another group paints. The
 structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.`
-menu, `:package`, `:unpackage`), with `a grouping row: edit its lines` and
-`split package: edit its legs` in the footer; a package both split and
-partly hidden reads the split reason. For structural verbs, a selection
-containing either refuses whole. A selection's typed commit or live step
-passes over group rows and edits the visible lines it holds, across groups;
-a closed group inside it is ignored, its hidden lines left as they were. A
-split package row inside it still refuses. A split package's legs, and the
-lines under a group, edit as usual.
+menu, `:package`, `:unpackage`) refuse on either, with `a grouping row: edit
+its lines` and `split package: edit its legs` in the footer, and a
+selection containing either refuses them whole. A split package row also
+refuses its own cell edits, and a selection's typed commit or live step
+containing one; a package both split and partly hidden reads the split
+reason. A split package's legs edit as usual.
+
+**Editing a grouping row.** A group row stands for its shown lines: every
+line beneath it, through nested and closed subgroups. `i`, `enter` or a
+double-click on one of its value cells opens the editor there (a
+double-click on its label opens or closes it, as on a package's name), on
+the value its lines share and empty where the cell paints `mixed` or blank;
+the editor's kind is the column's (a typeahead for a type, a date field for
+an expiry). The column must edit on at least one of its lines, or the
+editor refuses with that line's reason. `enter` writes the value to every
+line, as one undo entry, and the header counts what it set and skipped
+(`set 3 cells, skipped 2 (1 n/a, 1 hidden)`); an untouched `enter` writes
+nothing, and when no line accepts the value the editor stays open with `no
+grouped cell accepts '<text>'`. A quantity sets each root to the number: a bare line, or a package
+the group holds whole, as a package quantity through its template's weights;
+a package the group holds only part of (a calendar split across expiry
+groups) and a package in list form are skipped and counted `refused`. Any
+other column writes the one value to each line; a barrier on a vanilla line
+counts `n/a`. Lines the scope hides are never written; the ones the group
+would hold were they shown count as `hidden`. On a qty, strike, barrier or
+shift cell the arrows step every line live, as over a selection: `escape`
+takes the steps back and `enter` keeps them as one undo entry. Editing the
+group's own grouped column, or an enclosing group's shown on a nested row,
+moves its lines: the cursor lands on the group row they moved into (one they
+merged with, if it already existed).
+
+A selection's typed commit and live step treat each selected group row the
+same way: the targets are the selected line rows and every selected group's
+lines, each line written once. `i` on a group row under a selection opens
+the editor there and commits over the selection's targets.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
 are selected too. `y y` or `V y` on a split package row yanks that row's
 legs, as its cells show them, not the whole package. A selection can start
 on a group row as on a line: it anchors on the group's path, and clears with
 `selection cleared: anchor row no longer shown` once that path stops
-painting (a regroup, its last line leaving it, a closed ancestor). With the
-cursor on a group row, `i` still refuses; a typed commit edits from a line
-cell. `o`,
+painting (a regroup, its last line leaving it, a closed ancestor). `o`,
 `shift+o` and `p` / `shift+p` with the cursor on a group row have no line to
 land beside: the bar's label reads `at end`, and a put lands at the end of the sheet with `put at
 the end of the sheet` in the footer. `g m` on a group row opens the plain

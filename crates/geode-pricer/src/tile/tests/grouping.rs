@@ -745,17 +745,15 @@ fn a_split_package_refuses_edits_with_the_split_footer(cx: &mut gpui::TestAppCon
     );
 }
 
-/// A grouping row has no line behind it: `i`, `d d`, `g p`, `g u` and
-/// `:package` refuse with the grouping-row footer, as does a `V`
-/// selection reaching one; `y y` yanks its lines' shorthand.
+/// A grouping row has no line behind it for a structural verb: `d d`,
+/// `g p`, `g u` and `:package` refuse with the grouping-row footer, as
+/// does a `V` selection reaching one; `y y` yanks its lines' shorthand.
 #[gpui::test]
-fn a_group_row_is_read_only_and_yanks_its_lines(cx: &mut gpui::TestAppContext) {
+fn a_group_row_refuses_structural_verbs_and_yanks_its_lines(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &MIXED);
     h.command(&mut vcx, "group underlying_ref").unwrap();
     cursor_to(&h, &mut vcx, "SPX");
     let len = h.sheet_len(&vcx);
-    h.dispatch(&mut vcx, "edit", None);
-    assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_TEXT), "i");
     for verb in ["delete", "group", "ungroup"] {
         h.dispatch(&mut vcx, verb, None);
         assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_TEXT), "{verb}");
@@ -778,8 +776,25 @@ fn a_group_row_is_read_only_and_yanks_its_lines(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.sheet_len(&vcx), len);
 }
 
-/// A `V` selection spanning groups edits the lines it paints: the group
-/// rows between them have no line and are passed over, not refused.
+/// Every line's shorthand, in sheet order (a leg's its own).
+fn line_texts(h: &Harness, vcx: &VisualTestContext) -> Vec<String> {
+    h.tile.read_with(vcx, |t, _| {
+        (0..t.sheet.len())
+            .filter(|&r| t.sheet.is_line(r))
+            .map(|r| t.sheet.shorthand(r))
+            .collect()
+    })
+}
+
+/// The transient notice a bulk edit sets.
+fn edit_notice(h: &Harness, vcx: &VisualTestContext) -> Option<String> {
+    h.tile
+        .read_with(vcx, |t, _| t.notice.clone())
+        .map(|s| s.to_string())
+}
+
+/// A `V` selection spanning groups edits every line it reaches: a group
+/// row between them stands for its lines, a package's legs among them.
 #[gpui::test]
 fn a_selection_across_groups_edits_its_lines(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &MIXED);
@@ -793,21 +808,17 @@ fn a_selection_across_groups_edits_its_lines(cx: &mut gpui::TestAppContext) {
     set_editor(&h, &mut vcx, "4500");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.footer(&vcx), None);
-    let tree = h.tree(&vcx);
-    for line in [
-        "NDX Z26 4500 P",
-        "SPX Z26 4500 C",
-        "-5 SPX Z26 4800/5200 CS",
-    ] {
-        assert!(tree.iter().any(|t| t == line), "{line}: {tree:?}");
-    }
+    let lines = line_texts(&h, &vcx);
+    assert_eq!(lines.len(), 4);
+    assert!(lines.iter().all(|l| l.contains("4500")), "{lines:?}");
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 4 cells"));
     assert_eq!(h.mode(&mut vcx), "normal");
 }
 
-/// A closed group inside the selection is passed over: the edit writes
-/// the lines the selection paints and leaves the hidden ones as they were.
+/// A closed group inside the selection stands for its lines: the edit
+/// writes them with the lines the selection paints, each once.
 #[gpui::test]
-fn a_selection_over_a_closed_group_edits_only_the_visible_lines(cx: &mut gpui::TestAppContext) {
+fn a_selection_over_a_closed_group_edits_its_lines_too(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &["SPX Z26 3000 P", "SPX Z26 4000 P", "SPX Z26 5000 P"]);
     h.command(&mut vcx, "group strike").unwrap();
     h.dispatch(&mut vcx, "expand_all", None);
@@ -822,9 +833,10 @@ fn a_selection_over_a_closed_group_edits_only_the_visible_lines(cx: &mut gpui::T
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.footer(&vcx), None);
     assert_eq!(h.mode(&mut vcx), "normal");
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 3 cells"));
     h.dispatch(&mut vcx, "expand_all", None);
     let tree = h.tree(&vcx);
-    for line in ["3 SPX Z26 3000 P", "SPX Z26 4000 P", "3 SPX Z26 5000 P"] {
+    for line in ["3 SPX Z26 3000 P", "3 SPX Z26 4000 P", "3 SPX Z26 5000 P"] {
         assert!(tree.iter().any(|t| t == line), "{line}: {tree:?}");
     }
 }
@@ -883,9 +895,9 @@ fn a_selection_starts_on_a_group_row(cx: &mut gpui::TestAppContext) {
     );
 }
 
-/// A selection anchored on a group row edits the lines it paints once
-/// the cursor rests on one; on the group row itself `i` refuses with the
-/// grouping-row footer, and `d` refuses whole.
+/// A selection anchored on a group row edits the group's lines and every
+/// line it paints; on the group row itself `i` opens the editor, and `d`
+/// refuses whole.
 #[gpui::test]
 fn a_selection_from_a_group_row_edits_its_lines(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_seeded(cx, &MIXED);
@@ -898,10 +910,12 @@ fn a_selection_from_a_group_row_edits_its_lines(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.mode(&mut vcx), "visual");
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(
-        h.footer(&vcx).as_deref(),
-        Some(GROUP_TEXT),
-        "i on the group"
+        h.mode(&mut vcx),
+        "insert",
+        "i on the group opens the editor"
     );
+    assert_eq!(h.footer(&vcx), None);
+    h.dispatch(&mut vcx, "cancel", None);
     h.dispatch(&mut vcx, "delete", None);
     assert_eq!(h.footer(&vcx).as_deref(), Some(GROUP_TEXT), "V d");
     assert_eq!(h.sheet_len(&vcx), len);
@@ -915,10 +929,319 @@ fn a_selection_from_a_group_row_edits_its_lines(cx: &mut gpui::TestAppContext) {
     set_editor(&h, &mut vcx, "4500");
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.footer(&vcx), None);
-    let tree = h.tree(&vcx);
-    assert!(tree.iter().any(|t| t == "SPX Z26 4500 C"), "{tree:?}");
-    assert!(tree.iter().any(|t| t == "NDX Z26 4000 P"), "{tree:?}");
+    let lines = line_texts(&h, &vcx);
+    assert!(lines.contains(&"SPX Z26 4500 C".to_string()), "{lines:?}");
+    assert!(lines.contains(&"NDX Z26 4000 P".to_string()), "{lines:?}");
+    assert_eq!(
+        lines.iter().filter(|l| l.contains("4500")).count(),
+        3,
+        "the SPX line and both legs: {lines:?}"
+    );
     assert_eq!(h.mode(&mut vcx), "normal", "the commit ends the selection");
+}
+
+/// `i` on a grouping row under a live selection opens the editor there
+/// and the commit writes the selection's targets: the line rows it holds
+/// and the group's lines.
+#[gpui::test]
+fn i_on_a_group_row_under_a_selection_commits_over_the_selection(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    cursor_to(&h, &mut vcx, "NDX Z26 4000 P");
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "visual_rows", None);
+    cursor_to(&h, &mut vcx, "SPX");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.mode(&mut vcx), "insert");
+    set_editor(&h, &mut vcx, "2");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 4 cells"));
+    assert_eq!(spots(&h, &vcx), [Some(2.0); 4], "every line");
+    assert_eq!(h.mode(&mut vcx), "normal", "the commit ends the selection");
+}
+
+/// Each line's own spot shift, in sheet order.
+fn spots(h: &Harness, vcx: &VisualTestContext) -> Vec<Option<f64>> {
+    h.tile.read_with(vcx, |t, _| {
+        (0..t.sheet.len())
+            .filter(|&r| t.sheet.is_line(r))
+            .map(|r| t.sheet.shift(r).spot_pct)
+            .collect()
+    })
+}
+
+fn leg_qtys(h: &Harness, vcx: &VisualTestContext, pkg: usize) -> Vec<i64> {
+    h.tile.read_with(vcx, |t, _| {
+        t.sheet.children(pkg).map(|l| t.sheet.qty(l)).collect()
+    })
+}
+
+fn qty(h: &Harness, vcx: &VisualTestContext, row: usize) -> i64 {
+    h.tile.read_with(vcx, |t, _| t.sheet.qty(row))
+}
+
+/// The grid rows of the painted grouping rows, in painted order.
+fn group_rows(h: &Harness, vcx: &VisualTestContext) -> Vec<usize> {
+    h.tile.read_with(vcx, |t, _| {
+        (0..t.model.len())
+            .filter(|&g| t.model.path(g).is_some())
+            .collect()
+    })
+}
+
+/// `i` on a grouping row with no selection writes the value to every
+/// shown line beneath it, through a closed subgroup too, as ONE undo
+/// entry; a line in another group is untouched.
+#[gpui::test]
+fn a_group_row_edit_writes_every_line_under_it_as_one_undo(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref strike").unwrap();
+    cursor_to(&h, &mut vcx, "SPX"); // its strike subgroups closed
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(h.mode(&mut vcx), "insert", "the editor opens");
+    set_editor(&h, &mut vcx, "2");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 3 cells"));
+    // [SPX 5000 C, NDX 4000 P, CS legs]
+    assert_eq!(spots(&h, &vcx), [Some(2.0), None, Some(2.0), Some(2.0)]);
+    assert_eq!(
+        cursor_text(&h, &vcx).as_deref(),
+        Some("SPX"),
+        "the cursor stays"
+    );
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(
+        spots(&h, &vcx),
+        [None; 4],
+        "one undo takes every write back"
+    );
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
+/// A quantity on a grouping row sets each root to it: a bare line to the
+/// number, a package the group holds whole to that package quantity
+/// (its legs by the template's weights).
+#[gpui::test]
+fn a_group_row_qty_sets_each_line_and_whole_package(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.footer(&vcx), None);
+    assert_eq!(qty(&h, &vcx, 0), 3);
+    assert_eq!(leg_qtys(&h, &vcx, 2), [3, -3], "the CS weighted, not 3/3");
+    assert_eq!(qty(&h, &vcx, 1), 1, "NDX untouched");
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("set 3 cells"));
+}
+
+/// A package the grouping splits has only some legs under a group: its
+/// quantity is skipped and counted refused, its legs as they were.
+#[gpui::test]
+fn a_group_row_qty_skips_a_split_package(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &CALENDAR);
+    h.command(&mut vcx, "group expiry").unwrap();
+    let before = leg_qtys(&h, &vcx, 1);
+    let z26 = group_rows(&h, &vcx)[0];
+    cursor_to_row(&h, &mut vcx, z26);
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "2");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        edit_notice(&h, &vcx).as_deref(),
+        Some("set 1 cell, skipped 1 (1 refused)")
+    );
+    assert_eq!(qty(&h, &vcx, 0), 2);
+    assert_eq!(leg_qtys(&h, &vcx, 1), before, "the calendar untouched");
+}
+
+/// A package in list form (its legs no longer fit the template) has no
+/// weights: a group's quantity refuses it, none of its legs written.
+#[gpui::test]
+fn a_group_row_qty_refuses_a_package_in_list_form(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    // Rows: 0 SPX 5000 C, 1 NDX, 2 CS (legs 3, 4); its second leg to 3.
+    cursor_to_row(&h, &mut vcx, 2);
+    h.dispatch(&mut vcx, "expand", None);
+    cursor_to_row(&h, &mut vcx, 4);
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(leg_qtys(&h, &vcx, 2), [-5, 3], "fixture: list form");
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "qty");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "4");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        edit_notice(&h, &vcx).as_deref(),
+        Some("set 1 cell, skipped 1 (1 refused)")
+    );
+    assert_eq!(leg_qtys(&h, &vcx, 2), [-5, 3], "no leg written");
+    assert_eq!(qty(&h, &vcx, 0), 4);
+}
+
+/// A barrier written through a group skips its vanilla lines, counted as
+/// not applicable rather than read-only.
+#[gpui::test]
+fn a_group_row_barrier_counts_a_vanilla_line_not_applicable(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C DO 4000", "SPX Z26 4000 P"]);
+    h.command(&mut vcx, "view barrier").unwrap();
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "barrier");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "3900");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        edit_notice(&h, &vcx).as_deref(),
+        Some("set 1 cell, skipped 1 (1 n/a)")
+    );
+    let lines = line_texts(&h, &vcx);
+    assert!(lines[0].contains("3900"), "{lines:?}");
+}
+
+/// A line the scope hides is never written through its group, and the
+/// notice counts it, so the write does not read as the group's whole.
+#[gpui::test]
+fn a_group_row_edit_leaves_a_scope_hidden_line_and_counts_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    set_scope(&h, &mut vcx, "strike != 5000");
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "spot_shift");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "2");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(
+        edit_notice(&h, &vcx).as_deref(),
+        Some("set 2 cells, skipped 1 (1 hidden)")
+    );
+    // [SPX 5000 C (hidden), NDX, CS legs]
+    assert_eq!(spots(&h, &vcx), [None, None, Some(2.0), Some(2.0)]);
+}
+
+/// Editing a group row's own grouped column re-tags its lines: they merge
+/// into the group of the new value, and the cursor lands on that group's
+/// row rather than falling back to a neighbour.
+#[gpui::test]
+fn a_group_row_retag_lands_the_cursor_on_the_merged_group(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &STRIKES);
+    h.command(&mut vcx, "group strike").unwrap();
+    assert_eq!(h.tree(&vcx), ["4000", "5000"]);
+    cursor_to(&h, &mut vcx, "5000");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"));
+    set_editor(&h, &mut vcx, "4000");
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.tree(&vcx), ["4000"], "merged into the existing group");
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("4000"));
+}
+
+/// An enclosing group's column edited on a nested group row moves its
+/// lines under another top group; the cursor follows them to the nested
+/// row there.
+#[gpui::test]
+fn a_nested_group_row_retag_follows_its_lines(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref strike").unwrap();
+    h.dispatch(&mut vcx, "expand_all", None);
+    let spx_5000 = h.tile.read_with(&vcx, |t, _| {
+        (0..t.model.len())
+            .find(|&g| {
+                t.model.path(g).is_some_and(|p| {
+                    p.len() == 2
+                        && p[0].as_deref() == Some("SPX")
+                        && p[1].as_deref() == Some("5000")
+                })
+            })
+            .unwrap()
+    });
+    cursor_to_row(&h, &mut vcx, spx_5000);
+    goto_column(&h, &mut vcx, "underlying_ref");
+    h.dispatch(&mut vcx, "edit", None);
+    set_editor(&h, &mut vcx, "NDX");
+    h.dispatch(&mut vcx, "commit", None);
+    let at = h.tile.read_with(&vcx, |t, _| t.cursor.at.clone());
+    assert_eq!(
+        at,
+        Some(At::Group(vec![Some("NDX".into()), Some("5000".into())])),
+        "on the 5000 row under NDX"
+    );
+}
+
+/// The editor opens on the value a group's lines share, and empty where
+/// the cell paints `mixed`.
+#[gpui::test]
+fn a_group_row_editor_opens_on_its_lines_shared_value(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "SPX Z26 5000 P", "NDX Z26 4000 P"]);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "strike");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"), "unanimous");
+    h.dispatch(&mut vcx, "cancel", None);
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "strike");
+    assert_eq!(h.cell(&vcx, 1, "strike"), "mixed", "fixture");
+    h.dispatch(&mut vcx, "edit", None);
+    assert_eq!(
+        editor_text(&h, &vcx).as_deref(),
+        Some(""),
+        "mixed seeds empty"
+    );
+    // An untouched enter on the empty seed writes nothing.
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(h.mode(&mut vcx), "normal");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+}
+
+/// On a grouping row's steppable cell the arrows step every line beneath
+/// it live; escape rolls every step back, and enter keeps them as ONE
+/// undo entry.
+#[gpui::test]
+fn arrows_step_a_group_rows_lines_live(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_seeded(cx, &MIXED);
+    h.command(&mut vcx, "group underlying_ref").unwrap();
+    cursor_to(&h, &mut vcx, "SPX");
+    goto_column(&h, &mut vcx, "strike");
+    let before = line_texts(&h, &vcx);
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", None);
+    let stepped = line_texts(&h, &vcx);
+    assert_eq!(
+        stepped,
+        [
+            "SPX Z26 5001 C",
+            "NDX Z26 4000 P",
+            &before[2].replace("4800", "4801"),
+            &before[3].replace("5200", "5201"),
+        ],
+        "each SPX line by its own unit"
+    );
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("stepped 3 cells +1"));
+    h.dispatch(&mut vcx, "cancel", None);
+    assert_eq!(line_texts(&h, &vcx), before, "escape rolls back");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
+    h.dispatch(&mut vcx, "edit", None);
+    h.dispatch(&mut vcx, "insert_up", Some(2));
+    h.dispatch(&mut vcx, "commit", None);
+    assert_eq!(line_texts(&h, &vcx)[0], "SPX Z26 5002 C", "enter keeps");
+    h.dispatch(&mut vcx, "undo", None);
+    assert_eq!(line_texts(&h, &vcx), before, "one undo");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
 }
 
 /// A group anchor whose row no longer paints — a regroup removed its

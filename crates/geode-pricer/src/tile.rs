@@ -305,8 +305,9 @@ pub(crate) const PARTLY_HIDDEN: &str = "package partly hidden by the scope: edit
 /// hidden reads this one.
 pub(crate) const SPLIT: &str = "split package: edit its legs";
 
-/// A grouping row has no line behind it: a cell edit on it and every
-/// structural verb whose target includes it refuse with this.
+/// A grouping row has no line behind it: every structural verb whose
+/// target includes it refuses with this. (A cell edit on it writes the
+/// shown lines beneath it instead; `PricerTile::edit_targets`.)
 pub(crate) const GROUP_ROW: &str = "a grouping row: edit its lines";
 
 /// `shift+j`/`shift+k` move a line among its siblings in sheet order,
@@ -357,12 +358,21 @@ pub(crate) const SCOPE_DROPPED_EDIT: &str = "the line is hidden by the scope; ed
 /// would package a line the trader never saw.
 pub(crate) const HIDDEN_IN_RANGE: &str = "a line in that range is hidden by the scope";
 
-/// Cell editor attached to a line identity and column kind. Rebuilds follow the
+/// The row an editor opened on: a line or package row by its identity,
+/// or a grouping row by its path — it has no line, and stands for the
+/// shown lines beneath it (`PricerTile::edit_targets`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EditOn {
+    Line(LineId),
+    Group(Path),
+}
+
+/// Cell editor attached to a row (`EditOn`) and column kind. Rebuilds follow the
 /// target across movement and close the editor if it disappears; commit checks
 /// the target again before writing.
 pub(crate) enum Editor {
     Text {
-        line: LineId,
+        on: EditOn,
         col: usize,
         kind: ColumnKind,
         input: Entity<InputState>,
@@ -381,7 +391,7 @@ pub(crate) enum Editor {
         initial: String,
     },
     Choice {
-        line: LineId,
+        on: EditOn,
         col: usize,
         kind: ColumnKind,
         input: Entity<InputState>,
@@ -406,7 +416,7 @@ pub(crate) enum Editor {
     /// shell read keys as typing — and the segments prepared on every
     /// change, so paint formats nothing.
     Date {
-        line: LineId,
+        on: EditOn,
         col: usize,
         kind: ColumnKind,
         field: DateTimeField,
@@ -490,17 +500,11 @@ impl Editor {
         }
     }
 
-    fn target(&self) -> (LineId, usize, ColumnKind) {
+    fn target(&self) -> (EditOn, usize, ColumnKind) {
         match self {
-            Editor::Text {
-                line, col, kind, ..
-            }
-            | Editor::Choice {
-                line, col, kind, ..
-            }
-            | Editor::Date {
-                line, col, kind, ..
-            } => (*line, *col, *kind),
+            Editor::Text { on, col, kind, .. }
+            | Editor::Choice { on, col, kind, .. }
+            | Editor::Date { on, col, kind, .. } => (on.clone(), *col, *kind),
         }
     }
 
@@ -2169,28 +2173,43 @@ impl PricerTile {
     /// as without one, and that cell must itself be editable: a read-only
     /// cursor cell refuses with its own reason, rather than opening a
     /// field whose grammar belongs to some other selected cell.
+    ///
+    /// On a grouping row the editor stands for the shown lines beneath it
+    /// (`core::select::group_editor`): its kind is the column's on those lines,
+    /// and it opens on the value they share, empty where the cell paints
+    /// `mixed`. A commit writes every one of them (`commit_selection`).
     fn begin_edit(&mut self, caret: EditCaret, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
             self.footer = Some("the sheet is still loading".into());
             return;
         }
         self.close_editor(window, cx);
-        if self.cursor_on_group() {
-            self.footer = Some(GROUP_ROW.into());
-            return;
-        }
-        let (Some(row), Some(planned)) = (
-            self.cursor_sheet_row(),
-            self.plan.columns.get(self.cursor.col),
-        ) else {
+        let Some(planned) = self.plan.columns.get(self.cursor.col) else {
             return;
         };
-        if let Some(why) = self.read_only(row) {
-            self.footer = Some(why.into());
-            return;
-        }
-        let (line, col, kind) = (self.sheet.id(row), self.cursor.col, planned.def.kind);
-        let editor = match cell::editor_for(&self.sheet, row, kind, &planned.format) {
+        let (col, kind) = (self.cursor.col, planned.def.kind);
+        let (on, row, opening) = match (&self.cursor.at, self.cursor_on_group()) {
+            (Some(At::Group(path)), true) => {
+                let lines = self.group_lines(path);
+                let opening =
+                    crate::core::select::group_editor(&self.sheet, &lines, kind, &planned.format);
+                (EditOn::Group(path.clone()), None, opening)
+            }
+            _ => {
+                let Some(row) = self.cursor_sheet_row() else {
+                    return;
+                };
+                if let Some(why) = self.read_only(row) {
+                    self.footer = Some(why.into());
+                    return;
+                }
+                let opening = cell::editor_for(&self.sheet, row, kind, &planned.format);
+                (EditOn::Line(self.sheet.id(row)), Some(row), opening)
+            }
+        };
+        // Arrows step every target live: a selection's, or a group's lines.
+        let live = self.selection.is_some() || matches!(on, EditOn::Group(_));
+        let editor = match opening {
             Err(why) => {
                 self.footer = Some(why.into());
                 return;
@@ -2199,8 +2218,9 @@ impl PricerTile {
                 // A tenor has no date here (the library's calendar resolves
                 // it, never the pricer): the field opens on today by the
                 // app clock, and the footer says so — a commit replaces
-                // the tenor with that date.
-                let note: Option<SharedString> = date.is_none().then(|| {
+                // the tenor with that date. A group whose lines share no
+                // date opens on today too, with nothing to name.
+                let note: Option<SharedString> = row.filter(|_| date.is_none()).map(|row| {
                     let tenor = self
                         .sheet
                         .instrument(row)
@@ -2217,7 +2237,7 @@ impl PricerTile {
                 );
                 let paint = DateFieldPaint::of(&field, self.id.0);
                 Editor::Date {
-                    line,
+                    on,
                     col,
                     kind,
                     field,
@@ -2229,8 +2249,10 @@ impl PricerTile {
                 }
             }
             Ok(CellEditor::Text(text)) => {
-                let opened = self.sheet.is_package(row).then(|| text.clone());
-                let bulk = (self.selection.is_some() && select::steppable(kind)).then(|| Bulk {
+                let opened = row
+                    .filter(|&r| self.sheet.is_package(r))
+                    .map(|_| text.clone());
+                let bulk = (live && select::steppable(kind)).then(|| Bulk {
                     seeded: text.clone(),
                     steps: 0,
                     undo: Undo { inverse: vec![] },
@@ -2242,7 +2264,7 @@ impl PricerTile {
                 let input = cx.new(|cx| InputState::new(window, cx));
                 input.update(cx, |s, cx| caret.seed(s, text.clone(), window, cx));
                 Editor::Text {
-                    line,
+                    on,
                     col,
                     kind,
                     input,
@@ -2291,7 +2313,7 @@ impl PricerTile {
                 let mut list = ChoiceList::new(options, DEFAULT_CAP);
                 list.place(Some(&current));
                 Editor::Choice {
-                    line,
+                    on,
                     col,
                     kind,
                     input,
@@ -2348,7 +2370,7 @@ impl PricerTile {
         }
         // The editor's borrow ends inside this block, before any `self` call.
         let stepped = untouched.is_some();
-        let (value, (line, col, kind), opened, unchanged) = {
+        let (value, (on, col, kind), opened, unchanged) = {
             let Some(editor) = self.editor.as_mut() else {
                 return;
             };
@@ -2399,10 +2421,13 @@ impl PricerTile {
             };
             (value, target, opened, unchanged)
         };
-        // Over a selection an unchanged cell writes nothing: its own value
-        // filled across every target would be a plausible wrong block
-        // from a no-op gesture. No edit, no notice, no undo entry.
-        if unchanged && self.selection.is_some() {
+        // A selection's targets, or a grouping row's lines.
+        let bulk = self.selection.is_some() || matches!(on, EditOn::Group(_));
+        // Over a selection or a group an unchanged cell writes nothing: its
+        // own value filled across every target would be a plausible wrong
+        // block from a no-op gesture (a group's `mixed` opens empty). No
+        // edit, no notice, no undo entry.
+        if unchanged && bulk {
             self.close_ending_selection(window, cx);
             return;
         }
@@ -2425,16 +2450,20 @@ impl PricerTile {
             cx.notify();
             return;
         };
-        // A live selection takes the value to every target line, each
-        // judged on its own; the cursor cell is only where it was typed.
-        if self.selection.is_some() {
-            if !self.cursor_on_editor(line, kind) {
+        // A live selection, or a grouping row, takes the value to every
+        // target line, each judged on its own; the cursor cell is only
+        // where it was typed.
+        if bulk {
+            if !self.cursor_on_editor(&on, kind) {
                 self.refuse_moved(window, cx);
             } else if self.commit_selection(&value, None, cx) {
                 self.close_ending_selection(window, cx);
             }
             return;
         }
+        let EditOn::Line(line) = on else {
+            return;
+        };
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
@@ -2523,10 +2552,24 @@ impl PricerTile {
     /// `V` selection writes the cursor's column, so a commit after the
     /// cursor left the editor's column would write the typed text into
     /// a column it was never typed for.
-    fn cursor_on_editor(&self, line: LineId, kind: ColumnKind) -> bool {
-        let row_line = self.cursor_sheet_row().map(|r| self.sheet.id(r));
+    fn cursor_on_editor(&self, on: &EditOn, kind: ColumnKind) -> bool {
         let col_kind = self.plan.columns.get(self.cursor.col).map(|c| c.def.kind);
-        row_line == Some(line) && col_kind == Some(kind)
+        let same_row = match on {
+            EditOn::Line(line) => self.cursor_sheet_row().map(|r| self.sheet.id(r)) == Some(*line),
+            EditOn::Group(path) => {
+                self.cursor_on_group() && matches!(&self.cursor.at, Some(At::Group(p)) if p == path)
+            }
+        };
+        same_row && col_kind == Some(kind)
+    }
+
+    /// The grid row an editor sits on: its line's first painted row, or
+    /// its grouping row by path.
+    fn editor_grid_row(&self, on: &EditOn) -> Option<usize> {
+        match on {
+            EditOn::Line(line) => self.model.grid_row_of(*line),
+            EditOn::Group(path) => self.group_row(path),
+        }
     }
 
     /// Close the editor with `MOVED`: its commit no longer means what the
@@ -2560,7 +2603,7 @@ impl PricerTile {
     fn commit_date(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.id.0;
         let Some(Editor::Date {
-            line,
+            on,
             col,
             kind,
             field,
@@ -2572,7 +2615,7 @@ impl PricerTile {
         else {
             return;
         };
-        let (line, col, kind) = (*line, *col, *kind);
+        let (on, col, kind) = (on.clone(), *col, *kind);
         let (initial, typed) = (*initial, *typed);
         let finished = field.complete_pending();
         *paint = DateFieldPaint::of(field, id);
@@ -2584,23 +2627,26 @@ impl PricerTile {
             cx.notify();
             return;
         }
-        // A live selection takes a changed or typed date to every target
-        // line. The opening date untyped writes nothing: filled across the
-        // targets it would replace their expiries (a tenor's with today)
-        // from a no-op gesture.
-        if self.selection.is_some() {
+        // A live selection, or a grouping row, takes a changed or typed
+        // date to every target line. The opening date untyped writes
+        // nothing: filled across the targets it would replace their
+        // expiries (a tenor's with today) from a no-op gesture.
+        if self.selection.is_some() || matches!(on, EditOn::Group(_)) {
             if date == initial && !typed {
                 self.close_ending_selection(window, cx);
                 return;
             }
             let text = date.format("%Y-%m-%d").to_string();
-            if !self.cursor_on_editor(line, kind) {
+            if !self.cursor_on_editor(&on, kind) {
                 self.refuse_moved(window, cx);
             } else if self.commit_selection(&text, Some(date), cx) {
                 self.close_ending_selection(window, cx);
             }
             return;
         }
+        let EditOn::Line(line) = on else {
+            return;
+        };
         let Some(row) = self.editor_row(line, col, kind, window, cx) else {
             return;
         };
@@ -2813,8 +2859,8 @@ impl PricerTile {
     /// and the typeahead's prepared rows.
     fn sync_editor(&mut self, cx: &mut Context<Self>) {
         let paint = self.editor.as_ref().and_then(|e| {
-            let (line, col, _) = e.target();
-            let row = self.model.grid_row_of(line)?;
+            let (on, col, _) = e.target();
+            let row = self.editor_grid_row(&on)?;
             let (field, choice) = match e {
                 Editor::Choice { list, input, .. } => (
                     EditorField::Text(input.clone()),
@@ -5451,23 +5497,32 @@ impl PricerTile {
         self.refresh_row_drag(cx);
     }
 
-    /// Keep an open editor attached to its LineId and ColumnKind across rebuilds.
+    /// Keep an open editor attached to its row (a LineId, or a grouping
+    /// row's path) and ColumnKind across rebuilds.
     /// Update its plan index and the cursor column together. If either target leaves
     /// the visible grid or plan, close the editor and show MOVED, or
     /// SCOPE_DROPPED_EDIT when the frame's scope hid its line.
     fn follow_editor(&mut self, cx: &mut Context<Self>) {
-        let Some(editor) = self.editor.as_mut() else {
+        let Some(editor) = self.editor.as_ref() else {
             return;
         };
-        let (line, _, kind) = editor.target();
+        let (on, _, kind) = editor.target();
         let col = self.plan.columns.iter().position(|c| c.def.kind == kind);
-        match col.filter(|_| self.model.grid_row_of(line).is_some()) {
+        match col.filter(|_| self.editor_grid_row(&on).is_some()) {
             Some(c) => {
-                editor.set_col(c);
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.set_col(c);
+                }
                 self.cursor.col = c;
             }
             None => {
-                let why = match self.sheet.index_of(line) {
+                // A grouping row whose path no longer paints (a regroup,
+                // its lines all leaving it) has nothing to say beyond that.
+                let line = match on {
+                    EditOn::Line(line) => self.sheet.index_of(line),
+                    EditOn::Group(_) => None,
+                };
+                let why = match line {
                     Some(r) if !self.visibility.is_shown(r) => SCOPE_DROPPED_EDIT,
                     Some(r) if col.is_some() && self.under_closed_group(r) => REGROUPED_EDIT,
                     _ => MOVED,
@@ -5670,10 +5725,39 @@ impl PricerTile {
     }
 
     /// The painted grouping row whose path is `path`.
-    fn group_row(&self, path: &[Option<String>]) -> Option<usize> {
+    pub(crate) fn group_row(&self, path: &[Option<String>]) -> Option<usize> {
         self.model
             .trees()
             .position(|r| r.path.map(Vec::as_slice) == Some(path))
+    }
+
+    /// The rollup's group node at `path`, painted or not.
+    pub(crate) fn group_node(&self, path: &[Option<String>]) -> Option<usize> {
+        self.rollup
+            .nodes
+            .iter()
+            .position(|n| matches!(n.kind, NodeKind::Group { .. }) && n.path == path)
+    }
+
+    /// The shown lines the grouping row at `path` stands for, through
+    /// nested and closed subgroups, in sheet order; none when no group
+    /// has that path. The rollup places only shown lines, so a line the
+    /// scope hides is never among them.
+    pub(crate) fn group_lines(&self, path: &[Option<String>]) -> Vec<usize> {
+        self.group_node(path)
+            .map(|n| rollup::legs_under(&self.rollup, n))
+            .unwrap_or_default()
+    }
+
+    /// The path of the group `depth` levels deep that holds sheet row
+    /// `row` now: where an edit of a grouped column moved it.
+    pub(crate) fn group_holding(&self, row: usize, depth: usize) -> Option<Path> {
+        let node = self
+            .rollup
+            .nodes
+            .iter()
+            .find(|n| n.kind == NodeKind::Leaf { row })?;
+        (node.path.len() >= depth).then(|| node.path[..depth].to_vec())
     }
 
     /// A selection anchor's row: `row_at` without its group fallback — an
@@ -6048,8 +6132,8 @@ impl PricerTile {
 
     /// The `(grid row, plan column)` the open editor sits on.
     fn editor_cell(&self) -> Option<(usize, usize)> {
-        let (line, col, _) = self.editor.as_ref()?.target();
-        Some((self.model.grid_row_of(line)?, col))
+        let (on, col, _) = self.editor.as_ref()?.target();
+        Some((self.editor_grid_row(&on)?, col))
     }
 
     /// Every mouse selection gesture lands here and goes through the same
@@ -6233,22 +6317,14 @@ impl PricerTile {
                 let Some(at) = line else {
                     return;
                 };
-                // A group row has no editable cell: a double-click
-                // anywhere on it is `space`, as on a blotter row.
-                let group = matches!(at, At::Group(_));
                 // Before the tree-column return: this press's `SelectCell`
                 // moved the cursor to the row that slid up.
                 self.cursor.at = Some(at);
                 self.sync_cursor(cx);
-                if group {
-                    self.tree_verb(None, cx);
-                    self.rebuild_chrome();
-                    cx.notify();
-                    return;
-                }
                 let Some(c) = SheetDelegate::plan_col(*col) else {
-                    // A package row's tree cell (its name) is `space` on
-                    // it. Only a package's own row: `tree_verb` takes a
+                    // A package or grouping row's tree cell (its name) is
+                    // `space` on it; its value cells edit, as a line's do.
+                    // Only a package's own row: `tree_verb` takes a
                     // leg to its parent, and a leg's name must not
                     // collapse the package it sits in. Not when the first
                     // press was this line's chevron: that already toggled
@@ -6259,7 +6335,7 @@ impl PricerTile {
                     if !chevron_toggled
                         && matches!(
                             self.cursor_row().and_then(|g| self.model.kind(g)),
-                            Some(GridRowKind::Package { .. })
+                            Some(GridRowKind::Package { .. } | GridRowKind::Group { .. })
                         )
                     {
                         self.tree_verb(None, cx);
@@ -9240,32 +9316,43 @@ pub(crate) mod tests {
         );
     }
 
-    /// A double-click anywhere on a group row is `space` on it, as on a
-    /// blotter row: a group row has no editable cell, so the edit route a
-    /// line's double-click takes would only refuse.
+    /// A double-click on a group row's tree cell (its label) is `space` on
+    /// it, as on a package's name; on one of its value cells it opens the
+    /// editor there, which writes the group's lines.
     #[gpui::test]
-    fn a_double_click_on_a_group_row_toggles_it(cx: &mut gpui::TestAppContext) {
+    fn a_double_click_on_a_group_rows_label_toggles_it_and_a_value_cell_edits(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let (h, mut vcx) = open_seeded(cx, &["SPX Z26 5000 C", "NDX Z26 4000 P"]);
         h.command(&mut vcx, "group underlying_ref").unwrap();
         h.draw(&mut vcx);
         assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "groups start closed");
-        for sel in ["pricer-cell-1-3", "pricer-cell-1-0"] {
-            click(&mut vcx, sel, 1);
-            click(&mut vcx, sel, 2);
-            assert_eq!(
-                h.tree(&vcx),
-                ["NDX", "SPX", "SPX Z26 5000 C"],
-                "{sel}: a double-click opens the group"
-            );
-            assert!(
-                h.tile.read_with(&vcx, |t, _| t.editor.is_none()),
-                "{sel}: no editor opens on a group row"
-            );
-            assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1), "{sel}");
-            click(&mut vcx, sel, 1);
-            click(&mut vcx, sel, 2);
-            assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "{sel}: and closes it again");
-        }
+        let label = "pricer-cell-1-0";
+        click(&mut vcx, label, 1);
+        click(&mut vcx, label, 2);
+        assert_eq!(
+            h.tree(&vcx),
+            ["NDX", "SPX", "SPX Z26 5000 C"],
+            "a double-click on the label opens the group"
+        );
+        assert!(
+            h.tile.read_with(&vcx, |t, _| t.editor.is_none()),
+            "no editor opens on the label"
+        );
+        assert_eq!(h.cursor(&vcx).map(|c| c.0), Some(1));
+        click(&mut vcx, label, 1);
+        click(&mut vcx, label, 2);
+        assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "and closes it again");
+        let value = "pricer-cell-1-3";
+        click(&mut vcx, value, 1);
+        click(&mut vcx, value, 2);
+        assert_eq!(h.tree(&vcx), ["NDX", "SPX"], "a value cell toggles nothing");
+        assert_eq!(
+            h.tile
+                .read_with(&vcx, |t, _| t.editor.as_ref().map(|e| e.target().0)),
+            Some(EditOn::Group(vec![Some("SPX".into())])),
+            "the editor opens on the group row"
+        );
     }
 
     /// A double-click on a package row's tree cell (its name, beside the

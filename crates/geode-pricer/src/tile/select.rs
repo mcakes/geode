@@ -8,8 +8,8 @@ use super::*;
 use crate::core::cell::READ_ONLY;
 use crate::core::package::{self, package_qty};
 use crate::core::select::{
-    NOT_CONTIGUOUS, Skip, Skips, group_plan, lines_of, move_plan, risk_totals_visible, set_notice,
-    step_notice, top_most,
+    NOT_CONTIGUOUS, Skip, Skips, Targets, group_plan, move_plan, risk_totals_visible, set_notice,
+    step_notice, targets, top_most,
 };
 use crate::core::sheet::OwnShifts;
 use geode_core::grid::selection::Lost;
@@ -33,6 +33,17 @@ fn first_refusal(reasons: impl Iterator<Item = Option<&'static str>>) -> Option<
         out = out.or(Some(why));
     }
     out
+}
+
+/// What a bulk edit writes ([`PricerTile::edit_targets`]).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EditTargets {
+    pub(crate) targets: Targets,
+    /// The plan columns it writes.
+    pub(crate) cols: Vec<usize>,
+    /// Lines the scope hides that an edited grouping row would hold:
+    /// never written, counted as skipped in each column's notice.
+    pub(crate) hidden: usize,
 }
 
 /// The refusal for `v`/`V` with no row or column under the cursor: an
@@ -215,12 +226,13 @@ impl PricerTile {
 
     /// Why the selection is read-only, if it is: it holds a package row
     /// that is split ([`SPLIT`]) or that the scope partly hides
-    /// ([`PARTLY_HIDDEN`]). A grouping row, open or closed, has no line of
-    /// its own and is passed over: an edit writes only the line rows the
-    /// selection paints, never the lines a closed group hides. A selected
-    /// package stands for every leg (`lines_of`), those another node
-    /// paints or the scope hides too, so a bulk write through it would
-    /// reach legs its row does not show: the whole write refuses.
+    /// ([`PARTLY_HIDDEN`]). A selected package stands for every leg
+    /// (`lines_of`), those another node paints or the scope hides too, so
+    /// a bulk write through it would reach legs its row does not show: the
+    /// whole write refuses. A grouping row, open or closed, never refuses:
+    /// it stands for the shown lines beneath it ([`Self::edit_targets`]),
+    /// and a package it holds only part of is skipped by a quantity, not
+    /// refused whole.
     pub(crate) fn selection_read_only(&self) -> Option<&'static str> {
         first_refusal(
             self.selected_sheet_rows()
@@ -253,39 +265,79 @@ impl PricerTile {
         top_most(&self.sheet, &rows)
     }
 
-    /// What a bulk edit reaches: the selected rows' leaf lines (a package
-    /// stands for its legs) and the plan columns — the cursor's alone
-    /// under `V`, whose columns span every column including read-only
-    /// ones, and the block's under `v`. A typed commit writes the
-    /// cursor's column alone under both; see [`Self::commit_selection`].
-    pub(crate) fn selection_targets(&self) -> (Vec<usize>, Vec<usize>) {
-        let Some(r) = &self.resolved else {
-            return (Vec::new(), Vec::new());
+    /// The one door that answers what a bulk edit (a typed commit or a
+    /// live step) writes. Under a live selection: the selected rows' leaf
+    /// lines (a package stands for its legs) together with the shown lines
+    /// each selected grouping row stands for, each line once, and the plan
+    /// columns — the cursor's alone under `V`, whose columns span every
+    /// column including read-only ones, and the block's under `v`. With
+    /// no selection and the cursor on a grouping row: that group's shown
+    /// lines, in the cursor's column. Otherwise `None`: a single line's
+    /// edit is the editor's own path. A typed commit writes the cursor's
+    /// column alone in every case; see [`Self::commit_selection`].
+    pub(crate) fn edit_targets(&self) -> Option<EditTargets> {
+        let (direct, groups, cols) = if self.selection.is_some() {
+            let Some(r) = &self.resolved else {
+                return Some(EditTargets::default());
+            };
+            let groups: Vec<Path> = r
+                .rows
+                .clone()
+                .filter_map(|g| self.model.path(g).cloned())
+                .collect();
+            let cols = match r.kind {
+                SelectKind::Rows => vec![self.cursor.col],
+                SelectKind::Block => r.cols.clone().collect(),
+            };
+            (self.selected_sheet_rows(), groups, cols)
+        } else if self.cursor_on_group() {
+            let Some(At::Group(path)) = &self.cursor.at else {
+                return None;
+            };
+            (Vec::new(), vec![path.clone()], vec![self.cursor.col])
+        } else {
+            return None;
         };
-        let lines = lines_of(&self.sheet, &self.selected_sheet_rows());
-        let cols = match r.kind {
-            SelectKind::Rows => vec![self.cursor.col],
-            SelectKind::Block => r.cols.clone().collect(),
-        };
-        (lines, cols)
+        let grouped: Vec<usize> = groups.iter().flat_map(|p| self.group_lines(p)).collect();
+        let hidden = rollup::hidden_under(
+            &self.sheet,
+            &self.visibility,
+            &self.chain,
+            &self.shared.dims.borrow(),
+            self.clock,
+            &groups,
+        )
+        .len();
+        Some(EditTargets {
+            targets: targets(&self.sheet, &direct, &grouped),
+            cols,
+            hidden,
+        })
     }
 
-    /// A typed value committed over a live selection: every selected
-    /// line's cell in the cursor's column that takes it is written, as ONE
-    /// undo entry; the rest are skipped and counted in the notice. Answers
-    /// whether the editor closes — it stays open when no cell accepts the
-    /// value or the sheet refuses the batch, and then nothing was written.
-    /// `date` is the date field's value, which an expiry cell takes as a
-    /// date rather than as text.
+    /// A typed value committed over [`Self::edit_targets`] — a live
+    /// selection's, or a grouping row's lines: every target line's cell in
+    /// the cursor's column that takes it is written, as ONE undo entry;
+    /// the rest are skipped and counted in the notice, with the lines the
+    /// scope hides from an edited group. Answers whether the editor closes
+    /// — it stays open when no cell accepts the value or the sheet refuses
+    /// the batch, and then nothing was written. `date` is the date field's
+    /// value, which an expiry cell takes as a date rather than as text.
     ///
     /// The column is the cursor's under `v` too: one absolute text parsed
     /// into several column grammars (qty 5 and strike 5, a type option in
     /// the underlying) would be a plausible wrong value. Each cell is
     /// judged on its own line's instrument, never on the cursor cell's.
     ///
-    /// A selected package's quantity scales its legs by the template's
-    /// weights: the per-leg path would write the bare typed number to
-    /// every leg, turning a -5/+5 spread into -5/-5.
+    /// A quantity sets each root ([`Targets`]): a selected package, or one
+    /// a grouping row holds whole, scales its legs by the template's
+    /// weights — the per-leg path would write the bare typed number to
+    /// every leg, turning a -5/+5 spread into -5/-5; a package a group
+    /// holds only part of is skipped and counted refused.
+    ///
+    /// Re-tagging a grouping row's lines (its own grouped column, or an
+    /// enclosing group's) moves them out of its path: the cursor follows
+    /// them to the group row they now sit under at the same depth.
     pub(crate) fn commit_selection(
         &mut self,
         text: &str,
@@ -305,7 +357,12 @@ impl PricerTile {
             cx.notify();
             return false;
         }
-        let (mut lines, _) = self.selection_targets();
+        let Some(EditTargets {
+            targets: t, hidden, ..
+        }) = self.edit_targets()
+        else {
+            return false;
+        };
         let Some(planned) = self.plan.columns.get(self.cursor.col) else {
             return false;
         };
@@ -317,14 +374,14 @@ impl PricerTile {
         let mut edits = Vec::new();
         let mut set = 0usize;
         let mut skips = Skips::default();
-        if kind == ColumnKind::Qty && editable {
-            let packages: Vec<usize> = top_most(&self.sheet, &self.selected_sheet_rows())
-                .into_iter()
-                .filter(|&r| self.sheet.is_package(r))
-                .collect();
-            for pkg in packages {
+        // The first line given the value: where the cursor follows a
+        // grouping row whose lines a grouped column's edit moved.
+        let mut first_set: Option<usize> = None;
+        // A quantity sets each root: a package through its weights, a
+        // bare line (or a leg selected on its own row) to the number.
+        let lines = if kind == ColumnKind::Qty && editable {
+            for &pkg in &t.packages {
                 let legs = self.sheet.children(pkg);
-                lines.retain(|l| !legs.contains(l));
                 // In list form the legs no longer fit the template, so there
                 // are no weights, and one typed number would land on every
                 // leg unscaled: refused, none of its legs written.
@@ -334,13 +391,22 @@ impl PricerTile {
                 }
                 match package::commit(&self.sheet, pkg, kind, &format, text) {
                     Ok(es) => {
-                        set += legs.filter(|&l| self.sheet.is_line(l)).count();
+                        set += legs.clone().filter(|&l| self.sheet.is_line(l)).count();
+                        first_set = first_set.or(legs.clone().next());
                         edits.extend(es);
                     }
                     Err(_) => skips.add(Skip::Refused),
                 }
             }
-        }
+            // A package a group holds only part of: one number through its
+            // weights would rescale legs the group does not show.
+            for _ in &t.split {
+                skips.add(Skip::Refused);
+            }
+            t.qty_lines
+        } else {
+            t.lines
+        };
         for &line in &lines {
             if !editable {
                 skips.add(Skip::ReadOnly);
@@ -362,6 +428,7 @@ impl PricerTile {
                 Ok(Some(edit)) => {
                     edits.push(edit);
                     set += 1;
+                    first_set = first_set.or(Some(line));
                 }
                 // Already that value: it counts as set, with no edit.
                 Ok(None) => set += 1,
@@ -369,14 +436,30 @@ impl PricerTile {
                 Err(_) => skips.add(Skip::Refused),
             }
         }
+        for _ in 0..hidden {
+            skips.add(Skip::Hidden);
+        }
         if set == 0 {
+            let whose = if self.selection.is_some() {
+                "selected"
+            } else {
+                "grouped"
+            };
             self.footer =
-                Some(format!("no selected cell accepts '{text}'{}", skips.describe()).into());
+                Some(format!("no {whose} cell accepts '{text}'{}", skips.describe()).into());
             self.sync_editor(cx);
             self.rebuild_chrome();
             cx.notify();
             return false;
         }
+        // A grouping row the cursor rests on, and the line it follows
+        // should the edit move every line out of it (a grouped column).
+        let follow = match &self.cursor.at {
+            Some(At::Group(path)) if self.cursor_on_group() => {
+                first_set.map(|row| (path.clone(), self.sheet.id(row)))
+            }
+            _ => None,
+        };
         // Every edit is a `Set*` on its own line, so no edit shifts
         // another's row index; one batch makes one undo entry and a
         // refusal rolls the whole batch back. Defensive: every edit was
@@ -391,6 +474,20 @@ impl PricerTile {
             self.rebuild_chrome();
             cx.notify();
             return false;
+        }
+        // Re-tagged lines leave their group's path; the cursor lands on
+        // the group row they moved into at the same depth (an existing
+        // group they merged with, perhaps), not on whatever row the
+        // rebuild's fallback found.
+        if let Some((path, id)) = follow
+            && self.group_row(&path).is_none()
+            && let Some(dest) = self
+                .sheet
+                .index_of(id)
+                .and_then(|row| self.group_holding(row, path.len()))
+        {
+            self.cursor.at = Some(At::Group(dest));
+            self.sync_cursor(cx);
         }
         self.notice = Some(set_notice(set, &skips).into());
         self.rebuild_chrome();
@@ -698,26 +795,29 @@ impl PricerTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<()> {
-        // A delivery that lost the anchor cleared the selection under the
-        // open editor: there are no targets, and the field is one cell's.
-        self.selection.as_ref()?;
-        let (line, kind, input, seeded) = match &self.editor {
+        let (on, kind, input, seeded) = match &self.editor {
             Some(Editor::Text {
-                line,
+                on,
                 kind,
                 input,
                 bulk: Some(b),
                 ..
-            }) => (*line, *kind, input.clone(), b.seeded.clone()),
+            }) => (on.clone(), *kind, input.clone(), b.seeded.clone()),
             _ => return None,
         };
+        // A delivery that lost the anchor cleared the selection under an
+        // open line editor: there are no targets, and the field is one
+        // cell's. A grouping row's editor targets its own lines.
+        if self.selection.is_none() && !matches!(on, EditOn::Group(_)) {
+            return None;
+        }
         if input.read(cx).value().as_ref() != seeded || !steppable(kind) {
             return None;
         }
         // The editor's cell is the one the trader watches: steps taken
         // while the cursor sits elsewhere would move every target with no
         // sign of it in the field.
-        if !self.cursor_on_editor(line, kind) {
+        if !self.cursor_on_editor(&on, kind) {
             return None;
         }
         // Refused here rather than answered `None`: the single-field
@@ -729,8 +829,11 @@ impl PricerTile {
             cx.notify();
             return Some(());
         }
-        let (lines, cols) = self.selection_targets();
-        let top = top_most(&self.sheet, &self.selected_sheet_rows());
+        let EditTargets {
+            targets: t,
+            cols,
+            hidden,
+        } = self.edit_targets()?;
         let mut edits: Vec<Edit> = Vec::new();
         // Each stepped line's instrument and own shifts as this press has
         // left them so far. `SetInstrument` and `SetShift` rewrite the whole
@@ -749,11 +852,22 @@ impl PricerTile {
                 planned.def.editable,
                 planned.format.clone(),
             );
-            let mut col_lines = lines.clone();
+            for _ in 0..hidden {
+                skips.add(Skip::Hidden);
+            }
+            let col_lines = if ckind == ColumnKind::Qty && editable {
+                &t.qty_lines
+            } else {
+                &t.lines
+            };
             if ckind == ColumnKind::Qty && editable {
-                for &pkg in top.iter().filter(|&&r| self.sheet.is_package(r)) {
+                // A package a group holds only part of has no weights to
+                // step the shown legs by alone.
+                for _ in &t.split {
+                    skips.add(Skip::Refused);
+                }
+                for &pkg in &t.packages {
                     let legs = self.sheet.children(pkg);
-                    col_lines.retain(|l| !legs.contains(l));
                     // In list form the legs no longer fit the template, so
                     // there are no weights to step them by.
                     if package_qty(&self.sheet, pkg).is_none() {
@@ -777,7 +891,7 @@ impl PricerTile {
                     }
                 }
             }
-            for &l in &col_lines {
+            for &l in col_lines {
                 if !editable {
                     skips.add(Skip::ReadOnly);
                     continue;
@@ -903,10 +1017,24 @@ impl PricerTile {
         bulk.after.extend(after);
         let total = bulk.steps;
         self.after_edit(cx);
-        // The field follows its own cell: the step moved it too.
-        let reseed = self.sheet.index_of(line).and_then(|row| {
-            let format = &self.plan.columns.get(self.cursor.col)?.format;
-            match cell::editor_for(&self.sheet, row, kind, format) {
+        // The field follows its own cell: the step moved it too. A
+        // grouping row's cell is the value its lines share, still empty
+        // where they differ.
+        let reseed = self.plan.columns.get(self.cursor.col).and_then(|planned| {
+            let format = &planned.format;
+            let opened = match &on {
+                EditOn::Line(line) => {
+                    let row = self.sheet.index_of(*line)?;
+                    cell::editor_for(&self.sheet, row, kind, format)
+                }
+                EditOn::Group(path) => crate::core::select::group_editor(
+                    &self.sheet,
+                    &self.group_lines(path),
+                    kind,
+                    format,
+                ),
+            };
+            match opened {
                 Ok(CellEditor::Text(t)) => Some(t),
                 _ => None,
             }
