@@ -1291,11 +1291,13 @@ fn a_qty_step_under_a_qty_grouping_keeps_its_lines(cx: &mut gpui::TestAppContext
     goto_column(&h, &mut vcx, "qty");
     let before = line_texts(&h, &vcx);
     h.dispatch(&mut vcx, "edit", None);
-    h.dispatch(&mut vcx, "insert_up", Some(3));
+    // Five presses carry the lines from 1 past the leg's 5 group: their
+    // group now paints third, where escape's fallback row would land on 5.
+    h.dispatch(&mut vcx, "insert_up", Some(5));
     assert_eq!(h.footer(&vcx), None);
     assert!(editor_open(&h, &vcx));
-    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("stepped 2 cells +3"));
-    assert_eq!((qty(&h, &vcx, 0), qty(&h, &vcx, 1)), (4, 4));
+    assert_eq!(edit_notice(&h, &vcx).as_deref(), Some("stepped 2 cells +5"));
+    assert_eq!((qty(&h, &vcx, 0), qty(&h, &vcx, 1)), (6, 6));
     assert_eq!(leg_qtys(&h, &vcx, 2), [-5, 5], "the CS untouched");
     let home = h.tile.read_with(&vcx, |t, _| t.group_holding(0, 1));
     h.dispatch(&mut vcx, "cancel", None);
