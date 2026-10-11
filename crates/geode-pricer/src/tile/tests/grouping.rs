@@ -1135,17 +1135,30 @@ fn a_group_row_edit_leaves_a_scope_hidden_line_and_counts_it(cx: &mut gpui::Test
 /// row rather than falling back to a neighbour.
 #[gpui::test]
 fn a_group_row_retag_lands_the_cursor_on_the_merged_group(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open_seeded(cx, &STRIKES);
+    let (h, mut vcx) = open_seeded(
+        cx,
+        &[
+            "SPX Z26 3000 P",
+            "SPX Z26 4000 P",
+            "SPX Z26 5000 C",
+            "SPX Z26 5000 P",
+        ],
+    );
     h.command(&mut vcx, "group strike").unwrap();
-    assert_eq!(h.tree(&vcx), ["4000", "5000"]);
+    assert_eq!(h.tree(&vcx), ["3000", "4000", "5000"]);
     cursor_to(&h, &mut vcx, "5000");
     goto_column(&h, &mut vcx, "strike");
     h.dispatch(&mut vcx, "edit", None);
     assert_eq!(editor_text(&h, &vcx).as_deref(), Some("5000"));
-    set_editor(&h, &mut vcx, "4000");
+    set_editor(&h, &mut vcx, "3000");
     h.dispatch(&mut vcx, "commit", None);
-    assert_eq!(h.tree(&vcx), ["4000"], "merged into the existing group");
-    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("4000"));
+    assert_eq!(
+        h.tree(&vcx),
+        ["3000", "4000"],
+        "merged into the existing group"
+    );
+    // The row the cursor last sat on (2) would fall back to 4000.
+    assert_eq!(cursor_text(&h, &vcx).as_deref(), Some("3000"));
 }
 
 /// An enclosing group's column edited on a nested group row moves its
@@ -1202,9 +1215,11 @@ fn a_group_row_editor_opens_on_its_lines_shared_value(cx: &mut gpui::TestAppCont
         Some(""),
         "mixed seeds empty"
     );
-    // An untouched enter on the empty seed writes nothing.
+    // An untouched enter on the empty seed writes nothing: no edit, no
+    // notice, no undo entry.
     h.dispatch(&mut vcx, "commit", None);
     assert_eq!(h.mode(&mut vcx), "normal");
+    assert_eq!(edit_notice(&h, &vcx), None, "nothing counted as set");
     assert!(!h.tile.read_with(&vcx, |t, _| t.undo.can_undo()));
 }
 

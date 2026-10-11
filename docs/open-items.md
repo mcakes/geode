@@ -403,8 +403,12 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   chip, unscoped chip and tooltip, refusal notice, `· N of M legs`, hidden-landing
   footer.
 - Grouping and sort: group-row grounds, sort arrow after a header click, the icon
-  beside labels at Large font, rows reordering live, group-row double-click, find
-  highlight color.
+  beside labels at Large font, rows reordering live, group-row double-click (label
+  toggles, value cell edits), find highlight color.
+- Group-row edit: the editor, typeahead and date field painted on a group row's
+  cell over its ground; the empty seed on a `mixed` cell; a live step on a closed
+  group repainting its folded cells; the cursor landing on the merged group after
+  a re-tag; the `hidden` count in the notice.
 - Selection: tint over package ground, footer position-risk totals, held
   `shift+up` repaint and reprice, shift+click/drag, click inside the editor, the
   entry-bar shift press, light and dark.
