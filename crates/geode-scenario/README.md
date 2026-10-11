@@ -52,8 +52,10 @@ yet: a tile asks for no data and paints an empty table.
   yank as TSV, `c` currency without a requery, `p` paint, `m` diff, `.`
   menu, and the shell's grid motions with counts), the `:` commands
   (`filter`, `unscoped`, `asof`, `scale`; frame-wide verbs refused by
-  name), notices and the session record. `escape` peels one layer per
-  press (selection, refusal, standing notice) and is unhandled with none.
+  name), notices and the session record. `escape` clears the selection
+  and a live refusal (every verb clears the refusal); with neither it
+  dismisses the standing notice, and with nothing to clear it is
+  unhandled. Motions and presses scroll the cursor cell into view.
   `tile/data.rs` holds the read chain's entry points, `tile/menu.rs` the
   `.` menu (open and close only so far).
 - `header.rs`: the shared header strip (title and readout; mode, links,

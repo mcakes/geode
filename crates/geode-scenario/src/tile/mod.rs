@@ -74,6 +74,18 @@ pub(crate) fn clock(cx: &App) -> Clock {
         .unwrap_or_else(|| Clock::machine().0)
 }
 
+/// Keep the cursor cell in view after it moved: a motion past the viewport
+/// would otherwise leave it, and the footer's readout, off screen.
+fn scroll_to_cursor(
+    t: &mut TableState<ScenarioDelegate>,
+    cx: &mut Context<TableState<ScenarioDelegate>>,
+) {
+    if let Some((row, col)) = t.delegate().table_cursor() {
+        t.scroll_to_row(row, cx);
+        t.scroll_to_col(col, cx);
+    }
+}
+
 impl ScenarioTile {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -219,6 +231,7 @@ impl ScenarioTile {
             self.refusal = None;
             self.table.update(cx, |t, cx| {
                 t.delegate_mut().apply_motion(m);
+                scroll_to_cursor(t, cx);
                 cx.notify();
             });
             cx.notify();
@@ -287,8 +300,10 @@ impl ScenarioTile {
                 }
             }
             "escape" => {
-                // Peel one layer: the selection, then the refusal, then the
-                // reported notices; with none, the key is not handled.
+                // Every verb takes the refusal, so one press clears the
+                // selection and a live refusal together; with neither, it
+                // dismisses the reported notices; with nothing at all to
+                // clear, the key is not handled.
                 let had_selection = self.table.update(cx, |t, cx| {
                     let had = t.delegate().selection.is_some();
                     if had {
@@ -362,6 +377,7 @@ impl ScenarioTile {
                 // Focus only: the shell's press route moves it.
                 CellPointer::Context { .. } => return,
             }
+            scroll_to_cursor(t, cx);
             cx.notify();
         });
         cx.notify();

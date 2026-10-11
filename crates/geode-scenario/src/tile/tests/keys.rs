@@ -99,6 +99,37 @@ fn grid_motions_move_the_cursor_cell_and_counts_multiply(cx: &mut gpui::TestAppC
     assert_eq!(h.delegate(&vcx, |d| d.cursor), (0, 0));
 }
 
+/// A motion past the viewport scrolls the cursor cell into view, so the
+/// cursor (and the footer's readout of it) never leaves the screen.
+#[gpui::test]
+#[ignore = "needs the read chain's show_picture"]
+fn a_motion_past_the_viewport_scrolls_the_cursor_into_view(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.show_picture(&mut vcx);
+    // Short enough that the last data row starts out of view.
+    vcx.simulate_resize(gpui::size(gpui::px(320.0), gpui::px(64.0)));
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let visible = |vcx: &gpui::VisualTestContext| {
+        h.tile
+            .read_with(vcx, |t, cx| t.table.read(cx).visible_range().rows().clone())
+    };
+    assert!(!visible(&vcx).contains(&3), "{:?}", visible(&vcx));
+    vcx.simulate_keystrokes("shift-g");
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(h.delegate(&vcx, |d| d.cursor.0), 3);
+    assert!(visible(&vcx).contains(&3), "{:?}", visible(&vcx));
+    assert!(
+        h.tile
+            .read_with(&vcx, |t, cx| t.cursor_readout(cx))
+            .is_some_and(|r| !r.ends_with("· —")),
+        "the readout reads the cursor cell"
+    );
+}
+
 #[gpui::test]
 fn c_toggles_currency_without_a_requery_and_refuses_without_a_twin(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open(cx);
@@ -139,9 +170,10 @@ fn p_cycles_heat_and_plain_and_m_refuses_without_a_diff(cx: &mut gpui::TestAppCo
     assert!(!l.state(&vcx2).diff);
 }
 
-/// `escape` peels one layer per press, the selection before the refusal,
-/// and reports each peel as handled; with nothing to peel it is not
-/// handled, so the shell's own `escape` runs.
+/// `escape` clears the selection, or a live refusal (every verb takes
+/// it, so a selection and a refusal clear together), and reports each as
+/// handled; with nothing to clear it is not handled, so the shell's own
+/// `escape` runs.
 #[gpui::test]
 fn escape_peels_the_selection_then_the_refusal_then_reports_unhandled(
     cx: &mut gpui::TestAppContext,

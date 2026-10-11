@@ -9,7 +9,7 @@ use crate::core::pivot::{Head, Pivot};
 use crate::core::prepare::{self, CellColor, Inputs, Layout, Palette, PreparedCell};
 use crate::core::readout::head_text;
 use geode_core::colour::scale::Diverging;
-use geode_core::colour::{Anchors, NamedColours, Tokens};
+use geode_core::colour::{Anchors, NamedColours, Rgb, Tokens};
 use geode_core::grid::selection::{self, Accumulator, Resolved, SelectKind, Selection, describe};
 use geode_core::view::Scale;
 use geode_shell::colfit::{FitMetrics, FittedWidths};
@@ -412,23 +412,33 @@ impl ScenarioDelegate {
             .unwrap_or_default()
     }
 
-    fn text_color(&mut self, cell: &PreparedCell, theme: &Theme) -> Hsla {
-        match &cell.color {
+    /// A cell's text color: a fixed one as prepared, a named one resolved
+    /// against the live theme (`foreground` when the name is undefined) and
+    /// made readable over the cell's `fill`.
+    fn text_color(&mut self, color: &CellColor, fill: Option<Rgb>, foreground: Hsla) -> Hsla {
+        match color {
             CellColor::Fixed(rgb) => to_hsla(*rgb),
             CellColor::Named { name, sign } => {
                 let Some(inputs) = &self.theme else {
-                    return theme.foreground;
+                    return foreground;
                 };
                 let resolved = self
                     .named
                     .get(&self.colours, name, &inputs.anchors, &inputs.tokens);
-                let hsla = resolved.map_or(theme.foreground, |r| r.for_sign(*sign));
-                match cell.fill {
+                let hsla = resolved.map_or(foreground, |r| r.for_sign(*sign));
+                match fill {
                     Some(fill) => to_hsla(Diverging::text_over(fill, to_rgb(hsla))),
                     None => hsla,
                 }
             }
         }
+    }
+
+    /// The cursor in table coordinates (the label column is column 0), or
+    /// `None` while there are no data cells to stand on.
+    pub fn table_cursor(&self) -> Option<(usize, usize)> {
+        (self.layout.data_rows > 0 && self.layout.data_cols > 0)
+            .then_some((self.cursor.0, self.cursor.1 + 1))
     }
 
     fn wire_pointer(el: Div, cx: &Context<TableState<Self>>, row: usize, col: usize) -> Div {
@@ -590,7 +600,7 @@ impl TableDelegate for ScenarioDelegate {
         _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        let theme = cx.theme().clone();
+        let theme = cx.theme();
         let data = self.layout.data_col(col_ix).map(|c| (row_ix, c));
         let at_cursor = data == Some(self.cursor) && !self.layout.is_sigma_row(row_ix);
         let in_block = data.is_some_and(|(r, c)| {
@@ -598,15 +608,21 @@ impl TableDelegate for ScenarioDelegate {
                 .as_ref()
                 .is_some_and(|s| s.kind == SelectKind::Block && s.contains(r, c))
         });
-        let cell = self.cache.get(row_ix, col_ix).cloned();
-        let (text, fill, color) = match &cell {
+        // Copied out of the cache (Arc clones, no allocation) so a named
+        // color can resolve through `&mut self`.
+        let (text, fill, color) = match self.cache.get(row_ix, col_ix) {
             Some(c) => (
-                SharedString::from(c.text.to_string()),
-                c.fill.map(to_hsla),
-                self.text_color(c, &theme),
+                SharedString::from(c.text.clone()),
+                c.fill,
+                Some(c.color.clone()),
             ),
-            None => (SharedString::default(), None, theme.foreground),
+            None => (SharedString::default(), None, None),
         };
+        let color = match &color {
+            Some(color) => self.text_color(color, fill, theme.foreground),
+            None => theme.foreground,
+        };
+        let fill = fill.map(to_hsla);
         let el = div()
             .size_full()
             .flex()
@@ -620,7 +636,7 @@ impl TableDelegate for ScenarioDelegate {
             .debug_selector(move || format!("scenario-cell-{row_ix}-{col_ix}"))
             .when_some(fill, |el, fill| el.bg(fill))
             .text_color(color)
-            .when(in_block, |el| el.child(selection_tint(&theme)))
+            .when(in_block, |el| el.child(selection_tint(theme)))
             // The cursor cell: a border in the table's active-border color,
             // never a fill, so the heat fill shows through it.
             .when(at_cursor, |el| {
@@ -708,6 +724,16 @@ mod tests {
         d.set_picture(None);
         assert_eq!(d.cursor, (0, 0));
         assert_eq!(d.layout.cols(), 1, "the label column alone");
+    }
+
+    /// The scroll target is the cursor's table cell (past the label
+    /// column), and there is none to scroll to without data cells.
+    #[test]
+    fn the_table_cursor_is_offset_past_the_label_column() {
+        assert_eq!(ladder().table_cursor(), None);
+        let mut d = with_layout(ladder(), 3, 2);
+        d.cursor = (2, 1);
+        assert_eq!(d.table_cursor(), Some((2, 2)));
     }
 
     #[test]
