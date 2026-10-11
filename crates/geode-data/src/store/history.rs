@@ -23,6 +23,7 @@ use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::query::{HistoryRow, HistoryTable, KeySet, Span, normalize_key};
 use geode_core::schema::{ColumnSpec, ColumnType, DatasetSpec};
+use std::collections::{HashMap, HashSet};
 
 pub const STAGING_TABLE: &str = "staging_history";
 
@@ -253,54 +254,167 @@ pub fn missing_by_key(
         .collect()
 }
 
-/// Whether the cache can answer an as-of `t` for every asked tuple: each
-/// names every key column (an exact tuple, or a prefix of full arity), `t`
-/// lies inside a merged coverage span `[a, b)` of it, and a stored
-/// observation of that tuple has `a <= ts <= t`. Coverage alone is not enough: a span can hold `t` while
+/// The asked tuples the cache cannot answer `At(t)` for. A tuple is
+/// answerable when it names every key column, `t` lies inside one of its
+/// merged coverage spans `[a, b)` (rows recorded for it or for a prefix of
+/// it, trailing NULLs), and the cache holds a row of that exact tuple with
+/// `a <= ts <= t`. Coverage alone is not enough: a span can hold `t` while
 /// the tuple's last observation at or before `t` lies before the span, never
-/// fetched; and a tuple naming fewer key columns names members the cache
-/// cannot enumerate, so one missing member would be invisible. Either way a
-/// stale or missing member would be answered as current, so any such tuple
-/// makes this false.
+/// fetched, and answering from the cache would serve a stale value as
+/// current.
+///
+/// A tuple naming fewer (or more) key columns than the key never answers
+/// locally: a prefix names members the cache cannot enumerate, so one
+/// missing member would be invisible. One such tuple makes every asked tuple
+/// uncovered, returned as asked with repeats removed. Otherwise the result
+/// is normalized, in asked order, repeats removed.
+///
+/// Two statements whatever the tuple count: every coverage row that applies
+/// to any asked tuple, then every covered tuple's last observation at or
+/// before `t`.
+pub fn uncovered_at(
+    conn: &Connection,
+    ds: &DatasetSpec,
+    asked: &[Vec<String>],
+    t: DateTime<Utc>,
+) -> Result<Vec<Vec<String>>, StoreError> {
+    let keys = ds.history_key();
+    if asked.iter().any(|tuple| tuple.len() != keys.len()) {
+        let mut all: Vec<Vec<String>> = Vec::with_capacity(asked.len());
+        for tuple in asked {
+            if !all.contains(tuple) {
+                all.push(tuple.clone());
+            }
+        }
+        return Ok(all);
+    }
+    let mut tuples: Vec<Vec<String>> = Vec::with_capacity(asked.len());
+    let mut seen: HashSet<Vec<String>> = HashSet::with_capacity(asked.len());
+    for tuple in asked {
+        let normalized: Vec<String> = normalized_tuple(&keys, tuple, "asked")?
+            .into_iter()
+            .flatten()
+            .collect();
+        if seen.insert(normalized.clone()) {
+            tuples.push(normalized);
+        }
+    }
+    if tuples.is_empty() {
+        return Ok(tuples);
+    }
+    let n = keys.len();
+    let key_list = joined(&keys, |c| quote(&c.name), ", ");
+    // Key columns read back in the spelling `normalized_tuple` produces, so
+    // a stored key compares equal to the asked one.
+    let read_key = |r: &duckdb::Row, i: usize| -> duckdb::Result<Option<String>> {
+        match keys[i].ty {
+            ColumnType::F64 => r
+                .get::<_, Option<f64>>(i)
+                .map(|f| f.map(|f| format!("{f}"))),
+            _ => r.get::<_, Option<String>>(i),
+        }
+    };
+    // 1) Every coverage row that applies to an asked tuple: equal to it, or
+    //    a prefix of it (trailing NULLs), the predicate `covered_spans` uses
+    //    for a full-arity tuple.
+    let one = joined(
+        &keys,
+        |c| {
+            let (col, ty) = (quote(&c.name), c.ty.sql());
+            format!("({col} = CAST(? AS {ty}) OR {col} IS NULL)")
+        },
+        " AND ",
+    );
+    let predicate = vec![format!("({one})"); tuples.len()].join(" OR ");
+    let select = format!(
+        "select {key_list}, epoch_us(from_ts), epoch_us(to_ts) from {} where {predicate}",
+        history_coverage_table(&ds.name)
+    );
+    let params: Vec<Value> = tuples.iter().flatten().cloned().map(Value::Text).collect();
+    let mut stmt = conn.prepare(&select).map_err(sql_err(&select))?;
+    let rows: Vec<(Vec<Option<String>>, i64, i64)> = stmt
+        .query_map(duckdb::params_from_iter(params), |r| {
+            let key = (0..n)
+                .map(|i| read_key(r, i))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((key, r.get(n)?, r.get(n + 1)?))
+        })
+        .map_err(sql_err(&select))?
+        .collect::<Result<_, _>>()
+        .map_err(sql_err(&select))?;
+    // Per tuple: the merged spans of the rows that apply to it, and the
+    // start of the one holding `t`.
+    let mut uncovered: Vec<Vec<String>> = Vec::new();
+    let mut starts: Vec<(&Vec<String>, DateTime<Utc>)> = Vec::with_capacity(tuples.len());
+    for tuple in &tuples {
+        let mut spans: Vec<CoverSpan> = rows
+            .iter()
+            .filter(|(key, _, _)| {
+                key.iter()
+                    .zip(tuple)
+                    .all(|(k, v)| k.as_ref().is_none_or(|k| k == v))
+            })
+            .map(|&(_, from, to)| (from_micros(from), from_micros(to)))
+            .collect();
+        merge_spans(&mut spans);
+        match spans.iter().find(|(a, b)| *a <= t && t < *b) {
+            Some(&(a, _)) => starts.push((tuple, a)),
+            None => uncovered.push(tuple.clone()), // no span of this tuple holds t
+        }
+    }
+    if !starts.is_empty() {
+        // 2) Every covered tuple's last observation at or before t.
+        let exact = joined(
+            &keys,
+            |c| format!("{} = CAST(? AS {})", quote(&c.name), c.ty.sql()),
+            " AND ",
+        );
+        let predicate = vec![format!("({exact})"); starts.len()].join(" OR ");
+        let latest = format!(
+            "select {key_list}, max(epoch_us(ts)) from {} \
+             where ({predicate}) and epoch_us(ts) <= ? group by {key_list}",
+            history_table(&ds.name)
+        );
+        let mut params: Vec<Value> = starts
+            .iter()
+            .flat_map(|(tuple, _)| tuple.iter().cloned().map(Value::Text))
+            .collect();
+        params.push(Value::BigInt(micros(t)));
+        let mut stmt = conn.prepare(&latest).map_err(sql_err(&latest))?;
+        let observed: HashMap<Vec<String>, i64> = stmt
+            .query_map(duckdb::params_from_iter(params), |r| {
+                let key = (0..n)
+                    .map(|i| read_key(r, i).map(Option::unwrap_or_default))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok((key, r.get(n)?))
+            })
+            .map_err(sql_err(&latest))?
+            .collect::<Result<_, _>>()
+            .map_err(sql_err(&latest))?;
+        for (tuple, a) in &starts {
+            let answered = observed
+                .get_key_value(*tuple)
+                .is_some_and(|(_, last)| from_micros(*last) >= *a); // a row at or before t, inside the span
+            if !answered {
+                uncovered.push((*tuple).clone());
+            }
+        }
+        // Asked order, for a stable call shape.
+        uncovered.sort_by_key(|u| tuples.iter().position(|t| t == u));
+    }
+    Ok(uncovered)
+}
+
+/// Whether the cache can answer `At(t)` for every asked tuple:
+/// `uncovered_at` names none. A tuple of the wrong arity makes this
+/// `Ok(false)`, never an error.
 pub fn covers_instant(
     conn: &Connection,
     ds: &DatasetSpec,
     asked: &[Vec<String>],
     t: DateTime<Utc>,
 ) -> Result<bool, StoreError> {
-    let keys = ds.history_key();
-    let key_match = joined(
-        &keys,
-        |c| format!("{} = CAST(? AS {})", quote(&c.name), c.ty.sql()),
-        " AND ",
-    );
-    let sql = format!(
-        "select count(*) > 0 from {} where {key_match} \
-         and epoch_us(ts) >= ? and epoch_us(ts) <= ?",
-        history_table(&ds.name)
-    );
-    for tuple in asked {
-        if tuple.len() != keys.len() {
-            return Ok(false);
-        }
-        let held = covered_spans(conn, ds, tuple)?;
-        let Some(&(a, _)) = held.iter().find(|(a, b)| *a <= t && t < *b) else {
-            return Ok(false);
-        };
-        let mut params: Vec<Value> = normalized_tuple(&keys, tuple, "asked")?
-            .into_iter()
-            .flatten()
-            .map(Value::Text)
-            .collect();
-        params.extend([Value::BigInt(micros(a)), Value::BigInt(micros(t))]);
-        let observed: bool = conn
-            .query_row(&sql, duckdb::params_from_iter(params), |r| r.get(0))
-            .map_err(sql_err(&sql))?;
-        if !observed {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    Ok(uncovered_at(conn, ds, asked, t)?.is_empty())
 }
 
 /// Live read of the cached rows for `keys` under `span`: the greatest
@@ -1600,6 +1714,114 @@ mod tests {
         assert!(
             covers_instant(w, &ds, &[exact("SPX")], t).unwrap(),
             "the exact tuple under it is held"
+        );
+    }
+
+    #[test]
+    fn uncovered_at_names_the_tuples_the_cache_cannot_answer() {
+        let (_d, store, ds) = seeded();
+        // SPX covered over its rows; NDX covered from the 6th, after its only row.
+        let week = ("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z");
+        cover(
+            &store,
+            &ds,
+            &["SPX", "3M", "0.5"],
+            week,
+            "2026-01-10T00:00:00Z",
+        );
+        cover(
+            &store,
+            &ds,
+            &["NDX", "3M", "0.5"],
+            ("2026-01-06T00:00:00Z", "2026-01-10T00:00:00Z"),
+            "2026-01-10T00:00:00Z",
+        );
+        let conn = store.writer();
+        let spx = exact("SPX");
+        let ndx = exact("NDX");
+        let at = ts("2026-01-08T12:00:00Z");
+        assert_eq!(
+            uncovered_at(conn, &ds, std::slice::from_ref(&spx), at).unwrap(),
+            Vec::<Vec<String>>::new(),
+            "SPX has a row at or before t inside its span"
+        );
+        assert_eq!(
+            uncovered_at(conn, &ds, std::slice::from_ref(&ndx), at).unwrap(),
+            vec![ndx.clone()],
+            "NDX is covered but its only row lies before the span"
+        );
+        assert_eq!(
+            uncovered_at(conn, &ds, &[ndx.clone(), spx.clone()], at).unwrap(),
+            vec![ndx.clone()],
+            "only the tuple that cannot be answered"
+        );
+        let sx5e = exact("SX5E");
+        assert_eq!(
+            uncovered_at(
+                conn,
+                &ds,
+                &[sx5e.clone(), spx.clone(), ndx.clone(), sx5e.clone()],
+                at
+            )
+            .unwrap(),
+            vec![sx5e.clone(), ndx.clone()],
+            "asked order, an uncovered tuple once however often asked"
+        );
+        assert!(
+            !covers_instant(conn, &ds, &[spx.clone(), ndx], at).unwrap(),
+            "every tuple, not any"
+        );
+        assert!(
+            covers_instant(conn, &ds, &[spx.clone(), spx], at).unwrap(),
+            "a repeated tuple is one tuple"
+        );
+    }
+
+    #[test]
+    fn covers_instant_reads_a_prefix_coverage_row_for_an_exact_tuple() {
+        let (_d, store, ds) = seeded();
+        cover(
+            &store,
+            &ds,
+            &["SPX"],
+            ("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z"),
+            "2026-01-10T00:00:00Z",
+        );
+        let conn = store.writer();
+        let spx = exact("SPX");
+        let spx25 = vec!["SPX".to_string(), "3M".into(), "0.25".into()];
+        let at = ts("2026-01-08T12:00:00Z");
+        assert!(covers_instant(conn, &ds, &[spx, spx25], at).unwrap());
+        assert_eq!(
+            uncovered_at(conn, &ds, &[exact("NDX")], at).unwrap(),
+            vec![exact("NDX")],
+            "another member's prefix row does not cover it"
+        );
+    }
+
+    #[test]
+    fn a_tuple_of_the_wrong_arity_makes_every_asked_tuple_uncovered() {
+        let (_d, store, ds) = seeded();
+        cover(
+            &store,
+            &ds,
+            &["SPX"],
+            ("2026-01-05T00:00:00Z", "2026-01-10T00:00:00Z"),
+            "2026-01-10T00:00:00Z",
+        );
+        let conn = store.writer();
+        let at = ts("2026-01-08T12:00:00Z");
+        let prefix = vec!["SPX".to_string()];
+        let long = vec!["SPX".to_string(), "3M".into(), "0.5".into(), "x".into()];
+        assert!(
+            !covers_instant(conn, &ds, std::slice::from_ref(&prefix), at).unwrap(),
+            "a one-column prefix is Ok(false), never an error"
+        );
+        assert!(!covers_instant(conn, &ds, std::slice::from_ref(&long), at).unwrap());
+        assert_eq!(
+            uncovered_at(conn, &ds, &[exact("SPX"), prefix.clone(), exact("SPX")], at).unwrap(),
+            vec![exact("SPX"), prefix],
+            "every asked tuple, as asked, repeats removed"
         );
     }
 

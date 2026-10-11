@@ -24,7 +24,7 @@ use crate::query::pool::{QueryPool, QueryRequest, RequestKind, ViewId, Work};
 use crate::query::volboard::{BoardPlan, BoardRead, board_pool_key};
 use crate::service::{DataEvent, EventSink};
 use crate::store::StoreError;
-use crate::store::history::{CoverSpan, Covered, covers_instant, missing_by_key};
+use crate::store::history::{CoverSpan, Covered, covers_instant, missing_by_key, uncovered_at};
 use chrono::{DateTime, Utc};
 use geode_core::query::{HistoryOutcome, HistoryParams, KeySet, QueryKey, Span, normalize_key};
 use geode_core::schema::{DatasetSpec, SchemaSpec};
@@ -334,8 +334,9 @@ fn same_kind(like: &KeySet, tuples: Vec<Vec<String>>) -> KeySet {
 ///
 /// - `Latest` always asks the source: only it knows whether a newer
 ///   observation exists.
-/// - `At(t)` reads the cache only when `covers_instant` holds for every
-///   tuple; otherwise one call for every asked tuple.
+/// - `At(t)` reads the cache for every exact tuple it can answer
+///   (`uncovered_at`) and asks the source for the rest in one call; a
+///   prefix ask goes whole, since the cache cannot enumerate its members.
 /// - `Between` is clipped to the dataset's history window first (retention
 ///   would delete what an older span fetched, and the next ask would fetch
 ///   it again forever; a wholly expired span asks nothing) and its end to
@@ -356,13 +357,27 @@ pub(crate) fn plan_calls(
     };
     match span {
         Span::Latest => Ok(vec![call(keys.clone(), span)]),
-        Span::At(t) => {
-            if covers_instant(conn, ds, keys.tuples(), t)? {
-                Ok(Vec::new())
-            } else {
-                Ok(vec![call(keys.clone(), span)])
+        Span::At(t) => match keys {
+            // Each exact tuple the cache can answer is read from it; only
+            // the rest go to the source. An absent tuple (a member the
+            // surface lacks) therefore costs one small call per ask, not a
+            // refetch of the whole set.
+            KeySet::Exact(_) => {
+                let uncovered = uncovered_at(conn, ds, keys.tuples(), t)?;
+                if uncovered.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![call(KeySet::Exact(uncovered), span)])
+                }
             }
-        }
+            KeySet::Prefix(_) => {
+                if covers_instant(conn, ds, keys.tuples(), t)? {
+                    Ok(Vec::new())
+                } else {
+                    Ok(vec![call(keys.clone(), span)])
+                }
+            }
+        },
         Span::Between { from, to, step } => {
             let from = match history_cutoff(ds, now) {
                 Some(cutoff) => from.max(cutoff),
@@ -504,6 +519,88 @@ mod tests {
     /// A fetch time long after every span below, so no clip applies.
     fn settled() -> DateTime<Utc> {
         ts("2027-01-01T00:00:00Z")
+    }
+
+    /// `history_dataset()` with SPX 3M 0.5 rows on Jan 5–7 and both SPX 3M
+    /// 0.5 and NDX 3M 0.5 covered over `[Jan 5, Jan 10)`: NDX has no row.
+    fn covered_store() -> (tempfile::TempDir, crate::store::Store, DatasetSpec) {
+        use crate::store::history::{HistoryAppendRequest, append_history};
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("geode.duckdb")).unwrap();
+        let ds = history_dataset();
+        store.apply_schema(&ds).unwrap();
+        crate::store::catalog::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        let days = [
+            "2026-01-05T21:00:00Z",
+            "2026-01-06T21:00:00Z",
+            "2026-01-07T21:00:00Z",
+        ];
+        let rows = HistoryRows {
+            ts: days.iter().map(|d| ts(d)).collect(),
+            keys: vec![
+                vec!["SPX".into(); 3],
+                vec!["3M".into(); 3],
+                vec!["0.5".into(); 3],
+            ],
+            values: vec![vec![15.0; 3], vec![7650.0; 3]],
+        };
+        let week = (ts("2026-01-05T00:00:00Z"), ts("2026-01-10T00:00:00Z"));
+        append_history(
+            &store,
+            &HistoryAppendRequest {
+                dataset: &ds,
+                source: "hanweck",
+                rows: &rows,
+                covered: vec![
+                    Covered {
+                        asked: exact(&["SPX", "3M", "0.5"]),
+                        span: week,
+                    },
+                    Covered {
+                        asked: exact(&["NDX", "3M", "0.5"]),
+                        span: week,
+                    },
+                ],
+                received_at: ts("2026-01-10T09:00:00Z"),
+            },
+        )
+        .unwrap();
+        (dir, store, ds)
+    }
+
+    #[test]
+    fn an_exact_at_asks_only_the_tuples_coverage_cannot_answer() {
+        let (_d, store, ds) = covered_store();
+        let spx = exact(&["SPX", "3M", "0.5"]);
+        let ndx = exact(&["NDX", "3M", "0.5"]);
+        let at = ts("2026-01-08T12:00:00Z");
+        let plan = |keys: KeySet| {
+            plan_calls(
+                store.writer(),
+                &ds,
+                "surface",
+                &keys,
+                Span::At(at),
+                settled(),
+            )
+            .unwrap()
+        };
+        let calls = plan(KeySet::Exact(vec![spx.clone(), ndx.clone()]));
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(
+            calls[0].keys,
+            KeySet::Exact(vec![ndx.clone()]),
+            "SPX is read from the cache"
+        );
+        assert_eq!(calls[0].span, Span::At(at));
+        assert_eq!(calls[0].table, "surface");
+        assert!(plan(KeySet::Exact(vec![spx])).is_empty());
+        // A prefix ask still goes whole, even where every member under it is held.
+        let prefix = plan(KeySet::Prefix(vec![exact(&["SPX"])]));
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].keys, KeySet::Prefix(vec![exact(&["SPX"])]));
     }
 
     #[test]

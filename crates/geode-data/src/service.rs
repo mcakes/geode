@@ -6083,6 +6083,38 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_member_refetches_only_its_own_tuples() {
+        let (f, calls) = fake(300);
+        let (_dir, service, rx) = board_service(f);
+        let ask = |tag| {
+            board_ask(
+                1,
+                tag,
+                &["SPX", "ZZZ"],
+                vec![Measure::atfm("3M")],
+                vec![Lookback::W1],
+                None,
+            )
+        };
+        service.vol_board(ask(1));
+        board_answer(&rx, 1).result.unwrap();
+        let before = calls.lock().unwrap().len();
+        service.vol_board(ask(2));
+        board_answer(&rx, 2).result.unwrap();
+        let after: Vec<_> = calls.lock().unwrap()[before..].to_vec();
+        let ats: Vec<_> = after
+            .iter()
+            .filter(|c| matches!(c.span, Span::At(_)))
+            .collect();
+        assert_eq!(ats.len(), 1, "one At for the surface: {after:?}");
+        assert_eq!(
+            ats[0].keys,
+            KeySet::Exact(vec![vec!["ZZZ".to_string(), "3M".into(), "0.5".into()]]),
+            "SPX's tuple is served from coverage"
+        );
+    }
+
+    #[test]
     fn a_failing_realized_blanks_its_cells_and_names_itself_once() {
         let (mut f, _calls) = fake(300);
         f.fail_tables = vec!["realized"];
