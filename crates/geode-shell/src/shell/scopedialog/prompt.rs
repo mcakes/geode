@@ -194,7 +194,7 @@ pub(super) fn save_prompt(seed: Option<String>) -> NamePrompt {
     }
 }
 
-/// `s` on Current or Saved: push the save prompt over that screen, or refuse into the dialog's error
+/// `s` on the screen: push the save prompt over it, or refuse into the dialog's error
 /// line when the scope is empty. The caller re-derives and syncs the input.
 pub(super) fn push_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let (empty, seed) = {
@@ -342,7 +342,7 @@ pub(super) fn copy_prompt(row: &super::saved::SavedRow) -> NamePrompt {
 
 /// Write `from`'s definition, as the configuration holds it now, under the
 /// new `name`. A copy never forks: the name must be one no layer holds. The
-/// step leaves for Saved with the cursor on the copy.
+/// step returns to the screen with the cursor on the copy.
 fn copy_definition(
     shell: &mut ShellView,
     name: String,

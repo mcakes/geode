@@ -2385,3 +2385,39 @@ fn leaving_the_text_step_brings_the_saved_cursor_back_into_view(cx: &mut gpui::T
         "{row:?} inside {list:?}"
     );
 }
+
+/// While the filter is live the field owns the keyboard: a press on a
+/// current row or an `add` control would act behind it, so neither moves
+/// the cursor out of the saved group nor opens a step.
+#[gpui::test]
+fn the_current_rows_ignore_the_pointer_while_the_filter_is_live(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("scope-dialog-row-0")
+        .expect("the liq row paints");
+    let add = vcx
+        .debug_bounds("scope-dialog-add-dimensions")
+        .expect("the add control paints");
+    vcx.simulate_keystrokes("/");
+    draw(&mut vcx);
+    super::double_click(&mut vcx, row.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    vcx.simulate_click(add.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope),
+        "no picker opened"
+    );
+    assert_eq!(depth(&shell, &vcx), 1, "no step pushed");
+    assert!(
+        on_saved(&shell, &vcx),
+        "the cursor stays in the saved group"
+    );
+    let mode = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.saved.mode));
+    assert_eq!(mode, Some(crate::dialogmode::DialogMode::Filter));
+}

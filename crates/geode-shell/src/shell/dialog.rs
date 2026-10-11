@@ -579,7 +579,7 @@ pub(crate) fn sync_dialog_text(
             // gives the shell root focus: the field's own bindings
             // (backspace, delete, paste) run before the dialog's key handler
             // could claim them, and would edit the draft behind the
-            // question. Its answer hands focus back. The Saved screen's
+            // question. Its answer hands focus back. The saved group's
             // filter is a mode dialog's: the input mirrors its query and has
             // focus only while filtering.
             let Some(state) = shell.scope_dialog.as_ref() else {

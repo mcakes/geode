@@ -10,8 +10,9 @@
 //! The as-of chip alone uses warning colors. Grouping opens the Grouping
 //! dialog and stays visibly pressed while it is open. Filled selection chips contain
 //! a separate, occluding close target; add/load/save actions are bare
-//! glyphs. The load glyph opens the Scope dialog's Saved screen and, like the grouping
-//! readout, stays pressed while it is open.
+//! glyphs. The load glyph opens the Scope dialog with the cursor on the saved
+//! scopes and, like the grouping readout, stays pressed while the dialog it
+//! opened is up.
 //!
 //! Scope chips show dimensions, named expressions, top-level expression
 //! terms, and any
@@ -509,12 +510,12 @@ pub fn toolbar(
             on_add(window, cx)
         }),
     );
-    // The load glyph opens the Scope dialog's Saved screen
+    // The load glyph opens the Scope dialog on its saved scopes
     // (`frame::scope_saved`). Always painted: loading a saved scope is as
-    // useful on an empty scope as on a full one, and the screen says how to
+    // useful on an empty scope as on a full one, and the dialog says how to
     // save one when none exist. It sits before the conditional save glyph so
     // save appearing never moves it, and it holds its pressed fill while
-    // the Saved screen is up, as the grouping readout does. `FolderOpen` is
+    // the dialog it opened is up, as the grouping readout does. `FolderOpen` is
     // in the default icon bundle.
     verbs = verbs.child(
         verb(

@@ -412,34 +412,38 @@ retains priority for its own Escape behavior.
 
 [`shell/scopedialog`](../../crates/geode-shell/src/shell/scopedialog/)
 shows the lane's scope by ingredient and is where every ingredient is added,
-edited and removed. It is also where saved scopes and saved expressions are
-loaded, saved, edited, copied, deleted and reverted (its [Saved](#saved)
-screen). `frame::scope` ("Scope…", `mod+o`) and the scope bar's `+` open it
-on its Current screen; the `+` holds its pressed fill while the dialog is
-up. Its other doors are listed under [doors](#doors). It edits the dialog's lane (`target_frame`), so in a pinned
-workspace it edits that workspace's copy. Opening it while it is already on
-top does nothing; opening it while it sits lower in the dialog stack is
-refused with a status notice.
+edited and removed. On the same screen, under the scope, it lists the saved
+scopes and saved expressions, which are loaded, saved, edited, copied,
+deleted and reverted there (its [saved sections](#saved)). `frame::scope`
+("Scope…", `mod+o`) and the scope bar's `+` open it with the cursor on the
+first current row; its other doors are listed under [doors](#doors). It
+edits the dialog's lane (`target_frame`), so in a pinned workspace it edits
+that workspace's copy. Opening it while it is already on top does nothing;
+opening it while it sits lower in the dialog stack is refused with a status
+notice.
 
-Current paints three sections in fixed order, each under its header:
-`Dimensions` (one row per dimension selection: the column, its values, then
-how many values are selected), `Expressions` (one row per top-level `and`
+The screen is one list in fixed order: the current group's three sections,
+`DIMENSIONS` (one row per dimension selection: the column, its values, then
+how many values are selected), `EXPRESSIONS` (one row per top-level `and`
 term of the expression, marked `unnamed`, then one row per named reference,
-its name with its definition's text), and `Text` (the text filter in quotes,
-`textual columns`). Every row leads with its kind's glyph in a fixed-width
-muted column: `▦` dimension, `ƒ` term, `≡` reference, `⌕` text. An empty
-section paints one muted row naming the key that fills it:
-`no dimensions · p`, `no expressions · x`, `no text · t`.
+its name with its definition's text) and `TEXT` (the text filter in quotes,
+`textual columns`); then a hairline separator, the filter row, and the saved
+group's two sections, `SAVED SCOPES` and `SAVED EXPRESSIONS`. Every current
+row leads with its kind's glyph in a fixed-width muted column: `▦`
+dimension, `ƒ` term, `≡` reference, `⌕` text. An empty current section
+paints one muted row naming the key that fills it: `no dimensions · p`,
+`no expressions · x`, `no text · t`.
 
-Each section header carries an `add` control at its right, the pointer route
-to the key that fills it (its tooltip names the key): Dimensions opens the
-picker's Columns list as `p` does, Expressions the expression dialog's Add
-mode as `x` does, Text the text step as `t` does. A single press on an empty
-section's muted row opens the same step, since that row has no cursor to
-move. While the text step is open, both ignore the pointer. A reference the
-frame cannot resolve paints in the danger tone with its reason, or with
-`'<name>' is not defined` for a missing name. When the scope records a
-contradiction (`Scope::impossible`), the line `nothing can match —
+Each current section header carries an `add` control at its right, the
+pointer route to the key that fills it (its tooltip names the key):
+Dimensions opens the picker's Columns list as `p` does, Expressions the
+expression dialog's Add mode as `x` does, Text the text step as `t` does. A
+single press on an empty current section's muted row opens the same step,
+since that row has no cursor to move. While the text step is open or the
+filter is live, the current rows and the add controls ignore the pointer. A
+reference the frame cannot resolve paints in the danger tone with its reason,
+or with `'<name>' is not defined` for a missing name. When the scope records
+a contradiction (`Scope::impossible`), the line `nothing can match —
 selections don't overlap` paints above the sections in the danger tone; the
 scope does not record which column contradicted, so the line names none.
 
@@ -452,48 +456,91 @@ scope no longer exists, and nothing for an empty scope.
 
 The rows are prepared when the frame generation or the configuration version
 changes, never during paint, so an edit made elsewhere while the dialog is
-open (a chip's `×`, an undo, a reload that redefines a name) shows at once.
-The cursor follows its row by identity across a refresh; when that row is
-gone it keeps its index, clamped to the last row.
+open (a chip's `×`, an undo, a save, a copy, a reload that redefines a name)
+shows at once. The list is at most sixteen rows tall and scrolls beyond
+that; it follows the cursor whenever the cursor's row or its place in the list
+changes, and a refresh that moves neither leaves a mouse-wheel scroll alone.
+Leaving a step for the screen follows the cursor afresh.
+
+One cursor walks every stop in paint order, wrapping: the current rows, then
+the saved rows and, while no filter is typed, the saved sections' empty rows.
+The current sections' empty rows are not stops. The cursor follows its row
+by identity across a refresh; when that row is gone it keeps its index,
+clamped to its group's last stop. A group with nowhere to rest hands the
+cursor to the other: with the scope empty the cursor starts in the saved
+group (deleting the last current row puts it there too), and returns to the
+first current row once the scope gains one, unless the user has since chosen
+a saved position (a move, `o`, a press, the saved door's landing, entering
+the filter, or a verb on a saved row).
+
+Keys act on the cursor's row by its kind:
+
+| Key | Current row | Saved scope | Saved expression |
+|---|---|---|---|
+| `enter`, a row double-click | Edit the row: a dimension in the picker on its column, a term in the expression dialog's Term mode, a reference in the [definition step](#definition-step), the text in the text step. A reference whose name nothing defines refuses with `that expression no longer exists` | Replace the lane's scope with it (`ShellView::load_saved_scope`, one undoable step) | Add the reference to the lane's scope or remove it, in one undoable edit |
+| `e` | As `enter` | Refuses with `load it, change it, then save over it (s)` | Its [definition](#definition-step) |
+| `d` | Remove the row from the scope in one undoable edit | Delete the user's own definition, after a question | As on a scope |
+| `c` | Refuses with `only a saved scope or expression can be copied` | Copy the definition under a new name | As on a scope |
+| `r` | Refuses with `only a saved scope or expression can be reverted` | Revert the user's copy to the lower layer's, after a question | As on a scope |
+| `i` | On a `≡` row, replace the reference with its definition in one undoable edit | Refuses with `only a named reference can be inlined` | As on a scope |
+| `mod+s` | On a term row, open that term's name entry in the expression dialog | Refuses with `only an unnamed term can be named` | As on a scope |
+| `n` | A new expression's [definition](#definition-step) | Refuses with `narrow the current scope, then save it (s)` | A new expression's definition |
+
+`d` means "remove from where the row lives": the scope for a current row,
+the configuration for a saved one, where it always asks first. The saved
+sections' empty rows take the verbs of their section: on the empty
+`SAVED EXPRESSIONS` row `enter` and `n` open a new definition; on the empty
+`SAVED SCOPES` row `enter` and `n` refuse with
+`narrow the current scope, then save it (s)` and `e` with
+`load it, change it, then save over it (s)`. `c`, `d` and `r` there, and `e`
+on the empty `SAVED EXPRESSIONS` row, do nothing.
+
+Keys that do not depend on the row:
 
 | Key | Effect |
 |---|---|
-| `j` / `k`, `up` / `down` | Move the cursor, wrapping |
-| `enter`, `e`, a row double-click | Edit the cursor's row: a dimension in the picker on its column, a term in the expression dialog's Term mode, a reference in the [definition step](#definition-step), the text in the text step. A reference whose name nothing defines refuses with `that expression no longer exists` |
-| `d` | Remove the cursor's row in one undoable edit |
+| `j` / `k`, `up` / `down` | Move the cursor, wrapping across both groups |
+| `o` | Jump: from a current row to the saved scopes (the lane's `loaded_from` scope when it is listed, else the first), from there to the saved expressions, from there to the first current row (to the saved scopes again when the scope is empty). A saved section the filter emptied leaves the cursor where it is |
 | `shift+d` | Clear the whole scope in one undoable edit |
 | `u` / `ctrl+r` | Undo / redo the lane's scope |
 | `p` | Add a dimension: the picker's Columns list |
 | `x` | Add an expression: the expression dialog's Add mode |
 | `t` | The text step |
-| `i` | On a `≡` row, replace the reference with its definition in one undoable edit |
-| `mod+s` | On a term row, open that term's name entry in the expression dialog |
-| `o` | The [Saved](#saved) screen |
 | `s` | The [save prompt](#save-prompt); an empty scope refuses with `nothing to save — the scope is empty` |
+| `/` | Filter the saved sections |
 | `escape` | Close the dialog |
 
-A single row press moves the cursor; the second press of a double-click acts
-as `enter` (a third press does not open a second step). The footer offers
-`i` only on a `≡` row and `mod+s` only on a term row.
+A single row press moves the cursor; the second press of a double-click
+acts as `enter` (a third press does not act twice). The footer follows the
+cursor's group: on a current row it offers `i` only on a `≡` row and
+`mod+s` only on a term row; on a saved stop it lists the saved verbs, and
+`enter` reads `new expression` on the empty `SAVED EXPRESSIONS` row.
+
+A commit on a saved row (a load or a toggle) depends on the door that opened
+the dialog. Opened by the saved door (the load glyph, `frame::scope_saved`,
+`config::scopes`, `config::expressions`), it closes the dialog. Opened by
+any other door, it stays on the screen: the current sections show the
+result, and the cursor stays on the saved row it committed.
 
 Steps that exist as their own modals (the dimension picker and the
-expression dialog) are pushed over Current. When the step closes, by its
-commit or its own escape, Current is on top again with its rows re-derived.
-The same steps opened on their own (`mod+p`, `mod+x`, a term chip) close on
-commit. The Saved screen, the save prompt and the definition step are drawn
-inside the dialog and follow the same rule: pushed over a screen, their
-commit or escape returns to it; opened by their own door, they close the
-dialog.
+expression dialog) are pushed over the screen. When the step closes, by its
+commit or its own escape, the screen is on top again with its rows
+re-derived. The same steps opened on their own (`mod+p`, `mod+x`, a term
+chip) close on commit. The save prompt, the definition step and the copy and
+name prompts are drawn inside the dialog and follow the same rule: pushed
+over the screen, their commit or escape returns to it; opened by their own
+door, they close the dialog.
 
-The text step is drawn inside the dialog, as a field above the sections,
-seeded with the lane's text. Every non-chord key types, Current's verbs
-included, and the rows under it ignore the pointer. `enter` sets the trimmed
-text, or clears the filter when it is empty, in one undoable edit and returns
-to Current; `escape` returns with nothing changed. `t` while the step is open
-types a `t`.
+The text step is drawn inside the dialog, as a field above the current
+sections, seeded with the lane's text; the saved group is hidden while it is
+up. Every non-chord key types, the screen's verbs included, and the rows
+under it ignore the pointer. `enter` sets the trimmed text, or clears the
+filter when it is empty, in one undoable edit and returns to the screen;
+`escape` returns with nothing changed. `t` while the step is open types a
+`t`.
 
-Refusals paint as one danger line under the sections and change nothing.
-The next key the dialog claims drops it.
+Refusals paint as one danger line under the list and change nothing. The
+next key the dialog claims drops it.
 
 - `only an unnamed term can be named` — `mod+s` off a term row.
 - `only a named reference can be inlined` — `i` off a `≡` row; a reference
@@ -509,53 +556,33 @@ field when it closes.
 
 ### Saved
 
-The Saved screen lists the saved scopes, then the saved expressions, each
+The saved group lists the saved scopes, then the saved expressions, each
 section under its header and in name order. Each header carries what `enter`
-does in its section, `enter replaces the current scope` beside `Scopes` and
-`enter adds to the current scope` beside `Expressions`, because the same key
-means different things in the two. A scope row is its name and a one-line
-summary; an expression row leads with `≡` and is its name and its text in
-monospace, with an `applied` tag when the lane's scope refers to it. An
-expression whose definition does not parse paints its name and its reason in
-the danger tone. A section with no definitions paints one muted row:
+does in its section, `enter replaces the current scope` beside
+`SAVED SCOPES` and `enter adds to the current scope` beside
+`SAVED EXPRESSIONS`, because the same key means different things in the two.
+A scope row is its name and a one-line summary; an expression row leads with
+`≡` and is its name and its text in monospace, with an `applied` tag when the
+lane's scope refers to it. An expression whose definition does not parse
+paints its name and its reason in the danger tone. A section with no
+definitions paints one muted row:
 `no saved scopes · s saves the current one`, or
-`no saved expressions · n names a new one`.
+`no saved expressions · n names a new one`. A single press on the empty
+`SAVED EXPRESSIONS` row opens a new definition, as `n` does there.
 
-The rows derive with Current's, under the frame generation and the
-configuration version, so a save, a copy, a reload or an edit elsewhere shows
-at once; the cursor follows its row by identity, as on Current. While no
-filter is typed, an empty section's row is a cursor stop, so `n` and `enter`
-reach a first expression from the keyboard. Under a filter it is not a stop:
-a filter that matches nothing leaves `enter` nothing to act on.
+`/`, or a press on the filter row, filters the saved rows by name and by
+summary or text; the current sections are never filtered, since they are
+what a saved-row commit changes. The filter decides membership only: the
+sections and their name order hold, and a section the filter empties paints
+its header alone. Under a filter the empty rows are not stops, so a filter
+that matches nothing leaves `enter` nothing to act on. In the filter, every
+key types, verb letters included; arrows move the cursor among the matching
+saved rows. `escape` restores the query held when the filter was entered and
+bare `enter` keeps the typed one; neither loads nor toggles a row.
 
-| Key | Effect |
-|---|---|
-| `j` / `k`, `up` / `down` | Move the cursor, wrapping |
-| `enter`, a row double-click | On a scope, replace the lane's scope with it (`ShellView::load_saved_scope`, one undoable step). On an expression, add the reference to the lane's scope or remove it, in one undoable edit. Either commit leaves Saved |
-| `enter` on an empty row | The empty Expressions row opens a new [definition](#definition-step); the empty Scopes row refuses with `narrow the current scope, then save it (s)` |
-| `e` | On an expression, its [definition](#definition-step); on a scope, refuses with `load it, change it, then save over it (s)` |
-| `n` | A new expression's definition, from anywhere off a scope row; on a scope row or the empty Scopes row, refuses with `narrow the current scope, then save it (s)` |
-| `s` | The [save prompt](#save-prompt), pushed over Saved; its commit or `escape` returns to Saved. An empty scope refuses with `nothing to save — the scope is empty` |
-| `c` | Copy the row's definition under a new name |
-| `d` | Delete the user's own definition, after a question |
-| `r` | Revert the user's copy to the lower layer's, after a question |
-| `/` | Filter |
-| `escape` | Back to Current when Saved was pushed from there, else close |
-
-`/`, or a press on the filter row, filters the rows by name and by summary
-or text. The filter decides membership only: the sections and their name
-order hold. In the filter, `escape` restores the query held when the filter
-was entered and bare `enter` keeps the typed one; neither loads nor toggles
-a row. Arrows move the cursor.
-
-A single row press moves the cursor; the second press of a double-click
-commits the row. A single press on the empty Expressions row opens a new
-definition, as `n` does there. Pushed over Current, Saved paints the title
-row's Back button, which leaves Saved in one click (reverting an open
-filter); opened alone it has none. A scope or expression removed since the
-rows derived refuses with `that saved scope no longer exists` or
-`that expression no longer exists`, and the rows re-derive. Refusals paint as
-one danger line under the rows, as on Current.
+A scope or expression removed since the rows derived refuses with
+`that saved scope no longer exists` or `that expression no longer exists`,
+and the rows re-derive.
 
 `c` opens a name prompt labelled `Copy '<name>' as`, previewing the source's
 summary or text. The copy is written from the definition as the
@@ -565,11 +592,11 @@ forks. The copy lands in the user layer, and the cursor on it.
 
 `d` asks `Delete '<name>' from your config?` with a `Delete` button; for an
 expression, the line under the question names its users (for example
-`Used by EQ liquid and the current scope.`). A delete never rewrites the scopes that name the expression: they show
-it as missing. `r` asks `Throw away your changes to '<name>'?` with a
-`Revert` button; yes removes the user's copy and the lower layer's is in
-force again. Each refuses when the user holds nothing to remove: `d` on an
-inherited row with
+`Used by EQ liquid and the current scope.`). A delete never rewrites the
+scopes that name the expression: they show it as missing. `r` asks
+`Throw away your changes to '<name>'?` with a `Revert` button; yes removes
+the user's copy and the lower layer's is in force again. Each refuses when
+the user holds nothing to remove: `d` on an inherited row with
 `'<name>' comes from the <layer> layer — there is nothing of yours to delete`,
 and `r` without a user copy over a lower one with
 `'<name>' has no changes of yours to revert`. The answer re-checks
@@ -581,19 +608,20 @@ row; after a revert it stays.
 
 A question takes the footer's place and every key until it is answered:
 `y` or `enter` carries it out, `n` or `escape` drops it, and every other key
-is claimed and dropped. Rows, the filter row and Back ignore the pointer
-while it is up. The shared input loses focus under a question, because its
-own bindings (backspace, delete, paste) run before the dialog's key handler
-and would otherwise edit a prompt's draft behind the question; the answer
-gives focus back.
+is claimed and dropped. The rows and the filter row ignore the pointer while
+it is up. The shared input loses focus under a question, because its own
+bindings (backspace, delete, paste) run before the dialog's key handler and
+would otherwise edit a prompt's draft behind the question; the answer gives
+focus back.
 
 ### Save prompt
 
-`s` on Current or Saved, the scope bar's save glyph and
-`scope::save_current` open the save prompt: a field labelled `Save scope as` above Current's rows, which
-preview what is saved and ignore the pointer. It is seeded with the saved
-scope the lane's scope was loaded from (`loaded_from`), so saving a loaded
-scope back over itself is `s` then `enter`. An empty scope refuses at the
+`s` on the screen, the scope bar's save glyph and `scope::save_current` open
+the save prompt: a field labelled `Save scope as` above the current
+sections, which preview what is saved and ignore the pointer; the saved
+group is hidden while it is up, since what the prompt saves is the current
+scope. It is seeded with the saved scope the lane's scope was loaded from
+(`loaded_from`), so saving a loaded scope back over itself is `s` then `enter`. An empty scope refuses at the
 door, and again at the write if it was cleared under the prompt.
 
 `enter` checks the name (`check_object_name`, then the reserved names, which
@@ -613,13 +641,13 @@ the name as the lane's `loaded_from`, so the title reads `from <name>`.
 
 The same field names a copy (above) and a new expression (below). Those
 prompts paint alone, the field over a monospace preview of what they name,
-since Current's rows are not what they write.
+since the current sections are not what they write.
 
 ### Definition step
 
 The definition step edits one saved expression's text in place. `enter`,
-`e` or a double-click on a `≡` row of Current, `e` on an expression in
-Saved, and a `≡` chip's body open it, seeded with the definition's text; an
+`e` or a double-click on a current `≡` row, `e` on a saved expression, and a
+`≡` chip's body open it, seeded with the definition's text; an
 invalid definition opens too, since this is where it gets fixed. Under the
 field, the expression dialog's column and value suggestions show (`tab`
 inserts one), without named-expression rows: one definition never refers to
@@ -639,27 +667,36 @@ inherited. An expression deleted while the step was open refuses with
 `that expression no longer exists` rather than be written back. `escape`
 leaves the step and writes nothing.
 
-`n` in Saved opens the step empty, labelled `New expression`. Its `enter`
+`n` (anywhere but a saved scope or the empty `SAVED SCOPES` row), `enter`
+or a press on the empty `SAVED EXPRESSIONS` row open the step empty,
+labelled `New expression`. Its `enter`
 checks the text the same way, then turns the step into a name prompt
 (`Name this expression`) in its place. A name any layer holds refuses with
 `'<name>' already exists`. The new expression is written and resolved but
-not applied to the lane's scope, and the prompt returns to Saved. `escape`
-from the name prompt also returns to Saved, and discards the typed
+not applied to the lane's scope, and the prompt returns to the screen.
+`escape` from the name prompt also returns to the screen, and discards the typed
 definition: the step it replaced is gone, so the text must be typed again.
 
 ### Doors
 
-| Door | Opens |
-|---|---|
-| `frame::scope` (`mod+o`), the scope bar's `+` | Current |
-| `frame::scope_saved` (unbound), the toolbar's load glyph, `config::scopes`, `config::expressions` | Saved alone; with the dialog on top on Current, Saved is pushed over it, as `o` does |
-| The scope bar's save glyph, `scope::save_current` | The save prompt alone; with the dialog on top on Current or Saved, pushed over that screen, as `s` does there. An empty scope refuses on the status bar and opens nothing |
-| A `≡` chip's body | That expression's definition alone; with the dialog on top on Current or Saved, pushed over it. A name nothing defines refuses on the status bar and opens nothing |
+| Door | Cursor lands on | A saved-row commit |
+|---|---|---|
+| `frame::scope` (`mod+o`), the scope bar's `+` | The first current row (a saved stop when the scope is empty) | Stays open; the current sections show the result |
+| The toolbar's load glyph, `frame::scope_saved` (unbound), `config::scopes` | The lane's `loaded_from` scope when it is listed, else the first saved scope | Closes the dialog |
+| `config::expressions` | The first saved expression | Closes the dialog |
+| The scope bar's save glyph, `scope::save_current` | The save prompt alone. An empty scope refuses on the status bar and opens nothing | — |
+| A `≡` chip's body | That expression's definition alone. A name nothing defines refuses on the status bar and opens nothing | — |
 
-A door that opens a screen or step alone makes it the bottom layer, so its
-commit or `escape` closes the dialog. The load glyph holds its pressed fill
-while Saved is the top layer. With the dialog on top on any other layer (a
-step, or under a question) the Saved, save and definition doors do nothing.
+With the dialog already on top on its screen, a saved door moves the cursor
+to its landing, as `o` does, and keeps the opener the dialog was opened
+with; the save glyph and a `≡` chip push their step over the screen, as `s`
+and `e` do there. A door that opens a step alone makes it the bottom layer,
+so its commit or `escape` closes the dialog. With the dialog on top on a
+step, or under a question, the saved, save and definition doors do nothing.
+
+The scope bar's pressed fills follow the opener: the load glyph holds its
+fill while a dialog a saved door opened is up, and the `+` while a dialog
+any other door opened is up.
 
 ## Dimension picker
 

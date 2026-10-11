@@ -142,7 +142,7 @@ pub(crate) struct ScopeDialogState {
     pub text_draft: String,
     /// The last refusal (an inline that could not resolve, a term that moved).
     pub error: Option<String>,
-    /// The Saved screen's rows, filter and cursor; derived with `rows`
+    /// The saved group's rows, filter and cursor; derived with `rows`
     /// under the same key.
     pub saved: super::saved_view::SavedScreen,
     /// The name being typed while a name prompt is the top layer.
@@ -401,7 +401,9 @@ pub(crate) fn follow_cursor(shell: &mut ShellView) {
         return;
     };
     if !state.on_screen() {
-        // A step's push already cleared `followed`; its return follows.
+        // `push_step` already cleared `followed`; clearing it again is a
+        // deliberate safeguard for a step that reached the top without it,
+        // so the screen's return still follows.
         state.followed = None;
         return;
     }

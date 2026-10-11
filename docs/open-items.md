@@ -31,9 +31,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   slot from the list drops its activation; `restore_ad_hoc(_, false)` bumps the
   grouping generation; a hand-edited session with both a slot and an active ad
   hoc chain drops the slot silently; lead rows are rebuilt eagerly.
-- Scope dialog: the Saved screen's `e`/`d`/`r` have no pointer route (a `⋯`
-  menu would give one). Row ids on Current and Saved are positional.
-  `note_saved_as` is kept after a failed write, and an optimistic refresh survives
+- Scope dialog: a saved row's `e`/`d`/`r` have no pointer route (a `⋯`
+  menu would give one). `note_saved_as` is kept after a failed write, and an optimistic refresh survives
   a rejected merge.
 - Scope dialog: a saved scope deleted mid-session leaves `loaded_from` until
   restart (the title is correct). `mod+s` naming then `escape` takes two escapes
@@ -163,11 +162,17 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   create → Escape returns correctly; back button in the title row.
 - Grouping dialog: rows, badges, hover controls, save prompt, the `* · chain`
   readout.
-- Scope dialog Current: sections, empty rows, add controls, glyphs, counts,
-  title, text field, `+` pressed fill and tooltip, stacked step titles. Saved:
-  sections, notes, applied/broken marks, filter, empty-row stops, save prompt and
+- Scope dialog current sections: empty rows, add controls, glyphs, counts,
+  title, text field, `+` pressed fill and tooltip, stacked step titles. Saved
+  sections: notes, applied/broken marks, filter, empty-row stops, save prompt and
   its question, definition field with suggestions and used-by note, name preview,
   load glyph pressed.
+- Scope dialog one screen: the separator hairline staying 1 px in the scroll
+  list, the `SAVED SCOPES` / `SAVED EXPRESSIONS` headers, the filter row's
+  placement above the saved group, the list's 16-row height and its scrolling
+  (keys and mouse wheel; a refresh must not snap a wheel scroll back), the
+  cursor highlight crossing between the groups, and the load glyph vs `+`
+  pressed fills by opener.
 - Scope expression suggestions: row layout and detail alignment, warning color
   across themes, dialog height as the list changes.
 - Toolbar: mono expression term chips with `×` inset; `≡` named-expression chip

@@ -813,11 +813,13 @@ chips row and the save glyph paint for it.
 
 The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
 paints whatever the scope holds, empty included; a click opens the Scope
-dialog on its [Saved](input-and-dialogs.md#saved) screen, alone
-(`frame::scope_saved`), and the glyph holds its pressed fill while Saved is
-the dialog's top layer. Its tooltip, `Saved scopes and expressions`, names
+dialog (`frame::scope_saved`) with the cursor on its
+[saved scopes](input-and-dialogs.md#saved), on the lane's `loaded_from`
+scope when it is listed, and a load or toggle there closes the dialog, so a
+load by pointer is two clicks. The glyph holds its pressed fill while the
+dialog it opened is up. Its tooltip, `Saved scopes and expressions`, names
 `frame::scope_saved`'s chord once one is bound; it has none by default, and
-from the keyboard Saved is also `o` in the Scope dialog. The save glyph, when
+from the keyboard the saved scopes are also `o` in the Scope dialog. The save glyph, when
 the scope is savable, comes after it, so its appearance never moves the load
 glyph. A click on it opens the Scope dialog's
 [save prompt](input-and-dialogs.md#save-prompt) alone, as
@@ -827,8 +829,10 @@ loaded from.
 The `+` verb opens the [Scope dialog](input-and-dialogs.md#scope-dialog)
 (`frame::scope`, `mod+o`), where every ingredient is added — by key, or by
 pointer through each section header's `add` control or an empty section's
-row — and holds its pressed fill while that dialog is open; its tooltip names `frame::scope`'s
-chord. It paints on an empty scope too, since adding a filter is how a scope
+row — and holds its pressed fill while a Scope dialog no saved door opened
+is up (the save glyph's prompt and a `≡` chip's definition included; the
+saved doors are the load glyph, `frame::scope_saved`, `config::scopes` and
+`config::expressions`); its tooltip names `frame::scope`'s chord. It paints on an empty scope too, since adding a filter is how a scope
 starts. Opened while the scope text field held focus, the dialog hands focus
 back to the field when it closes.
 
