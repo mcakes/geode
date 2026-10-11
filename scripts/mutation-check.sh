@@ -18717,6 +18717,66 @@ run_mutation "scope dialog: add controls under the text step ignore presses" \
   geode-shell \
   add_controls_under_the_text_step_ignore_the_pointer
 
+# The list's handle outlives a close: every opening resets its offset, or
+# the saved door's minimal follow keeps the last visit's offset and hides
+# the current sections above the landing row.
+run_mutation "scope dialog: every opening starts the list at the top" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    view.scope_dialog_scroll.set_offset(gpui::Point::default());' \
+  '' \
+  geode-shell \
+  the_dialog_reopens_at_the_top_after_a_scrolled_visit
+
+# The first current row follows to child 0, so the contradiction line and
+# the first header show with it.
+run_mutation "scope dialog: the first current row follows to the list top" \
+  crates/geode-shell/src/shell/scopedialog/screen.rs \
+  '    if first_current {' \
+  '    if false {' \
+  geode-shell \
+  following_up_to_a_section_start_shows_its_header
+
+# A section's first row brings its header when the header lies above.
+run_mutation "scope dialog: a section's first row follows with its header" \
+  crates/geode-shell/src/shell/scopedialog/screen.rs \
+  '    } else if at.within == 0 && header_above {' \
+  '    } else if false {' \
+  geode-shell \
+  following_up_to_a_section_start_shows_its_header
+
+# A header in view or below scrolls to the row itself: scrolling to such a
+# header would leave the row below the fold.
+run_mutation "scope dialog: a header in view follows the row, not the header" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    header.top() + scroll.offset().y < scroll.bounds().top()' \
+  '    { let _ = header; true }' \
+  geode-shell \
+  the_list_scrolls_to_a_saved_row_below_the_fold
+
+# `o` passes over a target a kept filter emptied instead of stalling.
+run_mutation "scope dialog: o passes over an emptied section" \
+  crates/geode-shell/src/shell/scopedialog/screen.rs \
+  '        if lands(jump) {' \
+  '        if { let _ = &lands; true } {' \
+  geode-shell \
+  o_passes_over_a_section_a_kept_filter_emptied
+
+# The saved footer shows `e` only on an expression row.
+run_mutation "scope dialog: the saved footer hides e off an expression" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if on_expression {' \
+  '    if true {' \
+  geode-shell \
+  the_saved_footer_shows_e_and_n_only_where_they_act
+
+# The empty SAVED EXPRESSIONS row ignores presses while the filter is live.
+run_mutation "scope dialog: the empty expressions row ignores the pointer while filtering" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        .is_some_and(super::view::takes_pointer)' \
+  '        .is_some_and(|s| s.on_screen() && s.pending.is_none())' \
+  geode-shell \
+  the_empty_expressions_row_ignores_the_pointer_while_the_filter_is_live
+
 # A dimension row's value count is prepared when the rows derive.
 run_mutation "scope dialog: a dimension row prepares its count" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
@@ -19069,7 +19129,7 @@ run_mutation "scope dialog: steps hide the saved group" \
 # The list scrolls to the cursor's child.
 run_mutation "scope dialog: the list scrolls to the cursor" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
-  '        shell.scope_dialog_scroll.scroll_to_item(ix);' \
+  '        shell.scope_dialog_scroll.scroll_to_item(target);' \
   '        shell.scope_dialog_scroll.scroll_to_item(0);' \
   geode-shell \
   the_list_scrolls_to_a_saved_row_below_the_fold
