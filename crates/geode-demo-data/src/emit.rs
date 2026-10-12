@@ -307,6 +307,7 @@ const SCENARIO_SOURCE_NAMES: &[(&str, &str)] = &[
     ("atm_vol", "ATMVol"),
     ("skew", "Skew"),
     ("curvature", "Curvature"),
+    ("diva", "Diva"),
     ("rho", "Rho"),
 ];
 
@@ -318,8 +319,12 @@ fn scenario_header(canonical: &str) -> &'static str {
         .unwrap_or_else(|| source_name(canonical))
 }
 
-/// One CSV and sentinel per (dataset, business date, book) under `root`:
-/// `<dataset>_<date>_<book>.csv`. Every measure is followed by its `_USD`
+/// One CSV and sentinel per (table, business date, book) under `root`:
+/// `<dataset>_<date>_<book>.csv` for a dataset's own report, and
+/// `<report>_<book>_<date>.csv` for a second report into it, so a batch
+/// pattern can capture `<report>_<book>` whole: a partition is (dataset,
+/// batch, book), and a second report sharing the first's batch would
+/// replace its rows on every load. Every measure is followed by its `_USD`
 /// twin at the risk emitter's fixed factor. Source times are staggered per
 /// file as the risk emitter does.
 pub fn emit_scenario_directory(
@@ -343,10 +348,11 @@ pub fn emit_scenario_directory(
         // business_date is column 0 and book column 1.
         let mut by_file: BTreeMap<String, Vec<&crate::ScenarioRow>> = BTreeMap::new();
         for r in &table.rows {
-            by_file
-                .entry(format!("{}_{}_{}", table.dataset, r.text[0], r.text[1]))
-                .or_default()
-                .push(r);
+            let stem = match table.report {
+                None => format!("{}_{}_{}", table.dataset, r.text[0], r.text[1]),
+                Some(report) => format!("{report}_{}_{}", r.text[1], r.text[0]),
+            };
+            by_file.entry(stem).or_default().push(r);
         }
         for (stem, rows) in &by_file {
             let csv_path = root.join(format!("{stem}.csv"));

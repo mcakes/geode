@@ -254,7 +254,9 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// service is `demo_positions`, which rewrites the risk CSVs in place.
 /// `refdb` polls the `underlyings` reference table from `demo_refdb` every
 /// 30 s. Each scenario dataset has a `demo_scenario_<dataset>` directory
-/// source over `scenario/` beside `source_dir`, polled every five seconds.
+/// source over `scenario/` beside `source_dir`, polled every five seconds;
+/// `demo_scenario_diva` is a second source into `term_sensitivities` over
+/// the dividend sensitivity report's `diva_*.csv` files.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let scenario_dir = source_dir
         .parent()
@@ -269,6 +271,17 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
             scenario_dir.join(format!("{ds}_*.csv")).to_string_lossy()
         ));
     }
+    // The diva report is a second report into `term_sensitivities`. Its
+    // files are `diva_<book>_<date>.csv` and its batch `diva_<book>`, never
+    // the term source's `<book>`: a partition is (dataset, batch, book), so
+    // a shared batch would let each report's load replace the other's rows.
+    let diva = geode_demo_data::DIVA_REPORT;
+    scenario_sources.push_str(&format!(
+        "[demo_scenario_{diva}]\ndataset = \"term_sensitivities\"\npaths = [{:?}]\n\
+         readiness = \"sentinel\"\npriority = \"latest_other\"\npoll_interval = \"5s\"\n\
+         pending_timeout = \"1m\"\nbatch_pattern = '^(?P<batch>{diva}_.+)_\\d{{4}}-\\d{{2}}-\\d{{2}}$'\n",
+        scenario_dir.join(format!("{diva}_*.csv")).to_string_lossy()
+    ));
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
          readiness = \"sentinel\"\npriority = \"latest_risk\"\npoll_interval = \"2s\"\n\
@@ -520,8 +533,9 @@ mod tests {
         );
         assert_eq!(
             sources.len(),
-            12,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
+            13,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario \
+             sources + the diva report"
         );
     }
 
@@ -553,8 +567,9 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            12,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
+            13,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario \
+             sources + the diva report"
         );
         assert!(sources.iter().any(|s| s.name == "dividend"));
     }
@@ -587,8 +602,9 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            12,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
+            13,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario \
+             sources + the diva report"
         );
         assert!(sources.iter().any(|s| s.name == "opra_sim"));
     }
@@ -631,8 +647,9 @@ mod tests {
         );
         assert_eq!(
             sources.len(),
-            12,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
+            13,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario \
+             sources + the diva report"
         );
         let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
         let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
@@ -741,8 +758,80 @@ mod tests {
         }
         assert_eq!(
             sources.len(),
-            12,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario sources"
+            13,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb + five scenario \
+             sources + the diva report"
+        );
+    }
+
+    /// The diva report feeds `term_sensitivities` from its own source, and
+    /// the same desk batch reads a different batch from the two reports: a
+    /// partition is (dataset, batch, book), so equal batches would let each
+    /// report's load replace the other's rows.
+    #[test]
+    fn the_diva_report_feeds_term_sensitivities_under_its_own_batch() {
+        let (_, sources) = demo_schema_and_sources();
+        let diva = sources
+            .iter()
+            .find(|s| s.name == "demo_scenario_diva")
+            .expect("the diva source");
+        let term = sources
+            .iter()
+            .find(|s| s.name == "demo_scenario_term_sensitivities")
+            .unwrap();
+        assert_eq!(diva.dataset, "term_sensitivities");
+        assert_eq!(diva.paths, ["/tmp/geode-demo/100-42/scenario/diva_*.csv"]);
+        assert_eq!(
+            diva.priority,
+            geode_core::source_config::Priority::LatestOther
+        );
+
+        // Batches of the files the emitter actually writes, for one book.
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 300,
+            seed: SEED,
+            business_dates: 1,
+        });
+        let set = geode_demo_data::generate_scenarios(&batch, 20, SEED);
+        let dir = tempfile::tempdir().unwrap();
+        let files = geode_demo_data::emit_scenario_directory(&set, dir.path()).unwrap();
+        let named = |prefix: &str, book: &str| {
+            files
+                .iter()
+                .map(|f| f.csv_path.clone())
+                .find(|p| {
+                    let n = p.file_name().unwrap().to_string_lossy();
+                    n.starts_with(prefix) && n.contains(book)
+                })
+                .unwrap_or_else(|| panic!("a {prefix} file for {book}"))
+        };
+        let book = &files
+            .iter()
+            .find(|f| {
+                f.csv_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("diva_")
+            })
+            .unwrap()
+            .books[0];
+        let term_file = named("term_sensitivities_", book);
+        let diva_file = named("diva_", book);
+        assert!(
+            !diva_file
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("term_sensitivities_"),
+            "the term source's glob never picks up a diva file"
+        );
+        assert_eq!(term.batch_of(&term_file), *book);
+        assert_eq!(diva.batch_of(&diva_file), format!("diva_{book}"));
+        // A second date keeps the same batch, so it replaces, not adds.
+        assert_eq!(
+            diva.batch_of(Path::new(&format!("diva_{book}_2026-08-25.csv"))),
+            format!("diva_{book}")
         );
     }
 
@@ -797,21 +886,34 @@ mod tests {
         let set = geode_demo_data::generate_scenarios(&batch, 20, SEED);
         let dir = tempfile::tempdir().unwrap();
         geode_demo_data::emit_scenario_directory(&set, dir.path()).unwrap();
-        for ds in geode_demo_data::SCENARIO_DATASETS {
+        // Each dataset's columns against the headers of every report into
+        // it: `term_sensitivities` reads the term and the diva reports.
+        let header_of = |prefix: &str| -> Vec<String> {
             let csv = std::fs::read_dir(dir.path())
                 .unwrap()
                 .map(|e| e.unwrap().path())
                 .find(|p| {
                     let name = p.file_name().unwrap().to_string_lossy();
-                    name.starts_with(&format!("{ds}_")) && name.ends_with(".csv")
+                    name.starts_with(&format!("{prefix}_")) && name.ends_with(".csv")
                 })
-                .unwrap_or_else(|| panic!("a CSV for {ds}"));
+                .unwrap_or_else(|| panic!("a CSV for {prefix}"));
             let text = std::fs::read_to_string(&csv).unwrap();
-            let header: Vec<&str> = text.lines().next().unwrap().split(',').collect();
+            text.lines()
+                .next()
+                .unwrap()
+                .split(',')
+                .map(str::to_string)
+                .collect()
+        };
+        for ds in geode_demo_data::SCENARIO_DATASETS {
+            let mut header = header_of(ds);
+            if ds == "term_sensitivities" {
+                header.extend(header_of(geode_demo_data::DIVA_REPORT));
+            }
             let spec = schema.dataset(ds).unwrap();
             for column in &spec.columns {
                 assert!(
-                    header.contains(&column.source_name()),
+                    header.iter().any(|h| h == column.source_name()),
                     "{ds}.{} reads {:?}, absent from {header:?}",
                     column.name,
                     column.source_name()

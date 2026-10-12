@@ -761,6 +761,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   `geode_tile::following` would serve both.
 - `prepare_chips` (the chips and the scope readout) runs on every
   non-motion verb, whether or not the verb changed what they read.
+- A dataset fed by several reports shows one dataset time; nothing says
+  which report is the old one.
 
 ### Display checks
 
@@ -772,6 +774,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The ladder header (By maturity, spot ladder): each measure's name on the
   row above its unit, right-aligned over the numbers, nothing clipped; a Σ
   total wider than the cells keeps its minus sign.
+- By maturity's fifth column, `diva` (`per 1% div`), in `--demo` after
+  deleting `$TMPDIR/geode-demo/<rows>-42/`: present in every tenor row with
+  its Σ, negative where delta is long, nothing clipped at the default
+  width, and the four term columns unchanged beside it.
 - The `native` chip's warning tone and tooltip over a mixed-currency scope.
 - The base-row highlight on the spot ladder in diff mode, and its
   disappearance under `m`.

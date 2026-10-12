@@ -1,6 +1,8 @@
 //! Scenario batches derived from the risk batch: bucketed vega, a vega spot
-//! ladder, a spot ladder, term sensitivities and rho by curve, for the first
-//! `coverage` distinct (instrument, underlying) rows. Each bucket is a share
+//! ladder, a spot ladder, term sensitivities, rho by curve and the dividend
+//! sensitivity ("diva") report, for the first `coverage` distinct
+//! (instrument, underlying) rows. The diva report is a second report into
+//! `term_sensitivities`, written as its own files under [`DIVA_REPORT`]. Each bucket is a share
 //! of the position's risk measure so Σ over a bucket axis agrees with the
 //! blotter; curves exist only in the instrument's own currency so a scope's
 //! untouched curves stay blank.
@@ -19,7 +21,24 @@ pub const MONEYNESS: [f64; 9] = [70.0, 80.0, 90.0, 95.0, 100.0, 105.0, 110.0, 12
 pub const SPOT_SHIFTS: [f64; 11] = [
     -20.0, -15.0, -10.0, -5.0, -2.0, 0.0, 2.0, 5.0, 10.0, 15.0, 20.0,
 ];
+/// Each tenor's time in years; a bucket's width is its time less the
+/// previous tenor's, so the widths sum to the last tenor's five years.
+pub const TENOR_YEARS: [f64; 10] = [
+    1.0 / 12.0,
+    2.0 / 12.0,
+    0.25,
+    0.5,
+    0.75,
+    1.0,
+    1.5,
+    2.0,
+    3.0,
+    5.0,
+];
 pub const CURVE_TYPES: [&str; 2] = ["OIS", "RFR"];
+/// The file-name prefix of the dividend sensitivity report. Its rows land in
+/// `term_sensitivities` beside the term report's, carrying only `diva`.
+pub const DIVA_REPORT: &str = "diva";
 pub const SCENARIO_DATASETS: [&str; 5] = [
     "vega_buckets",
     "vega_spot_ladder",
@@ -65,6 +84,9 @@ pub struct ScenarioRow {
 #[derive(Debug)]
 pub struct ScenarioTable {
     pub dataset: &'static str,
+    /// `Some(prefix)` for a second report into `dataset`, written as its own
+    /// files with that prefix; `None` for the dataset's own report.
+    pub report: Option<&'static str>,
     /// Canonical column names in emission order (identity, axes, measures).
     pub columns: Vec<&'static str>,
     pub rows: Vec<ScenarioRow>,
@@ -111,12 +133,17 @@ fn f(v: f64) -> String {
     }
 }
 
-/// Derives the five scenario tables from `batch`, seeded and deterministic.
+/// Derives the five scenario tables and the diva report from `batch`,
+/// seeded and deterministic.
 ///
 /// Vega buckets, rho curves and the term table's repo, ATM vol and skew are
 /// unjittered shares of the position's own measure, so Σ over a bucket axis
 /// reproduces the blotter's value; jitter shapes only the vega spot ladder
 /// and the curvature column, which have no blotter total to agree with.
+/// Diva per bucket is `-delta01 × bucket width in years`: higher dividends
+/// lower the forward, so it is opposite in sign to delta and grows with the
+/// bucket's time, and Σ over tenors is `-5 × delta01`. It draws nothing
+/// from the generator, so adding it left every other table unchanged.
 pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> ScenarioSet {
     let mut rng = StdRng::seed_from_u64(seed);
     // The first `coverage` distinct (instrument, underlying) rows in batch order.
@@ -173,6 +200,7 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
     let table =
         |dataset: &'static str, axes: &[&'static str], measures: &[&'static str]| ScenarioTable {
             dataset,
+            report: None,
             columns: IDENTITY
                 .iter()
                 .copied()
@@ -199,6 +227,8 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
         &["tenor", "curve_ccy", "curve_type"],
         &["rho"],
     );
+    let mut diva = table("term_sensitivities", &["tenor"], &["diva"]);
+    diva.report = Some(DIVA_REPORT);
 
     for &i in &rows {
         let id = identity(i);
@@ -243,6 +273,13 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
                     batch.normalized_vega01[i] * 0.2 * tw[t] * jitter[t],
                 ],
             });
+            let width = TENOR_YEARS[t] - if t == 0 { 0.0 } else { TENOR_YEARS[t - 1] };
+            let mut text = id.clone();
+            text.push(tenor.to_string());
+            diva.rows.push(ScenarioRow {
+                text,
+                measures: vec![-batch.delta01[i] * width],
+            });
             for (c, curve) in CURVE_TYPES.iter().enumerate() {
                 let base = if c == 0 {
                     batch.rho_ois010[i]
@@ -276,7 +313,7 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
         }
     }
     ScenarioSet {
-        tables: vec![vega_buckets, vega_spot, spot, term, rho],
+        tables: vec![vega_buckets, vega_spot, spot, term, rho, diva],
     }
 }
 
@@ -294,8 +331,19 @@ mod tests {
         generate_scenarios(&batch, coverage, 42)
     }
 
+    /// The dataset's own report, never a second report into it.
     fn table<'a>(s: &'a ScenarioSet, name: &str) -> &'a ScenarioTable {
-        s.tables.iter().find(|t| t.dataset == name).unwrap()
+        s.tables
+            .iter()
+            .find(|t| t.dataset == name && t.report.is_none())
+            .unwrap()
+    }
+
+    fn diva_table(s: &ScenarioSet) -> &ScenarioTable {
+        s.tables
+            .iter()
+            .find(|t| t.report == Some(DIVA_REPORT))
+            .unwrap()
     }
 
     fn col(t: &ScenarioTable, name: &str) -> usize {
@@ -384,6 +432,75 @@ mod tests {
             "{total} vs {}",
             batch.vega01[i]
         );
+    }
+
+    #[test]
+    fn the_diva_report_is_a_row_per_tenor_carrying_only_identity_tenor_and_diva() {
+        let s = set(5_000, 40);
+        let d = diva_table(&s);
+        assert_eq!(d.dataset, "term_sensitivities");
+        assert_eq!(d.rows.len(), 40 * TENORS.len());
+        let expected: Vec<&str> = IDENTITY.iter().copied().chain(["tenor", "diva"]).collect();
+        assert_eq!(d.columns, expected);
+        assert!(d.rows.iter().all(|r| r.measures.len() == 1));
+        let term = table(&s, "term_sensitivities");
+        assert!(
+            !term.columns.contains(&"diva"),
+            "the term report does not carry diva: {:?}",
+            term.columns
+        );
+    }
+
+    /// Diva is opposite in sign to delta and scales with the bucket's time:
+    /// each bucket is `-delta01 × width`, so a position's buckets sum to
+    /// `-5 × delta01`.
+    #[test]
+    fn diva_opposes_delta_and_scales_with_the_bucket_time() {
+        let batch = generate(&GeneratorConfig {
+            rows: 500,
+            seed: 42,
+            business_dates: 1,
+        });
+        let s = generate_scenarios(&batch, 10, 42);
+        let d = diva_table(&s);
+        let (ci, cu, ct) = (
+            col(d, "instrument_ref"),
+            col(d, "underlying_ref"),
+            col(d, "tenor"),
+        );
+        let mut sums: BTreeMap<(String, String), f64> = BTreeMap::new();
+        for r in &d.rows {
+            *sums
+                .entry((r.text[ci].clone(), r.text[cu].clone()))
+                .or_default() += r.measures[0];
+        }
+        assert_eq!(sums.len(), 10);
+        for ((inst, und), total) in &sums {
+            let i = (0..batch.len())
+                .find(|&i| batch.instrument_ref[i] == *inst && batch.underlying_ref[i] == *und)
+                .unwrap();
+            let delta = batch.delta01[i];
+            assert!(
+                (total + 5.0 * delta).abs() < 1e-9,
+                "{inst}/{und}: {total} vs -5 × {delta}"
+            );
+            for r in d
+                .rows
+                .iter()
+                .filter(|r| r.text[ci] == *inst && r.text[cu] == *und)
+            {
+                let t = TENORS.iter().position(|x| *x == r.text[ct]).unwrap();
+                let width = match t {
+                    0 => TENOR_YEARS[0],
+                    _ => TENOR_YEARS[t] - TENOR_YEARS[t - 1],
+                };
+                assert!(
+                    (r.measures[0] + delta * width).abs() < 1e-12,
+                    "{inst}/{und} at {}",
+                    r.text[ct]
+                );
+            }
+        }
     }
 
     #[test]
@@ -551,5 +668,29 @@ mod tests {
             doc["columns"].as_array().unwrap().len(),
             header.split(',').count()
         );
+
+        // The diva report: its own files, book before date, into the term
+        // dataset, with only the identity, tenor and diva headers.
+        let diva = files
+            .iter()
+            .find(|f| {
+                f.csv_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("diva_")
+            })
+            .expect("a diva file");
+        let name = diva.csv_path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("diva_BK"), "{name}");
+        assert!(name.ends_with("_2026-08-24.csv"), "{name}");
+        let header = std::fs::read_to_string(&diva.csv_path).unwrap();
+        let header: Vec<&str> = header.lines().next().unwrap().split(',').collect();
+        assert_eq!(header[header.len() - 3..], ["Tenor", "Diva", "Diva_USD"]);
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(diva.sentinel_path.as_ref().unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(doc["dataset"], "term_sensitivities");
     }
 }

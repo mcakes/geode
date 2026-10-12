@@ -42,7 +42,9 @@ columns = { measures = [
 diff = { base = 0, measures = ["npv"] }
 paint = "heat"
 
-# Term sensitivities by tenor bucket, each in its own unit.
+# Term sensitivities by tenor bucket, each in its own unit. Two reports feed
+# the dataset: the term report (repo through curvature) and the dividend
+# sensitivity report (diva).
 [by_maturity]
 title = "By maturity"
 dataset = "term_sensitivities"
@@ -52,6 +54,7 @@ columns = { measures = [
   { column = "atm_vol", label = "atm vol", unit = "per vol pt" },
   { column = "skew", unit = "per skew pt" },
   { column = "curvature", unit = "per curv pt" },
+  { column = "diva", unit = "per 1% div" },
 ] }
 paint = "plain"
 

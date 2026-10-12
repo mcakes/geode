@@ -989,7 +989,9 @@ fn handoff_once(world: &World, collector: &mut Proc, marker: &str) -> Sample {
 }
 
 /// The (dataset, batch) of every scenario CSV under `dir`, as the
-/// collector's publish lines name them: `<dataset>_<date>_<batch>.csv`.
+/// collector's publish lines name them: `<dataset>_<date>_<batch>.csv`,
+/// and the diva report's `diva_<book>_<date>.csv` into
+/// `term_sensitivities` under batch `diva_<book>`.
 fn scenario_batches(dir: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -997,6 +999,13 @@ fn scenario_batches(dir: &Path) -> Vec<(String, String)> {
         let Some(stem) = name.strip_suffix(".csv") else {
             continue;
         };
+        let diva = format!("{}_", geode_demo_data::DIVA_REPORT);
+        if stem.starts_with(&diva)
+            && let Some((batch, _date)) = stem.rsplit_once('_')
+        {
+            out.push(("term_sensitivities".to_string(), batch.to_string()));
+            continue;
+        }
         for ds in geode_demo_data::SCENARIO_DATASETS {
             if let Some(rest) = stem.strip_prefix(&format!("{ds}_"))
                 && let Some((_date, batch)) = rest.split_once('_')

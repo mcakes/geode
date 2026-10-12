@@ -253,6 +253,20 @@ declares no measure. Dropping the dataset rather than the column is
 deliberate: a table built without a declared axis would merge its buckets
 under one key, and every sum over it would be plausible and wrong.
 
+Several reports can feed one measures dataset, each from its own directory
+source (the demo's term and diva reports both feed `term_sensitivities`).
+Two rules make that work. Each report's measures are `required = false`,
+because each file carries only its own measures: the others read as NULL
+and a missing required column would degrade every load. Each source's
+`batch_pattern` must yield a batch no other report's file yields for the
+same book, because a partition is (dataset, batch, book) and a load
+replaces its partitions' live rows: two reports under one batch delete
+each other's rows on every load. A query sums each measure over every
+partition, and SQL `sum` skips the other report's NULLs, so neither report
+zeroes or blanks the other's totals. A source still warns once per run for
+its combination of optional columns missing (`optional [...] missing, read
+as NULL`).
+
 The `pricer` declaration marks its nine utf8 dimensions `textual = true`:
 `sheet`, `template`, `underlying_ref`, `expiry`, `option_type`, `currency`,
 `barrier_type`, `priced_at` and `status`. Its keys (`position_ref`,

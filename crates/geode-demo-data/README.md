@@ -17,7 +17,7 @@ for startup, caching, and ingestion ownership.
 | `generate` | Risk structure and measures assigned at position, instrument, underlying, and pair grains. `demo_underlyings` supplies the shared risk/document vocabulary. |
 | `model` | `RiskBatch`, canonical column groups, and typed column access. Each row names an ordered underlying pair for an instrument. |
 | `emit` | CSV header mapping, fixed-factor USD twins, file partitioning, sentinels, and deliberate missing-column and conflict fixtures; `emit_scenario_directory` writes scenario tables. |
-| `scenario` | `generate_scenarios`: five scenario tables (vega buckets, vega spot ladder, spot ladder, term sensitivities, rho curves) derived from a risk batch. |
+| `scenario` | `generate_scenarios`: five scenario tables (vega buckets, vega spot ladder, spot ladder, term sensitivities, rho curves) and the diva report into term sensitivities, derived from a risk batch. |
 | `documents::cvi` | Fixed CVI axes and per-key walks for node parameters, ATM volatility, and skew. |
 | `documents::dividend` | Per-key schedules with repeated dates, stable generated IDs, amount walks, status promotions, and appended rows. |
 | `documents::chain` | `ChainGenerator`: one option-chain document per `(underlying, expiry)`, rotating through twelve monthly expiries per underlying and priced off the latest CVI document through `geode_pricing::DemoVolModel`. |
@@ -68,11 +68,18 @@ Vega buckets, rho curves, and the term table's repo, ATM vol and skew are
 unjittered shares of the row's own risk measure, so a sum over a bucket axis
 reproduces the blotter's value. Seeded jitter shapes only the vega spot
 ladder and curvature. Rho curves exist only in the instrument's currency.
+The diva report (`DIVA_REPORT`) is a sixth table into `term_sensitivities`
+carrying only identity, `tenor` and `diva`: `-delta01 × bucket width in
+years` per tenor (`TENOR_YEARS`), opposite in sign to delta, so a row's
+buckets sum to `-5 × delta01`. It draws nothing from the seeded generator,
+so the other tables are unchanged by it.
 Axis values print without trailing zeros, so the spot ladder's base row is
 `0`.
 
 `emit_scenario_directory` writes `<dataset>_<date>_<book>.csv` with a `.done`
-sentinel naming the dataset. Identity headers use the risk spelling; axis and
+sentinel naming the dataset; a second report into a dataset (diva) writes
+`<report>_<book>_<date>.csv`, so a batch pattern can capture `<report>_<book>`
+whole and its partitions never collide with the dataset's own report. Identity headers use the risk spelling; axis and
 measure headers use `SCENARIO_SOURCE_NAMES`, each measure followed by its
 `_USD` twin at the same fixed factor.
 

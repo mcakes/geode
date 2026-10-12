@@ -1389,3 +1389,234 @@ source_name = "NPV"
         assert!(as_of.is_some());
     }
 }
+
+/// Two reports into one measures dataset: the demo's term report and its
+/// dividend sensitivity (diva) report both land in `term_sensitivities`,
+/// each file carrying only its own measures.
+#[cfg(test)]
+mod several_reports_tests {
+    use super::*;
+    use crate::store::Catalog;
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::schema::SchemaSpec;
+    use geode_demo_data::{EmittedFile, ScenarioSet};
+    use std::collections::BTreeMap;
+
+    const DATASET: &str = "term_sensitivities";
+
+    fn demo_schema() -> SchemaSpec {
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                include_str!("../../../../examples/demo-config/datasets.toml"),
+            )
+            .unwrap()],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema
+    }
+
+    struct World {
+        _db: tempfile::TempDir,
+        _src: tempfile::TempDir,
+        store: Store,
+        schema: SchemaSpec,
+        set: ScenarioSet,
+        /// The term file and the diva file for one book.
+        term: EmittedFile,
+        diva: EmittedFile,
+        book: String,
+    }
+
+    fn world() -> World {
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = Store::open(db.path().join("g.duckdb")).unwrap();
+        let schema = demo_schema();
+        store
+            .apply_schema(schema.dataset(DATASET).unwrap())
+            .unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 500,
+            seed: 42,
+            business_dates: 1,
+        });
+        let set = geode_demo_data::generate_scenarios(&batch, 40, 42);
+        let files = geode_demo_data::emit_scenario_directory(&set, src.path()).unwrap();
+        let named = |prefix: &str| -> Vec<&EmittedFile> {
+            files
+                .iter()
+                .filter(|f| {
+                    f.csv_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(prefix)
+                })
+                .collect()
+        };
+        // A book both reports cover with more than one position.
+        let diva = named("diva_")
+            .into_iter()
+            .max_by_key(|f| f.rows)
+            .unwrap()
+            .clone();
+        let book = diva.books[0].clone();
+        let term = named("term_sensitivities_")
+            .into_iter()
+            .find(|f| f.books == [book.clone()])
+            .unwrap()
+            .clone();
+        assert!(diva.rows > 10, "a book with several positions");
+        World {
+            _db: db,
+            _src: src,
+            store,
+            schema,
+            set,
+            term,
+            diva,
+            book,
+        }
+    }
+
+    fn load(w: &World, file: &EmittedFile, batch: &str) -> LoadOutcome {
+        let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let sentinel = crate::source::parse_sentinel(&text).unwrap();
+        load_file(
+            &w.store,
+            &LoadRequest {
+                dataset: w.schema.dataset(DATASET).unwrap(),
+                dataset_name: DATASET,
+                csv_path: &file.csv_path,
+                sentinel: &sentinel,
+                batch,
+            },
+        )
+        .unwrap()
+    }
+
+    /// Per tenor, the generator's own sum of `measure` over `book`, from
+    /// whichever report into the dataset carries it.
+    fn expected(w: &World, measure: &str) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        for t in w.set.tables.iter().filter(|t| t.dataset == DATASET) {
+            let Some(m) = t.columns.iter().position(|c| *c == measure) else {
+                continue;
+            };
+            let m = m - t.text_columns();
+            let tenor = t.columns.iter().position(|c| *c == "tenor").unwrap();
+            for r in t.rows.iter().filter(|r| r.text[1] == w.book) {
+                *out.entry(r.text[tenor].clone()).or_default() += r.measures[m];
+            }
+        }
+        out
+    }
+
+    /// The By maturity query: grouped by tenor, `repo` and `diva` summed.
+    fn by_tenor(w: &World) -> geode_core::snapshot::Snapshot {
+        let text = "[m]\ndataset = \"term_sensitivities\"\ngrouping = [\"tenor\"]\n\
+                    [[m.columns]]\nname = \"repo\"\nkind = \"measure\"\n\
+                    [[m.columns]]\nname = \"diva\"\nkind = \"measure\"\n";
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
+        let view = geode_core::view::ViewSpec::from_doc(&doc)
+            .0
+            .into_iter()
+            .next()
+            .unwrap();
+        let compiled = crate::query::compile::compile_view(
+            w.store.writer(),
+            &view,
+            &w.schema,
+            &geode_core::scope::Scope::default(),
+            &geode_core::dimensions::DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        crate::query::pool::run_snapshot(
+            w.store.writer(),
+            &compiled,
+            &compiled.grouping,
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn cell(s: &geode_core::snapshot::Snapshot, tenor: Option<&str>, measure: &str) -> Option<f64> {
+        let r = (0..s.rows()).find(|&r| match tenor {
+            Some(t) => s.depth_of_row(r) == Some(1) && s.text_value("tenor", r) == Some(t),
+            None => s.depth_of_row(r) == Some(0),
+        })?;
+        s.f64_value(measure, r)
+    }
+
+    fn close(a: Option<f64>, b: f64) -> bool {
+        // The CSV carries six decimals per row.
+        a.is_some_and(|a| (a - b).abs() < 1e-4 * (1.0 + b.abs()))
+    }
+
+    /// The term and diva files for one book load under their sources'
+    /// distinct batches, neither degraded; both measures survive, and the
+    /// grouped query sums each per tenor and in the Σ (total) row, the other
+    /// report's NULLs neither zeroing nor blanking a sum.
+    #[test]
+    fn a_term_and_a_diva_report_both_survive_and_sum_per_tenor() {
+        let w = world();
+        let term = load(&w, &w.term, &w.book);
+        let diva = load(&w, &w.diva, &format!("diva_{}", w.book));
+        for out in [&term, &diva] {
+            assert_eq!(out.health, Health::Ok, "{out:?}");
+            assert!(out.missing_required.is_empty(), "{out:?}");
+        }
+        assert_eq!(term.missing_optional, ["diva", "diva_usd"]);
+        assert!(diva.missing_optional.contains(&"repo".to_string()));
+
+        let s = by_tenor(&w);
+        let (repo, diva_sums) = (expected(&w, "repo"), expected(&w, "diva"));
+        assert_eq!(repo.len(), 10);
+        assert_eq!(diva_sums.len(), 10);
+        for (tenor, want) in &repo {
+            let got = cell(&s, Some(tenor), "repo");
+            assert!(close(got, *want), "repo at {tenor}: {got:?} vs {want}");
+        }
+        for (tenor, want) in &diva_sums {
+            let got = cell(&s, Some(tenor), "diva");
+            assert!(close(got, *want), "diva at {tenor}: {got:?} vs {want}");
+            assert!(*want != 0.0, "a nonzero expectation at {tenor}");
+        }
+        let (repo_total, diva_total) =
+            (repo.values().sum::<f64>(), diva_sums.values().sum::<f64>());
+        let got = cell(&s, None, "repo");
+        assert!(close(got, repo_total), "Σ repo: {got:?} vs {repo_total}");
+        let got = cell(&s, None, "diva");
+        assert!(close(got, diva_total), "Σ diva: {got:?} vs {diva_total}");
+
+        // The dataset time is the older of the two reports' times.
+        let older = w.term.as_of.clone().min(w.diva.as_of.clone());
+        let as_of = Catalog::new(w.store.writer())
+            .dataset_as_of(DATASET, &[])
+            .unwrap()
+            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        assert_eq!(as_of.as_deref(), Some(older.as_str()));
+    }
+
+    /// Why the batches must differ: a diva file loaded under the term
+    /// report's batch replaces the term rows of that book.
+    #[test]
+    fn a_diva_file_under_the_term_batch_replaces_the_term_rows() {
+        let w = world();
+        assert!(
+            w.diva.as_of > w.term.as_of,
+            "the diva file is newer, so it publishes live rather than to the archive"
+        );
+        load(&w, &w.term, &w.book);
+        load(&w, &w.diva, &w.book);
+        let s = by_tenor(&w);
+        assert_eq!(cell(&s, None, "repo"), None, "the term rows are gone");
+        assert!(cell(&s, None, "diva").is_some());
+    }
+}

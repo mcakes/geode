@@ -1682,6 +1682,14 @@ notice line on the left. On the right is the cursor readout (row, column and
 value, e.g. `1Y × 100 · 254.5`) or, while a selection holds, the aggregates
 strip. Its totals are unsummable down a scenario rows axis.
 
+**Several reports.** A dataset fed by several reports (By maturity's
+`term_sensitivities`: the term report and the diva report) is one dataset
+to the tile. Each report's partitions are separate, so each column sums its
+own report's rows. The dataset time is the oldest of each book's newest
+time per batch, so a lagging report shows, and turns stale, as the older
+time. Any report's publish moves the dataset's generation and requeries.
+The health chip is the worst of the dataset's sources.
+
 **Session.** The tile saves:
 
 - `currency`, `paint` and `scale`;
@@ -1712,6 +1720,8 @@ the record.
 **Limitations.**
 
 - No emission: a scenario tile follows a group but posts no scope.
+- The dataset time does not say which report is old: a lagging diva report
+  and a lagging term report read the same.
 - No `/` find and no sort.
 - `:filter <expr>` and `:asof <time>` have no menu rows.
 - The `…` in-flight mark has no delay threshold, unlike the blotter's.

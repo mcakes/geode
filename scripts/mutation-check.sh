@@ -37640,8 +37640,41 @@ run_mutation "demo scenario: the sources point beside src" \
   '        .map(|p| p.join("scenario"))' \
   '        .map(|p| p.join("src"))' \
   geode-compose the_demo_layer_declares_the_five_scenario_sources
+# The diva report feeds term_sensitivities under batch `diva_<book>`; the
+# term report's `<book>` would let each report's load replace the other's
+# rows (a partition is dataset, batch and book).
+run_mutation "demo scenario: the diva batch differs from the term batch" \
+  crates/geode-compose/src/demo.rs \
+  '(?P<batch>{diva}_.+)_' \
+  '{diva}_(?P<batch>.+)_' \
+  geode-compose the_diva_report_feeds_term_sensitivities_under_its_own_batch
+# Diva opposes delta: higher dividends lower the forward.
+run_mutation "demo scenario: diva opposes delta" \
+  crates/geode-demo-data/src/scenario.rs \
+  '                measures: vec![-batch.delta01[i] * width],' \
+  '                measures: vec![batch.delta01[i] * width],' \
+  geode-demo-data diva_opposes_delta_and_scales_with_the_bucket_time
+# Diva scales with the bucket's width in years, not the tenor's time.
+run_mutation "demo scenario: diva scales with the bucket width" \
+  crates/geode-demo-data/src/scenario.rs \
+  '            let width = TENOR_YEARS[t] - if t == 0 { 0.0 } else { TENOR_YEARS[t - 1] };' \
+  '            let width = TENOR_YEARS[t];' \
+  geode-demo-data diva_opposes_delta_and_scales_with_the_bucket_time
+# A diva file carries only its own measure, so the report stays separate
+# from the term report rather than a column of it.
+run_mutation "demo scenario: the diva report carries only diva" \
+  crates/geode-demo-data/src/scenario.rs \
+  '    let mut diva = table("term_sensitivities", &["tenor"], &["diva"]);' \
+  '    let mut diva = table("term_sensitivities", &["tenor"], &["diva", "repo"]);' \
+  geode-demo-data the_diva_report_is_a_row_per_tenor_carrying_only_identity_tenor_and_diva
 
 # ---- scenario shapes (scenarios.toml) and the pivot ----
+# By maturity's fifth column is the diva report's measure.
+run_mutation "scenario: by_maturity paints diva" \
+  crates/geode-scenario/src/core/builtin_scenarios.toml \
+  '  { column = "diva", unit = "per 1% div" },' \
+  '  { column = "curvature", label = "diva", unit = "per 1% div" },' \
+  geode-scenario the_builtin_shapes_check_clean_against_the_demo_datasets
 
 run_mutation "scenario: an axis laid out nowhere is refused" \
   crates/geode-core/src/scenario/check.rs \

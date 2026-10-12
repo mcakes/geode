@@ -150,6 +150,16 @@ mod tests {
             None,
             "a ladder's Σ row is the total row"
         );
+        // Two reports feed the dataset; the diva report's one measure is the
+        // fifth column, with its USD twin.
+        let Columns::Measures(cols) = &by_maturity.columns else {
+            unreachable!()
+        };
+        let names: Vec<&str> = cols.iter().map(|c| c.column.as_str()).collect();
+        assert_eq!(names, ["repo", "atm_vol", "skew", "curvature", "diva"]);
+        let diva = &cols[4];
+        assert_eq!(diva.unit.as_deref(), Some("per 1% div"));
+        assert_eq!(diva.usd_twin.as_deref(), Some("diva_usd"));
 
         let rho = by_kind("rho");
         assert_eq!(rho.column_axes(), ["curve_ccy", "curve_type"]);
