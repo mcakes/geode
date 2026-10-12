@@ -47,8 +47,11 @@ builtin five, the pivot and the tile.
   `format.color` is resolved, sign variant and readability over the heat
   fill included, when the window is prepared, and new named colors
   re-prepare the window; `render_td` only reads fixed colors. The column
-  heads and units are prepared with each picture, and the footer's cursor
-  readout whenever the cursor, the picture or the prepared window moves.
+  heads and units are prepared with each picture (a ladder with units
+  puts the names in a group row above the units, one line per header row),
+  with each column's widest text, Σ included, which floors its default
+  width, and the footer's cursor readout whenever the cursor, the picture
+  or the prepared window moves.
   The cursor and a rows or block selection live over data cells only;
   the selection's per-column totals are unsummable down a scenario rows
   axis. A two-level header (two columns axes) adds one

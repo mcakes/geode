@@ -37963,6 +37963,29 @@ run_mutation "scenario delegate: an outer axis lays a group header row" \
         None' \
   geode-scenario the_band_spans_the_outer_axis_groups
 
+# A default width narrower than its widest text clips a right-aligned
+# number from the left, its minus sign first.
+run_mutation "scenario delegate: a default width holds the widest text" \
+  crates/geode-scenario/src/delegate.rs \
+  '        scale::design_px(design, px(self.rem_px)).max(content)' \
+  '        { let _ = content; scale::design_px(design, px(self.rem_px)) }' \
+  geode-scenario a_default_width_holds_the_widest_text_sigma_included
+
+# The Σ row counts toward a column's widest text.
+run_mutation "scenario prepare: the widest text reads every row" \
+  crates/geode-scenario/src/core/prepare.rs \
+  '            (0..layout.rows())' \
+  '            (0..layout.rows().saturating_sub(1))' \
+  geode-scenario a_default_width_holds_the_widest_text_sigma_included
+
+# A ladder with units lays its names in a header row of their own; stacked
+# with the unit in one head they clip.
+run_mutation "scenario delegate: a ladder lays a name row over its units" \
+  crates/geode-scenario/src/delegate.rs \
+  '        self.units_row.then(|| {' \
+  '        false.then(|| {' \
+  geode-scenario a_ladder_header_puts_each_name_on_a_row_above_its_unit
+
 run_mutation "scenario menu: diff is disabled on a shape without one" \
   crates/geode-scenario/src/tile/menu.rs \
   '        let diff = if self.shape.diff.is_some() {' \

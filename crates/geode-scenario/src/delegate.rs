@@ -95,6 +95,13 @@ pub struct ScenarioDelegate {
     pub cursor_readout: Option<SharedString>,
     /// One per table column, label and Σ included.
     heads: Vec<PreparedHead>,
+    /// A ladder's header: the measure names ride a group row above the
+    /// leaf heads, which carry the units. The table gives every header row
+    /// one row's height, so a name and its unit stacked in one cell clip.
+    units_row: bool,
+    /// One per table column: its widest cell or header text, in
+    /// characters, which floors the column's default width.
+    widest: Vec<usize>,
     /// Whether the rows axis is a scenario axis: a column sum down it is unsummable.
     rows_axis_is_scenario: bool,
     cache: WindowCache<PreparedCell>,
@@ -124,6 +131,8 @@ impl ScenarioDelegate {
             extent: None,
             cursor_readout: None,
             heads: Vec::new(),
+            units_row: false,
+            widest: Vec::new(),
             rows_axis_is_scenario,
             cache: WindowCache::default(),
             requested: WindowRequest::with_first(FIRST_WINDOW),
@@ -135,6 +144,7 @@ impl ScenarioDelegate {
             drag_origin: false,
         };
         d.prepare_heads();
+        d.prepare_widest();
         d
     }
 
@@ -156,6 +166,7 @@ impl ScenarioDelegate {
         self.layout = pivot.as_deref().map(Layout::of).unwrap_or(EMPTY);
         self.pivot = pivot;
         self.prepare_heads();
+        self.prepare_widest();
         self.clamp_cursor();
         self.refresh_selection();
         self.invalidate_cells();
@@ -197,8 +208,12 @@ impl ScenarioDelegate {
     /// on a change.
     pub fn set_paint(&mut self, heat: bool, scale: Option<Scale>) {
         if self.heat != heat || self.scale != scale {
+            let rescaled = self.scale != scale;
             self.heat = heat;
             self.scale = scale;
+            if rescaled {
+                self.prepare_widest();
+            }
             self.invalidate_cells();
             self.refresh_selection();
         }
@@ -480,6 +495,56 @@ impl ScenarioDelegate {
             }
         };
         self.heads = (0..self.layout.cols()).map(head).collect();
+        self.units_row = self.pivot.as_ref().is_some_and(|p| {
+            p.columns
+                .iter()
+                .any(|c| matches!(&c.head, Head::Measure { unit: Some(_), .. }))
+        });
+    }
+
+    /// Column `col`'s width without a fitted one: `design` at the window's
+    /// rem, widened to hold the picture's widest text in it. A clipped
+    /// right-aligned number loses its leading characters, a minus first.
+    fn default_width(&self, col: usize, design: f32) -> f32 {
+        let metrics = FitMetrics::xsmall_mono(px(self.rem_px));
+        let chars = self.widest.get(col).copied().unwrap_or(0);
+        let content = metrics.fit([chars as f32 * metrics.advance_px]);
+        scale::design_px(design, px(self.rem_px)).max(content)
+    }
+
+    /// A ladder's name row: each measure's name over its column, blank
+    /// over the label and Σ columns; `None` off a ladder.
+    fn name_row(&self) -> Option<Vec<SharedString>> {
+        self.units_row.then(|| {
+            self.heads
+                .iter()
+                .enumerate()
+                .map(|(col, h)| {
+                    if col == 0 || self.layout.is_sigma_col(col) {
+                        SharedString::default()
+                    } else {
+                        h.key.clone()
+                    }
+                })
+                .collect()
+        })
+    }
+
+    /// Each table column's widest text at the current scale: every cell,
+    /// Σ included, and its header lines. Re-run with each picture and
+    /// `:scale`; the text does not depend on paint.
+    fn prepare_widest(&mut self) {
+        let mut widest = self
+            .pivot
+            .as_deref()
+            .map(|p| prepare::widest_chars(p, self.scale))
+            .unwrap_or_default();
+        widest.resize(self.heads.len(), 0);
+        for (w, head) in widest.iter_mut().zip(&self.heads) {
+            let unit = head.unit.as_ref().map_or(0, |u| u.chars().count());
+            *w = (*w).max(head.key.chars().count()).max(unit);
+        }
+        self.widest = widest;
     }
 
     /// The footer's `1Y × 100 · 254.5` for the cursor cell, re-prepared
@@ -598,7 +663,7 @@ impl TableDelegate for ScenarioDelegate {
             .fitted
             .get(key.as_ref())
             .copied()
-            .unwrap_or_else(|| scale::design_px(default, px(self.rem_px)));
+            .unwrap_or_else(|| self.default_width(col_ix, default));
         Column {
             key: key.clone(),
             name: key,
@@ -633,6 +698,14 @@ impl TableDelegate for ScenarioDelegate {
     /// re-reads it on `refresh`, which every new picture and width change
     /// already calls.
     fn group_headers(&self, _cx: &App) -> Option<Vec<Vec<ColumnGroup>>> {
+        if let Some(names) = self.name_row() {
+            return Some(vec![
+                names
+                    .into_iter()
+                    .map(|name| ColumnGroup::new(name, 1))
+                    .collect(),
+            ]);
+        }
         let groups = self.band_groups();
         if groups.is_empty() {
             return None;
@@ -662,7 +735,11 @@ impl TableDelegate for ScenarioDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let named = !label.is_empty();
+        // A ladder's name row aligns with the numbers under it and draws
+        // no group rule; a two-level header centres each outer value over
+        // its group and closes it with a hairline.
+        let names = self.units_row;
+        let named = !label.is_empty() && !names;
         let selector = label.clone();
         div()
             .w(width)
@@ -670,7 +747,8 @@ impl TableDelegate for ScenarioDelegate {
             .flex_shrink_0()
             .flex()
             .items_end()
-            .justify_center()
+            .when(names, |el| el.justify_end())
+            .when(!names, |el| el.justify_center())
             .px_1()
             .overflow_hidden()
             .whitespace_nowrap()
@@ -691,9 +769,17 @@ impl TableDelegate for ScenarioDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        let (key, unit) = match self.heads.get(col_ix) {
+        let (mut key, unit) = match self.heads.get(col_ix) {
             Some(h) => (h.key.clone(), h.unit.clone()),
             None => (SharedString::default(), None),
+        };
+        // Under a name row the leaf carries the unit alone: one line, as
+        // the table gives each header row one row's height.
+        let unit = if self.units_row && col_ix != 0 {
+            key = unit.unwrap_or_default();
+            None
+        } else {
+            unit
         };
         div()
             .size_full()
@@ -825,6 +911,105 @@ mod tests {
             sigma_col: true,
         };
         d
+    }
+
+    fn ladder_picture() -> Pivot {
+        use crate::core::pivot::fixtures::{ladder_main, spot_ladder};
+        use crate::core::pivot::{AxisDomains, Currency, Mode};
+        Pivot::build(
+            &ladder_main().snapshot("spot_ladder", Some(1)),
+            None,
+            &spot_ladder(),
+            Mode {
+                currency: Currency::Native,
+                diff: false,
+            },
+            &AxisDomains::default(),
+        )
+        .unwrap()
+    }
+
+    fn totalled_picture() -> Pivot {
+        use crate::core::pivot::fixtures::{vega_kt, vega_main, vega_totals};
+        use crate::core::pivot::{AxisDomains, Currency, Mode};
+        Pivot::build(
+            &vega_main().snapshot("vega_buckets", Some(1)),
+            Some(&vega_totals().snapshot("vega_buckets", Some(1))),
+            &vega_kt(),
+            Mode {
+                currency: Currency::Native,
+                diff: false,
+            },
+            &AxisDomains::default(),
+        )
+        .unwrap()
+    }
+
+    /// The table gives each header row one row's height, so a ladder's
+    /// measure name and unit take a row each: the name in a group row
+    /// over the column, the unit alone in the leaf head.
+    #[test]
+    fn a_ladder_header_puts_each_name_on_a_row_above_its_unit() {
+        let mut d = ladder();
+        d.ensure_palette(&gpui_component::Theme::default());
+        assert_eq!(d.name_row(), None, "no picture, no name row");
+        let picture = ladder_picture();
+        let (name, unit) = picture
+            .columns
+            .iter()
+            .enumerate()
+            .find_map(|(i, c)| match &c.head {
+                Head::Measure {
+                    label,
+                    unit: Some(unit),
+                } => Some(((i, label.clone()), unit.clone())),
+                _ => None,
+            })
+            .expect("the fixture ladder has a measure with a unit");
+        d.set_picture(Some(Arc::new(picture)));
+        let names = d.name_row().expect("a ladder with units has a name row");
+        assert_eq!(names.len(), d.layout.cols());
+        assert_eq!(names[0], "", "the label column has no name");
+        assert_eq!(names[name.0 + 1], name.1.as_str());
+        assert_eq!(d.heads[name.0 + 1].unit.as_deref(), Some(unit.as_str()));
+        d.set_picture(Some(Arc::new(named_picture())));
+        assert_eq!(d.name_row(), None, "an axis grid keeps one header row");
+    }
+
+    /// A default width holds the column's widest text, Σ included: a
+    /// right-aligned total wider than the column lost its minus sign.
+    #[test]
+    fn a_default_width_holds_the_widest_text_sigma_included() {
+        let mut d = ladder();
+        d.ensure_palette(&gpui_component::Theme::default());
+        d.set_picture(Some(Arc::new(totalled_picture())));
+        let sigma_row = d.layout.rows() - 1;
+        assert!(d.layout.is_sigma_row(sigma_row));
+        d.fill_window(0..d.layout.rows());
+        for col in 0..d.layout.cols() {
+            let longest = (0..d.layout.rows())
+                .filter_map(|r| d.cache.get(r, col).map(|c| c.text.chars().count()))
+                .max()
+                .unwrap_or(0);
+            assert!(d.widest[col] >= longest, "column {col} under-measured");
+        }
+        let metrics = FitMetrics::xsmall_mono(px(d.rem_px));
+        let design = scale::design_px(CELL_WIDTH, px(d.rem_px));
+        d.widest[1] = 30;
+        let wide = d.default_width(1, CELL_WIDTH);
+        assert_eq!(wide, metrics.fit([30.0 * metrics.advance_px]));
+        assert!(wide > design, "thirty characters overflow the design width");
+        d.widest[1] = 1;
+        assert_eq!(
+            d.default_width(1, CELL_WIDTH),
+            design,
+            "narrow text keeps the design width"
+        );
+        // `:scale` re-measures: unscaled values print more characters than millions.
+        d.set_paint(true, Some(Scale::Millions));
+        let millions = d.widest.clone();
+        d.set_paint(true, Some(Scale::None));
+        assert!(d.widest.iter().zip(&millions).any(|(u, m)| u > m));
     }
 
     /// A reload's colors reach the paint: new definitions drop the names

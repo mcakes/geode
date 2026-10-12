@@ -1604,7 +1604,11 @@ snapshot's subtotal and total rows and from the totals query, never summed
 from cells. While the main and totals generations disagree, the Σ row is
 blank until a delivery where they agree. A diffed column has no Σ. The
 `rho` matrix has two columns axes, which add a group header row (the outer
-axis) above the column heads.
+axis) above the column heads. A ladder whose measures carry units puts each
+measure's name in a header row above its unit: the table gives every header
+row one row's height, so a name and unit stacked in one head would clip. A
+column's default width holds its widest text, Σ included, so a total longer
+than the cells keeps its sign; a fitted `:autosize` width replaces it.
 
 **Paint.** Heat is a diverging fill by magnitude. The domain is per column
 for a ladder (each column its own unit) and matrix-wide for an axis

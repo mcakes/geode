@@ -769,6 +769,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The `rho` group header row: its height, alignment over the leaf heads at
   rest and under horizontal scroll, the hairline per group and over the
   pinned label column.
+- The ladder header (By maturity, spot ladder): each measure's name on the
+  row above its unit, right-aligned over the numbers, nothing clipped; a Σ
+  total wider than the cells keeps its minus sign.
 - The `native` chip's warning tone and tooltip over a mixed-currency scope.
 - The base-row highlight on the spot ladder in diff mode, and its
   disappearance under `m`.

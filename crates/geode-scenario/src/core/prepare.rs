@@ -144,6 +144,42 @@ pub fn cell(i: &Inputs<'_>, row: usize, col: usize) -> Option<PreparedCell> {
     Some(number(value, &format, fill, pal, base))
 }
 
+/// The widest cell text in each table column, in characters, over every
+/// row (Σ included) at `scale`. A default column width narrower than its
+/// widest text clips the leading characters of a right-aligned number,
+/// a minus sign first; widths are floored by this. Text never depends on
+/// paint, so no fill or contrast search runs.
+pub fn widest_chars(pivot: &Pivot, scale: Option<Scale>) -> Vec<usize> {
+    const NO_PAINT: Rgb = Rgb {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+    };
+    let palette = Palette {
+        bullish: NO_PAINT,
+        bearish: NO_PAINT,
+        background: NO_PAINT,
+        foreground: NO_PAINT,
+        muted: NO_PAINT,
+    };
+    let inputs = Inputs {
+        pivot,
+        palette: &palette,
+        scale,
+        heat: false,
+    };
+    let layout = Layout::of(pivot);
+    (0..layout.cols())
+        .map(|col| {
+            (0..layout.rows())
+                .filter_map(|row| cell(&inputs, row, col))
+                .map(|c| c.text.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
 fn plain(text: &str, color: Rgb, base: bool) -> PreparedCell {
     PreparedCell {
         text: Arc::from(text),
