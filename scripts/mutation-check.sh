@@ -22852,8 +22852,8 @@ run_mutation "spark: a flat series sits on the top edge" \
 # The end dot is today's value: the last finite one, not a NaN slot.
 run_mutation "spark: the end dot sits on the last value even when it is NaN" \
   crates/geode-chart/src/core/spark.rs \
-  '        .rposition(|v| v.is_finite())' \
-  '        .rposition(|_| true)' \
+  '    let end = values.iter().rposition(|v| v.is_finite()).map(point_at);' \
+  '    let end = values.iter().rposition(|_| true).map(point_at);' \
   geode-chart \
   the_end_is_the_last_finite_value
 
@@ -22872,6 +22872,22 @@ run_mutation "spark: the shared range counts a NaN" \
   '        .filter(|_| true)' \
   geode-chart \
   shared_range_is_the_finite_min_and_max_across_rows
+
+# Decimation keeps column extremes; the line must still end under the end dot.
+run_mutation "spark: a run ends on a column extreme, away from the end dot" \
+  crates/geode-chart/src/core/spark.rs \
+  '        if scratch.runs.last() != Some(&last) {' \
+  '        if false {' \
+  geode-chart \
+  the_line_starts_and_ends_on_each_runs_true_first_and_last_values
+
+# A value between two gaps has no segment; without its dot it vanishes.
+run_mutation "spark: an isolated value is not noted for a dot" \
+  crates/geode-chart/src/core/spark.rs \
+  '            scratch.isolated.push(first);' \
+  '            let _ = first;' \
+  geode-chart \
+  isolated_values_are_dots_and_draw_no_segment
 
 # Higher values are higher on screen.
 run_mutation "spark: y grows downward" \

@@ -23,8 +23,12 @@ pub fn shared_range<'a>(rows: impl IntoIterator<Item = &'a [f64]>) -> Option<(f6
 pub struct SparkScratch {
     /// The polyline in absolute coordinates, `Point::BREAK` between runs.
     pub points: Vec<Point>,
+    /// A run of one finite value between gaps or the series' edges: no
+    /// segment draws it, so the element paints it as a dot.
+    pub isolated: Vec<Point>,
     xs: Vec<f32>,
     ys: Vec<f64>,
+    runs: Vec<Point>,
 }
 
 /// The end of the line (the last finite value) and the marked point.
@@ -48,6 +52,7 @@ pub fn layout(
     scratch: &mut SparkScratch,
 ) -> SparkMarks {
     scratch.points.clear();
+    scratch.isolated.clear();
     let (w, h) = (rect.w - 2.0 * inset, rect.h - 2.0 * inset);
     if !(w > 0.0 && h > 0.0 && values.iter().any(|v| v.is_finite())) {
         return SparkMarks::default();
@@ -88,13 +93,47 @@ pub fn layout(
     for p in scratch.points.iter_mut().filter(|p| !p.is_break()) {
         p.x += left;
     }
-    let end = values
-        .iter()
-        .rposition(|v| v.is_finite())
-        .map(|i| Point::new(left + x_of(i), y_of(values[i])));
+    // Decimation keeps each column's extremes, so a run's first or last
+    // value is dropped when it is neither: the line would end away from the
+    // end dot. Each run is rebuilt to start and end on its true values, and
+    // a run of one value, which no segment draws, is noted as isolated.
+    let point_at = |i: usize| Point::new(left + x_of(i), y_of(values[i]));
+    scratch.isolated.clear();
+    scratch.runs.clear();
+    let mut chunks = scratch.points.split(|p| p.is_break());
+    let mut i = 0;
+    while i < n {
+        if !values[i].is_finite() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && values[i].is_finite() {
+            i += 1;
+        }
+        let chunk = chunks.next().unwrap_or(&[]);
+        if !scratch.runs.is_empty() {
+            scratch.runs.push(Point::BREAK);
+        }
+        let (first, last) = (point_at(start), point_at(i - 1));
+        if start == i - 1 {
+            scratch.isolated.push(first);
+            scratch.runs.push(first);
+            continue;
+        }
+        if chunk.first() != Some(&first) {
+            scratch.runs.push(first);
+        }
+        scratch.runs.extend_from_slice(chunk);
+        if scratch.runs.last() != Some(&last) {
+            scratch.runs.push(last);
+        }
+    }
+    std::mem::swap(&mut scratch.points, &mut scratch.runs);
+    let end = values.iter().rposition(|v| v.is_finite()).map(point_at);
     let mark = mark
         .filter(|i| values.get(*i).is_some_and(|v| v.is_finite()))
-        .map(|i| Point::new(left + x_of(i), y_of(values[i])));
+        .map(point_at);
     SparkMarks { end, mark }
 }
 
@@ -270,6 +309,84 @@ mod tests {
             s.points.len()
         );
         assert!(s.points.len() >= 136);
+    }
+
+    /// The real points of each run, split at breaks.
+    fn runs(points: &[Point]) -> Vec<Vec<Point>> {
+        let mut out = vec![Vec::new()];
+        for p in points {
+            if p.is_break() {
+                out.push(Vec::new());
+            } else {
+                out.last_mut().unwrap().push(*p);
+            }
+        }
+        out.retain(|r| !r.is_empty());
+        out
+    }
+
+    #[test]
+    fn the_line_starts_and_ends_on_each_runs_true_first_and_last_values() {
+        // 21 values into 4 px: about five per column, every column holding
+        // 0 and 1, with the first, last and pre-gap values at 0.5 (never a
+        // column's extreme), so decimation alone would end the line elsewhere.
+        let mut values: Vec<f64> = (0..21)
+            .map(|i| if i % 2 == 0 { 0.0 } else { 1.0 })
+            .collect();
+        values[0] = 0.5;
+        values[20] = 0.5;
+        let mut s = SparkScratch::default();
+        let r = Rect::new(0.0, 0.0, 8.0, 16.0);
+        let marks = layout(&values, None, None, r, 2.0, &mut s);
+        let p = finite(&s.points);
+        assert_eq!(
+            p.first().copied(),
+            Some(Point::new(2.0, 8.0)),
+            "the first value"
+        );
+        assert_eq!(
+            marks.end,
+            p.last().copied(),
+            "the line ends under the end dot"
+        );
+        assert_eq!(marks.end, Some(Point::new(6.0, 8.0)));
+        // A gap: the run before it ends on its true last value.
+        values[10] = 0.5;
+        values[11] = f64::NAN;
+        layout(&values, None, None, r, 2.0, &mut s);
+        let rs = runs(&s.points);
+        assert_eq!(rs.len(), 2);
+        assert_eq!(
+            rs[0].last().copied(),
+            Some(Point::new(2.0 + 4.0 * 10.0 / 20.0, 8.0))
+        );
+        assert_eq!(rs[1].first().map(|q| q.x), Some(2.0 + 4.0 * 12.0 / 20.0));
+    }
+
+    #[test]
+    fn isolated_values_are_dots_and_draw_no_segment() {
+        let mut s = SparkScratch::default();
+        layout(
+            &[1.0, f64::NAN, 2.0, f64::NAN, 3.0],
+            None,
+            None,
+            rect(),
+            2.0,
+            &mut s,
+        );
+        assert_eq!(s.isolated.len(), 3, "{:?}", s.isolated);
+        assert!(
+            runs(&s.points).iter().all(|r| r.len() == 1),
+            "no segment joins them"
+        );
+        layout(&[0.3], None, None, rect(), 2.0, &mut s);
+        assert_eq!(
+            s.isolated,
+            vec![Point::new(46.0, 28.0)],
+            "one value is an isolated point"
+        );
+        layout(&[1.0, 2.0, f64::NAN, 3.0], None, None, rect(), 2.0, &mut s);
+        assert_eq!(s.isolated.len(), 1, "only the run of one");
     }
 
     #[test]

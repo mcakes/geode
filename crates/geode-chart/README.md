@@ -129,9 +129,13 @@ need readback or a fork of gpui; none is used.
 
 - A value outside the y-range is clamped to the cell's inset edge, never
   painted into a neighbouring row; a flat range draws through the middle.
-- Non-finite values break the line. The end dot marks the last finite value;
-  a mark on a non-finite or out-of-range index is not painted. A series with
-  no finite value, or a cell no larger than the dots' inset, paints nothing.
+- Non-finite values break the line, which never connects across a gap. Each
+  run starts and ends on its true first and last values, decimation
+  notwithstanding, so the line ends under the end dot. A value with a gap or
+  the series' edge on both sides paints as a dot in the line's color. The end
+  dot marks the last finite value; a mark on a non-finite or out-of-range
+  index is not painted. A series with no finite value, or a cell no larger
+  than the dots' inset, paints nothing.
 - Layout reuses one thread-local scratch, so a grid of sparklines repaints
   without growing memory; the stroke's gpui path is the only per-paint
   allocation. The element has no id, so it carries no keyed state.

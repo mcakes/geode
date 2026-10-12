@@ -106,6 +106,11 @@ impl Plot for Spark {
                 {
                     window.paint_path(path, self.paint.line);
                 }
+                // A value with a gap or the series' edge on both sides has
+                // no segment to show it; it reads as a dot in the line's color.
+                for &p in &scratch.isolated {
+                    dot(window, p, mark_r, self.paint.line);
+                }
                 if let Some(m) = marks.mark {
                     dot(window, m, mark_r, self.paint.mark);
                 }
