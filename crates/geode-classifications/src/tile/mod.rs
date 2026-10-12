@@ -55,6 +55,7 @@ use geode_shell::actions::ActionId;
 use geode_shell::frame::{ConfigEdit, FrameRef, TileNotice};
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
+use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::vimfind::{FindDirection, find_match};
@@ -110,6 +111,7 @@ impl MenuPick for Pick {
     }
 }
 
+const ADD_ACTION: &str = "classifications::add";
 const NEW_ACTION: &str = "classifications::new";
 const RENAME_ACTION: &str = "classifications::rename";
 const DELETE_ACTION: &str = "classifications::delete";
@@ -293,6 +295,9 @@ pub struct ClassificationsTile {
     history: History,
     /// The open label editor; the tile is in insert mode while it is.
     editor: Option<LabelEditor>,
+    /// The value `o` is adding, shown as a draft row while the label editor
+    /// is open on it and dropped with the editor: only its label writes it.
+    draft: Option<String>,
     /// The open prompt (New, Rename); insert mode too.
     prompt: Option<PromptField>,
     /// The armed y/n question; it holds the keyboard, insert mode too.
@@ -361,11 +366,11 @@ impl ClassificationsTile {
         });
         // The window, for the double-click's edit through the tile's door.
         cx.subscribe_in(&table, window, |this, _, e: &RowPressed, window, cx| {
-            this.row_pressed(*e, window, cx)
+            this.row_pressed(e.clone(), window, cx)
         })
         .detach();
         cx.subscribe_in(&table, window, |this, _, e: &RowContext, window, cx| {
-            this.row_context(*e, window, cx)
+            this.row_context(e.clone(), window, cx)
         })
         .detach();
         cx.subscribe(&table, |this, _, e: &SortClicked, cx| {
@@ -407,6 +412,7 @@ impl ClassificationsTile {
             tag: 0,
             asked: None,
             observed: Vec::new(),
+            draft: None,
             values_loaded: false,
             file_op: None,
             planning: None,
@@ -938,11 +944,20 @@ impl ClassificationsTile {
             }),
             (other, _) => other,
         };
+        let add = match (&shown, self.reverting()) {
+            (None, _) => Err(Blocked::same(NOTHING_SHOWN)),
+            (Some(_), Some(name)) => Err(Blocked {
+                short: "reverting\u{2026}",
+                long: format!("reverting {name}\u{2026}"),
+            }),
+            (Some(_), None) => Ok(()),
+        };
         let mut rows = vec![
             row("classifications::edit", labelled()),
             row("classifications::clear", labelled()),
             row("classifications::yank", labelled()),
             row("classifications::paste", paste),
+            row(ADD_ACTION, add),
             Row::Separator,
             row(NEW_ACTION, Ok(())),
             row(RENAME_ACTION, self.own(Verb::Rename).map(|_| ())),
@@ -1536,6 +1551,7 @@ impl ClassificationsTile {
             self.state.cursor = None;
             self.grid = GridModel::new();
             self.grid.set_sort(self.state.sort);
+            self.draft = None;
             self.find = None;
             self.searching = false;
             self.history.forget();
@@ -1759,15 +1775,29 @@ impl ClassificationsTile {
         drop(e);
         self.sync_editor(cx);
         self.offer_held_later(cx);
+        self.drop_draft(cx);
+    }
+
+    /// The draft goes with the editor: written by its label, or dropped.
+    fn drop_draft(&mut self, cx: &mut Context<Self>) {
+        if self.draft.take().is_some() {
+            self.grid.set_draft(None);
+            self.rebuild_rows(false, cx);
+        }
     }
 
     /// Drop the editor where no window is at hand, blurring it later
     /// through the window it opened in if it still owns focus (a newer
     /// field is never blurred).
+    ///
+    /// The draft goes with it, unrebuilt: every caller rebuilds the rows
+    /// after (the classification went, or the tile closed).
     fn release_editor(&mut self, cx: &mut App) {
         let Some(e) = self.editor.take() else {
             return;
         };
+        self.draft = None;
+        self.grid.set_draft(None);
         self.release_field(e.input, cx);
     }
 
@@ -1803,6 +1833,7 @@ impl ClassificationsTile {
             && let Some(list) = p.list.as_mut()
         {
             list.nav(NavCommand::Move(delta));
+            p.moved = true;
             p.repaint();
             cx.notify();
         }
@@ -1843,10 +1874,11 @@ impl ClassificationsTile {
             self.commit_edit(window, cx);
             return;
         }
-        // The prompt's column list: that column answers the step.
+        // The prompt's list: that column or value answers the step.
         let picked = self.prompt.as_mut().and_then(|p| {
             let list = p.list.as_mut()?;
             list.set_highlighted(row).then(|| {
+                p.moved = true;
                 (
                     p.input.clone(),
                     list.highlighted_text().unwrap_or_default().to_string(),
@@ -1862,6 +1894,71 @@ impl ClassificationsTile {
     /// Open the prompt asking `prompt`, the field focused. A rename seeds
     /// the current name, selected, so typing replaces it.
     fn open_prompt(&mut self, prompt: Prompt, window: &mut Window, cx: &mut Context<Self>) {
+        let columns = self.columns();
+        self.open_prompt_with(prompt, columns, window, cx);
+    }
+
+    /// `o`: ask for a value to add, offering the reference keys of its
+    /// source column not already rows. Refused at once, before any typing,
+    /// where a label could not be written anyway: a revert on its way, or a
+    /// source column no classification may map.
+    fn open_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_while_reverting(cx) {
+            return;
+        }
+        let Some(config_dim) = self.config_dim() else {
+            return;
+        };
+        if let Err(why) = self.source_writable(&config_dim) {
+            self.refuse(format!("not saved: {why}"), cx);
+            return;
+        }
+        let rows: std::collections::HashSet<String> = self.row_sources().into_iter().collect();
+        let keys: Vec<String> = cx
+            .try_global::<ReferenceGlobal>()
+            .map(|g| {
+                g.0.keys_by_column(&config_dim.from)
+                    .into_iter()
+                    .filter(|k| !rows.contains(*k))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.notices.outcome.clear();
+        self.rebuild_chrome();
+        self.grid.clear_selection();
+        self.sync_table(false, cx);
+        self.open_prompt_with(
+            Prompt::Add {
+                from: config_dim.from.clone(),
+            },
+            keys,
+            window,
+            cx,
+        );
+    }
+
+    /// The rows' source values, a draft's left out: what `o` checks a
+    /// typed value against (a draft is not a row the data or the map holds).
+    fn row_sources(&self) -> Vec<String> {
+        let draft = self.grid.draft();
+        self.grid
+            .visible()
+            .iter()
+            .map(|&i| &self.grid.row(i).source)
+            .filter(|s| Some(s.as_str()) != draft)
+            .cloned()
+            .collect()
+    }
+
+    /// [`Self::open_prompt`] with the list's `choices` given.
+    fn open_prompt_with(
+        &mut self,
+        prompt: Prompt,
+        choices: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_prompt(window, cx);
         let seed = match &prompt {
             Prompt::Rename { from } => from.clone(),
@@ -1870,7 +1967,8 @@ impl ClassificationsTile {
         let placeholder = editor::placeholder(&prompt);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         input.update(cx, |s, cx| EditCaret::Select.seed(s, seed, window, cx));
-        // The column step's list re-ranks as the column is typed. The
+        // The column and add steps' lists re-rank as the text is typed;
+        // typing after a moved highlight makes it a guess again. The
         // subscription dies with the field.
         cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| {
             if let InputEvent::Change = event {
@@ -1879,6 +1977,7 @@ impl ClassificationsTile {
                     && let Some(list) = p.list.as_mut()
                     && list.set_query(&query)
                 {
+                    p.moved = false;
                     p.repaint();
                     cx.notify();
                 }
@@ -1886,7 +1985,7 @@ impl ClassificationsTile {
         })
         .detach();
         input.read(cx).focus_handle(cx).focus(window, cx);
-        self.prompt = Some(PromptField::new(input, prompt, self.columns()));
+        self.prompt = Some(PromptField::new(input, prompt, choices));
         self.field_window = Some(window.window_handle());
         cx.notify();
     }
@@ -1900,21 +1999,30 @@ impl ClassificationsTile {
             .unwrap_or_default()
     }
 
-    /// `enter` in the prompt: the answer through `prompt::submit`. A
-    /// refusal stays on the bar with the field open; the name step moves
-    /// on to the column; the last step closes the prompt and creates, or
-    /// asks y/n to rename.
+    /// `enter` in the prompt: the answer through `prompt::submit` (an
+    /// added value through `prompt::submit_add`). A refusal stays on the
+    /// bar with the field open; the name step moves on to the column; the
+    /// last step closes the prompt and creates, or asks y/n to rename; an
+    /// added value opens the label editor on its row, a draft row when it
+    /// has none.
     fn commit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.row_sources();
         let Some(p) = self.prompt.as_mut() else {
             return;
         };
         let text = p.input.read(cx).value().to_string();
         let answer = p.answer(&text);
-        let step = {
-            let config = self.shared.config.borrow();
-            match config.as_ref() {
-                Some(c) => prompt::submit(&p.prompt, &answer, &c.schema, &c.dims),
-                None => Step::Refuse("the configuration has not loaded yet".into()),
+        let step = match &p.prompt {
+            Prompt::Add { .. } => {
+                let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                prompt::submit_add(&answer, &rows)
+            }
+            _ => {
+                let config = self.shared.config.borrow();
+                match config.as_ref() {
+                    Some(c) => prompt::submit(&p.prompt, &answer, &c.schema, &c.dims),
+                    None => Step::Refuse("the configuration has not loaded yet".into()),
+                }
             }
         };
         match step {
@@ -1942,11 +2050,31 @@ impl ClassificationsTile {
                 self.close_prompt(window, cx);
                 self.ask_rename(from, to, window, cx);
             }
-            // Only `submit_add` answers with these, never `submit`; closing
-            // keeps a stray one from leaving the field open on nothing.
-            Step::Existing(_) | Step::Draft(_) => self.close_prompt(window, cx),
+            Step::Existing(source) => {
+                self.close_prompt(window, cx);
+                self.label_added(&source, window, cx);
+            }
+            Step::Draft(source) => {
+                self.close_prompt(window, cx);
+                self.draft = Some(source.clone());
+                self.grid.set_draft(Some(source.clone()));
+                self.rebuild_rows(false, cx);
+                self.label_added(&source, window, cx);
+                // The draft lives only while its editor does.
+                if self.editor.is_none() {
+                    self.drop_draft(cx);
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// Open the label editor on an added value's row, its own or the
+    /// draft's, with the caret at the end.
+    fn label_added(&mut self, source: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.grid.put_on(source);
+        self.sync_table(false, cx);
+        self.open_editor(EditCaret::End, window, cx);
     }
 
     /// Close the prompt with nothing written: `escape`, a press on the
@@ -2123,15 +2251,36 @@ impl ClassificationsTile {
         self.user_acted(cx);
         // A press on the grid leaves the editor or the prompt unwritten, as
         // escape would.
-        self.close_editor(window, cx);
-        self.close_prompt(window, cx);
-        self.grid.click(e.row, e.shift);
+        let Some(row) = self.close_fields_for_press(&e.source, window, cx) else {
+            self.sync_table(false, cx);
+            cx.notify();
+            return;
+        };
+        self.grid.click(row, e.shift);
         self.sync_table(false, cx);
         if e.clicks >= 2 && !e.shift {
             let edit = ActionId("classifications::edit".to_string());
             self.dispatch(&edit, None, window, cx);
         }
         cx.notify();
+    }
+
+    /// Close the editor and the prompt unwritten for a press on `source`'s
+    /// row, answering where that row shows now: closing the editor drops a
+    /// draft row, which moves every row under it up one. `None` when the row
+    /// is no longer shown (the draft's own, now dropped).
+    fn close_fields_for_press(
+        &mut self,
+        source: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        self.close_editor(window, cx);
+        self.close_prompt(window, cx);
+        self.grid
+            .visible()
+            .iter()
+            .position(|&i| self.grid.row(i).source == source)
     }
 
     /// A right press on shown row `row`: the cursor moves there (a row of a
@@ -2141,11 +2290,14 @@ impl ClassificationsTile {
     fn row_context(&mut self, e: RowContext, window: &mut Window, cx: &mut Context<Self>) {
         self.user_acted(cx);
         confirm::cancel(self, window, cx);
-        self.close_editor(window, cx);
-        self.close_prompt(window, cx);
-        let in_selection = self.grid.selected().is_some_and(|s| s.contains(&e.row));
+        let Some(row) = self.close_fields_for_press(&e.source, window, cx) else {
+            self.sync_table(false, cx);
+            cx.notify();
+            return;
+        };
+        let in_selection = self.grid.selected().is_some_and(|s| s.contains(&row));
         if !in_selection {
-            self.grid.click(e.row, false);
+            self.grid.click(row, false);
         }
         // The table's own right-press row outline: the tile paints the
         // cursor and the selection itself.
@@ -2659,6 +2811,7 @@ impl ClassificationsTile {
                     Err(why) => self.refuse(why, cx),
                 }
             }
+            ADD_ACTION if self.menu.is_none() => self.open_add(window, cx),
             // The label verbs act on the selection, else the cursor's row.
             "classifications::edit" if self.menu.is_none() => {
                 self.open_editor(EditCaret::End, window, cx)

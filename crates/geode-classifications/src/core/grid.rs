@@ -68,6 +68,11 @@ pub struct GridModel {
     /// rows). It takes the cursor the first time a rebuild shows it, and
     /// is dropped by a move or by [`GridModel::forget_seed`].
     seed: Option<String>,
+    /// A value the trader is adding, asked for by [`GridModel::set_draft`].
+    draft: Option<String>,
+    /// Whether the last [`GridModel::set_rows`] inserted the draft's row:
+    /// false while no draft is asked for or the rows already hold it.
+    draft_shown: bool,
 }
 
 impl GridModel {
@@ -93,10 +98,44 @@ impl GridModel {
         self.seed.as_deref().or(self.cursor_source.as_deref())
     }
 
+    /// Hold `source` as a draft row: a value the trader is adding, held only
+    /// here until its label is written. It is inserted after the unclassified
+    /// rows the data holds (the core order puts unclassified first) unless the
+    /// rows already hold it, and counts as neither a value nor unclassified.
+    /// Takes effect on the next [`GridModel::set_rows`].
+    pub fn set_draft(&mut self, source: Option<String>) {
+        self.draft = source;
+    }
+
+    /// The draft while a row of it is shown.
+    pub fn draft(&self) -> Option<&str> {
+        self.draft.as_deref().filter(|_| self.draft_shown)
+    }
+
     /// Replace the rows. The cursor stays on its source value, else falls
     /// to the nearest index; a selection stays while its anchor is shown.
-    pub fn set_rows(&mut self, rows: Vec<ClassRow>) {
-        self.unclassified = rows.iter().filter(|r| label_text(r).is_none()).count();
+    pub fn set_rows(&mut self, mut rows: Vec<ClassRow>) {
+        self.draft_shown = false;
+        if let Some(d) = self.draft.as_deref()
+            && !rows.iter().any(|r| r.source == d)
+        {
+            let at = rows
+                .iter()
+                .position(|r| label_text(r).is_some() || !r.in_data)
+                .unwrap_or(rows.len());
+            rows.insert(
+                at,
+                ClassRow {
+                    source: d.to_string(),
+                    label: None,
+                    count: None,
+                    in_data: false,
+                },
+            );
+            self.draft_shown = true;
+        }
+        self.unclassified =
+            rows.iter().filter(|r| label_text(r).is_none()).count() - usize::from(self.draft_shown);
         self.rows = rows;
         self.reorder();
         self.reseat();
@@ -269,9 +308,12 @@ impl GridModel {
         }
     }
 
-    /// `(values, unclassified)` over every row.
+    /// `(values, unclassified)` over every row but a draft's.
     pub fn counts(&self) -> (usize, usize) {
-        (self.rows.len(), self.unclassified)
+        (
+            self.rows.len() - usize::from(self.draft_shown),
+            self.unclassified,
+        )
     }
 
     /// Where `source` shows, if it does.
@@ -426,6 +468,44 @@ mod tests {
         g.set_rows(vec![row("A", None, Some(3)), row("B", None, Some(2))]);
         assert_eq!(g.cursor(), Some(1));
         assert_eq!(g.cursor_source(), Some("B"));
+    }
+
+    #[test]
+    fn a_draft_sorts_after_the_observed_unclassified_rows_and_is_not_counted() {
+        let mut g = GridModel::new();
+        g.set_draft(Some("NEW".into()));
+        g.set_rows(vec![
+            row("NKY", None, Some(7)),
+            row("DAX", Some("Europe"), Some(5)),
+        ]);
+        assert_eq!(sources(&g), ["NKY", "NEW", "DAX"]);
+        assert_eq!(
+            g.counts(),
+            (2, 1),
+            "a draft is neither a value nor unclassified"
+        );
+        assert_eq!(g.draft(), Some("NEW"));
+        assert!(g.put_on("NEW"));
+    }
+
+    #[test]
+    fn a_draft_the_rows_now_hold_is_the_real_row() {
+        let mut g = GridModel::new();
+        g.set_draft(Some("NEW".into()));
+        g.set_rows(vec![row("NEW", None, Some(1))]);
+        assert_eq!(sources(&g), ["NEW"]);
+        assert_eq!(g.counts(), (1, 1));
+        assert_eq!(g.draft(), None, "nothing is held as a draft");
+    }
+
+    #[test]
+    fn dropping_the_draft_removes_its_row() {
+        let mut g = GridModel::new();
+        g.set_draft(Some("NEW".into()));
+        g.set_rows(vec![row("NKY", None, Some(7))]);
+        g.set_draft(None);
+        g.set_rows(vec![row("NKY", None, Some(7))]);
+        assert_eq!(sources(&g), ["NKY"]);
     }
 
     #[test]

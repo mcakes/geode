@@ -1630,6 +1630,25 @@ A verb that changes
 nothing (`x` on unclassified rows, `u` with nothing to undo, a replay that
 skips every row) keeps the selection and a waiting cursor.
 
+**Adding a value.** `o` (`shift+o` is the same verb: the grid's order is
+the sort's) opens a field under the header, `Add <from> value`. It offers
+the keys of every reference table keyed by the source column alone that are
+not already rows (`underlyings` for `underlying_ref`); for another column
+it takes free text. `enter` takes the highlighted key when the highlight
+was moved or equals the typed text ignoring case, else the text trimmed;
+blank is refused under the field (`type a value`). A value that already has
+a row (exact match: `dax` is not `DAX`) moves the cursor there and opens
+its label editor. Any other value becomes a draft row after the
+unclassified values the data holds, `not in data`, with the label editor
+open on it; it counts in neither `<n> values` nor `<k> unclassified`.
+Committing a label writes it as an ordinary map entry, one write and one
+undo step; `escape`, a blank label or any other verb drops the draft and
+writes nothing, since `dimensions.toml` holds only labelled values. A
+values answer that brings the draft's value keeps the editor on the real
+row. `o` is refused at once while a revert is on its way or over a source
+column no classification may map. Once the data carries the value its count
+shows and `not in data` goes.
+
 **New, rename, delete, revert.** Registered actions, reached from the
 palette and the `⋯` menu, never `:` commands and with no default chord.
 New asks a name, then a source column from a closed choice, and writes an

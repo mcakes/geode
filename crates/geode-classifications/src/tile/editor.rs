@@ -10,8 +10,10 @@
 //!
 //! The prompt field ([`PromptField`]) is the tile's other text entry: a bar
 //! under the header asking a new classification's name and source column,
-//! or a new name. Its column step hangs a closed choice over the columns a
-//! classification may map, painted by the label editor's list painter.
+//! or a new name, or a value to add. Its column step hangs a closed choice
+//! over the columns a classification may map, and its add step a free
+//! typeahead over the reference keys not yet rows, both painted by the label
+//! editor's list painter.
 
 use std::rc::Rc;
 
@@ -35,6 +37,10 @@ pub(crate) const NEW_LABEL: &str = "no label matches: enter sets it as typed";
 pub(crate) const NO_COLUMNS: &str = "no column can be classified";
 /// What it says while the typed text matches no column.
 pub(crate) const NO_COLUMN_MATCHES: &str = "no column matches";
+/// What the add step's list says while no reference key is left to offer.
+pub(crate) const NO_VALUES: &str = "type a value";
+/// What it says while the typed text matches no reference key.
+pub(crate) const NEW_VALUE: &str = "no match: enter adds it as typed";
 
 pub(crate) struct LabelEditor {
     pub input: Entity<InputState>,
@@ -101,12 +107,15 @@ pub(crate) fn prefill<'a>(mut labels: impl Iterator<Item = Option<&'a str>>) -> 
 }
 
 /// Which list a [`ChoicePaint`] is: the label editor's free typeahead,
-/// where the typed text may be a new label, or the prompt's closed choice
-/// of source columns, where only a listed column is an answer.
+/// where the typed text may be a new label; the prompt's closed choice of
+/// source columns, where only a listed column is an answer; or the add
+/// step's free typeahead over reference keys, where the typed text may be
+/// a value no table holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChoiceKind {
     Labels,
     Columns,
+    Values,
 }
 
 /// What a typeahead paints, prepared when the list changes.
@@ -134,6 +143,11 @@ pub(crate) fn choice_paint(list: &ChoiceList, kind: ChoiceKind) -> ChoicePaint {
         ),
         ChoiceKind::Columns => (
             if none { NO_COLUMNS } else { NO_COLUMN_MATCHES },
+            "classifications-prompt",
+            false,
+        ),
+        ChoiceKind::Values => (
+            if none { NO_VALUES } else { NEW_VALUE },
             "classifications-prompt",
             false,
         ),
@@ -250,14 +264,19 @@ pub(crate) fn render_cell(e: &EditorPaint, cx: &App) -> gpui::AnyElement {
 }
 
 /// The open prompt: what it asks, its field, the closed column choice on
-/// the column step, and why the last answer was refused.
+/// the column step or the reference keys on the add step, and why the last
+/// answer was refused.
 pub(crate) struct PromptField {
     pub input: Entity<InputState>,
     pub prompt: Prompt,
     /// The words before the field, prepared when the step changes.
     pub label: SharedString,
-    /// The columns a classification may map, on the column step only.
+    /// The column step's columns, or the add step's reference keys.
     pub list: Option<ChoiceList>,
+    /// The trader moved the add step's highlight (a key or a row click): it
+    /// is a choice, not a guess, and enter takes it whatever is typed. A
+    /// change to the text makes it a guess again.
+    pub moved: bool,
     /// The list as painted, prepared when it changes.
     pub choice: Option<Rc<ChoicePaint>>,
     /// The last answer's refusal; the field stays open under it.
@@ -265,49 +284,63 @@ pub(crate) struct PromptField {
 }
 
 impl PromptField {
-    /// The field asking `prompt`; `columns` lists the column step's
-    /// choices.
-    pub(crate) fn new(input: Entity<InputState>, prompt: Prompt, columns: Vec<String>) -> Self {
+    /// The field asking `prompt`; `choices` lists the column step's
+    /// columns or the add step's reference keys.
+    pub(crate) fn new(input: Entity<InputState>, prompt: Prompt, choices: Vec<String>) -> Self {
         let mut field = PromptField {
             input,
             prompt: Prompt::NewName,
             label: SharedString::default(),
             list: None,
+            moved: false,
             choice: None,
             error: None,
         };
-        field.ask(prompt, columns);
+        field.ask(prompt, choices);
         field
     }
 
-    /// Move to `prompt`: its label, and a fresh column list on the column
-    /// step. The last refusal belonged to the previous question.
-    pub(crate) fn ask(&mut self, prompt: Prompt, columns: Vec<String>) {
+    /// Move to `prompt`: its label, and a fresh list of `choices` on the
+    /// column and add steps. The last refusal belonged to the previous
+    /// question.
+    pub(crate) fn ask(&mut self, prompt: Prompt, choices: Vec<String>) {
         self.label = label(&prompt).into();
-        self.list = matches!(prompt, Prompt::NewColumn { .. })
-            .then(|| ChoiceList::new(columns, DEFAULT_CAP));
+        self.list = match &prompt {
+            Prompt::NewColumn { .. } | Prompt::Add { .. } => {
+                Some(ChoiceList::new(choices, DEFAULT_CAP))
+            }
+            Prompt::NewName | Prompt::Rename { .. } => None,
+        };
+        self.moved = false;
         self.prompt = prompt;
         self.error = None;
         self.repaint();
     }
 
     pub(crate) fn repaint(&mut self) {
-        self.choice = self
-            .list
-            .as_ref()
-            .map(|l| Rc::new(choice_paint(l, ChoiceKind::Columns)));
+        let kind = match self.prompt {
+            Prompt::Add { .. } => ChoiceKind::Values,
+            _ => ChoiceKind::Columns,
+        };
+        self.choice = self.list.as_ref().map(|l| Rc::new(choice_paint(l, kind)));
     }
 
-    /// The answer `text` gives: on the closed column step, the highlighted
+    /// The answer `text` gives. On the closed column step, the highlighted
     /// column whenever one survives the typed text (`under` answers
-    /// `underlying_ref`), else the text, which validation then refuses.
+    /// `underlying_ref`), else the text, which validation then refuses. On
+    /// the add step, the label editor's rule ([`commit_value`]): the
+    /// highlighted key when moved to or typed out in full, else the text
+    /// trimmed; blank stays blank, which the add step refuses.
     pub(crate) fn answer(&mut self, text: &str) -> String {
-        match self.list.as_mut() {
-            Some(list) => {
+        match (&self.prompt, self.list.as_mut()) {
+            (Prompt::Add { .. }, Some(list)) => {
+                commit_value(list, self.moved, text).unwrap_or_default()
+            }
+            (_, Some(list)) => {
                 list.set_query(text.trim());
                 list.highlighted_text().unwrap_or(text).to_string()
             }
-            None => text.to_string(),
+            (_, None) => text.to_string(),
         }
     }
 }

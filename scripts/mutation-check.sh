@@ -38935,8 +38935,8 @@ run_mutation "classifications: the cursor follows its source across a rebuild" \
 
 run_mutation "classifications: a blank label counts as unclassified" \
   crates/geode-classifications/src/core/grid.rs \
-  '        self.unclassified = rows.iter().filter(|r| label_text(r).is_none()).count();' \
-  '        self.unclassified = rows.iter().filter(|r| r.label.is_none()).count();' \
+  '            rows.iter().filter(|r| label_text(r).is_none()).count() - usize::from(self.draft_shown);' \
+  '            rows.iter().filter(|r| r.label.is_none()).count() - usize::from(self.draft_shown);' \
   geode-classifications \
   counts_treat_a_blank_label_as_unclassified
 
@@ -39370,6 +39370,39 @@ run_mutation "classifications: a removed value is announced" \
   '        _ => return None,' \
   geode-classifications \
   d_d_removes_a_map_only_value_and_clears_one_in_the_data
+
+# The draft goes with the editor: escape must not leave a phantom row.
+run_mutation "classifications: a closed editor drops its draft" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.draft.take().is_some() {' \
+  '        if false {' \
+  geode-classifications \
+  escape_at_the_label_step_leaves_no_trace
+
+# A value the rows already hold is the real row, never a second draft row.
+run_mutation "classifications: a draft the rows hold is not inserted" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            && !rows.iter().any(|r| r.source == d)' \
+  '            && true' \
+  geode-classifications \
+  a_draft_the_rows_now_hold_is_the_real_row
+
+# The draft is not a value yet: counting it would claim a row the data lacks.
+run_mutation "classifications: a draft is not counted" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            self.rows.len() - usize::from(self.draft_shown),' \
+  '            self.rows.len(),' \
+  geode-classifications \
+  a_draft_sorts_after_the_observed_unclassified_rows_and_is_not_counted
+
+# The add field offers only reference keys not already rows: offering a
+# shown value would read as adding what is there.
+run_mutation "classifications: add offers only keys not yet rows" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                    .filter(|k| !rows.contains(*k))' \
+  '                    .filter(|_| true)' \
+  geode-classifications \
+  o_adds_a_value_and_its_label_writes_one_entry
 
 # A door tile shows its edit before the write: a failed write must reach it,
 # or its labels look saved.

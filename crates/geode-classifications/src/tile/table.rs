@@ -77,20 +77,22 @@ impl Prepared {
     }
 }
 
-/// A press on shown row `row`: `shift` extends a selection; `clicks` is
-/// the press's click count, so a double-click opens the label editor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A press on the row of `source`: `shift` extends a selection; `clicks`
+/// is the press's click count, so a double-click opens the label editor.
+/// The row is named by source, not painted index: the press may close a
+/// draft's editor first, which moves the rows under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RowPressed {
-    pub row: usize,
+    pub source: SharedString,
     pub shift: bool,
     pub clicks: usize,
 }
 
-/// A right press on shown row `row`, at `position` in window coordinates:
-/// the `⋯` menu opens there.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// A right press on the row of `source`, at `position` in window
+/// coordinates: the `⋯` menu opens there.
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RowContext {
-    pub row: usize,
+    pub source: SharedString,
     pub position: Point<Pixels>,
 }
 
@@ -376,6 +378,8 @@ impl TableDelegate for GridDelegate {
             return div().id(("row", row_ix));
         };
         let source = row.source.clone();
+        let pressed = source.clone();
+        let context = source.clone();
         div()
             .id(ElementId::Name(row.source.clone()))
             .debug_selector(move || format!("classifications-row-{source}"))
@@ -387,7 +391,7 @@ impl TableDelegate for GridDelegate {
                         return;
                     }
                     cx.emit(RowPressed {
-                        row: row_ix,
+                        source: pressed.clone(),
                         shift: m.shift,
                         clicks: e.click_count,
                     });
@@ -397,7 +401,7 @@ impl TableDelegate for GridDelegate {
                 MouseButton::Right,
                 cx.listener(move |_, e: &MouseDownEvent, _, cx| {
                     cx.emit(RowContext {
-                        row: row_ix,
+                        source: context.clone(),
                         position: e.position,
                     });
                 }),

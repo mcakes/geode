@@ -15,7 +15,8 @@ the frame's config door.
   the tile's `TileContent` door, `ACTIONS` (category `Classifications`) and
   the `DEFAULT_KEYMAP` fragment: `i`/`enter` edit (caret at the end),
   `shift+i` edit (label selected), `x`, `d d` (`d` on a selection) clear,
-  `s` cycles the label sort. New, rename, delete and revert have no
+  `s` cycles the label sort, `o`/`shift+o` add a value (Add value…, also in
+  the `⋯` menu). New, rename, delete and revert have no
   default chord: the palette and the `⋯` menu reach them; Export CSV,
   Export CSV with unclassified and Import CSV likewise.
 - `core/session.rs`: the session table (`version`, `name`,
@@ -35,6 +36,12 @@ the frame's config door.
   shown index instead, so labelling the top unclassified row leaves the
   cursor on the next one; the verb ends a selection. A rebuild that removes
   the cursor's row while a selection is live ends the selection.
+  A draft row (`set_draft`, taking effect on the next `set_rows`) is a value
+  being added: inserted after the observed unclassified rows unless the rows
+  already hold it (then it is the real row and `draft()` is `None`), and
+  counted in neither figure of `counts`. The tile holds a draft exactly as
+  long as the label editor: closing the editor (a commit, `escape`, any
+  other verb) drops it, and only its label's write keeps the value.
 - `core/history.rs`: `History`, the undo and redo stacks over the shown
   classification and the optimistic object an edit produced. Every verb
   works over `current` (the pending object, else the configuration's), so

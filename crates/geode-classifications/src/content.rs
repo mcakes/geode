@@ -50,6 +50,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
         "classifications::import",
         "Classification: Import CSV\u{2026}",
     ),
+    ("classifications::add", "Classification: Add value\u{2026}"),
     ("classifications::edit", "Classification: Set label"),
     (
         "classifications::edit_select",
@@ -120,6 +121,8 @@ context = "classifications && mode == visual"
 context = "classifications && mode == normal"
 [bindings.keys]
 "enter" = "classifications::edit"
+"o" = "classifications::add"
+"shift+o" = "classifications::add"
 "i" = "classifications::edit"
 "shift+i" = "classifications::edit_select"
 "x" = "classifications::clear"
@@ -409,7 +412,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 35);
+        assert_eq!(count, 37);
         // The config-level verbs are reached from the palette and the menu.
         for unbound in [
             "new",
@@ -449,6 +452,8 @@ mod tests {
             "\"s\" =",
             "\"n\" =",
             "\"shift+n\" =",
+            "\"o\" =",
+            "\"shift+o\" =",
         ] {
             assert!(fragment.contains(key), "{key} is bound");
         }
