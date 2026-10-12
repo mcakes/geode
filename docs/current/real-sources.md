@@ -160,7 +160,11 @@ desk-layer `sources.toml` entry per report and a `datasets.toml`
 declaration with `axes`. Where several reports feed one dataset, each
 report's source lists the `measures` its files carry and each source's
 `batch_pattern` yields a batch no other report's does. Each demo term
-report's source lists its one measure and that measure's twin.
+report's source lists its one measure and that measure's twin. Splitting
+a report into several, or changing a `batch_pattern`, leaves the old
+batch's partitions live beside the new ones: nothing retires them, and
+their measures add in with `Ok` health. Delete the store after such a
+change (see [several reports](configuration.md#validation-boundaries)).
 
 **Lag:** a position move rewrites the risk files only; scenario rows keep
 the old LHU until the next scenario run, and the scenario data's source

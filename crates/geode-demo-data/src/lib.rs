@@ -9,7 +9,7 @@ mod model;
 pub mod scenario;
 
 pub use emit::{
-    EmitOptions, EmittedDirectory, EmittedFile, emit_directory, emit_scenario_directory,
+    EmitOptions, EmittedDirectory, EmittedFile, USD_FACTOR, emit_directory, emit_scenario_directory,
 };
 pub use generate::{GeneratorConfig, demo_underlyings, generate};
 pub use model::RiskBatch;

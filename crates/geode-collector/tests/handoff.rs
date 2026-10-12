@@ -18,9 +18,11 @@
 //!
 //! - Every child process is held by a [`Proc`], which kills and reaps it on
 //!   drop, so a failed assertion never leaves a collector running.
-//! - Every wait is a poll with a deadline of 10 s or less ([`WAIT`]) that
-//!   fails on expiry. The one longer bound is the app's own 15 s open
-//!   deadline inside `acquire_app`, which returns by itself.
+//! - Every wait is a poll with a deadline that fails on expiry: 10 s
+//!   ([`WAIT`]) for everything but two. The demo's scenario startup burst
+//!   gets [`SCENARIO_WAIT`] (40 s), and a freshly copied binary's first
+//!   launch on macOS gets `FIRST_LAUNCH_WAIT` (30 s). The app's own 15 s
+//!   open deadline inside `acquire_app` returns by itself.
 //! - Tests run one at a time ([`serial`]). A spawned child shares this
 //!   process's open file descriptions between its fork and its exec, so a
 //!   `<db>.app.lock` dropped by one test while another test spawns a child
@@ -48,7 +50,7 @@ use geode_data::store::{Catalog, Store, StoreError};
 use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_geode-collector");
-/// The longest any test waits for anything but the scenario burst.
+/// The bound on every wait except the scenario burst and a first launch.
 const WAIT: Duration = Duration::from_secs(10);
 /// The demo's scenario startup burst: every scenario report's files.
 const SCENARIO_WAIT: Duration = Duration::from_secs(40);
@@ -609,6 +611,7 @@ fn a_handoff_keeps_the_documents_the_collector_received() {
     let scenario = world.db.parent().unwrap().join("scenario");
     let expected = scenario_batches(&scenario);
     assert!(!expected.is_empty(), "the demo emitted scenario files");
+    let burst = Instant::now();
     wait_until("every scenario file published", SCENARIO_WAIT, || {
         if let Some(status) = collector.exited() {
             panic!("{}", world.exited_message(status));
@@ -619,6 +622,14 @@ fn a_handoff_keeps_the_documents_the_collector_received() {
             .all(|key| done.contains_key(key))
             .then_some(())
     });
+    // The burst's own time against its bound, so a shrinking margin shows
+    // (with `--nocapture`) before the wait fails.
+    println!(
+        "scenario burst: {} files in {:.1} s of {} s",
+        expected.len(),
+        burst.elapsed().as_secs_f64(),
+        SCENARIO_WAIT.as_secs()
+    );
     wait_quiet(&world, Duration::from_secs(1), WAIT);
 
     let (lease, store, _, _) = take_store(&world.db);

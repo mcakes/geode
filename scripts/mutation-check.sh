@@ -37648,6 +37648,24 @@ run_mutation "demo scenario: each term report's batch carries its name" \
   '(?P<batch>{report}_.+)_' \
   '{report}_(?P<batch>.+)_' \
   geode-compose each_term_report_feeds_term_sensitivities_under_its_own_batch
+# `term_sensitivities` has no source of its own: one report per measure
+# feeds it, and a combined source would list no `measures`.
+run_mutation "demo scenario: no combined term source" \
+  crates/geode-compose/src/demo.rs \
+  '        if ds == TERM_DATASET {
+            continue;
+        }' \
+  '        if false {
+            continue;
+        }' \
+  geode-compose the_demo_layer_declares_the_scenario_sources
+# A term report's file puts the book before the date, so its batch
+# `<report>_<book>` leaves the date out and each date replaces the last.
+run_mutation "demo scenario: a term report's file name puts the book before the date" \
+  crates/geode-demo-data/src/emit.rs \
+  '                Some(report) => format!("{report}_{}_{}", r.text[1], r.text[0]),' \
+  '                Some(report) => format!("{report}_{}_{}", r.text[0], r.text[1]),' \
+  geode-demo-data emitting_writes_one_file_per_dataset_and_book_with_a_sentinel
 # Diva opposes delta: higher dividends lower the forward.
 run_mutation "demo scenario: diva opposes delta" \
   crates/geode-demo-data/src/scenario.rs \

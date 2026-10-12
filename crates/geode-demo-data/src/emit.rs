@@ -48,7 +48,7 @@ const SOURCE_NAMES: &[(&str, &str)] = &[
 ];
 
 /// Deterministic FX factor for every `_USD` twin, so twins are reproducible.
-const USD_FACTOR: f64 = 1.08;
+pub const USD_FACTOR: f64 = 1.08;
 
 /// Measures emitted with a `_USD` twin using the fixed `USD_FACTOR`.
 const USD_TWINS: &[&str] = &[

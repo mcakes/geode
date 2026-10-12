@@ -1650,6 +1650,17 @@ mod several_reports_tests {
             let total = want.values().sum::<f64>();
             let got = cell(&s, None, measure);
             assert!(close(got, total), "Σ {measure}: {got:?} vs {total}");
+            // The USD twin, which the tile paints by default: the native
+            // value at the emitter's fixed factor, per tenor and in Σ.
+            let twin = format!("{measure}_usd");
+            for (tenor, v) in &want {
+                let usd = v * geode_demo_data::USD_FACTOR;
+                let got = cell(&s, Some(tenor), &twin);
+                assert!(close(got, usd), "{twin} at {tenor}: {got:?} vs {usd}");
+            }
+            let usd = total * geode_demo_data::USD_FACTOR;
+            let got = cell(&s, None, &twin);
+            assert!(close(got, usd), "Σ {twin}: {got:?} vs {usd}");
         }
 
         // The dataset time is the oldest of the five reports' times.

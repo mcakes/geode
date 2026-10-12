@@ -255,8 +255,7 @@ under one key, and every sum over it would be plausible and wrong.
 
 Several reports can feed one measures dataset, each from its own directory
 source (the demo's five term reports, one per measure, all feed
-`term_sensitivities`).
-Two rules make that work. Each source lists the measures its files carry
+`term_sensitivities`). Two rules make that work. Each source lists the measures its files carry
 in [`measures`](#source-configuration). A measure the file lacks and the
 list omits is another report's: it reads as NULL with no degradation and
 no note. A listed measure the file lacks keeps the schema's `required`
@@ -265,8 +264,18 @@ must yield a batch no other report's file yields for the same book,
 because a partition is (dataset, batch, book) and a load replaces its
 partitions' live rows: two reports under one batch delete each other's
 rows on every load. A query sums each measure over every partition, and
-SQL `sum` skips the other report's NULLs, so neither report zeroes or
-blanks the other's totals.
+SQL `sum` skips the other reports' NULLs, so no report zeroes or blanks
+another's totals.
+
+Changing a report's batch (splitting one report into several, or editing
+a `batch_pattern`) leaves the partitions under the old batch live. A load
+replaces only its own (dataset, batch, book) partitions, and nothing
+retires a batch no source produces any more: retention sweeps archive
+tables only, never live ones, so the old partitions never age out. Their
+measures add into the new partitions' with `Ok` health and no note, a
+plausible wrong total. After such a change, delete the store (for the
+demo, `$TMPDIR/geode-demo/<rows>-42/`) so every partition is rebuilt from
+the current sources.
 
 The `pricer` declaration marks its nine utf8 dimensions `textual = true`:
 `sheet`, `template`, `underlying_ref`, `expiry`, `option_type`, `currency`,

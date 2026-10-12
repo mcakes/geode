@@ -1729,8 +1729,8 @@ the record.
 - The dataset time does not say which report is old: any of the five
   reports lagging reads the same.
 - When one report lags another by a business date, a position carries two
-  `business_date` values across the live table, and every load of either
-  report records a cross-file attribute conflict (diagnostic only, no
+  `business_date` values across the live table, and every load of any of
+  the reports records a cross-file attribute conflict (diagnostic only, no
   health effect).
 - No `/` find and no sort.
 - `:filter <expr>` and `:asof <time>` have no menu rows.

@@ -769,8 +769,13 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - A dataset fed by several reports (By maturity's five) shows one dataset
   time, the oldest report's; nothing says which report is the old one.
 - A report lagging another by a business date records a cross-file
-  `business_date` attribute conflict on every load of either report;
+  `business_date` attribute conflict on every load of any of the reports;
   attribute conflicts do not know that rows come from different reports.
+- Changing a source's `batch_pattern`, or splitting one report into
+  several, leaves the old batch's partitions live: sums include them, with
+  `Ok` health, until the store is cleared. Nothing detects a live batch no
+  configured source produces any more, and nothing retires it (retention
+  sweeps archives only).
 
 ### Display checks
 
