@@ -16228,6 +16228,39 @@ run_mutation "cell: a flat heat range tints fully" \
   geode-widgets \
   a_flat_range_tints_nothing
 
+# The chip's tint follows the sign the host displays: a change shown as 0.0
+# is not tinted whatever its unrounded value.
+run_mutation "cell: a change displayed as zero is tinted" \
+  crates/geode-widgets/src/cell/delta_chip.rs \
+  '    let alpha = if scale.is_finite() && scale > 0.0 && sign != Sign::Zero {' \
+  '    let alpha = if scale.is_finite() && scale > 0.0 && value != 0.0 {' \
+  geode-widgets \
+  the_displayed_sign_decides_the_color_and_a_displayed_zero_has_no_fill
+
+# The bar follows the displayed sign too: no bar beside a 0.0.
+run_mutation "cell: a spread displayed as zero draws a bar" \
+  crates/geode-widgets/src/cell/zero_bar.rs \
+  '    let extent = if scale.is_finite() && scale > 0.0 && sign != Sign::Zero {' \
+  '    let extent = if scale.is_finite() && scale > 0.0 && value != 0.0 {' \
+  geode-widgets \
+  the_displayed_sign_decides_the_side_and_a_displayed_zero_draws_no_bar
+
+# Slider tracks start at the cell's leading edge (the glyph fills the cell)
+# so they line up down a column whatever the width of each rank.
+run_mutation "cell: a slider track floats with its number's width" \
+  crates/geode-widgets/src/cell/percent_slider.rs \
+  '    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(design(GAP))' \
+  '    div()
+        .flex()
+        .items_center()
+        .gap(design(GAP))' \
+  geode-widgets \
+  tracks_line_up_down_a_right_aligned_column
+
 # ---- Object-dialog action buttons ----
 
 # While confirmation is armed, render the value chip as plain text without a

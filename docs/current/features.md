@@ -1317,7 +1317,11 @@ grows from a center axis on the value's sign side, its length the value's
 share of the column's largest magnitude. The heat tint puts one hue behind the
 number, alpha by its position in the grid's range, and no tint at all when the
 range is flat. Every glyph keeps its number; a missing or non-finite value
-paints the number alone. The vol watchlist tile is the first consumer.
+paints the number alone. The chip and the bar take the sign the host displays,
+which follows the rounded value, so a change shown as `0.0` is neither tinted
+nor barred; the host passes the slider's rank at display precision. Slider
+tracks and bar axes start at the cell's leading edge, so they line up down a
+column whatever the width of each number. The vol watchlist tile is the first consumer.
 
 ## Vol slice
 

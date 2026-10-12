@@ -66,12 +66,18 @@ pub fn paint(
     id: SharedString,
 ) -> Div {
     let text_sel = id.clone();
+    // The label takes the space after the track, right-aligned, so in a
+    // column of cells every track starts at the cell's leading edge
+    // whatever the width of its number.
     let label = div()
+        .flex_1()
+        .flex()
+        .justify_end()
         .text_color(paint.text)
         .debug_selector(move || format!("{text_sel}-text"))
         .child(text);
     let Some(s) = slider else {
-        return div().flex().items_center().child(label);
+        return div().w_full().flex().items_center().child(label);
     };
     let (track_sel, fill_sel, marker_sel) = (id.clone(), id.clone(), id);
     let marker = if s.warn { paint.warning } else { paint.marker };
@@ -117,6 +123,7 @@ pub fn paint(
                 .debug_selector(move || format!("{marker_sel}-marker")),
         );
     div()
+        .w_full()
         .flex()
         .items_center()
         .gap(design(GAP))
@@ -241,6 +248,61 @@ mod tests {
         assert!(
             vcx.debug_bounds("probe-text").is_some(),
             "no rank: the text alone"
+        );
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+    use gpui::{
+        AppContext as _, IntoElement, TestAppContext, VisualTestContext, Window, div, hsla, px,
+    };
+
+    struct Column;
+    impl gpui::Render for Column {
+        fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let p = SliderPaint {
+                track: hsla(0.0, 0.0, 0.2, 1.0),
+                fill: hsla(0.6, 0.6, 0.5, 1.0),
+                tick: hsla(0.0, 0.0, 0.1, 1.0),
+                marker: hsla(0.0, 0.0, 0.9, 1.0),
+                warning: hsla(0.1, 1.0, 0.5, 1.0),
+                text: hsla(0.0, 0.0, 0.6, 1.0),
+                radius: px(2.0),
+            };
+            let row = |text: &'static str, id: &'static str| {
+                div().w(px(160.0)).flex().justify_end().child(paint(
+                    text.into(),
+                    slider(0.5),
+                    p,
+                    id.into(),
+                ))
+            };
+            div()
+                .flex()
+                .flex_col()
+                .child(row("5", "r0"))
+                .child(row("100", "r1"))
+        }
+    }
+
+    #[gpui::test]
+    fn tracks_line_up_down_a_right_aligned_column(cx: &mut TestAppContext) {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |_w, cx| cx.new(|_| Column))
+            })
+            .unwrap();
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        let a = vcx.debug_bounds("r0-track").expect("row 0 track");
+        let b = vcx.debug_bounds("r1-track").expect("row 1 track");
+        assert!(
+            (a.origin.x.as_f32() - b.origin.x.as_f32()).abs() < 0.5,
+            "a one-digit and a three-digit rank share the track's x: {a:?} {b:?}"
         );
     }
 }

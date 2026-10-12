@@ -16,20 +16,16 @@ pub struct Chip {
 }
 
 /// The chip for `value` against the column `scale` (`column_scale`), with
-/// fill alpha capped at `ceiling` (clamped to `[0, 1]`). `None` for a
-/// non-finite value: the host paints its text alone. A zero, or a zero or
+/// fill alpha capped at `ceiling` (clamped to `[0, 1]`). `sign` is the sign
+/// of the number as the host displays it (`geode_core::format::Formatted::sign`,
+/// which follows the rounded value), so a change shown as `0.0` gets no tint
+/// and the zero color whatever its unrounded value. `None` for a non-finite
+/// value: the host paints its text alone. A zero sign, or a zero or
 /// non-finite scale, has no fill.
-pub fn chip(value: f64, scale: f64, ceiling: f32) -> Option<Chip> {
+pub fn chip(value: f64, sign: Sign, scale: f64, ceiling: f32) -> Option<Chip> {
     if !value.is_finite() {
         return None;
     }
-    let sign = if value > 0.0 {
-        Sign::Positive
-    } else if value < 0.0 {
-        Sign::Negative
-    } else {
-        Sign::Zero
-    };
     let ceiling = ceiling.clamp(0.0, 1.0);
     let alpha = if scale.is_finite() && scale > 0.0 && sign != Sign::Zero {
         ((value.abs() / scale).min(1.0) as f32) * ceiling
@@ -71,17 +67,23 @@ const INSET: f32 = 4.0;
 /// number; with no chip it is painted in the plain text color.
 pub fn paint(text: SharedString, chip: Option<Chip>, paint: ChipPaint, id: SharedString) -> Div {
     let text_sel = id.clone();
+    // The wrapper right-aligns the chip, so it keeps its own width in any
+    // host; a missing value carries the chip's text inset so its `—` lines
+    // up with the numbers above and below it.
     let Some(chip) = chip else {
-        return div().child(
-            div()
-                .text_color(paint.text)
-                .debug_selector(move || format!("{text_sel}-text"))
-                .child(text),
+        return div().flex().justify_end().child(
+            div().px(design(INSET)).child(
+                div()
+                    .text_color(paint.text)
+                    .debug_selector(move || format!("{text_sel}-text"))
+                    .child(text),
+            ),
         );
     };
     let color = paint.color(chip.sign);
-    div().child(
+    div().flex().justify_end().child(
         div()
+            .flex_none()
             .min_w(design(MIN_WIDTH))
             .px(design(INSET))
             .rounded(paint.radius)
@@ -101,29 +103,40 @@ pub fn paint(text: SharedString, chip: Option<Chip>, paint: ChipPaint, id: Share
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sign the host would display for an exactly representable value.
+    fn sgn(v: f64) -> Sign {
+        if v > 0.0 {
+            Sign::Positive
+        } else if v < 0.0 {
+            Sign::Negative
+        } else {
+            Sign::Zero
+        }
+    }
     use gpui::{
         AppContext as _, IntoElement, TestAppContext, VisualTestContext, Window, div, hsla, px,
     };
 
     #[test]
     fn alpha_is_magnitude_over_the_scale_up_to_the_ceiling() {
-        let c = chip(1.1, 2.2, 0.55).unwrap();
+        let c = chip(1.1, sgn(1.1), 2.2, 0.55).unwrap();
         assert_eq!(c.sign, Sign::Positive);
         assert!((c.alpha - 0.275).abs() < 1e-6);
-        let c = chip(-2.2, 2.2, 0.55).unwrap();
+        let c = chip(-2.2, sgn(-2.2), 2.2, 0.55).unwrap();
         assert_eq!(c.sign, Sign::Negative);
         assert!((c.alpha - 0.55).abs() < 1e-6);
     }
 
     #[test]
     fn a_move_beyond_the_scale_clamps_at_the_ceiling() {
-        assert!((chip(5.0, 2.0, 0.55).unwrap().alpha - 0.55).abs() < 1e-6);
-        assert!((chip(-5.0, 2.0, 0.4).unwrap().alpha - 0.4).abs() < 1e-6);
+        assert!((chip(5.0, sgn(5.0), 2.0, 0.55).unwrap().alpha - 0.55).abs() < 1e-6);
+        assert!((chip(-5.0, sgn(-5.0), 2.0, 0.4).unwrap().alpha - 0.4).abs() < 1e-6);
     }
 
     #[test]
     fn a_zero_scale_tints_nothing() {
-        let c = chip(0.0, 0.0, 0.55).unwrap();
+        let c = chip(0.0, sgn(0.0), 0.0, 0.55).unwrap();
         assert_eq!(
             c,
             Chip {
@@ -131,7 +144,7 @@ mod tests {
                 alpha: 0.0
             }
         );
-        let c = chip(0.3, 0.0, 0.55).unwrap();
+        let c = chip(0.3, sgn(0.3), 0.0, 0.55).unwrap();
         assert_eq!(c.alpha, 0.0, "no scale: sign kept, no fill");
         assert_eq!(c.sign, Sign::Positive);
     }
@@ -139,14 +152,14 @@ mod tests {
     #[test]
     fn zero_is_its_own_sign_with_no_fill() {
         assert_eq!(
-            chip(0.0, 3.0, 0.55),
+            chip(0.0, sgn(0.0), 3.0, 0.55),
             Some(Chip {
                 sign: Sign::Zero,
                 alpha: 0.0
             })
         );
         assert_eq!(
-            chip(-0.0, 3.0, 0.55),
+            chip(-0.0, sgn(-0.0), 3.0, 0.55),
             Some(Chip {
                 sign: Sign::Zero,
                 alpha: 0.0
@@ -156,10 +169,10 @@ mod tests {
 
     #[test]
     fn a_non_finite_value_has_no_chip() {
-        assert_eq!(chip(f64::NAN, 3.0, 0.55), None);
-        assert_eq!(chip(f64::INFINITY, 3.0, 0.55), None);
+        assert_eq!(chip(f64::NAN, sgn(f64::NAN), 3.0, 0.55), None);
+        assert_eq!(chip(f64::INFINITY, sgn(f64::INFINITY), 3.0, 0.55), None);
         assert_eq!(
-            chip(1.0, f64::NAN, 0.55).map(|c| c.alpha),
+            chip(1.0, sgn(1.0), f64::NAN, 0.55).map(|c| c.alpha),
             Some(0.0),
             "a bad scale tints nothing"
         );
@@ -167,8 +180,8 @@ mod tests {
 
     #[test]
     fn a_negative_or_oversized_ceiling_is_clamped_to_zero_and_one() {
-        assert_eq!(chip(1.0, 1.0, -0.5).unwrap().alpha, 0.0);
-        assert_eq!(chip(1.0, 1.0, 3.0).unwrap().alpha, 1.0);
+        assert_eq!(chip(1.0, sgn(1.0), 1.0, -0.5).unwrap().alpha, 0.0);
+        assert_eq!(chip(1.0, sgn(1.0), 1.0, 3.0).unwrap().alpha, 1.0);
     }
 
     fn test_paint() -> ChipPaint {
@@ -210,7 +223,7 @@ mod tests {
 
     #[gpui::test]
     fn the_chip_paints_its_text_and_a_fill_only_when_tinted(cx: &mut TestAppContext) {
-        let mut vcx = drawn(cx, chip(1.1, 2.2, 0.55));
+        let mut vcx = drawn(cx, chip(1.1, sgn(1.1), 2.2, 0.55));
         assert!(
             vcx.debug_bounds("probe-chip").is_some(),
             "the chip with its number is painted"
@@ -225,5 +238,95 @@ mod tests {
             vcx.debug_bounds("probe-text").is_some(),
             "a missing value still paints its text"
         );
+    }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+    use gpui::{
+        AppContext as _, IntoElement, TestAppContext, VisualTestContext, Window, div, hsla, px,
+    };
+
+    fn p() -> ChipPaint {
+        ChipPaint {
+            positive: hsla(0.47, 0.6, 0.4, 1.0),
+            negative: hsla(0.0, 0.8, 0.6, 1.0),
+            zero: hsla(0.0, 0.0, 0.6, 1.0),
+            text: hsla(0.0, 0.0, 0.9, 1.0),
+            radius: px(3.0),
+        }
+    }
+
+    struct Column;
+    impl gpui::Render for Column {
+        fn render(&mut self, _w: &mut Window, _cx: &mut gpui::Context<Self>) -> impl IntoElement {
+            let row = |text: &'static str, c: Option<Chip>, id: &'static str| {
+                div()
+                    .w(px(160.0))
+                    .flex()
+                    .justify_end()
+                    .child(paint(text.into(), c, p(), id.into()))
+            };
+            div()
+                .flex()
+                .flex_col()
+                .child(row("+1.1", chip(1.1, Sign::Positive, 2.2, 0.55), "r0"))
+                .child(row("—", None, "r1"))
+                // A block host: the chip keeps its own width, not the cell's.
+                .child(div().w(px(160.0)).child(paint(
+                    "+1.1".into(),
+                    chip(1.1, Sign::Positive, 2.2, 0.55),
+                    p(),
+                    "blk".into(),
+                )))
+        }
+    }
+
+    fn drawn(cx: &mut TestAppContext) -> VisualTestContext {
+        let window = cx
+            .update(|cx| {
+                cx.open_window(gpui::WindowOptions::default(), |_w, cx| cx.new(|_| Column))
+            })
+            .unwrap();
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|w, cx| {
+            let _ = w.draw(cx);
+        });
+        vcx
+    }
+
+    #[gpui::test]
+    fn a_missing_value_lines_up_with_the_chips_numbers(cx: &mut TestAppContext) {
+        let mut vcx = drawn(cx);
+        let a = vcx.debug_bounds("r0-text").expect("chip text");
+        let b = vcx.debug_bounds("r1-text").expect("missing text");
+        let right = |r: gpui::Bounds<gpui::Pixels>| r.origin.x.as_f32() + r.size.width.as_f32();
+        assert!((right(a) - right(b)).abs() < 0.5, "right edges {a:?} {b:?}");
+    }
+
+    #[gpui::test]
+    fn the_chip_keeps_its_own_width_in_a_block_cell(cx: &mut TestAppContext) {
+        let mut vcx = drawn(cx);
+        let c = vcx.debug_bounds("blk-chip").expect("chip");
+        assert!(
+            c.size.width.as_f32() < 100.0,
+            "the chip did not stretch to the 160 px cell: {c:?}"
+        );
+    }
+
+    #[test]
+    fn the_displayed_sign_decides_the_color_and_a_displayed_zero_has_no_fill() {
+        // 0.04 displayed at one decimal reads 0.0: no tint behind a zero.
+        assert_eq!(
+            chip(0.04, Sign::Zero, 2.0, 0.55),
+            Some(Chip {
+                sign: Sign::Zero,
+                alpha: 0.0
+            })
+        );
+        let c = chip(-0.4, Sign::Negative, 2.0, 0.55).unwrap();
+        assert_eq!(c.sign, Sign::Negative);
+        assert!((c.alpha - 0.11).abs() < 1e-6);
     }
 }

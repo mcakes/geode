@@ -1,9 +1,11 @@
 //! The cell glyphs at grid density, for the owner's display check: eight
 //! rows like the vol board's Changes and Rich/cheap views, with a heat-tinted
 //! level, a change chip, a percentile slider and a bar from zero. The rows
-//! include a zero change, a missing change and rank, and both decile edges.
+//! include a change that displays as zero, a missing change and rank, both
+//! decile edges and a two-digit spread.
 //! `t` toggles light and dark.
 
+use geode_core::format::Sign;
 use geode_widgets::cell::{column_scale, delta_chip, design, heat, percent_slider, zero_bar};
 use gpui::{
     App, Context, FocusHandle, KeyDownEvent, Render, SharedString, Window, div, prelude::*,
@@ -20,13 +22,26 @@ const BAR_ALPHA: f32 = 0.75;
 const ROWS: [(&str, f64, f64, f64, f64); 8] = [
     ("SPX", 15.9, 1.1, 0.91, 3.4),
     ("SX5E", 18.2, -0.4, 0.23, -1.2),
-    ("NKY", 22.8, 0.0, 0.5, 0.0),
+    ("NKY", 22.8, 0.04, 0.5, 0.0),
     ("UKX", 13.1, 0.25, 0.05, 1.8),
     ("HSI", 24.4, -2.2, 0.10, -4.6),
     ("KOSPI2", 19.7, f64::NAN, f64::NAN, 2.2),
     ("AS51", 11.9, 0.6, 0.90, -0.3),
-    ("SMI", 14.8, -0.9, 0.97, 5.1),
+    ("SMI", 14.8, -0.9, 0.97, 12.3),
 ];
+
+/// The sign of `v` as displayed at one decimal, the way
+/// `geode_core::format::Formatted::sign` follows the rounded value.
+fn shown_sign(v: f64) -> Sign {
+    let r = (v * 10.0).round();
+    if r > 0.0 {
+        Sign::Positive
+    } else if r < 0.0 {
+        Sign::Negative
+    } else {
+        Sign::Zero
+    }
+}
 
 fn number(v: f64, signed: bool) -> SharedString {
     if !v.is_finite() {
@@ -132,19 +147,21 @@ impl Render for Cells {
                     )))
                     .child(cell(delta_chip::paint(
                         change_t,
-                        delta_chip::chip(*change, change_scale, CHIP_CEILING),
+                        delta_chip::chip(*change, shown_sign(*change), change_scale, CHIP_CEILING),
                         chip_paint,
                         format!("chip-{i}").into(),
                     )))
                     .child(cell(percent_slider::paint(
                         rank_t,
-                        percent_slider::slider(*rank),
+                        // The rank at its display precision, so the warning agrees with the
+                        // number shown (90 warns; 89 does not).
+                        percent_slider::slider((rank * 100.0).round() / 100.0),
                         slider_paint,
                         format!("slider-{i}").into(),
                     )))
                     .child(cell(zero_bar::paint(
                         spread_t,
-                        zero_bar::bar(*spread, spread_scale),
+                        zero_bar::bar(*spread, shown_sign(*spread), spread_scale),
                         bar_paint,
                         format!("bar-{i}").into(),
                     ))),

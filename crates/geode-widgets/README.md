@@ -59,6 +59,14 @@ focus, and repaint notification.
 - A cell glyph paints the host's preformatted number every time; color, length
   and position are second channels. A core returns `None` for a non-finite
   value, and the painter then draws the text alone in the plain text color.
+- The chip and the bar take the sign the host displays (`Formatted::sign`,
+  which follows the rounded value), so a change shown as `0.0` gets no tint
+  and no bar. The slider warns on the rank it is given; pass it at display
+  precision so a rank shown as `90` warns.
+- In a column, slider tracks and bar axes start at the cell's leading edge
+  and the number takes the rest, right-aligned, so tracks and axes line up
+  whatever the width of each row's number. A missing value's text carries the
+  chip's inset so it lines up with the chips' numbers.
 - Alpha ceilings (`delta_chip`, `heat`) and the bar's fill alpha are host
   inputs, so light and dark readability is the host's theme choice. A zero or
   non-finite column scale, or a flat heat range, tints nothing.

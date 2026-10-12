@@ -600,7 +600,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   theme): the change chip's tint ceiling against its text on light and dark;
   the slider marker's warning tone at 0.05, 0.10, 0.90 and 0.97 and the plain
   marker between; the heat tint's spread across the level column; the bar's
-  sides and zero axis; the `KOSPI2` row paints `—` with no glyph.
+  sides and zero axis lined up down the column (SMI's two-digit spread); the
+  `NKY` change shown as `+0.0` with no tint; the `KOSPI2` change and rank
+  paint `—` with no glyph, lined up with the numbers above and below.
 
 ## Data path
 
