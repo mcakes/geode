@@ -39380,13 +39380,25 @@ run_mutation "classifications: a refused clear announces no removal" \
   geode-classifications \
   a_refused_clear_announces_no_removal
 
-# A draft is written only by a label: a blank one must leave no mapping.
+# A draft is written only by a label: a blank enter must leave no mapping,
+# not take the highlighted label. (A blank that did reach the write is
+# stopped again by the assign's normalisation and its no-change skip, so
+# the editor's rule is the line a single mutation can break.)
 run_mutation "classifications: a draft is committed only on a non-blank label" \
   crates/geode-classifications/src/tile/editor.rs \
-  '        _ if typed.is_empty() => None,' \
-  '        _ if typed.is_empty() => Some(String::new()),' \
+  '        Some(h) if take => Some(h),' \
+  '        Some(h) if take || typed.is_empty() => Some(h),' \
   geode-classifications \
   escape_at_the_label_step_leaves_no_trace
+
+# An empty find commit keeps nothing for `escape` to end: a find left
+# open would eat the escape that dismisses the notices.
+run_mutation "classifications: an empty find commit keeps no find" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                if self.find.as_ref().is_some_and(|f| f.committed.is_none()) {' \
+  '                if false {' \
+  geode-classifications \
+  an_empty_find_commit_leaves_escape_to_the_notices
 
 # The draft goes with the editor: escape must not leave a phantom row.
 run_mutation "classifications: a closed editor drops its draft" \
