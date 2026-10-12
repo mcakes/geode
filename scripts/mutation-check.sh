@@ -39371,6 +39371,23 @@ run_mutation "classifications: a removed value is announced" \
   geode-classifications \
   d_d_removes_a_map_only_value_and_clears_one_in_the_data
 
+# A refused clear wrote nothing: announcing a removal would report a value
+# gone that the map still holds.
+run_mutation "classifications: a refused clear announces no removal" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                if wrote && let Some(text) = removal_notice(&removed, cleared) {' \
+  '                if true && let Some(text) = removal_notice(&removed, cleared) {' \
+  geode-classifications \
+  a_refused_clear_announces_no_removal
+
+# A draft is written only by a label: a blank one must leave no mapping.
+run_mutation "classifications: a draft is committed only on a non-blank label" \
+  crates/geode-classifications/src/tile/editor.rs \
+  '        _ if typed.is_empty() => None,' \
+  '        _ if typed.is_empty() => Some(String::new()),' \
+  geode-classifications \
+  escape_at_the_label_step_leaves_no_trace
+
 # The draft goes with the editor: escape must not leave a phantom row.
 run_mutation "classifications: a closed editor drops its draft" \
   crates/geode-classifications/src/tile/mod.rs \

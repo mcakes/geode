@@ -318,7 +318,8 @@ impl GridModel {
     }
 
     /// Where `source` shows, if it does.
-    fn position(&self, source: &str) -> Option<usize> {
+    /// Where `source`'s row shows, if it is shown.
+    pub fn position(&self, source: &str) -> Option<usize> {
         self.visible
             .iter()
             .position(|&i| self.rows[i].source == source)

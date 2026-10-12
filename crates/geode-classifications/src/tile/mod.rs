@@ -1676,11 +1676,8 @@ impl ClassificationsTile {
 
     /// The shown row for `source`, if it is shown.
     fn row_of(&self, source: &str) -> Option<&ClassRow> {
-        self.grid
-            .visible()
-            .iter()
-            .map(|&i| self.grid.row(i))
-            .find(|r| r.source == source)
+        let at = self.grid.position(source)?;
+        Some(self.grid.row(self.grid.visible()[at]))
     }
 
     /// Open the label editor over the verb's targets, prefilled with their
@@ -2277,10 +2274,7 @@ impl ClassificationsTile {
     ) -> Option<usize> {
         self.close_editor(window, cx);
         self.close_prompt(window, cx);
-        self.grid
-            .visible()
-            .iter()
-            .position(|&i| self.grid.row(i).source == source)
+        self.grid.position(source)
     }
 
     /// A right press on shown row `row`: the cursor moves there (a row of a
@@ -2407,12 +2401,11 @@ impl ClassificationsTile {
                 // Every change searches from the origin, not from where the
                 // last one landed: a lengthening query walks forward and a
                 // shortened one walks back.
-                let grid = &self.grid;
                 let from = self
                     .find
                     .as_ref()
                     .and_then(|f| f.origin.as_deref())
-                    .and_then(|s| grid.visible().iter().position(|&i| grid.row(i).source == s))
+                    .and_then(|s| self.grid.position(s))
                     .unwrap_or(0);
                 if let Some(at) = find_match(
                     self.grid.search_text(),
@@ -2432,6 +2425,11 @@ impl ClassificationsTile {
                     if !query.is_empty() {
                         f.committed = Some(query);
                     }
+                }
+                // An empty commit over no earlier query leaves nothing for
+                // `n`, and nothing for `escape` to end.
+                if self.find.as_ref().is_some_and(|f| f.committed.is_none()) {
+                    self.find = None;
                 }
                 self.offer_held_later(cx);
             }
@@ -2713,7 +2711,9 @@ impl ClassificationsTile {
                 self.sync_table(false, cx);
                 cx.notify();
             }
-            "classifications::cancel" if self.find.is_some() => {
+            "classifications::cancel"
+                if self.find.as_ref().is_some_and(|f| f.committed.is_some()) =>
+            {
                 self.find = None;
                 cx.notify();
             }
@@ -2826,6 +2826,8 @@ impl ClassificationsTile {
                 // A value only the map holds leaves the grid once cleared:
                 // read which before the write rebuilds the rows.
                 let targets = self.grid.targets();
+                // Raw `label`, not `label_text`: a hand-written blank
+                // mapping still leaves the map, so it is still removed.
                 let removed: Vec<String> = targets
                     .iter()
                     .filter(|s| {

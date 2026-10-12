@@ -1582,15 +1582,15 @@ sort control cycles desc → asc → default as every grid tile's does, and `s`
 cycles the label column's sort as its header control does. Unclassified
 labels and values not in the data sort last either way. `/` finds as the
 pricer's and market data's do, by `[ui] find_style`: under vim style each
-keystroke moves the cursor to the next row whose source or label contains
-the query (ignoring case, wrapping), searching from where the search began;
+keystroke moves the cursor to the first row at or after where the search
+began whose source or label contains the query (ignoring case, wrapping);
 `enter` keeps the query for `n`/`shift+n` (counted, wrapping), `escape`
 returns the cursor to where it was. Under fzf style a ranked results table
 in the grid's columns opens; only the source cell highlights the matched
 characters (the label cell paints plain), and a pick puts the cursor on its
 row and keeps the query for `n`. Every row stays on screen: nothing narrows.
-In normal mode `escape` ends a selection first, then the find, then
-dismisses the header's notices.
+`escape` ends a selection first, then a kept find query, then dismisses
+the header's notices.
 
 The shell's grid motions move a cursor held by source value, so a rebuild
 keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.

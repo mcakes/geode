@@ -3695,3 +3695,52 @@ fn a_press_below_the_draft_lands_on_the_row_pressed(cx: &mut gpui::TestAppContex
     assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
     release_the_table_menu(&mut vcx, at);
 }
+
+/// An empty commit over no earlier query keeps nothing, so the next
+/// `escape` goes past the find to the notices.
+#[gpui::test]
+fn an_empty_find_commit_leaves_escape_to_the_notices(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Err("no such column"));
+    assert_eq!(h.notices(&vcx), [NO_SUCH_COLUMN], "fixture");
+    h.find(&mut vcx, FindEvent::Changed(String::new()));
+    h.find(&mut vcx, FindEvent::Committed(String::new()));
+    assert!(h.tile.read_with(&vcx, |t, _| t.find.is_none()));
+    let shows = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            t.dismissed
+                .visible(t.chrome.notices.iter().cloned())
+                .iter()
+                .any(|n| n.text().as_ref() == NO_SUCH_COLUMN)
+        })
+    };
+    assert!(shows(&h, &vcx), "fixture: the values notice");
+    h.press(&mut vcx, "escape");
+    assert!(!shows(&h, &vcx), "one escape dismisses it");
+}
+
+/// A clear the tile refuses (a revert is on its way) wrote nothing, so it
+/// announces no removal: only the refusal shows.
+#[gpui::test]
+fn a_refused_clear_announces_no_removal(cx: &mut gpui::TestAppContext) {
+    let dims =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\", \"GHOST\"]\n";
+    let (h, mut vcx) = shown_with(cx, dims, "region", &[("DAX", 5), ("NKY", 7)]);
+    h.goto(&mut vcx, "GHOST");
+    h.tile
+        .update(&mut vcx, |t, _| t.reverting = Some("region".into()));
+    h.press(&mut vcx, "d d");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert!(h.shown(&vcx).contains(&"GHOST".to_string()));
+    let notices = h.notices(&vcx);
+    assert!(
+        !notices.iter().any(|n| n.contains("removed")),
+        "{notices:?}"
+    );
+    assert_eq!(notices, ["reverting region\u{2026}"]);
+}
