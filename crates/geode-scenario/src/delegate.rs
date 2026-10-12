@@ -982,10 +982,23 @@ mod tests {
     fn a_default_width_holds_the_widest_text_sigma_included() {
         let mut d = ladder();
         d.ensure_palette(&gpui_component::Theme::default());
-        d.set_picture(Some(Arc::new(totalled_picture())));
+        // A large negative total: wider than every cell in its column,
+        // as a sum over many rows is.
+        let mut picture = totalled_picture();
+        picture
+            .column_sums
+            .as_mut()
+            .expect("the fixture is totalled")[0] = Some(-987_654_321.5);
+        d.set_picture(Some(Arc::new(picture)));
+        d.set_paint(true, Some(Scale::None));
         let sigma_row = d.layout.rows() - 1;
         assert!(d.layout.is_sigma_row(sigma_row));
         d.fill_window(0..d.layout.rows());
+        let chars = |r: usize, c: usize| d.cache.get(r, c).map_or(0, |c| c.text.chars().count());
+        assert!(
+            (1..d.layout.cols()).any(|c| (0..sigma_row).all(|r| chars(sigma_row, c) > chars(r, c))),
+            "the fixture has a total wider than its column's cells"
+        );
         for col in 0..d.layout.cols() {
             let longest = (0..d.layout.rows())
                 .filter_map(|r| d.cache.get(r, col).map(|c| c.text.chars().count()))
