@@ -1202,7 +1202,10 @@ linear x axis that can run reversed, with a crosshair that snaps to a quoted
 point. Both paint through gpui-component's plot surface in up to two panes.
 Paths and chrome are cached by the values that affect them; cursor movement
 does not rebuild the data model. The timeseries tile hosts the time chart and
-the vol slice viewer the xy element.
+the vol slice viewer the xy element. `spark::Spark` is the grid-cell glyph: a
+sparkline or term glyph with an optional end dot and marked point, on its own
+or a column's shared y-range, with no axes, grid or tooltip; the vol
+watchlist tile (Part 4) is its first consumer.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,

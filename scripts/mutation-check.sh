@@ -22831,6 +22831,56 @@ run_mutation "chart xy: a row reads in its own axis format" \
   geode-chart \
   the_tooltip_reads_every_visible_slot_in_its_own_axis_format
 
+# ---- Spark (vol watchlist Part 3b) ----
+# A value outside the y-range must stay inside its cell, never drawn into the
+# neighbouring row.
+run_mutation "spark: a value outside the range paints outside the cell" \
+  crates/geode-chart/src/core/spark.rs \
+  '            let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0) as f32;' \
+  '            let t = ((v - lo) / (hi - lo)) as f32;' \
+  geode-chart \
+  a_value_outside_the_range_is_clamped_inside_the_rect
+
+# A flat series reads as "no move": through the middle, not on an edge.
+run_mutation "spark: a flat series sits on the top edge" \
+  crates/geode-chart/src/core/spark.rs \
+  '            top + h / 2.0' \
+  '            top' \
+  geode-chart \
+  a_flat_series_runs_through_the_middle
+
+# The end dot is today's value: the last finite one, not a NaN slot.
+run_mutation "spark: the end dot sits on the last value even when it is NaN" \
+  crates/geode-chart/src/core/spark.rs \
+  '        .rposition(|v| v.is_finite())' \
+  '        .rposition(|_| true)' \
+  geode-chart \
+  the_end_is_the_last_finite_value
+
+# A mark on a missing value would point at nothing.
+run_mutation "spark: a mark on a NaN value is painted" \
+  crates/geode-chart/src/core/spark.rs \
+  '        .filter(|i| values.get(*i).is_some_and(|v| v.is_finite()))' \
+  '        .filter(|i| *i < values.len())' \
+  geode-chart \
+  a_mark_sits_on_its_value_and_a_bad_mark_has_none
+
+# One NaN in a row must not blank the column's shared range.
+run_mutation "spark: the shared range counts a NaN" \
+  crates/geode-chart/src/core/spark.rs \
+  '        .filter(|v| v.is_finite())' \
+  '        .filter(|_| true)' \
+  geode-chart \
+  shared_range_is_the_finite_min_and_max_across_rows
+
+# Higher values are higher on screen.
+run_mutation "spark: y grows downward" \
+  crates/geode-chart/src/core/spark.rs \
+  '            bottom - t * h' \
+  '            top + t * h' \
+  geode-chart \
+  x_is_even_by_index_and_y_grows_upward
+
 # ---- Timeseries model and tile ----
 #
 # These entries cover resolution, requests, chart models, and fetch/query

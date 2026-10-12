@@ -2933,3 +2933,28 @@ over a long range would be slow, and the UI never waits for it (the
 request is bounded submission, answered on the pool). Not tuned here; the
 lever, if a desk asks for such spans, is a recursive or `ewm`-style
 running form that keeps one accumulator per row instead of a list.
+
+## Spark layout (2026-10-11)
+
+Fixture: `crates/geode-chart/benches/spark.rs`. Synthetic sine series around
+0.18: 30 values into a 72 x 16 px cell, 252 values into a 140 x 16 px band
+cell, and 25 rows of 30 values with a range shared across them and a marked
+point, each with a 3 px inset. Layout only (index spacing, range, clamp,
+decimation, end and mark points); path tessellation and paint are excluded.
+
+Command: `cargo bench -p geode-chart --bench spark -- --warm-up-time 1
+--measurement-time 3`. Conditions: Apple M5 Pro (arm64, 18 cores, 48 GB),
+rustc 1.96.0, bench profile. The machine was shared with other builds: load
+averages 12.6 / 13.3 / 24.6 before the run, 10.1 / 12.3 / 22.7 after it.
+Criterion medians, one run each.
+
+| Benchmark | Result |
+|---|---|
+| `spark/layout_30_into_72` | 171 ns |
+| `spark/layout_252_into_140` | 1.08 µs |
+| `spark/column_25x30_shared_range` | 4.26 µs |
+
+A 25-row column of sparklines lays out in under 5 µs, three orders of
+magnitude inside the 8 ms pure-UI target; the per-glyph cost of a one-year
+band sparkline is about a microsecond.
+
