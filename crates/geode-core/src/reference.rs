@@ -212,7 +212,8 @@ impl TableRows {
 /// Live reference tables keyed by dataset, then by joined key text.
 ///
 /// Live only: consumers never see reference data at the frame's as-of.
-/// Equality covers columns and cells, never the generation or source time, so
+/// Equality covers columns, key arity and cells, never the generation or
+/// source time (a re-keyed table is a different table), so
 /// a republish of unchanged rows compares equal and wakes no observer.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReferenceData {
@@ -222,6 +223,8 @@ pub struct ReferenceData {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Table {
     columns: Vec<String>,
+    /// How many leading cells form the row key.
+    key_columns: usize,
     /// Whole rows, key cells included, so a column's index addresses its cell.
     rows: BTreeMap<String, Vec<Option<String>>>,
 }
@@ -247,6 +250,7 @@ impl Table {
             .collect();
         Table {
             columns: table.columns.clone(),
+            key_columns,
             rows,
         }
     }
@@ -299,6 +303,21 @@ impl ReferenceData {
             .get(dataset)
             .into_iter()
             .flat_map(|t| t.rows.keys().map(String::as_str))
+    }
+
+    /// Every row key of the tables keyed by the single column `column`,
+    /// sorted and distinct: the values a name typed into that column could
+    /// take. A table with a compound key is skipped (its keys join cells).
+    pub fn keys_by_column(&self, column: &str) -> Vec<&str> {
+        let mut keys: Vec<&str> = self
+            .tables
+            .values()
+            .filter(|t| t.key_columns == 1 && t.columns.first().is_some_and(|c| c == column))
+            .flat_map(|t| t.rows.keys().map(String::as_str))
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
     }
 }
 
@@ -398,6 +417,32 @@ mod read_tests {
         let r3 = r2.without("underlyings").unwrap();
         assert!(!r3.has("underlyings"));
         assert_eq!(r3.without("underlyings"), None);
+    }
+
+    #[test]
+    fn keys_by_column_takes_only_tables_keyed_by_that_one_column() {
+        let one = ReferenceTable {
+            columns: vec!["underlying_ref".into(), "ccy".into()],
+            rows: vec![
+                vec![Some("SPX".into()), Some("USD".into())],
+                vec![Some("DAX".into()), Some("EUR".into())],
+            ],
+            gen_id: 1,
+            source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        };
+        let two = ReferenceTable {
+            columns: vec!["underlying_ref".into(), "date".into()],
+            rows: vec![vec![Some("NKY".into()), Some("2026-01-01".into())]],
+            gen_id: 1,
+            source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+        };
+        let data = ReferenceData::default()
+            .with_table("underlyings", &one, 1)
+            .unwrap()
+            .with_table("fixings", &two, 2)
+            .unwrap();
+        assert_eq!(data.keys_by_column("underlying_ref"), ["DAX", "SPX"]);
+        assert!(data.keys_by_column("book").is_empty());
     }
 
     #[test]

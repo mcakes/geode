@@ -2,10 +2,9 @@
 //! values: what one keystroke costs on the UI thread before paint. The edit
 //! records its undo entry and produces the next object (`History::apply`),
 //! renders it for the config door (`classification::to_toml`), joins it
-//! with the observed values (`classification::rows`), and re-orders and
-//! re-filters the grid with a sort and a filter active
-//! (`GridModel::relabelled`). Table preparation and painting are excluded.
-//! The budget and reference measurements are in
+//! with the observed values (`classification::rows`), and re-orders the
+//! grid with a sort active (`GridModel::relabelled`). Table preparation and
+//! painting are excluded. The budget and reference measurements are in
 //! `docs/current/performance.md`.
 
 use std::collections::BTreeMap;
@@ -44,7 +43,6 @@ fn rebuild_after_edit(c: &mut Criterion) {
     let (dim, observed) = shape();
     let mut grid = GridModel::new();
     grid.set_sort(Some((SortCol::Rows, true)));
-    grid.set_filter("src1");
     grid.set_rows(classification::rows(&dim, &observed));
     let target = vec!["SRC04999".to_string()];
     c.bench_function("classifications_rebuild_after_edit_5k", |b| {
@@ -68,7 +66,6 @@ fn rows_and_grid(c: &mut Criterion) {
     let (dim, observed) = shape();
     let mut grid = GridModel::new();
     grid.set_sort(Some((SortCol::Rows, true)));
-    grid.set_filter("src1");
     c.bench_function("classifications_rows_and_grid_5k", |b| {
         b.iter(|| {
             grid.set_rows(classification::rows(&dim, &observed));

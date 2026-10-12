@@ -1,4 +1,4 @@
-//! The Saved screen's rows: saved scopes, then saved expressions, each in
+//! The saved group's rows: saved scopes, then saved expressions, each in
 //! name order. `enter` means different things in the two sections — a scope
 //! replaces the current one, an expression is added to it — so the rows keep
 //! the two kinds apart rather than merging them into one list of names.

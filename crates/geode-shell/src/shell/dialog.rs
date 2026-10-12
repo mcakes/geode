@@ -579,7 +579,7 @@ pub(crate) fn sync_dialog_text(
             // gives the shell root focus: the field's own bindings
             // (backspace, delete, paste) run before the dialog's key handler
             // could claim them, and would edit the draft behind the
-            // question. Its answer hands focus back. The Saved screen's
+            // question. Its answer hands focus back. The saved group's
             // filter is a mode dialog's: the input mirrors its query and has
             // focus only while filtering.
             let Some(state) = shell.scope_dialog.as_ref() else {
@@ -607,10 +607,12 @@ pub(crate) fn sync_dialog_text(
                 input.read(cx).focus_handle(cx).focus(window, cx);
                 return;
             }
-            if !super::scopedialog::saved_view::in_saved(state) {
+            if !state.on_screen() {
                 shell.focus_handle.focus(window, cx);
                 return;
             }
+            // The screen's input is the saved group's filter: Normal mode
+            // focuses the shell, Filter the input.
             (state.saved.mode, false, state.saved.query.as_str())
         }
         // Filter-only dialogs keep their own focus path (see `refocus_top`).
@@ -729,8 +731,8 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
             };
             dialogmode::enter_filter(&mut state.mode, &mut state.filter_entry_query, &state.query);
         }
-        // The Saved screen's frozen filter row; a no-op on any other layer
-        // and while a question is up.
+        // The saved group's frozen filter row; a no-op under a step and
+        // while a question is up.
         Some(DialogKind::Scope) => {
             if let Some(state) = shell.scope_dialog.as_mut() {
                 if state.pending.is_some() {
@@ -739,6 +741,9 @@ pub(crate) fn enter_filter_by_mouse(shell: &mut ShellView) {
                 state.error = None;
                 super::scopedialog::saved_view::enter_filter(state);
             }
+            // Entering the filter may clamp the cursor into the saved group;
+            // no re-derive follows this press.
+            super::scopedialog::view::follow_cursor(shell);
         }
         _ => {}
     }

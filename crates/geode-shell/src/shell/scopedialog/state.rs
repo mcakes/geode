@@ -3,11 +3,12 @@
 //! a step directly (`mod+p`, `mod+x`, a chip) makes that step the bottom, so
 //! its commit or escape empties the stack and the dialog closes: those doors
 //! stay one-shot. A step pushed over a screen returns to that screen, so a
-//! visit that started on Current can build several ingredients.
+//! visit that started on the screen can build several ingredients.
 //!
-//! Doors: `mod+o` and `+` open `Current`; the load glyph,
-//! `frame::scope_saved`, `config::scopes` and `config::expressions` open
-//! `Saved`; a `≡` chip opens `Step(Definition)`; the `save` chip and
+//! Doors: `mod+o` and `+` open `Current`. The saved door
+//! (`frame::scope_saved`, `config::scopes`, `config::expressions`) opens the
+//! same screen with the cursor in the saved group and records
+//! `Opener::Saved`. A `≡` chip opens `Step(Definition)`; the `save` chip and
 //! `scope::save_current` open `Step(SaveScope)`. The dimension and expression
 //! steps are their own dialogs (the picker and the frame expression dialog),
 //! pushed over the Scope dialog rather than layered inside it.
@@ -33,8 +34,8 @@ pub(crate) enum Step {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Layer {
+    /// The one screen: the current scope's sections, then the saved ones.
     Current,
-    Saved,
     Step(Step),
 }
 
@@ -42,6 +43,23 @@ pub(crate) enum Layer {
 pub(crate) enum After {
     Show,
     Close,
+}
+
+/// Which door opened the dialog. A load or toggle on a saved row closes the
+/// dialog when the saved door opened it
+/// (`frame::scope_saved`, `config::scopes`, `config::expressions`): that door
+/// is one-shot. Opened any other way, the commit stays on the screen, so a
+/// visit from `mod+o` sees what it changed in the current sections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Opener {
+    Scope,
+    Saved,
+}
+
+impl Opener {
+    pub(crate) fn closes_on_saved_commit(self) -> bool {
+        self == Opener::Saved
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -88,14 +106,6 @@ impl Layers {
         self.pop()
     }
 
-    /// A Saved row committed (a scope loaded, an expression toggled): the
-    /// Saved screen leaves with it, back to Current when Saved was entered
-    /// from there, else the dialog closes.
-    pub(crate) fn commit_saved_row(&mut self) -> After {
-        debug_assert_eq!(self.top(), &Layer::Saved);
-        self.pop()
-    }
-
     fn pop(&mut self) -> After {
         self.layers.pop();
         if self.layers.is_empty() {
@@ -112,6 +122,12 @@ mod tests {
 
     fn text() -> Layer {
         Layer::Step(Step::Text)
+    }
+
+    #[test]
+    fn only_the_saved_door_closes_on_a_saved_commit() {
+        assert!(Opener::Saved.closes_on_saved_commit());
+        assert!(!Opener::Scope.closes_on_saved_commit());
     }
 
     #[test]
@@ -135,43 +151,25 @@ mod tests {
     }
 
     #[test]
-    fn a_saved_row_returns_to_current_when_saved_was_entered_from_it() {
+    fn a_definition_from_the_screen_returns_to_it() {
         let mut l = Layers::open(Layer::Current);
-        l.push(Layer::Saved);
-        assert_eq!(l.commit_saved_row(), After::Show);
-        assert_eq!(l.top(), &Layer::Current);
-        l.push(Layer::Saved);
-        assert_eq!(l.escape(), After::Show);
-        assert_eq!(l.top(), &Layer::Current);
-    }
-
-    #[test]
-    fn a_saved_row_closes_when_saved_was_opened_directly() {
-        let mut l = Layers::open(Layer::Saved);
-        assert_eq!(l.commit_saved_row(), After::Close);
-    }
-
-    #[test]
-    fn a_definition_from_saved_returns_to_saved() {
-        let mut l = Layers::open(Layer::Current);
-        l.push(Layer::Saved);
         l.push(Layer::Step(Step::Definition {
             name: Some("liq".into()),
         }));
         assert_eq!(l.commit_step(), After::Show);
-        assert_eq!(l.top(), &Layer::Saved);
-        assert_eq!(l.depth(), 2);
+        assert_eq!(l.top(), &Layer::Current);
+        assert_eq!(l.depth(), 1);
     }
 
     #[test]
-    fn a_new_expression_names_itself_in_place_then_returns_to_saved() {
-        let mut l = Layers::open(Layer::Saved);
+    fn a_new_expression_names_itself_in_place_then_returns_to_the_screen() {
+        let mut l = Layers::open(Layer::Current);
         l.push(Layer::Step(Step::Definition { name: None }));
         l.replace_top(Layer::Step(Step::NameExpression {
             text: "npv > 0".into(),
         }));
         assert_eq!(l.depth(), 2);
         assert_eq!(l.commit_step(), After::Show);
-        assert_eq!(l.top(), &Layer::Saved);
+        assert_eq!(l.top(), &Layer::Current);
     }
 }

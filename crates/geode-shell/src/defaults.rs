@@ -343,8 +343,8 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "config::views", "Edit views…", "Configuration");
     // Edit the groupings assigned to the nine Control-digit slots.
     action(reg, "config::groupings", "Edit groupings…", "Configuration");
-    // Manage saved scopes on the Scope dialog's Saved screen (as
-    // `frame::scope_saved`); their separate `scope::<name>` actions recall them.
+    // Manage saved scopes in the Scope dialog, the cursor on its saved scopes
+    // (as `frame::scope_saved`); their separate `scope::<name>` actions recall them.
     action(reg, "config::scopes", "Edit scopes…", "Configuration");
     // Inspect the read-only dataset schema used by configuration choices.
     action(reg, "config::schema", "Edit schema…", "Configuration");
@@ -369,7 +369,7 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     reg.register_rename("config::colours", "config::colors")
         .expect("a retired id is never a registered one");
     // Named scope expressions, which saved scopes and the frame tick: the
-    // Scope dialog's Saved screen, as `config::scopes`.
+    // Scope dialog with the cursor on its saved expressions.
     action(
         reg,
         "config::expressions",
@@ -473,9 +473,9 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     action(reg, "frame::grouping", "Pick a grouping…", "Frame");
     // The Scope dialog: the lane's scope by ingredient.
     action(reg, "frame::scope", "Scope…", "Frame");
-    // The Scope dialog's Saved screen alone: load a saved scope, add or
-    // remove a saved expression. No default binding; the load glyph is its
-    // pointer door.
+    // The Scope dialog with the cursor on its saved scopes: a load, or a
+    // saved expression added or removed, closes it. No default binding; the palette is its door,
+    // and inside the dialog `o` reaches the saved scopes.
     action(
         reg,
         "frame::scope_saved",

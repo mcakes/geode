@@ -23,6 +23,14 @@ cargo run -p geode-app -- --demo [rows]       # demo defaults (default 100,000 r
 cargo run -p geode-app --features profiling   # gpui's profiler and the perf::* actions
 ```
 
+On Windows, Velopack handles installer callbacks before logging, argument
+parsing, configuration, or GPUI startup. The SDK is pinned to the packaging
+tool version and is a Windows-only dependency. Applying pending updates on
+startup is explicitly disabled until collector shutdown and restart are
+integrated. There is no update feed polling yet. See
+[Windows packaging](../../docs/current/packaging.md) for producing a per-user
+installer and staging vendor DLLs.
+
 Config directories:
 
 | Layer | Where |
@@ -81,6 +89,9 @@ cargo check -p geode-app --features profiling
 
 ## Rules this crate pins
 
+- Windows installer callbacks exit without creating user configuration, logs,
+  a store, or a window. `tests/velopack_startup.rs` invokes the real executable
+  with each lifecycle callback; it never runs an installer or registers a task.
 - `gpui_component::init(cx)` runs before any component use, and the root
   view is wrapped in `gpui_component::Root`.
 - `ShellServices.keymap_diagnostics` and `keymap_fragment_diagnostics`

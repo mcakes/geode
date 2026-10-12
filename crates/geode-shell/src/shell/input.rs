@@ -20,6 +20,7 @@ use geode_core::query::AsOf;
 use super::keys::convert_keystroke;
 #[cfg(feature = "profiling")]
 use super::profiling_hook;
+use super::scopedialog::saved_view::Section;
 use super::{
     ShellView, asof_view, choicedialog, dialog, keybindings_view, objectdialog, picker,
     scope_expr_view, settings_view,
@@ -362,10 +363,12 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Views, window, cx);
         } else if action.0 == "config::groupings" {
             objectdialog::render::open(self, objectdialog::Domain::Groupings, window, cx);
-        } else if action.0 == "config::scopes" || action.0 == "config::expressions" {
-            // Saved scopes and expressions are managed on the Scope dialog's
-            // Saved screen; the palette titles stay where traders look.
-            super::scopedialog::view::open_saved(self, window, cx);
+        } else if action.0 == "config::scopes" {
+            // Saved scopes and expressions are managed in the Scope dialog's
+            // saved group; the palette titles stay where traders look.
+            super::scopedialog::view::open_saved(self, Section::Scopes, window, cx);
+        } else if action.0 == "config::expressions" {
+            super::scopedialog::view::open_saved(self, Section::Expressions, window, cx);
         } else if action.0 == "config::schema" {
             objectdialog::render::open(self, objectdialog::Domain::Schema, window, cx);
         } else if action.0 == "config::sources" {
@@ -502,12 +505,12 @@ impl ShellView {
             // An unknown name (hand-bound, or removed since startup) is a no-op.
             let _ = self.load_saved_scope(name, cx);
         } else if action.0 == "frame::scope" {
-            // The Scope dialog on Current: the lane's scope by ingredient.
+            // The Scope dialog, the cursor on the lane's scope by ingredient.
             super::scopedialog::view::open(self, window, cx);
         } else if action.0 == "frame::scope_saved" {
-            // The Scope dialog on its Saved screen, one-shot: a load, a
+            // The Scope dialog on its saved scopes, one-shot: a load, a
             // toggle or `escape` closes it.
-            super::scopedialog::view::open_saved(self, window, cx);
+            super::scopedialog::view::open_saved(self, Section::Scopes, window, cx);
         } else if action.0 == "frame::as_of" {
             // Open the as-of selector.
             asof_view::open(self, window, cx);

@@ -7,8 +7,8 @@ adapter. See
 acceptance; this guide describes what editing adds to those contracts.
 
 Saved scopes and named expressions are managed from the Scope dialog's
-[Saved](input-and-dialogs.md#saved) screen (`config::scopes`,
-`config::expressions`), not from an object dialog.
+[saved sections](input-and-dialogs.md#saved) (`config::scopes`,
+`config::expressions` open it on them), not from an object dialog.
 
 ## Stages and ownership
 

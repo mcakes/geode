@@ -403,7 +403,7 @@ impl Render for ShellView {
                 picker::open(view, Some(column), window, cx);
             });
         };
-        // The scope bar's `+` opens the Scope dialog on Current, the same
+        // The scope bar's `+` opens the Scope dialog on its current rows, the same
         // door as `frame::scope`.
         let add_entity = cx.entity();
         let on_add = move |window: &mut Window, cx: &mut App| {
@@ -418,14 +418,6 @@ impl Render for ShellView {
         let on_save = move |window: &mut Window, cx: &mut App| {
             save_chip_entity.update(cx, |view, cx| {
                 super::scopedialog::view::open_save(view, window, cx);
-            });
-        };
-        // The scope bar's load glyph opens the Scope dialog's Saved screen,
-        // the mouse form of `frame::scope_saved`.
-        let load_chip_entity = cx.entity();
-        let on_load = move |window: &mut Window, cx: &mut App| {
-            load_chip_entity.update(cx, |view, cx| {
-                super::scopedialog::view::open_saved(view, window, cx);
             });
         };
         // The grouping readout's click — the mouse form of
@@ -497,12 +489,9 @@ impl Render for ShellView {
                         parked.state.domain == objectdialog::Domain::Groupings
                     })
                 });
-        // The load glyph holds its pressed fill while the Saved screen is
-        // the Scope dialog's top layer.
-        let scope_open = self
-            .scope_dialog
-            .as_ref()
-            .is_some_and(super::scopedialog::saved_view::in_saved);
+        // The `+` reads pressed while the Scope dialog is up, whichever
+        // door opened it: it is the scope bar's only door to that dialog.
+        let scope_dialog_open = self.scope_dialog.is_some();
         // The pin glyph names the active workspace, whose tiles are the
         // ones on screen, not a dialog's target.
         let ws = self.active_ix();
@@ -521,13 +510,11 @@ impl Render for ShellView {
             &self.filter_input,
             &bar_model,
             grouping_open,
-            scope_open,
-            self.scope_dialog.is_some(),
+            scope_dialog_open,
             on_chip_close,
             on_chip_open,
             on_add,
             on_save,
-            on_load,
             on_grouping,
             on_as_of,
             on_term_open,

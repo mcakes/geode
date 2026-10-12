@@ -38,6 +38,13 @@ use gpui::prelude::*;
 use gpui_component::{Root, TitleBar};
 
 fn main() {
+    // Installer callbacks must exit before logging, argument parsing or opening
+    // a store/window. Applying updates needs collector coordination first.
+    #[cfg(windows)]
+    velopack::VelopackApp::build()
+        .set_auto_apply_on_startup(false)
+        .run();
+
     // Install logging before configuration loading so startup failures reach the
     // ring, stderr, and any available file sink. Apply configured levels once
     // configuration is loaded. Keep `_log_guard` bound until application exit;

@@ -1766,14 +1766,23 @@ changes its source column, and on `shift+r`; an answer another read has
 overtaken is dropped. A refused or failed read keeps the map's own rows on
 screen with a header notice (`values not loaded: … — shift+r retries`);
 while a read is on its way the header says `loading values…` beside the
-count. The
-default order is unclassified rows first, then by label. A label blank
-after trimming is unclassified everywhere: in the counts, the sort and the
-paint, including a hand-written `''`. `:sort <source|label|rows>
+count. The default order is unclassified rows first, then by label. A label
+blank after trimming is unclassified everywhere: in the counts, the sort and
+the paint, including a hand-written `''`. `:sort <source|label|rows>
 [asc|desc]` orders the grid and bare `:sort` restores the default; a header
-sort control cycles desc → asc → default as every grid tile's does.
-Unclassified labels and values not in the data sort last either way. `/`
-narrows over source and label, keeping the order.
+sort control cycles desc → asc → default as every grid tile's does, and `s`
+cycles the label column's sort as its header control does. Unclassified
+labels and values not in the data sort last either way. `/` finds as the
+pricer's and market data's do, by `[ui] find_style`: under vim style each
+keystroke moves the cursor to the first row at or after where the search
+began whose source or label contains the query (ignoring case, wrapping);
+`enter` keeps the query for `n`/`shift+n` (counted, wrapping), `escape`
+returns the cursor to where it was. Under fzf style a ranked results table
+in the grid's columns opens; only the source cell highlights the matched
+characters (the label cell paints plain), and a pick puts the cursor on its
+row and keeps the query for `n`. Every row stays on screen: nothing narrows.
+`escape` ends a selection first, then a kept find query, then dismisses
+the header's notices.
 
 The shell's grid motions move a cursor held by source value, so a rebuild
 keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.
@@ -1784,59 +1793,84 @@ than let its span re-resolve to rows nobody chose. A right press on a row
 moves the cursor there (a row inside a live selection keeps the selection)
 and opens the `⋯` menu at the pointer, as `.` opens it from the header.
 
-**Labels.** The verbs act on the selection, else the cursor's row.
-`enter`/`c` (or a double-click) open the label editor in the label cell,
-prefilled only when every target shares one label; `up`/`down` move the
-typeahead's highlight over the labels in use. Enter writes the highlighted
-label when the highlight was moved or equals the typed text ignoring case
-(Unicode lowercasing), else the typed text trimmed and never re-cased, so
-`tech` typed over an existing `Tech` takes `Tech`; blank clears. `x` clears,
-`y y` copies the cursor row's label, `p` pastes it, `u` undoes and `ctrl+r`
-redoes. Every write first checks the classification's source column: a
-hand-written definition over a column no classification may map is never
-written (`not saved: …`), since the door writes even when the reload then
-rejects the object. A written edit shows at once as a pending object, and
-every verb builds on it, so two edits before the reload compose; a reload
-carrying an earlier write of the tile's own keeps the later ones, and any
-other change to the object is the truth and drops them. Undo and redo
-replay row by row over what is current: a row another surface changed
-since is left as it is, and the notice says how many; a row the tile's own
-refused write touched is reported as not saved rather than changed
-elsewhere. Opening the editor puts the cursor on its row, so a reload or a
-values answer that reorders the rows keeps the field on the row it writes.
-A verb that changes
-nothing (`x` on unclassified rows, `u` with nothing to undo, a replay that
-skips every row) keeps the selection and a waiting cursor.
+**Labels.** The verbs act on the selection, else the cursor's row. `i`,
+`enter` (or a double-click) open the label editor in the label cell with the
+caret at the end of the label, `I` (`shift+i`) with it selected so typing
+replaces it; it is prefilled only when every target shares one label, and
+`up`/`down` move the typeahead's highlight over the labels in use. Enter
+writes the highlighted label when the highlight was moved or equals the
+typed text ignoring case (Unicode lowercasing), else the typed text trimmed
+and never re-cased, so `tech` typed over an existing `Tech` takes `Tech`;
+blank clears. `x` (`d` on a selection, `d d` on the cursor's row) clears — a
+value only the map holds then leaves the grid, and the notice says `removed
+<value>` (`cleared 2 labels, removed 1 value` for a mix). `y y` copies the
+cursor row's label, `p` pastes it, `u` undoes and `ctrl+r` redoes. Every
+write first checks the classification's source column: a hand-written
+definition over a column no classification may map is never written (`not
+saved: …`), since the door writes even when the reload then rejects the
+object. A written edit shows at once as a pending object, and every verb
+builds on it, so two edits before the reload compose; a reload carrying an
+earlier write of the tile's own keeps the later ones, and any other change
+to the object is the truth and drops them. Undo and redo replay row by row
+over what is current: a row another surface changed since is left as it is,
+and the notice says how many; a row the tile's own refused write touched is
+reported as not saved rather than changed elsewhere. Opening the editor puts
+the cursor on its row, so a reload or a values answer that reorders the rows
+keeps the field on the row it writes. A verb that changes nothing (`x` on
+unclassified rows, `u` with nothing to undo, a replay that skips every row)
+keeps the selection and a waiting cursor.
+
+**Adding a value.** `o` (`shift+o` is the same verb: the grid's order is the
+sort's), or `Add value…` in the `⋯` menu and the palette, opens a field
+under the header, `Add <from> value`. It offers the keys of every reference
+table keyed by the source column alone that are not already rows
+(`underlyings` for `underlying_ref`); for another column it takes free text.
+`enter` takes the highlighted key when the highlight was moved or equals the
+typed text ignoring case, else the text trimmed; blank is refused under the
+field (`type a value`). A value that already has a row (exact match: `dax`
+is not `DAX`) moves the cursor there and opens its label editor. Any other
+value becomes a draft row after the unclassified values the data holds, `not
+in data`, with the label editor open on it; it counts in neither `<n>
+values` nor `<k> unclassified`. Committing a label writes it as an ordinary
+map entry, one write and one undo step; as after any label verb the cursor
+keeps the draft's index rather than following the new row to its sorted
+place. `escape`, a blank label or any other verb drops the draft and writes
+nothing, since `dimensions.toml` holds only labelled values; a press
+elsewhere closes the editor and lands on the row pressed, and a right press
+on the draft row itself only closes the editor. A values answer that brings
+the draft's value keeps the editor on the real row. `o` is refused at once
+while a revert is on its way or over a source column no classification may
+map. Once the data carries the value its count shows and `not in data` goes.
 
 **New, rename, delete, revert.** Registered actions, reached from the
-palette and the `⋯` menu, never `:` commands and with no default chord.
-New asks a name, then a source column from a closed choice, and writes an
-empty classification; rename asks the new name. Each answer is validated
-before anything is written, and a refusal stays under the field. Rename,
-delete and revert then ask y/n on the confirm bar, naming how many
-groupings, views, saved scopes and named expressions still name the
-classification; revert's question names the lower layer it restores
-instead, since the name stays defined. A rename writes the new object and
-removes the old in one batch; delete and revert remove the user definition.
-Until the revert's reload lands, the label verbs on that classification
-are refused with `reverting <name>…`: an edit built on the user copy would
-replace the removal in the shell's batch and undo the revert. Rename and delete act only on a
+palette and the `⋯` menu, never `:` commands and with no default chord. New
+asks a name, then a source column from a closed choice, and writes an empty
+classification; rename asks the new name. Each answer is validated before
+anything is written, and a refusal stays under the field. Rename, delete and
+revert then ask y/n on the confirm bar, naming how many groupings, views,
+saved scopes and named expressions still name the classification; revert's
+question names the lower layer it restores instead, since the name stays
+defined. A rename writes the new object and removes the old in one batch;
+delete and revert remove the user definition. Until the revert's reload
+lands, the label verbs on that classification are refused with `reverting
+<name>…`: an edit built on the user copy would replace the removal in the
+shell's batch and undo the revert. Rename and delete act only on a
 classification the user layer owns outright: a desk or builtin one is
 refused (`<name> is defined in desk config; Geode cannot …`), as is a user
-copy over a lower one (Revert… removes that) and one whose layer is
-unknown. The `⋯` menu shows each refusal in its row's lane and in full
-when picked, and lists Revert… only over a shadowed user copy.
+copy over a lower one (Revert… removes that) and one whose layer is unknown.
+The `⋯` menu shows each refusal in its row's lane and in full when picked,
+and lists Revert… only over a shadowed user copy.
 
-**Notices.** The tile hears the door's outcome on its frame
-notification. A fork (`copied '<name>' to your config — Revert… restores
-the <layer> copy`, naming the layer it shadows) shows as status: editing a
-desk or builtin classification copies it whole into the user layer. A refusal shows as danger and drops the
-pending edit, whether the door refused it, the write failed (`config not
-saved — reverted: …`) or the merge rejected it (`saved to disk · rejected
-by the merge — showing the configuration in force`); a create, rename or delete that was refused shows what was
-shown before. A verb's notices last until the next verb or another
-classification is shown; the session restore's until the trader's first key
-or press in the tile.
+**Notices.** The tile hears the door's outcome on its frame notification. A
+fork (`copied '<name>' to your config — Revert… restores the <layer> copy`,
+naming the layer it shadows) shows as status: editing a desk or builtin
+classification copies it whole into the user layer. A refusal shows as
+danger and drops the pending edit, whether the door refused it, the write
+failed (`config not saved — reverted: …`) or the merge rejected it (`saved
+to disk · rejected by the merge — showing the configuration in force`); a
+create, rename or delete that was refused shows what was shown before. A
+verb's notices last until the next verb or another classification is shown;
+the session restore's until the trader's first key or press in the tile.
 
 **Export CSV.** `Classification: Export CSV…` and `Classification: Export
 CSV with unclassified…` are registered actions, in the palette and at the
@@ -1926,6 +1960,7 @@ Known limitations:
   command line closes over the focused tile; focusing the tile again asks.
 - Applying an import at `y` runs on the UI thread (see
   [performance](performance.md#known-gaps)); planning does not.
+- An added value needs a label; there is no unlabelled placeholder row.
 
 See the [crate guide](../../crates/geode-classifications/README.md) for the
 module map.
@@ -2360,7 +2395,7 @@ Normal-mode keys:
 |---|---|
 | `o` | Open the entry bar under the header; `enter` adds the line below the cursor row (on a leg, the next leg; on a package, its first leg; with no cursor row, at the end; a package typed inside a package lands just after that package) and keeps the bar open for the next; `up`/`down` walk the sheet's own lines as history; `tab`/`shift+tab` complete the token at the caret; `escape` closes it |
 | `shift+o` | The same bar, but the first line lands above the cursor row (on a leg, before that leg in its package; on a package or a top-level line, before it; on the first row, `at top`; on a grouping row, `at end`); each further line lands after the one just added, so a typed run reads top to bottom |
-| `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's tree cell, or anywhere on a group row, opens or closes it instead) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
+| `i`, `enter`, double-click | Edit the cell in place (a double-click on a package's or group row's tree cell opens or closes it instead; on a group row's value cell the edit writes the group's lines, see [grouping](#grouping)) with the caret at the end of text; `up`/`down` (`shift`: ten) step a number by the precision its text carries, or the expiry date field's active segment |
 | `I` (`shift+i`) | Edit the cell with its whole text selected: typing replaces it, one backspace clears it; date fields and choice pickers open as usual |
 | `d d` | Delete the row (a package with its legs) |
 | `u` / `ctrl+r` | Undo / redo; 100 entries, strictly last-in first-out. A step that brings rows back puts the cursor on the first of them, and a package that was open comes back open |
@@ -2739,11 +2774,14 @@ partly hidden would be a plausible wrong total.
 
 A partly hidden package's row is read-only. These refuse with
 `package partly hidden by the scope: edit its legs` and change nothing: `i`,
-`enter` or a double-click on its cells; a typed commit or a live step over a
-selection containing it; and the structural verbs `d`, `shift+j`/`shift+k`,
-`g p` and `g u`, from keys, the `.` menu, `:package` or `:unpackage`, because
-each would act on the hidden legs too. A selection containing one refuses
-whole. Yank, put, fold and find still work, and a shown leg edits and
+`enter` or a double-click on its cells without a selection; and the
+structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u`, from keys, the
+`.` menu, `:package` or `:unpackage`, because each would act on the hidden
+legs too. A selection containing one refuses those verbs whole. A typed
+commit or a live step over a selection containing it writes the legs its row
+paints and never the hidden ones, which the notice counts; a quantity skips
+the package as refused, since through its weights it would rescale the
+hidden legs. Yank, put, fold and find still work, and a shown leg edits and
 deletes as usual. A counted `g p` takes the next sheet rows, hidden ones
 included, so it refuses with `a line in that range is hidden by the scope`
 when any of them is hidden. `:unscoped` shows the whole package to edit it.
@@ -2889,23 +2927,97 @@ cells and find key cover only those legs, as for a package the scope partly
 hides. A selection total counts each split row's own legs, so the two rows
 of a calendar add up to the whole package.
 
-**What is read-only.** A group row has no line behind it; a split package
-row would reach legs another group paints. Both refuse cell edits (`i`,
-`enter`, double-click, a selection's typed commit or live step) and the
+**What is read-only.** A group row has no line behind it for a structural
+verb; a split package row would reach legs another group paints. The
 structural verbs `d`, `shift+j`/`shift+k`, `g p` and `g u` (keys, the `.`
-menu, `:package`, `:unpackage`), with `a grouping row: edit its lines` and
-`split package: edit its legs` in the footer; a package both split and
-partly hidden reads the split reason. For structural verbs, a selection
-containing either refuses whole. A selection's typed commit or live step
-passes over group rows and edits the visible lines it holds, across groups;
-a closed group inside it is ignored, its hidden lines left as they were. A
-split package row inside it still refuses. A split package's legs, and the
-lines under a group, edit as usual.
+menu, `:package`, `:unpackage`) refuse on either, with `a grouping row: edit
+its lines` and `split package: edit its legs` in the footer, and a
+selection containing either refuses them whole. A split package row also
+refuses its own cell edits without a selection; a package both split and
+partly hidden reads the split reason. Under a selection it stands for the
+legs it paints under its own node, as a group row stands for its lines: a
+selection's typed commit or live step writes those legs, each line once,
+and `i` with the cursor on it opens the editor over the selection. A
+quantity sets the package through its weights only when the selection
+reaches every leg (both its split rows, say, or a row and a group holding
+the rest); reaching part of it, the quantity skips it as refused. A split
+package's legs edit as usual.
+
+**Editing a grouping row.** A group row stands for its shown lines: every
+line beneath it, through nested and closed subgroups. `i`, `enter` or a
+double-click on one of its value cells opens the editor there (a
+double-click on its label opens or closes it, as on a package's name), on
+the value its lines share and empty where the cell paints `mixed` or blank;
+the editor's kind is the column's (a typeahead for a type, a date field for
+an expiry). The column must edit on at least one of its lines, or the
+editor refuses with that line's reason (a group holding only an empty
+package refuses `read-only`). The lines are fixed when the editor opens:
+the commit and every live step write those lines, even after a step has
+moved them out of the group or a delivery has brought other lines into it.
+`enter` writes the value to every
+line, as one undo entry, and the header counts what it set and skipped
+(`set 3 cells, skipped 2 (1 n/a, 1 hidden)`); an untouched `enter` writes
+nothing (an empty field on a `mixed` cell is untouched), and when no line
+accepts the value the editor stays open with `no grouped cell accepts
+'<text>'`. A quantity sets each root to the number: a bare line, or a package
+the group holds whole, as a package quantity through its template's weights;
+a package the group holds only part of (a calendar split across expiry
+groups, or one with a leg the scope hides) and a package in list form are
+skipped and counted `refused` once each. Selecting a package's leg rows
+writes the number to each leg, while a group, or a group plus a selected
+leg, that holds the whole package sets its package quantity through the
+weights. Any
+other column writes the one value to each line; a barrier on a vanilla line
+counts `n/a`. Lines the scope hides are never written; the ones the group
+would hold were they shown count as `hidden`. On a qty, strike, barrier or
+shift cell the arrows step every line live, as over a selection: `escape`
+takes the steps back and `enter` keeps them as one undo entry.
+
+The editor follows a lead line, never the group's path: the first line the
+group row paints when the editor opens. After every rebuild while it is
+open (its own step, a delivery, a rollback) the editor and the cursor sit
+on the group row that holds the lead line at the editor's original depth.
+So editing the group's own
+grouped column, or an enclosing group's shown on a nested row, carries
+them to the group the lines moved into, one they merged with or one they
+then left again, press by press, and under a `status` grouping (where any
+step sends the lines to `pricing…`) a delivery that turns them fresh again
+moves the editor with them. `escape` takes the steps back and the same rule
+puts the cursor home with the lines. A typed commit closes the editor with
+no footer and puts the cursor on the lead line's row by the same rule, or
+the nearest painted row above it when that is inside a closed group.
+Undoing a re-tag moves the lines back but leaves the cursor where it is.
+A change of the grouping chain itself (a frame slot switch, a pin) closes
+the editor, since the row it would follow onto stands for other lines than
+it writes: `edit closed: the grouping changed`, or `edit closed: the
+grouping changed; steps kept` with the steps kept as one undo entry. A line
+editor is unaffected. Otherwise the editor closes only when the lead line
+cannot paint at all: deleted, the
+sheet replaced, hidden by the scope, or inside a closed group. With no step
+taken the footer reads `the cell moved; edit refused`, `the line is hidden
+by the scope; edit dropped` or `the line moved to another group; edit
+dropped`; after steps they stand as one undo entry and the footer says so
+(`edit closed: the line is hidden by the scope; steps kept`, `…the line is
+in a closed group; steps kept`, `…the line went away; steps kept`).
+
+A selection's typed commit and live step treat each selected group row the
+same way: the targets are the selected line rows and every selected group's
+lines, each line written once. `i` on a group row under a selection opens
+the editor there and commits over the selection's targets and columns (a
+`v` block's columns stay the block's for every press), fixed when it opens
+as on a group alone; the lead line is the first line of the group row the
+cursor is on. A step or a rollback that moves the group the selection is
+anchored on does not clear the selection: the anchor follows the first
+line that group painted, so the selection stays painted through the steps
+and is whole again after `escape`. Losing the anchor any other way (a
+regroup, another write) clears it as below.
 `y y` on a group row copies the shorthand of its lines, and a `V` selection
 over a group row totals and yanks its lines once, whether or not their rows
 are selected too. `y y` or `V y` on a split package row yanks that row's
-legs, as its cells show them, not the whole package. A selection cannot start on a group row (`select from a
-line or package row`), though its moving end can rest on one. `o`,
+legs, as its cells show them, not the whole package. A selection can start
+on a group row as on a line: it anchors on the group's path, and clears with
+`selection cleared: anchor row no longer shown` once that path stops
+painting (a regroup, its last line leaving it, a closed ancestor). `o`,
 `shift+o` and `p` / `shift+p` with the cursor on a group row have no line to
 land beside: the bar's label reads `at end`, and a put lands at the end of the sheet with `put at
 the end of the sheet` in the footer. `g m` on a group row opens the plain

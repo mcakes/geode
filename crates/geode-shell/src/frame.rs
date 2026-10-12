@@ -1578,7 +1578,7 @@ impl<'a> FrameViewMut<'a> {
     }
 
     /// Add named expression `name` to the scope when it is absent, remove it
-    /// when present: the Saved screen's `enter` on an expression row. One
+    /// when present: the Scope dialog's `enter` on a saved expression row. One
     /// undoable `set_scope` either way. Edits the workspace lane even through
     /// a follower's view.
     pub fn toggle_named(&mut self, name: &str) -> bool {

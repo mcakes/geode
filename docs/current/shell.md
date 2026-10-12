@@ -520,17 +520,18 @@ matching branches. Enter or a row click reveals the selected row in the tree, an
 or leaving the tile cancels without moving the tree. No matches keeps the
 prompt open. The table virtualizes results and scrolls to keyboard selection.
 
-Blotter, pricer, and market-data implement Fzf search. Tree searches include
-collapsed descendants within the current scope. The blotter requests the full
-grouping depth when necessary. Every loaded parent and leaf is displayed together
-in full tree order, using labels prepared only for visible rows. Search text is
-indexed on a worker; completing that index does not change the empty-query
-display order. Queries entered during preparation wait for the complete index.
-The index is reused while the snapshot, column plan, and
-sort are unchanged; closing the prompt cancels pending preparation. Searching does not expand the tree; choosing a result
-opens its ancestors and restores the normal tree with that row active. Pricer
-results also include legs inside closed packages. Unsupported tiles retain
-their existing find behavior.
+Blotter, pricer, market-data and classifications implement Fzf search. Tree
+searches include collapsed descendants within the current scope. The blotter
+requests the full grouping depth when necessary. Every loaded parent and leaf
+is displayed together in full tree order, using labels prepared only for
+visible rows. Search text is indexed on a worker; completing that index does
+not change the empty-query display order. Queries entered during preparation
+wait for the complete index. The index is reused while the snapshot, column
+plan, and sort are unchanged; closing the prompt cancels pending preparation.
+Searching does not expand the tree; choosing a result opens its ancestors and
+restores the normal tree with that row active. Pricer results also include
+legs inside closed packages. Unsupported tiles retain their existing find
+behavior.
 
 ## Focus
 
@@ -816,24 +817,18 @@ chip's, is the [Scope dialog](input-and-dialogs.md#scope-dialog): `d` on
 that name's `≡` row. A scope whose only content is a name is not empty: the
 chips row and the save glyph paint for it.
 
-The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
-paints whatever the scope holds, empty included; a click opens the Scope
-dialog on its [Saved](input-and-dialogs.md#saved) screen, alone
-(`frame::scope_saved`), and the glyph holds its pressed fill while Saved is
-the dialog's top layer. Its tooltip, `Saved scopes and expressions`, names
-`frame::scope_saved`'s chord once one is bound; it has none by default, and
-from the keyboard Saved is also `o` in the Scope dialog. The save glyph, when
-the scope is savable, comes after it, so its appearance never moves the load
-glyph. A click on it opens the Scope dialog's
-[save prompt](input-and-dialogs.md#save-prompt) alone, as
-`scope::save_current` does, seeded with the saved scope the lane's scope was
-loaded from.
+The save glyph, when the scope is savable, follows the `+`. A click on it
+opens the Scope dialog's [save prompt](input-and-dialogs.md#save-prompt)
+alone, as `scope::save_current` does, seeded with the saved scope the lane's
+scope was loaded from.
 
 The `+` verb opens the [Scope dialog](input-and-dialogs.md#scope-dialog)
 (`frame::scope`, `mod+o`), where every ingredient is added — by key, or by
 pointer through each section header's `add` control or an empty section's
-row — and holds its pressed fill while that dialog is open; its tooltip names `frame::scope`'s
-chord. It paints on an empty scope too, since adding a filter is how a scope
+row — and holds its pressed fill while the Scope dialog is up, whichever
+door opened it. It is the scope bar's only door to that dialog: the saved
+scopes and expressions are part of it (`o` there), so the bar paints no
+separate load glyph. Its tooltip names `frame::scope`'s chord. It paints on an empty scope too, since adding a filter is how a scope
 starts. Opened while the scope text field held focus, the dialog hands focus
 back to the field when it closes.
 

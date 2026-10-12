@@ -1,6 +1,6 @@
 //! The Scope dialog's name prompt and its pending question.
 //!
-//! A name prompt is a step drawn on Current's body: the shared input above
+//! A name prompt is a step drawn on the screen's body: the shared input above
 //! the rows, its draft the source of truth `sync_dialog_text` mirrors. A
 //! pending question (an overwrite, a delete, a revert) takes the footer's
 //! place and every key until it is answered: `y`/`enter` carry it out,
@@ -66,7 +66,7 @@ impl Purpose {
     }
 
     /// Each prompt previews what it names. The save prompt names the lane's
-    /// scope, so it paints over Current's rows; a new expression and a copy
+    /// scope, so it paints over the current rows; a new expression and a copy
     /// name something else (the expression joins no scope), so they paint
     /// alone with their own preview line.
     fn previews_current(&self) -> bool {
@@ -83,7 +83,7 @@ impl Purpose {
     }
 }
 
-/// Whether a name prompt on top paints alone rather than over Current's
+/// Whether a name prompt on top paints alone rather than over the current
 /// rows (see [`Purpose::previews_current`]).
 pub(crate) fn paints_alone(state: &ScopeDialogState) -> bool {
     in_name_prompt(state)
@@ -194,7 +194,7 @@ pub(super) fn save_prompt(seed: Option<String>) -> NamePrompt {
     }
 }
 
-/// `s` on Current or Saved: push the save prompt over that screen, or refuse into the dialog's error
+/// `s` on the screen: push the save prompt over it, or refuse into the dialog's error
 /// line when the scope is empty. The caller re-derives and syncs the input.
 pub(super) fn push_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let (empty, seed) = {
@@ -213,7 +213,7 @@ pub(super) fn push_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
     state.error = None;
     state.prompt = Some(save_prompt(seed));
-    state.layers.push(Layer::Step(Step::SaveScope));
+    state.push_step(Step::SaveScope);
 }
 
 /// The Change arm's half for a name prompt: the field is the draft.
@@ -322,7 +322,7 @@ pub(super) fn doc_of(id: &SavedId) -> (&'static str, &str, &'static str) {
     }
 }
 
-/// The Copy prompt for the Saved row `row`: empty, labelled with what it
+/// The Copy prompt for the saved row `row`: empty, labelled with what it
 /// copies, previewing the source's summary or text.
 pub(super) fn copy_prompt(row: &super::saved::SavedRow) -> NamePrompt {
     let preview = match &row.kind {
@@ -342,7 +342,7 @@ pub(super) fn copy_prompt(row: &super::saved::SavedRow) -> NamePrompt {
 
 /// Write `from`'s definition, as the configuration holds it now, under the
 /// new `name`. A copy never forks: the name must be one no layer holds. The
-/// step leaves for Saved with the cursor on the copy.
+/// step returns to the screen with the cursor on the copy.
 fn copy_definition(
     shell: &mut ShellView,
     name: String,
@@ -377,6 +377,7 @@ fn copy_definition(
     };
     state.prompt = None;
     state.saved.cursor_id = Some(super::saved_view::StopId::Row(copy));
+    state.rest_in(super::screen::Zone::Saved);
     let after = state.layers.commit_step();
     super::saved_view::finish(shell, after, window, cx);
 }
@@ -439,7 +440,7 @@ pub(super) fn ask_revert(shell: &mut ShellView, id: SavedId) -> Result<(), Strin
 /// definition as it is now: still the user's, and for a revert still over a
 /// lower copy. Otherwise the question no longer describes what a removal
 /// would do (a revert whose lower copy went would delete the user's only
-/// copy), and it refuses. The Saved rows re-derive on the way out, so the
+/// copy), and it refuses. The saved rows re-derive on the way out, so the
 /// cursor stays on a reverted row or moves to the next after a delete.
 fn remove_saved(shell: &mut ShellView, id: &SavedId, revert: bool, cx: &mut Context<ShellView>) {
     let (doc, name, _) = doc_of(id);
@@ -583,7 +584,7 @@ fn save_scope_as(
     }
 }
 
-/// The name field, drawn above Current's rows while a prompt is on top.
+/// The name field, drawn above the current rows while a prompt is on top.
 pub(super) fn field(shell: &ShellView, state: &ScopeDialogState, cx: &App) -> Option<AnyElement> {
     let prompt = state.prompt.as_ref().filter(|_| in_name_prompt(state))?;
     Some(

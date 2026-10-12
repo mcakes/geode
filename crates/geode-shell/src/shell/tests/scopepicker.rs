@@ -1,6 +1,5 @@
-//! The toolbar's load glyph as the door to the Scope dialog's Saved screen
-//! on its own: filter and load, undo, live saved scopes, a row
-//! double-click, the empty state and the glyph's tip. The screen itself is
+//! The Scope dialog's saved door (`frame::scope_saved`), one-shot: filter and load, undo, live saved scopes, a row
+//! double-click, the empty state, and the scope bar's single door glyph. The screen itself is
 //! covered from `o` in `scope_saved.rs`.
 
 use super::scopebar::services_with_builtin_docs;
@@ -42,12 +41,10 @@ fn text_scope(text: &str) -> Scope {
     }
 }
 
-/// Open the Saved screen through the toolbar's load glyph.
-fn open_saved(vcx: &mut gpui::VisualTestContext) {
-    let glyph = vcx
-        .debug_bounds("scope-load-chip")
-        .expect("the load glyph paints");
-    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
+/// Open the Scope dialog on its saved scopes through the saved door,
+/// `frame::scope_saved`.
+fn open_saved(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext) {
+    dispatch_action(shell, "frame::scope_saved", vcx);
     vcx.run_until_parked();
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -56,9 +53,9 @@ fn open_saved(vcx: &mut gpui::VisualTestContext) {
 
 fn saved_open(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> bool {
     shell.read_with(vcx, |s, _| {
-        s.scope_dialog
-            .as_ref()
-            .is_some_and(crate::shell::scopedialog::saved_view::in_saved)
+        s.scope_dialog.as_ref().is_some_and(|d| {
+            d.on_screen() && d.zone == crate::shell::scopedialog::screen::Zone::Saved
+        })
     })
 }
 
@@ -73,16 +70,16 @@ fn visible_names(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Ve
     })
 }
 
-/// The load glyph opens Saved; the filter narrows it, `enter` keeps the
+/// The saved door lands on the saved scopes; the filter narrows it, `enter` keeps the
 /// filter, a second `enter` loads that saved scope and closes; `mod+z`
 /// then restores the scope before it — the load went through the undoable
 /// `load_saved_scope` path.
 #[gpui::test]
-fn the_load_glyph_then_filter_and_enter_loads_the_scope_undoably(cx: &mut gpui::TestAppContext) {
+fn the_saved_door_then_filter_and_enter_loads_the_scope_undoably(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
     assert_eq!(scope_text(&frame, &vcx), None);
 
-    open_saved(&mut vcx);
+    open_saved(&shell, &mut vcx);
     assert!(saved_open(&shell, &vcx));
     assert_eq!(visible_names(&shell, &vcx), ["asia", "eu"]);
 
@@ -124,7 +121,7 @@ fn a_scope_saved_after_startup_is_listed_and_loads(cx: &mut gpui::TestAppContext
     });
     vcx.run_until_parked();
 
-    open_saved(&mut vcx);
+    open_saved(&shell, &mut vcx);
     assert_eq!(visible_names(&shell, &vcx), ["asia", "eu", "later"]);
     vcx.simulate_keystrokes("/");
     vcx.simulate_input("later");
@@ -138,7 +135,7 @@ fn a_scope_saved_after_startup_is_listed_and_loads(cx: &mut gpui::TestAppContext
 #[gpui::test]
 fn a_row_double_click_loads_that_scope(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
-    open_saved(&mut vcx);
+    open_saved(&shell, &mut vcx);
     let row = vcx.debug_bounds("scope-saved-row-1").expect("the eu row");
     double_click(&mut vcx, row.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
@@ -152,7 +149,7 @@ fn a_row_double_click_loads_that_scope(cx: &mut gpui::TestAppContext) {
 fn with_no_saved_scopes_the_saved_screen_says_how_to_save_one(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
-    open_saved(&mut vcx);
+    open_saved(&shell, &mut vcx);
     assert!(saved_open(&shell, &vcx));
     assert!(vcx.debug_bounds("scope-saved-empty-scopes").is_some());
     vcx.simulate_keystrokes("enter");
@@ -163,29 +160,19 @@ fn with_no_saved_scopes_the_saved_screen_says_how_to_save_one(cx: &mut gpui::Tes
     assert!(shell.read_with(&vcx, |s, _| !s.modal_open()));
 }
 
-/// Hovering the load glyph names the Saved screen; `frame::scope_saved`
-/// has no default binding, so the tip names no chord (`mod+o` is
-/// `frame::scope`, the Current screen).
+/// The scope bar has one door to the Scope dialog, the `+`: the saved
+/// scopes are part of that dialog, so no separate load glyph paints.
 #[gpui::test]
-fn hovering_the_load_glyph_names_no_chord(cx: &mut gpui::TestAppContext) {
-    let (mut vcx, _shell, _frame) = open_with_scopes(cx);
-    let glyph = vcx.debug_bounds("scope-load-chip").expect("glyph painted");
-    vcx.simulate_mouse_move(
-        glyph.center(),
-        gpui::MouseButton::Left,
-        gpui::Modifiers::none(),
-    );
-    vcx.executor()
-        .advance_clock(std::time::Duration::from_millis(600));
+fn the_scope_bar_paints_one_door_glyph(cx: &mut gpui::TestAppContext) {
+    let (mut vcx, shell, _frame) = open_with_scopes(cx);
+    assert!(vcx.debug_bounds("scope-pick-chip").is_some());
+    assert!(vcx.debug_bounds("scope-load-chip").is_none());
+    let plus = vcx.debug_bounds("scope-pick-chip").expect("the + paints");
+    vcx.simulate_click(plus.center(), gpui::Modifiers::default());
     vcx.run_until_parked();
-    assert!(vcx.debug_bounds("tip-scope-load-chip").is_some());
-    assert!(
-        vcx.debug_bounds("tip-scope-load-chip-chord-mod+o")
-            .is_none()
-            && vcx
-                .debug_bounds("tip-scope-load-chip-chord-alt+o")
-                .is_none(),
-        "the load glyph's tip names no chord"
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
     );
 }
 
@@ -194,7 +181,7 @@ fn hovering_the_load_glyph_names_no_chord(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn enter_with_no_match_does_nothing_and_escape_closes(cx: &mut gpui::TestAppContext) {
     let (mut vcx, shell, frame) = open_with_scopes(cx);
-    open_saved(&mut vcx);
+    open_saved(&shell, &mut vcx);
     vcx.simulate_keystrokes("/");
     vcx.simulate_input("zzz");
     vcx.simulate_keystrokes("enter enter");

@@ -1,4 +1,4 @@
-//! The Current screen: the lane's scope as rows by ingredient — dimension
+//! The Scope dialog's current sections: the lane's scope as rows by ingredient — dimension
 //! selections, expression terms then named references, and the text filter
 //! — each with an identity that survives the frame changing under the
 //! dialog, so the cursor stays on what the user was pointing at.

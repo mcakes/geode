@@ -31,9 +31,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   slot from the list drops its activation; `restore_ad_hoc(_, false)` bumps the
   grouping generation; a hand-edited session with both a slot and an active ad
   hoc chain drops the slot silently; lead rows are rebuilt eagerly.
-- Scope dialog: the Saved screen's `e`/`d`/`r` have no pointer route (a `⋯`
-  menu would give one). Row ids on Current and Saved are positional.
-  `note_saved_as` is kept after a failed write, and an optimistic refresh survives
+- Scope dialog: a saved row's `e`/`d`/`r` have no pointer route (a `⋯`
+  menu would give one). `note_saved_as` is kept after a failed write, and an optimistic refresh survives
   a rejected merge.
 - Scope dialog: a saved scope deleted mid-session leaves `loaded_from` until
   restart (the title is correct). `mod+s` naming then `escape` takes two escapes
@@ -163,11 +162,17 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   create → Escape returns correctly; back button in the title row.
 - Grouping dialog: rows, badges, hover controls, save prompt, the `* · chain`
   readout.
-- Scope dialog Current: sections, empty rows, add controls, glyphs, counts,
-  title, text field, `+` pressed fill and tooltip, stacked step titles. Saved:
-  sections, notes, applied/broken marks, filter, empty-row stops, save prompt and
+- Scope dialog current sections: empty rows, add controls, glyphs, counts,
+  title, text field, `+` pressed fill and tooltip, stacked step titles. Saved
+  sections: notes, applied/broken marks, filter, empty-row stops, save prompt and
   its question, definition field with suggestions and used-by note, name preview,
   load glyph pressed.
+- Scope dialog one screen: the separator hairline staying 1 px in the scroll
+  list, the `SAVED SCOPES` / `SAVED EXPRESSIONS` headers, the filter row's
+  placement above the saved group, the list's 16-row height and its scrolling
+  (keys and mouse wheel; a refresh must not snap a wheel scroll back), the
+  cursor highlight crossing between the groups, and the load glyph vs `+`
+  pressed fills by opener.
 - Scope expression suggestions: row layout and detail alignment, warning color
   across themes, dialog height as the list changes.
 - Toolbar: mono expression term chips with `×` inset; `≡` named-expression chip
@@ -398,8 +403,12 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   chip, unscoped chip and tooltip, refusal notice, `· N of M legs`, hidden-landing
   footer.
 - Grouping and sort: group-row grounds, sort arrow after a header click, the icon
-  beside labels at Large font, rows reordering live, group-row double-click, find
-  highlight color.
+  beside labels at Large font, rows reordering live, group-row double-click (label
+  toggles, value cell edits), find highlight color.
+- Group-row edit: the editor, typeahead and date field painted on a group row's
+  cell over its ground; the empty seed on a `mixed` cell; a live step on a closed
+  group repainting its folded cells; the cursor landing on the merged group after
+  a re-tag; the `hidden` count in the notice.
 - Selection: tint over package ground, footer position-risk totals, held
   `shift+up` repaint and reprice, shift+click/drag, click inside the editor, the
   entry-bar shift press, light and dark.
@@ -670,6 +679,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   right-click menu position, "loading values…" mark, empty and removed states.
 - Classifications CSV: native open/save dialogs on macOS and Windows, confirm text
   wrapping, rejected-rows notice truncation, the held-plan notice and arm-on-focus.
+- Classifications alignment (2026-10-11): the add field and its reference
+  typeahead under the header; the draft row's paint with the label editor open
+  on it; the fzf results table in this tile (source-only highlight); the
+  `removed` / `cleared` notices after a clear.
 
 ## Watchlists
 
@@ -880,6 +893,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   next lever is a keyed lookup join); context columns (`query_context` 35.0 ms vs
   20.5 ms without); pricer grid build after the tree-column and scope slices
   (1.66–2.15 ms); the dividend benches' anomalous readings.
+- The two Classifications rows in `performance.md` (rebuild after an edit, rows
+  rebuild) were measured while the grid still had a `/` filter; re-run
+  `cargo bench -p geode-classifications` and replace them.
 - Painted-frame readings never taken: the per-keystroke scope text filter (recipe
   in `docs/perf.md`), the market-data panel at 10,000 rows, the diagnostics page
   p95 with the Log following.
