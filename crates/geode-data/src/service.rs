@@ -451,7 +451,6 @@ fn polled_event(source: String, ready: usize, at: SystemTime, next_in: Duration)
     }
 }
 
-/// Log an ingest failure with dataset, batch, and reason at error level.
 /// The sources of one dataset a restart seeds a persisted condition onto:
 /// the directory sources whose globs match the condition's file. A file no
 /// source's globs match (none recorded, or the globs changed since), or a
@@ -481,6 +480,7 @@ fn seed_owners<'a>(sources: &[&'a SourceSpec], path: Option<&str>) -> Vec<&'a So
     }
 }
 
+/// Log an ingest failure with dataset, batch, and reason at error level.
 fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
     tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
 }

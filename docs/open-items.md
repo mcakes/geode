@@ -745,6 +745,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
+- A file carrying a measure another source over the same dataset reports
+  (a term file that starts carrying `Diva`) loads, and that book's sum
+  double-counts with no health signal. A source's `measures` list could
+  also refuse or degrade a column it does not list; that is undecided.
 - Within-file `MEASURE` conflicts in a scenario source file are not
   surfaced by the ingest runner.
 - The document family's axes lack a duplicate-name refusal.

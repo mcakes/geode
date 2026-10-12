@@ -1675,7 +1675,9 @@ match, a generation with no recorded path, or a dataset with no directory
 source falls back to every source of the dataset, a conservative
 over-report. Seeding by path keeps one report's condition off another
 report's source, which never reports that batch and so could never clear
-it. Seeds use publication's batch key so a corrected load can clear them.
+it. Seeds use publication's batch key so a corrected load on the owning
+source can clear them; a fallback seed on a source that never loads that
+batch stands until a restart seeds by path again.
 
 Health reaches a tile through the shell's `Diagnostics` entity, never the
 data handle. The app bridge describes each source with its dataset at attach;
