@@ -516,16 +516,17 @@ or leaving the tile cancels without moving the tree. No matches keeps the
 prompt open. The table virtualizes results and scrolls to keyboard selection.
 
 Blotter, pricer, market-data and classifications implement Fzf search. Tree
-searches include collapsed descendants within the current scope. The
-blotter requests the full grouping depth when necessary. Every loaded parent and leaf is displayed together
-in full tree order, using labels prepared only for visible rows. Search text is
-indexed on a worker; completing that index does not change the empty-query
-display order. Queries entered during preparation wait for the complete index.
-The index is reused while the snapshot, column plan, and
-sort are unchanged; closing the prompt cancels pending preparation. Searching does not expand the tree; choosing a result
-opens its ancestors and restores the normal tree with that row active. Pricer
-results also include legs inside closed packages. Unsupported tiles retain
-their existing find behavior.
+searches include collapsed descendants within the current scope. The blotter
+requests the full grouping depth when necessary. Every loaded parent and leaf
+is displayed together in full tree order, using labels prepared only for
+visible rows. Search text is indexed on a worker; completing that index does
+not change the empty-query display order. Queries entered during preparation
+wait for the complete index. The index is reused while the snapshot, column
+plan, and sort are unchanged; closing the prompt cancels pending preparation.
+Searching does not expand the tree; choosing a result opens its ancestors and
+restores the normal tree with that row active. Pricer results also include
+legs inside closed packages. Unsupported tiles retain their existing find
+behavior.
 
 ## Focus
 
