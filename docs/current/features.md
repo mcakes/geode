@@ -1658,8 +1658,8 @@ scale. `:filter <expr>` compiles against the shape's dataset in the schema
 the service started with: an unknown column is refused, and every expression
 is refused while the dataset is undeclared (an edited `datasets` waits for
 a restart). `:filter` completes over the dataset's groupable columns, the
-derived dimensions and the shape's measures. Frame-wide verbs (`:scope`, `:live`,
-`:asof undo`) are refused, and the refusal names the palette entry that
+derived dimensions and the shape's measures. Frame-wide verbs (`:scope`,
+`:live`, `:asof undo`) are refused, and the refusal names the palette entry that
 owns them.
 
 A click on a data cell moves the cursor and focuses the tile, a shift-click

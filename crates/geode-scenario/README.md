@@ -48,9 +48,10 @@ builtin five, the pivot and the tile.
   fill included, when the window is prepared, and new named colors
   re-prepare the window; `render_td` only reads fixed colors. The column
   heads and units are prepared with each picture, and the footer's cursor
-  readout whenever the cursor, the picture or the prepared window moves. The cursor and a rows or block selection live over
-  data cells only; the selection's per-column totals are unsummable down
-  a scenario rows axis. A two-level header (two columns axes) adds one
+  readout whenever the cursor, the picture or the prepared window moves.
+  The cursor and a rows or block selection live over data cells only;
+  the selection's per-column totals are unsummable down a scenario rows
+  axis. A two-level header (two columns axes) adds one
   group row through the table's own `group_headers`: an empty group over
   the label column, one per outer value over its consecutive inner columns
   (`band_groups`), an empty one over Σ. The table lays it with the leaf
@@ -62,10 +63,10 @@ builtin five, the pivot and the tile.
   (`filter`, `unscoped`, `asof`, `scale`; frame-wide verbs refused by
   name; `filter <expr>` is compiled against the shape's dataset in the
   startup schema and refused when it names an unknown column or the
-  dataset is undeclared), notices and the session record. `escape` clears the selection
-  and a live refusal (every verb clears the refusal); with neither it
-  dismisses the standing notice, and with nothing to clear it is
-  unhandled. Motions and presses scroll the cursor cell into view.
+  dataset is undeclared), notices and the session record. `escape`
+  clears the selection and a live refusal (every verb clears the
+  refusal); with neither it dismisses the standing notice, and with
+  nothing to clear it is unhandled. Motions and presses scroll the cursor cell into view.
   The footer reports the refusal, then a query error, then the picture's
   own notice; a query error stands until a picture installs, so `c` and
   `m` (which rebuild the pivot) never hide it. A picture that cannot be
@@ -74,10 +75,9 @@ builtin five, the pivot and the tile.
   are prepared after every verb other than a motion, every `:` line and
   picture (the readout also on every frame change, and the chips on a
   clock change or a new local day for a pinned as-of), in spec order:
-  currency
-  (`USD`/`native`, warning while native sums mixed currencies; a click is
-  `c`), scale, `filtered` (its tip spells the filter), `diff` (a click is
-  `m`), `unscoped` (warning), the as-of pin (`LIVE`, `AS OF …`). The
+  currency (`USD`/`native`, warning while native sums mixed currencies; a
+  click is `c`), scale, `filtered` (its tip spells the filter), `diff` (a
+  click is `m`), `unscoped` (warning), the as-of pin (`LIVE`, `AS OF …`). The
   dataset times are labelled when a picture lands or the clock changes,
   and take the warning tone past `stale_after`. `tile/menu.rs` holds the
   `.` menu (also `⋯`), hung under the header's right edge: the verbs with
