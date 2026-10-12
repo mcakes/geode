@@ -78,9 +78,9 @@ impl LabelEditor {
 
 /// The label `enter` writes for `text`, `None` to clear. The highlighted
 /// label when the trader moved the highlight or typed it out in full (any
-/// case, by Unicode lowercasing: the existing spelling wins, so `tech` never makes a second `Tech`);
-/// else the typed text trimmed, as typed, never re-cased. A blank entry
-/// clears.
+/// case, by Unicode lowercasing: the existing spelling wins, so `tech`
+/// never makes a second `Tech`); else the typed text trimmed, as typed,
+/// never re-cased. A blank entry clears.
 pub(crate) fn commit_value(list: &mut ChoiceList, moved: bool, text: &str) -> Option<String> {
     list.set_query(text);
     let typed = text.trim();

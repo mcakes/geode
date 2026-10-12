@@ -1589,9 +1589,9 @@ impl ClassificationsTile {
     }
 
     /// Write one label change through the config door, returning whether it
-    /// queued a change: validated, recorded
-    /// in the history, queued whole-object, and shown at once (the pending
-    /// edit) ahead of the reload that carries it. A classification whose
+    /// queued a change: validated, recorded in the history, queued
+    /// whole-object, and shown at once (the pending edit) ahead of the
+    /// reload that carries it. A classification whose
     /// source column is not one a classification may map (a hand-written
     /// definition) is never written: the door would write it even when the
     /// reload then rejected it.

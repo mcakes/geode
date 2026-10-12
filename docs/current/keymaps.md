@@ -368,15 +368,17 @@ Its normal-mode `escape` is `volslice::cancel`, which dismisses the footer
 notice when there is nothing else to cancel.
 The classifications fragment binds its label verbs under `mode == normal`
 (`i`/`enter` edit with the caret at the end, `shift+i` edit with the label
-selected, `x`/`d d` clear, `s` cycle the label sort, `y y`/`ctrl+c` copy,
-`p`/`ctrl+v` paste, `u` undo, `ctrl+r` redo, `shift+r` refresh, `.` the `⋯` menu, `g c` the switcher, `v`/`shift+v`
-a row selection, `escape` dismissing the header's warning and danger
-notices); under `mode == visual` the verbs that act on a selection
-and `escape`; under `mode == insert` (the label editor and the New/Rename
-field) `enter`, `escape` and `up`/`down` over the typeahead; under `mode ==
-menu` `enter`, `escape` and `.`. `y` and `g` alone are unbound, so `y y` and
-`g c` stay reachable. New, rename, delete and revert have no default chord:
-the palette and the `⋯` menu reach them.
+selected, `x`/`d d` clear, `o`/`shift+o` add a value, `s` cycle the label
+sort, `y y`/`ctrl+c` copy, `p`/`ctrl+v` paste, `u` undo, `ctrl+r` redo,
+`shift+r` refresh, `.` the `⋯` menu, `g c` the switcher, `v`/`shift+v` a
+row selection, `n`/`shift+n` repeat a kept `/` find, `escape` dismissing
+the header's warning and danger notices); under `mode == visual` the verbs
+that act on a selection (`d` alone clears it) and `escape`; under `mode ==
+insert` (the label editor and the New, Rename and Add field) `enter`,
+`escape` and `up`/`down` over the typeahead; under `mode == menu` `enter`,
+`escape` and `.`. `y`, `g` and `d` alone are unbound in normal mode, so
+`y y`, `g c` and `d d` stay reachable. New, rename, delete and revert have
+no default chord: the palette and the `⋯` menu reach them.
 The diagnostics page's fragment binds only its verbs (`[`/`]`, `z o`/`z c`,
 `enter` and `space`, `tab`/`shift+tab` for a section's views, `/`, and a key
 per toolbar control) under `mode == normal` and `escape` under `mode ==

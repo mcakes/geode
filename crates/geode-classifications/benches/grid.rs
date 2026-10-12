@@ -3,8 +3,8 @@
 //! records its undo entry and produces the next object (`History::apply`),
 //! renders it for the config door (`classification::to_toml`), joins it
 //! with the observed values (`classification::rows`), and re-orders the
-//! grid with a sort active (`GridModel::relabelled`). Table preparation and painting are excluded.
-//! The budget and reference measurements are in
+//! grid with a sort active (`GridModel::relabelled`). Table preparation and
+//! painting are excluded. The budget and reference measurements are in
 //! `docs/current/performance.md`.
 
 use std::collections::BTreeMap;

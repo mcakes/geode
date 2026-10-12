@@ -1,8 +1,9 @@
-//! The grid's pure model: one classification's rows (`classification::
-//! rows`), the order a sort puts them in, a cursor and a row selection. The cursor and the selection's anchor are
-//! held by source value, so a rebuild (new values, a reload, a label edit
-//! that moves a row) keeps them on the rows they were on rather than on
-//! whatever now paints at the old index.
+//! The grid's pure model: one classification's rows
+//! (`classification::rows`), the order a sort puts them in, a cursor and a
+//! row selection. The cursor and the selection's anchor are held by source
+//! value, so a rebuild (new values, a reload, a label edit that moves a row)
+//! keeps them on the rows they were on rather than on whatever now paints at
+//! the old index.
 //!
 //! The order and the shown rows are rebuilt only when the rows or the sort
 //! change; a cursor move reads them.

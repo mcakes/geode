@@ -679,6 +679,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   right-click menu position, "loading values…" mark, empty and removed states.
 - Classifications CSV: native open/save dialogs on macOS and Windows, confirm text
   wrapping, rejected-rows notice truncation, the held-plan notice and arm-on-focus.
+- Classifications alignment (2026-10-11): the add field and its reference
+  typeahead under the header; the draft row's paint with the label editor open
+  on it; the fzf results table in this tile (source-only highlight); the
+  `removed` / `cleared` notices after a clear.
 
 ## Watchlists
 
@@ -819,6 +823,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   next lever is a keyed lookup join); context columns (`query_context` 35.0 ms vs
   20.5 ms without); pricer grid build after the tree-column and scope slices
   (1.66–2.15 ms); the dividend benches' anomalous readings.
+- The two Classifications rows in `performance.md` (rebuild after an edit, rows
+  rebuild) were measured while the grid still had a `/` filter; re-run
+  `cargo bench -p geode-classifications` and replace them.
 - Painted-frame readings never taken: the per-keystroke scope text filter (recipe
   in `docs/perf.md`), the market-data panel at 10,000 rows, the diagnostics page
   p95 with the Log following.

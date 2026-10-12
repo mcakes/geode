@@ -1574,24 +1574,23 @@ changes its source column, and on `shift+r`; an answer another read has
 overtaken is dropped. A refused or failed read keeps the map's own rows on
 screen with a header notice (`values not loaded: … — shift+r retries`);
 while a read is on its way the header says `loading values…` beside the
-count. The
-default order is unclassified rows first, then by label. A label blank
-after trimming is unclassified everywhere: in the counts, the sort and the
-paint, including a hand-written `''`. `:sort <source|label|rows>
+count. The default order is unclassified rows first, then by label. A label
+blank after trimming is unclassified everywhere: in the counts, the sort and
+the paint, including a hand-written `''`. `:sort <source|label|rows>
 [asc|desc]` orders the grid and bare `:sort` restores the default; a header
-sort control cycles desc → asc → default as every grid tile's does, and
-`s` cycles the label column's sort as its header control does.
-Unclassified labels and values not in the data sort last either way.
-Every row stays shown: `/` is vim's find, not a filter. Each keystroke
-moves the cursor to the first row at or after where the search began
-whose source or label contains the query (ignoring case, wrapping);
-`enter` keeps the query and `escape` returns the cursor to where it began.
-`n`/`shift+n` step the kept query from the cursor, wrapping, with a count.
-`escape` in normal mode ends a selection first, then the kept find, then
-dismisses the header's notices. Under `[ui] find_style = "fzf"`, `/` opens
-a results table in the grid's columns over every shown row, searched by
-source and label; a pick puts the cursor on its row and keeps the query
-for `n`.
+sort control cycles desc → asc → default as every grid tile's does, and `s`
+cycles the label column's sort as its header control does. Unclassified
+labels and values not in the data sort last either way. `/` finds as the
+pricer's and market data's do, by `[ui] find_style`: under vim style each
+keystroke moves the cursor to the next row whose source or label contains
+the query (ignoring case, wrapping), searching from where the search began;
+`enter` keeps the query for `n`/`shift+n` (counted, wrapping), `escape`
+returns the cursor to where it was. Under fzf style a ranked results table
+in the grid's columns opens; only the source cell highlights the matched
+characters (the label cell paints plain), and a pick puts the cursor on its
+row and keeps the query for `n`. Every row stays on screen: nothing narrows.
+In normal mode `escape` ends a selection first, then the find, then
+dismisses the header's notices.
 
 The shell's grid motions move a cursor held by source value, so a rebuild
 keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.
@@ -1602,82 +1601,84 @@ than let its span re-resolve to rows nobody chose. A right press on a row
 moves the cursor there (a row inside a live selection keeps the selection)
 and opens the `⋯` menu at the pointer, as `.` opens it from the header.
 
-**Labels.** The verbs act on the selection, else the cursor's row.
-`i`, `enter` (or a double-click) open the label editor in the label cell
-with the caret at the end of the label, `I` (`shift+i`) with it selected
-so typing replaces it; it is prefilled only when every target shares one
-label, and `up`/`down` move the
-typeahead's highlight over the labels in use. Enter writes the highlighted
-label when the highlight was moved or equals the typed text ignoring case
-(Unicode lowercasing), else the typed text trimmed and never re-cased, so
-`tech` typed over an existing `Tech` takes `Tech`; blank clears. `x` (`d`
-on a selection, `d d` on the cursor's row) clears — a value only the map
-holds then leaves the grid, and the notice says `removed <value>`
-(`cleared 2 labels, removed 1 value` for a mix). `y y` copies the cursor row's label, `p` pastes it, `u` undoes and `ctrl+r`
-redoes. Every write first checks the classification's source column: a
-hand-written definition over a column no classification may map is never
-written (`not saved: …`), since the door writes even when the reload then
-rejects the object. A written edit shows at once as a pending object, and
-every verb builds on it, so two edits before the reload compose; a reload
-carrying an earlier write of the tile's own keeps the later ones, and any
-other change to the object is the truth and drops them. Undo and redo
-replay row by row over what is current: a row another surface changed
-since is left as it is, and the notice says how many; a row the tile's own
-refused write touched is reported as not saved rather than changed
-elsewhere. Opening the editor puts the cursor on its row, so a reload or a
-values answer that reorders the rows keeps the field on the row it writes.
-A verb that changes
-nothing (`x` on unclassified rows, `u` with nothing to undo, a replay that
-skips every row) keeps the selection and a waiting cursor.
+**Labels.** The verbs act on the selection, else the cursor's row. `i`,
+`enter` (or a double-click) open the label editor in the label cell with the
+caret at the end of the label, `I` (`shift+i`) with it selected so typing
+replaces it; it is prefilled only when every target shares one label, and
+`up`/`down` move the typeahead's highlight over the labels in use. Enter
+writes the highlighted label when the highlight was moved or equals the
+typed text ignoring case (Unicode lowercasing), else the typed text trimmed
+and never re-cased, so `tech` typed over an existing `Tech` takes `Tech`;
+blank clears. `x` (`d` on a selection, `d d` on the cursor's row) clears — a
+value only the map holds then leaves the grid, and the notice says `removed
+<value>` (`cleared 2 labels, removed 1 value` for a mix). `y y` copies the
+cursor row's label, `p` pastes it, `u` undoes and `ctrl+r` redoes. Every
+write first checks the classification's source column: a hand-written
+definition over a column no classification may map is never written (`not
+saved: …`), since the door writes even when the reload then rejects the
+object. A written edit shows at once as a pending object, and every verb
+builds on it, so two edits before the reload compose; a reload carrying an
+earlier write of the tile's own keeps the later ones, and any other change
+to the object is the truth and drops them. Undo and redo replay row by row
+over what is current: a row another surface changed since is left as it is,
+and the notice says how many; a row the tile's own refused write touched is
+reported as not saved rather than changed elsewhere. Opening the editor puts
+the cursor on its row, so a reload or a values answer that reorders the rows
+keeps the field on the row it writes. A verb that changes nothing (`x` on
+unclassified rows, `u` with nothing to undo, a replay that skips every row)
+keeps the selection and a waiting cursor.
 
-**Adding a value.** `o` (`shift+o` is the same verb: the grid's order is
-the sort's) opens a field under the header, `Add <from> value`. It offers
-the keys of every reference table keyed by the source column alone that are
-not already rows (`underlyings` for `underlying_ref`); for another column
-it takes free text. `enter` takes the highlighted key when the highlight
-was moved or equals the typed text ignoring case, else the text trimmed;
-blank is refused under the field (`type a value`). A value that already has
-a row (exact match: `dax` is not `DAX`) moves the cursor there and opens
-its label editor. Any other value becomes a draft row after the
-unclassified values the data holds, `not in data`, with the label editor
-open on it; it counts in neither `<n> values` nor `<k> unclassified`.
-Committing a label writes it as an ordinary map entry, one write and one
-undo step; `escape`, a blank label or any other verb drops the draft and
-writes nothing, since `dimensions.toml` holds only labelled values. A
-values answer that brings the draft's value keeps the editor on the real
-row. `o` is refused at once while a revert is on its way or over a source
-column no classification may map. Once the data carries the value its count
-shows and `not in data` goes.
+**Adding a value.** `o` (`shift+o` is the same verb: the grid's order is the
+sort's), or `Add value…` in the `⋯` menu and the palette, opens a field
+under the header, `Add <from> value`. It offers the keys of every reference
+table keyed by the source column alone that are not already rows
+(`underlyings` for `underlying_ref`); for another column it takes free text.
+`enter` takes the highlighted key when the highlight was moved or equals the
+typed text ignoring case, else the text trimmed; blank is refused under the
+field (`type a value`). A value that already has a row (exact match: `dax`
+is not `DAX`) moves the cursor there and opens its label editor. Any other
+value becomes a draft row after the unclassified values the data holds, `not
+in data`, with the label editor open on it; it counts in neither `<n>
+values` nor `<k> unclassified`. Committing a label writes it as an ordinary
+map entry, one write and one undo step; as after any label verb the cursor
+keeps the draft's index rather than following the new row to its sorted
+place. `escape`, a blank label or any other verb drops the draft and writes
+nothing, since `dimensions.toml` holds only labelled values; a press
+elsewhere closes the editor and lands on the row pressed, and a right press
+on the draft row itself only closes the editor. A values answer that brings
+the draft's value keeps the editor on the real row. `o` is refused at once
+while a revert is on its way or over a source column no classification may
+map. Once the data carries the value its count shows and `not in data` goes.
 
 **New, rename, delete, revert.** Registered actions, reached from the
-palette and the `⋯` menu, never `:` commands and with no default chord.
-New asks a name, then a source column from a closed choice, and writes an
-empty classification; rename asks the new name. Each answer is validated
-before anything is written, and a refusal stays under the field. Rename,
-delete and revert then ask y/n on the confirm bar, naming how many
-groupings, views, saved scopes and named expressions still name the
-classification; revert's question names the lower layer it restores
-instead, since the name stays defined. A rename writes the new object and
-removes the old in one batch; delete and revert remove the user definition.
-Until the revert's reload lands, the label verbs on that classification
-are refused with `reverting <name>…`: an edit built on the user copy would
-replace the removal in the shell's batch and undo the revert. Rename and delete act only on a
+palette and the `⋯` menu, never `:` commands and with no default chord. New
+asks a name, then a source column from a closed choice, and writes an empty
+classification; rename asks the new name. Each answer is validated before
+anything is written, and a refusal stays under the field. Rename, delete and
+revert then ask y/n on the confirm bar, naming how many groupings, views,
+saved scopes and named expressions still name the classification; revert's
+question names the lower layer it restores instead, since the name stays
+defined. A rename writes the new object and removes the old in one batch;
+delete and revert remove the user definition. Until the revert's reload
+lands, the label verbs on that classification are refused with `reverting
+<name>…`: an edit built on the user copy would replace the removal in the
+shell's batch and undo the revert. Rename and delete act only on a
 classification the user layer owns outright: a desk or builtin one is
 refused (`<name> is defined in desk config; Geode cannot …`), as is a user
-copy over a lower one (Revert… removes that) and one whose layer is
-unknown. The `⋯` menu shows each refusal in its row's lane and in full
-when picked, and lists Revert… only over a shadowed user copy.
+copy over a lower one (Revert… removes that) and one whose layer is unknown.
+The `⋯` menu shows each refusal in its row's lane and in full when picked,
+and lists Revert… only over a shadowed user copy.
 
-**Notices.** The tile hears the door's outcome on its frame
-notification. A fork (`copied '<name>' to your config — Revert… restores
-the <layer> copy`, naming the layer it shadows) shows as status: editing a
-desk or builtin classification copies it whole into the user layer. A refusal shows as danger and drops the
-pending edit, whether the door refused it, the write failed (`config not
-saved — reverted: …`) or the merge rejected it (`saved to disk · rejected
-by the merge — showing the configuration in force`); a create, rename or delete that was refused shows what was
-shown before. A verb's notices last until the next verb or another
-classification is shown; the session restore's until the trader's first key
-or press in the tile.
+**Notices.** The tile hears the door's outcome on its frame notification. A
+fork (`copied '<name>' to your config — Revert… restores the <layer> copy`,
+naming the layer it shadows) shows as status: editing a desk or builtin
+classification copies it whole into the user layer. A refusal shows as
+danger and drops the pending edit, whether the door refused it, the write
+failed (`config not saved — reverted: …`) or the merge rejected it (`saved
+to disk · rejected by the merge — showing the configuration in force`); a
+create, rename or delete that was refused shows what was shown before. A
+verb's notices last until the next verb or another classification is shown;
+the session restore's until the trader's first key or press in the tile.
 
 **Export CSV.** `Classification: Export CSV…` and `Classification: Export
 CSV with unclassified…` are registered actions, in the palette and at the
@@ -1767,6 +1768,7 @@ Known limitations:
   command line closes over the focused tile; focusing the tile again asks.
 - Applying an import at `y` runs on the UI thread (see
   [performance](performance.md#known-gaps)); planning does not.
+- An added value needs a label; there is no unlabelled placeholder row.
 
 See the [crate guide](../../crates/geode-classifications/README.md) for the
 module map.
