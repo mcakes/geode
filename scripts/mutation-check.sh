@@ -37639,20 +37639,20 @@ run_mutation "demo scenario: the sources point beside src" \
   crates/geode-compose/src/demo.rs \
   '        .map(|p| p.join("scenario"))' \
   '        .map(|p| p.join("src"))' \
-  geode-compose the_demo_layer_declares_the_five_scenario_sources
-# The diva report feeds term_sensitivities under batch `diva_<book>`; the
-# term report's `<book>` would let each report's load replace the other's
-# rows (a partition is dataset, batch and book).
-run_mutation "demo scenario: the diva batch differs from the term batch" \
+  geode-compose the_demo_layer_declares_the_scenario_sources
+# Each term report feeds term_sensitivities under batch `<report>_<book>`;
+# reports sharing a batch (`<book>`) would replace each other's rows (a
+# partition is dataset, batch and book).
+run_mutation "demo scenario: each term report's batch carries its name" \
   crates/geode-compose/src/demo.rs \
-  '(?P<batch>{diva}_.+)_' \
-  '{diva}_(?P<batch>.+)_' \
-  geode-compose the_diva_report_feeds_term_sensitivities_under_its_own_batch
+  '(?P<batch>{report}_.+)_' \
+  '{report}_(?P<batch>.+)_' \
+  geode-compose each_term_report_feeds_term_sensitivities_under_its_own_batch
 # Diva opposes delta: higher dividends lower the forward.
 run_mutation "demo scenario: diva opposes delta" \
   crates/geode-demo-data/src/scenario.rs \
-  '                measures: vec![-batch.delta01[i] * width],' \
-  '                measures: vec![batch.delta01[i] * width],' \
+  '                -batch.delta01[i] * width,' \
+  '                batch.delta01[i] * width,' \
   geode-demo-data diva_opposes_delta_and_scales_with_the_bucket_time
 # Diva scales with the bucket's width in years, not the tenor's time.
 run_mutation "demo scenario: diva scales with the bucket width" \
@@ -37660,13 +37660,12 @@ run_mutation "demo scenario: diva scales with the bucket width" \
   '            let width = TENOR_YEARS[t] - if t == 0 { 0.0 } else { TENOR_YEARS[t - 1] };' \
   '            let width = TENOR_YEARS[t];' \
   geode-demo-data diva_opposes_delta_and_scales_with_the_bucket_time
-# A diva file carries only its own measure, so the report stays separate
-# from the term report rather than a column of it.
-run_mutation "demo scenario: the diva report carries only diva" \
+# Each term report carries only its own measure: one report per measure.
+run_mutation "demo scenario: each term report carries only its measure" \
   crates/geode-demo-data/src/scenario.rs \
-  '    let mut diva = table("term_sensitivities", &["tenor"], &["diva"]);' \
-  '    let mut diva = table("term_sensitivities", &["tenor"], &["diva", "repo"]);' \
-  geode-demo-data the_diva_report_is_a_row_per_tenor_carrying_only_identity_tenor_and_diva
+  '            let mut t = table("term_sensitivities", &["tenor"], std::slice::from_ref(r));' \
+  '            let mut t = table("term_sensitivities", &["tenor"], &[*r, "repo"]);' \
+  geode-demo-data each_term_report_carries_only_identity_tenor_and_its_measure
 
 # ---- scenario shapes (scenarios.toml) and the pivot ----
 # A measure the source does not list is another report's: a partial
@@ -37675,14 +37674,14 @@ run_mutation "multi-report: a partial report is not degraded" \
   crates/geode-data/src/ingest/load.rs \
   '            let expected = !matches!(col.role, geode_core::schema::ColumnRole::Measure { .. })' \
   '            let expected = true || !matches!(col.role, geode_core::schema::ColumnRole::Measure { .. })' \
-  geode-data a_term_and_a_diva_report_both_survive_and_sum_per_tenor
+  geode-data all_five_term_reports_survive_and_sum_per_tenor
 # A measure the source lists keeps the required rule: a truncated report
 # still degrades.
 run_mutation "multi-report: a listed measure the file lacks still degrades" \
   crates/geode-data/src/ingest/load.rs \
   '                || req.measures.is_none_or(|m| m.contains(&col.name));' \
   '                || req.measures.is_none_or(|m| m.contains(&col.name) && false);' \
-  geode-data a_term_file_missing_its_own_measure_is_degraded
+  geode-data a_report_missing_its_own_measure_is_degraded_and_not_the_others
 # A `measures` name that is not a declared measure refuses the source.
 run_mutation "sources: a measures name that is not a measure refuses the source" \
   crates/geode-core/src/source_config.rs \
@@ -37708,14 +37707,13 @@ run_mutation "restart seed: a batch goes to the source owning its file" \
   '    if owners.is_empty() {' \
   '    if true {' \
   geode-data a_restart_seeds_a_degraded_batch_onto_its_own_source_only
-# The demo term source lists its measures, so diva reads as another report's.
-run_mutation "demo scenario: the term source lists its measures" \
+# Each demo term report's source lists its own measure and twin only, so
+# the other reports' measures read as another report's.
+run_mutation "demo scenario: each term report lists its own measures" \
   crates/geode-compose/src/demo.rs \
-  '        if ds == "term_sensitivities" {
-            scenario_sources.push_str' \
-  '        if false {
-            scenario_sources.push_str' \
-  geode-compose the_diva_report_feeds_term_sensitivities_under_its_own_batch
+  '             measures = [\"{report}\", \"{report}_usd\"]' \
+  '             measures = [\"{report}\", \"{report}_usd\", \"repo\"]' \
+  geode-compose each_term_report_feeds_term_sensitivities_under_its_own_batch
 # By maturity's fifth column is the diva report's measure.
 run_mutation "scenario: by_maturity paints diva" \
   crates/geode-scenario/src/core/builtin_scenarios.toml \

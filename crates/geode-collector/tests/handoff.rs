@@ -603,8 +603,8 @@ fn a_handoff_keeps_the_documents_the_collector_received() {
     });
     // The directory sources' startup loads, the scenario files last,
     // publish back to back for several seconds in a debug build, with no
-    // quiet second between them; wait for every scenario file first. Thirty
-    // files (six reports over five books) take longer than `WAIT` in a
+    // quiet second between them; wait for every scenario file first. The
+    // burst (nine reports over every book) takes longer than `WAIT` in a
     // loaded debug build, so this wait has its own bound.
     let scenario = world.db.parent().unwrap().join("scenario");
     let expected = scenario_batches(&scenario);
@@ -994,8 +994,8 @@ fn handoff_once(world: &World, collector: &mut Proc, marker: &str) -> Sample {
 
 /// The (dataset, batch) of every scenario CSV under `dir`, as the
 /// collector's publish lines name them: `<dataset>_<date>_<batch>.csv`,
-/// and the diva report's `diva_<book>_<date>.csv` into
-/// `term_sensitivities` under batch `diva_<book>`.
+/// and each term report's `<report>_<book>_<date>.csv` into
+/// `term_sensitivities` under batch `<report>_<book>`.
 fn scenario_batches(dir: &Path) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -1003,10 +1003,10 @@ fn scenario_batches(dir: &Path) -> Vec<(String, String)> {
         let Some(stem) = name.strip_suffix(".csv") else {
             continue;
         };
-        let diva = format!("{}_", geode_demo_data::DIVA_REPORT);
-        if stem.starts_with(&diva)
-            && let Some((batch, _date)) = stem.rsplit_once('_')
-        {
+        let term_report = geode_demo_data::TERM_REPORTS
+            .iter()
+            .any(|r| stem.starts_with(&format!("{r}_")));
+        if term_report && let Some((batch, _date)) = stem.rsplit_once('_') {
             out.push(("term_sensitivities".to_string(), batch.to_string()));
             continue;
         }

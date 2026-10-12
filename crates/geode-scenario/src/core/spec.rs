@@ -150,8 +150,8 @@ mod tests {
             None,
             "a ladder's Σ row is the total row"
         );
-        // Two reports feed the dataset; the diva report's one measure is the
-        // fifth column, with its USD twin.
+        // One report per measure feeds the dataset; diva is the fifth
+        // column, with its USD twin.
         let Columns::Measures(cols) = &by_maturity.columns else {
             unreachable!()
         };

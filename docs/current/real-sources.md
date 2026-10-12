@@ -122,13 +122,15 @@ desk-layer `sources.toml` entry and a `datasets.toml` declaration.
 **For:** bucketed and scenario risk — vega by tenor and moneyness, a vega
 spot ladder, a spot ladder, term sensitivities and rho by curve
 (`vega_buckets`, `vega_spot_ladder`, `spot_ladder`, `term_sensitivities`,
-`rho_curves` in the demo), each a measures dataset with `axes`, and the
-dividend sensitivity (diva) report, a second report into
-`term_sensitivities`.
+`rho_curves` in the demo), each a measures dataset with `axes`. Term
+sensitivities come from five reports, one per measure: repo, ATM vol,
+skew, curvature and dividend sensitivity (diva).
 
-**Simulator:** `geode-demo-data`'s `scenario` module derives the five tables
-from the risk batch and `emit_scenario_directory` writes
-`<dataset>_<date>_<book>.csv` with `.done` sentinels into
+**Simulator:** `geode-demo-data`'s `scenario` module derives one table per
+dataset from the risk batch, and one per term report for
+`term_sensitivities`. `emit_scenario_directory` writes
+`<dataset>_<date>_<book>.csv` (`<report>_<book>_<date>.csv` for a term
+report) with `.done` sentinels into
 `$TMPDIR/geode-demo/<rows>-42/scenario/`, beside `src/` so the risk glob
 never picks one up. Bucket measures are unjittered shares of the row's own
 risk measure, so a sum over a bucket axis reproduces the blotter's value;
@@ -139,26 +141,26 @@ The demo layer declares one `csv_dir` source per dataset,
 `demo_scenario_<dataset>`: sentinel readiness, a five-second poll, and
 `batch_pattern = '^<dataset>_\d{4}-\d{2}-\d{2}_(?P<batch>.+)$'`.
 
-The diva report is its own file, `diva_<book>_<date>.csv`, carrying the
-identity columns, `Tenor`, `Diva` and `Diva_USD` and nothing of the term
-report. Its source, `demo_scenario_diva`, feeds `term_sensitivities` with
-`batch_pattern = '^(?P<batch>diva_.+)_\d{4}-\d{2}-\d{2}$'`, so its batch
-is `diva_<book>` where the term report's is `<book>`. The batches must
-differ: a partition is (dataset, batch, book), and a load replaces its
-partitions' live rows, so a diva file under the term report's batch would
-delete that book's term rows and the next term file would delete its diva
-rows. The book comes before the date in the file name because a batch is
-one capture and must leave the date out. Diva per bucket is
-`-delta01 × bucket width in years`: higher dividends lower the forward, so
-it opposes delta and grows with the bucket's time.
+`term_sensitivities` has no source of its own. Each of its five reports is
+named for its measure (`repo`, `atm_vol`, `skew`, `curvature`, `diva`)
+and is its own file, `<report>_<book>_<date>.csv`, carrying the identity
+columns, `Tenor`, the report's measure and its `_USD` twin. Its source,
+`demo_scenario_term_<report>`, lists that measure and twin in `measures`
+and uses `batch_pattern = '^(?P<batch><report>_.+)_\d{4}-\d{2}-\d{2}$'`,
+so its batch is `<report>_<book>`. The batches must differ between
+reports: a partition is (dataset, batch, book), and a load replaces its
+partitions' live rows, so two reports under one batch would delete each
+other's rows on every load. The book comes before the date in the file
+name because a batch is one capture and must leave the date out. Diva per
+bucket is `-delta01 × bucket width in years`: higher dividends lower the
+forward, so it opposes delta and grows with the bucket's time.
 
 **Seam:** the same as risk files: none to write. A real deployment needs a
 desk-layer `sources.toml` entry per report and a `datasets.toml`
 declaration with `axes`. Where several reports feed one dataset, each
 report's source lists the `measures` its files carry and each source's
-`batch_pattern` yields a batch no other report's does. The demo's term
-source lists repo, ATM vol, skew, curvature and their twins; the diva
-source lists `diva` and `diva_usd`.
+`batch_pattern` yields a batch no other report's does. Each demo term
+report's source lists its one measure and that measure's twin.
 
 **Lag:** a position move rewrites the risk files only; scenario rows keep
 the old LHU until the next scenario run, and the scenario data's source
@@ -178,9 +180,10 @@ directory is deleted (see
 - Whether a real run covers the whole book or a subset, and whether every
   bucket is present for every row. An absent row reads as no value, not
   zero.
-- The diva report's file name, headers, unit (per 1% dividend change) and
-  bucketing. Whether the real report is a separate file at all, or a
-  column of the term report; a column would need no second source.
+- The term reports' file names, headers and bucketing, and diva's unit
+  (per 1% dividend change). Each real report is assumed to carry one
+  measure; a report carrying several would list them all in its source's
+  `measures`.
 - Whether spot shifts are joint across underlyings or per underlying. The
   demo ladders each (instrument, underlying) row on its own underlying; a
   joint shift changes what a sum across underlyings at one shift means.

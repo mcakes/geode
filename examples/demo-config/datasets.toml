@@ -623,13 +623,12 @@ role = "measure"
 grain = "instrument"
 source_name = "Theta_USD"
 
-# Two reports feed this dataset: the term report (repo, ATM vol, skew,
-# curvature) and the dividend sensitivity report (diva), each from its own
-# source. Each source lists the measures its files carry (`measures` in
-# sources.toml), so another report's measures read as NULL without a
-# signal while a file missing one of its own still degrades. The sources'
-# batches differ, so neither report's load replaces the other's rows (a
-# partition is dataset, batch and book).
+# One report per measure feeds this dataset (repo, ATM vol, skew, curvature
+# and diva), each from its own source. Each source lists the measure its
+# files carry (`measures` in sources.toml), so the other reports' measures
+# read as NULL without a signal while a file missing its own still
+# degrades. The sources' batches differ, so no report's load replaces
+# another's rows (a partition is dataset, batch and book).
 [term_sensitivities]
 axes = ["tenor"]
 [term_sensitivities.columns.business_date]

@@ -254,7 +254,8 @@ deliberate: a table built without a declared axis would merge its buckets
 under one key, and every sum over it would be plausible and wrong.
 
 Several reports can feed one measures dataset, each from its own directory
-source (the demo's term and diva reports both feed `term_sensitivities`).
+source (the demo's five term reports, one per measure, all feed
+`term_sensitivities`).
 Two rules make that work. Each source lists the measures its files carry
 in [`measures`](#source-configuration). A measure the file lacks and the
 list omits is another report's: it reads as NULL with no degradation and

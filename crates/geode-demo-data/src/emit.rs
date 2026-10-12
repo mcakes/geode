@@ -320,11 +320,11 @@ fn scenario_header(canonical: &str) -> &'static str {
 }
 
 /// One CSV and sentinel per (table, business date, book) under `root`:
-/// `<dataset>_<date>_<book>.csv` for a dataset's own report, and
-/// `<report>_<book>_<date>.csv` for a second report into it, so a batch
-/// pattern can capture `<report>_<book>` whole: a partition is (dataset,
-/// batch, book), and a second report sharing the first's batch would
-/// replace its rows on every load. Every measure is followed by its `_USD`
+/// `<dataset>_<date>_<book>.csv` for a dataset fed by one report, and
+/// `<report>_<book>_<date>.csv` for each of several reports into one
+/// dataset, so a batch pattern can capture `<report>_<book>` whole: a
+/// partition is (dataset, batch, book), and two reports sharing a batch
+/// would replace each other's rows on every load. Every measure is followed by its `_USD`
 /// twin at the risk emitter's fixed factor. Source times are staggered per
 /// file as the risk emitter does.
 pub fn emit_scenario_directory(

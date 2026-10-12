@@ -1,9 +1,9 @@
 //! Scenario batches derived from the risk batch: bucketed vega, a vega spot
-//! ladder, a spot ladder, term sensitivities, rho by curve and the dividend
-//! sensitivity ("diva") report, for the first `coverage` distinct
-//! (instrument, underlying) rows. The diva report is a second report into
-//! `term_sensitivities`, written as its own files under [`DIVA_REPORT`].
-//! Each bucket is a share of the position's risk measure so Σ over a bucket
+//! ladder, a spot ladder, term sensitivities and rho by curve, for the first
+//! `coverage` distinct (instrument, underlying) rows. Term sensitivities are
+//! one report per measure ([`TERM_REPORTS`]: repo, ATM vol, skew, curvature
+//! and dividend sensitivity), each written as its own files into
+//! `term_sensitivities`. Each bucket is a share of the position's risk measure so Σ over a bucket
 //! axis agrees with the blotter; curves exist only in the instrument's own
 //! currency so a scope's untouched curves stay blank.
 
@@ -36,9 +36,9 @@ pub const TENOR_YEARS: [f64; 10] = [
     5.0,
 ];
 pub const CURVE_TYPES: [&str; 2] = ["OIS", "RFR"];
-/// The file-name prefix of the dividend sensitivity report. Its rows land in
-/// `term_sensitivities` beside the term report's, carrying only `diva`.
-pub const DIVA_REPORT: &str = "diva";
+/// The reports that feed `term_sensitivities`, one per measure; each
+/// report is named for its measure and is its files' name prefix.
+pub const TERM_REPORTS: [&str; 5] = ["repo", "atm_vol", "skew", "curvature", "diva"];
 pub const SCENARIO_DATASETS: [&str; 5] = [
     "vega_buckets",
     "vega_spot_ladder",
@@ -84,8 +84,8 @@ pub struct ScenarioRow {
 #[derive(Debug)]
 pub struct ScenarioTable {
     pub dataset: &'static str,
-    /// `Some(prefix)` for a second report into `dataset`, written as its own
-    /// files with that prefix; `None` for the dataset's own report.
+    /// `Some(prefix)` for one of several reports into `dataset`, written as
+    /// its own files with that prefix; `None` for a dataset fed by one report.
     pub report: Option<&'static str>,
     /// Canonical column names in emission order (identity, axes, measures).
     pub columns: Vec<&'static str>,
@@ -133,13 +133,14 @@ fn f(v: f64) -> String {
     }
 }
 
-/// Derives the five scenario tables and the diva report from `batch`,
-/// seeded and deterministic.
+/// Derives the scenario tables from `batch`, seeded and deterministic: one
+/// per dataset, except `term_sensitivities`, which gets one per report in
+/// [`TERM_REPORTS`].
 ///
-/// Vega buckets, rho curves and the term table's repo, ATM vol and skew are
+/// Vega buckets, rho curves and the repo, ATM vol and skew reports are
 /// unjittered shares of the position's own measure, so Σ over a bucket axis
 /// reproduces the blotter's value; jitter shapes only the vega spot ladder
-/// and the curvature column, which have no blotter total to agree with.
+/// and the curvature report, which have no blotter total to agree with.
 /// Diva per bucket is `-delta01 × bucket width in years`: higher dividends
 /// lower the forward, so it is opposite in sign to delta and grows with the
 /// bucket's time, and Σ over tenors is `-5 × delta01`. It draws nothing
@@ -217,18 +218,19 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
         &["spot_shift"],
         &["npv", "delta", "gamma", "vega", "theta"],
     );
-    let mut term = table(
-        "term_sensitivities",
-        &["tenor"],
-        &["repo", "atm_vol", "skew", "curvature"],
-    );
+    let mut term: Vec<ScenarioTable> = TERM_REPORTS
+        .iter()
+        .map(|r| {
+            let mut t = table("term_sensitivities", &["tenor"], std::slice::from_ref(r));
+            t.report = Some(r);
+            t
+        })
+        .collect();
     let mut rho = table(
         "rho_curves",
         &["tenor", "curve_ccy", "curve_type"],
         &["rho"],
     );
-    let mut diva = table("term_sensitivities", &["tenor"], &["diva"]);
-    diva.report = Some(DIVA_REPORT);
 
     for &i in &rows {
         let id = identity(i);
@@ -262,24 +264,23 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
                     measures: vec![v],
                 });
             }
-            let mut text = id.clone();
-            text.push(tenor.to_string());
-            term.rows.push(ScenarioRow {
-                text,
-                measures: vec![
-                    batch.rho010[i] * 0.1 * tw[t],
-                    vega * tw[t],
-                    batch.skew01[i] * tw[t],
-                    batch.normalized_vega01[i] * 0.2 * tw[t] * jitter[t],
-                ],
-            });
+            // One value per term report, in `TERM_REPORTS` order.
             let width = TENOR_YEARS[t] - if t == 0 { 0.0 } else { TENOR_YEARS[t - 1] };
-            let mut text = id.clone();
-            text.push(tenor.to_string());
-            diva.rows.push(ScenarioRow {
-                text,
-                measures: vec![-batch.delta01[i] * width],
-            });
+            let values = [
+                batch.rho010[i] * 0.1 * tw[t],
+                vega * tw[t],
+                batch.skew01[i] * tw[t],
+                batch.normalized_vega01[i] * 0.2 * tw[t] * jitter[t],
+                -batch.delta01[i] * width,
+            ];
+            for (report, value) in term.iter_mut().zip(values) {
+                let mut text = id.clone();
+                text.push(tenor.to_string());
+                report.rows.push(ScenarioRow {
+                    text,
+                    measures: vec![value],
+                });
+            }
             for (c, curve) in CURVE_TYPES.iter().enumerate() {
                 let base = if c == 0 {
                     batch.rho_ois010[i]
@@ -312,9 +313,10 @@ pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> Scen
             });
         }
     }
-    ScenarioSet {
-        tables: vec![vega_buckets, vega_spot, spot, term, rho, diva],
-    }
+    let mut tables = vec![vega_buckets, vega_spot, spot];
+    tables.extend(term);
+    tables.push(rho);
+    ScenarioSet { tables }
 }
 
 #[cfg(test)]
@@ -331,7 +333,7 @@ mod tests {
         generate_scenarios(&batch, coverage, 42)
     }
 
-    /// The dataset's own report, never a second report into it.
+    /// The dataset's own table, never a report into it.
     fn table<'a>(s: &'a ScenarioSet, name: &str) -> &'a ScenarioTable {
         s.tables
             .iter()
@@ -339,11 +341,9 @@ mod tests {
             .unwrap()
     }
 
-    fn diva_table(s: &ScenarioSet) -> &ScenarioTable {
-        s.tables
-            .iter()
-            .find(|t| t.report == Some(DIVA_REPORT))
-            .unwrap()
+    /// One of the term reports, by name.
+    fn report<'a>(s: &'a ScenarioSet, name: &str) -> &'a ScenarioTable {
+        s.tables.iter().find(|t| t.report == Some(name)).unwrap()
     }
 
     fn col(t: &ScenarioTable, name: &str) -> usize {
@@ -397,10 +397,9 @@ mod tests {
         keys.sort();
         keys.dedup();
         let s = generate_scenarios(&batch, SCENARIO_COVERAGE, 42);
-        assert_eq!(
-            table(&s, "term_sensitivities").rows.len(),
-            keys.len() * TENORS.len()
-        );
+        for r in TERM_REPORTS {
+            assert_eq!(report(&s, r).rows.len(), keys.len() * TENORS.len(), "{r}");
+        }
     }
 
     #[test]
@@ -434,21 +433,66 @@ mod tests {
         );
     }
 
+    /// Term sensitivities are one report per measure: each carries the
+    /// identity, `tenor` and its own measure only, a row per tenor, and no
+    /// table carries several of them.
     #[test]
-    fn the_diva_report_is_a_row_per_tenor_carrying_only_identity_tenor_and_diva() {
+    fn each_term_report_carries_only_identity_tenor_and_its_measure() {
         let s = set(5_000, 40);
-        let d = diva_table(&s);
-        assert_eq!(d.dataset, "term_sensitivities");
-        assert_eq!(d.rows.len(), 40 * TENORS.len());
-        let expected: Vec<&str> = IDENTITY.iter().copied().chain(["tenor", "diva"]).collect();
-        assert_eq!(d.columns, expected);
-        assert!(d.rows.iter().all(|r| r.measures.len() == 1));
-        let term = table(&s, "term_sensitivities");
-        assert!(
-            !term.columns.contains(&"diva"),
-            "the term report does not carry diva: {:?}",
-            term.columns
-        );
+        for r in TERM_REPORTS {
+            let t = report(&s, r);
+            assert_eq!(t.dataset, "term_sensitivities", "{r}");
+            assert_eq!(t.rows.len(), 40 * TENORS.len(), "{r}");
+            let expected: Vec<&str> = IDENTITY.iter().copied().chain(["tenor", r]).collect();
+            assert_eq!(t.columns, expected, "{r}");
+            assert!(t.rows.iter().all(|row| row.measures.len() == 1), "{r}");
+        }
+        let into_term = s
+            .tables
+            .iter()
+            .filter(|t| t.dataset == "term_sensitivities")
+            .count();
+        assert_eq!(into_term, TERM_REPORTS.len(), "no combined term table");
+    }
+
+    /// Repo, ATM vol and skew are unjittered shares of the position's own
+    /// measure, so each report's buckets sum to it.
+    #[test]
+    fn the_unjittered_term_reports_sum_to_the_position_measure() {
+        let batch = generate(&GeneratorConfig {
+            rows: 500,
+            seed: 42,
+            business_dates: 1,
+        });
+        let s = generate_scenarios(&batch, 10, 42);
+        type Share = fn(&RiskBatch, usize) -> f64;
+        let expect: [(&str, Share); 3] = [
+            ("repo", |b, i| b.rho010[i] * 0.1),
+            ("atm_vol", |b, i| b.vega01[i]),
+            ("skew", |b, i| b.skew01[i]),
+        ];
+        for (name, want) in expect {
+            let t = report(&s, name);
+            let (ci, cu) = (col(t, "instrument_ref"), col(t, "underlying_ref"));
+            let first = &t.rows[0];
+            let total: f64 = t
+                .rows
+                .iter()
+                .filter(|r| r.text[ci] == first.text[ci] && r.text[cu] == first.text[cu])
+                .map(|r| r.measures[0])
+                .sum();
+            let i = (0..batch.len())
+                .find(|&i| {
+                    batch.instrument_ref[i] == first.text[ci]
+                        && batch.underlying_ref[i] == first.text[cu]
+                })
+                .unwrap();
+            assert!(
+                (total - want(&batch, i)).abs() < 1e-9,
+                "{name}: {total} vs {}",
+                want(&batch, i)
+            );
+        }
     }
 
     /// Diva is opposite in sign to delta and scales with the bucket's time:
@@ -462,7 +506,7 @@ mod tests {
             business_dates: 1,
         });
         let s = generate_scenarios(&batch, 10, 42);
-        let d = diva_table(&s);
+        let d = report(&s, "diva");
         let (ci, cu, ct) = (
             col(d, "instrument_ref"),
             col(d, "underlying_ref"),
@@ -669,28 +713,39 @@ mod tests {
             header.split(',').count()
         );
 
-        // The diva report: its own files, book before date, into the term
-        // dataset, with only the identity, tenor and diva headers.
-        let diva = files
+        // Each term report: its own files, book before date, into
+        // `term_sensitivities`, with only the identity, tenor and its
+        // measure's headers.
+        for (r, measure) in TERM_REPORTS
             .iter()
-            .find(|f| {
-                f.csv_path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .starts_with("diva_")
-            })
-            .expect("a diva file");
-        let name = diva.csv_path.file_name().unwrap().to_string_lossy();
-        assert!(name.starts_with("diva_BK"), "{name}");
-        assert!(name.ends_with("_2026-08-24.csv"), "{name}");
-        let header = std::fs::read_to_string(&diva.csv_path).unwrap();
-        let header: Vec<&str> = header.lines().next().unwrap().split(',').collect();
-        assert_eq!(header[header.len() - 3..], ["Tenor", "Diva", "Diva_USD"]);
-        let doc: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(diva.sentinel_path.as_ref().unwrap()).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(doc["dataset"], "term_sensitivities");
+            .zip(["Repo", "ATMVol", "Skew", "Curvature", "Diva"])
+        {
+            let f = files
+                .iter()
+                .find(|f| {
+                    f.csv_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(&format!("{r}_BK"))
+                })
+                .unwrap_or_else(|| panic!("a {r} file"));
+            let name = f.csv_path.file_name().unwrap().to_string_lossy();
+            assert!(name.ends_with("_2026-08-24.csv"), "{name}");
+            let header = std::fs::read_to_string(&f.csv_path).unwrap();
+            let header: Vec<&str> = header.lines().next().unwrap().split(',').collect();
+            let usd = format!("{measure}_USD");
+            assert_eq!(header[header.len() - 3..], ["Tenor", measure, usd.as_str()]);
+            assert_eq!(header.len(), IDENTITY.len() + 3, "{r}: {header:?}");
+            let doc: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(f.sentinel_path.as_ref().unwrap()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(doc["dataset"], "term_sensitivities");
+        }
+        assert!(
+            !names.iter().any(|n| n.starts_with("term_sensitivities_")),
+            "no combined term file"
+        );
     }
 }

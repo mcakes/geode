@@ -14,7 +14,7 @@ pub use emit::{
 pub use generate::{GeneratorConfig, demo_underlyings, generate};
 pub use model::RiskBatch;
 pub use scenario::{
-    DIVA_REPORT, SCENARIO_COVERAGE, SCENARIO_DATASETS, ScenarioRow, ScenarioSet, ScenarioTable,
+    SCENARIO_COVERAGE, SCENARIO_DATASETS, ScenarioRow, ScenarioSet, ScenarioTable, TERM_REPORTS,
     generate_scenarios,
 };
 

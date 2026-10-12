@@ -1411,16 +1411,16 @@ source_name = "NPV"
     }
 }
 
-/// Two reports into one measures dataset: the demo's term report and its
-/// dividend sensitivity (diva) report both land in `term_sensitivities`,
-/// each file carrying only its own measures.
+/// Several reports into one measures dataset: the demo's five term reports
+/// (repo, ATM vol, skew, curvature, diva) all land in `term_sensitivities`,
+/// each file carrying only its own measure.
 #[cfg(test)]
 mod several_reports_tests {
     use super::*;
     use crate::store::Catalog;
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::schema::SchemaSpec;
-    use geode_demo_data::{EmittedFile, ScenarioSet};
+    use geode_demo_data::{EmittedFile, ScenarioSet, TERM_REPORTS};
     use std::collections::BTreeMap;
 
     const DATASET: &str = "term_sensitivities";
@@ -1445,9 +1445,8 @@ mod several_reports_tests {
         store: Store,
         schema: SchemaSpec,
         set: ScenarioSet,
-        /// The term file and the diva file for one book.
-        term: EmittedFile,
-        diva: EmittedFile,
+        /// Each term report's file for `book`, in `TERM_REPORTS` order.
+        files: Vec<(&'static str, EmittedFile)>,
         book: String,
     }
 
@@ -1466,67 +1465,66 @@ mod several_reports_tests {
             business_dates: 1,
         });
         let set = geode_demo_data::generate_scenarios(&batch, 40, 42);
-        let files = geode_demo_data::emit_scenario_directory(&set, src.path()).unwrap();
+        let emitted = geode_demo_data::emit_scenario_directory(&set, src.path()).unwrap();
         let named = |prefix: &str| -> Vec<&EmittedFile> {
-            files
+            emitted
                 .iter()
                 .filter(|f| {
                     f.csv_path
                         .file_name()
                         .unwrap()
                         .to_string_lossy()
-                        .starts_with(prefix)
+                        .starts_with(&format!("{prefix}_"))
                 })
                 .collect()
         };
-        // A book both reports cover with more than one position.
-        let diva = named("diva_")
+        // The book with the most positions, which every report covers.
+        let book = named("diva")
             .into_iter()
             .max_by_key(|f| f.rows)
             .unwrap()
+            .books[0]
             .clone();
-        let book = diva.books[0].clone();
-        let term = named("term_sensitivities_")
-            .into_iter()
-            .find(|f| f.books == [book.clone()])
-            .unwrap()
-            .clone();
-        assert!(diva.rows > 10, "a book with several positions");
+        let files: Vec<(&'static str, EmittedFile)> = TERM_REPORTS
+            .iter()
+            .map(|r| {
+                let f = named(r)
+                    .into_iter()
+                    .find(|f| f.books == [book.clone()])
+                    .unwrap_or_else(|| panic!("a {r} file for {book}"))
+                    .clone();
+                assert!(f.rows > 10, "{r}: a book with several positions");
+                (*r, f)
+            })
+            .collect();
         World {
             _db: db,
             _src: src,
             store,
             schema,
             set,
-            term,
-            diva,
+            files,
             book,
         }
     }
 
-    /// The measures each demo source lists (`demo.rs::layer`).
-    fn term_measures() -> Vec<String> {
-        [
-            "repo",
-            "repo_usd",
-            "atm_vol",
-            "atm_vol_usd",
-            "skew",
-            "skew_usd",
-            "curvature",
-            "curvature_usd",
-        ]
-        .map(String::from)
-        .to_vec()
+    fn file<'a>(w: &'a World, report: &str) -> &'a EmittedFile {
+        &w.files.iter().find(|(r, _)| *r == report).unwrap().1
     }
 
-    fn diva_measures() -> Vec<String> {
-        vec!["diva".into(), "diva_usd".into()]
+    /// What each demo term source lists (`demo.rs::layer`): its measure
+    /// and its twin.
+    fn measures(report: &str) -> Vec<String> {
+        vec![report.to_string(), format!("{report}_usd")]
     }
 
-    fn load(w: &World, file: &EmittedFile, batch: &str, measures: &[String]) -> LoadOutcome {
+    /// Load `report`'s file for the world's book under `batch`, listing the
+    /// report's own measures as its source does.
+    fn load(w: &World, report: &str, batch: &str) -> LoadOutcome {
+        let file = file(w, report);
         let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
         let sentinel = crate::source::parse_sentinel(&text).unwrap();
+        let measures = measures(report);
         load_file(
             &w.store,
             &LoadRequest {
@@ -1535,10 +1533,15 @@ mod several_reports_tests {
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch,
-                measures: Some(measures),
+                measures: Some(&measures),
             },
         )
         .unwrap()
+    }
+
+    /// The batch a report's source captures: `<report>_<book>`.
+    fn own_batch(w: &World, report: &str) -> String {
+        format!("{report}_{}", w.book)
     }
 
     /// Per tenor, the generator's own sum of `measure` over `book`, from
@@ -1612,68 +1615,68 @@ mod several_reports_tests {
         a.is_some_and(|a| (a - b).abs() < 1e-4 * (1.0 + b.abs()))
     }
 
-    /// The term and diva files for one book load under their sources'
-    /// distinct batches, neither degraded; both measures survive, and the
-    /// grouped query sums each per tenor and in the Σ (total) row, the other
-    /// report's NULLs neither zeroing nor blanking a sum.
+    /// All five reports for one desk batch load under their sources'
+    /// distinct batches, none degraded and none noted. Every measure
+    /// survives, and the grouped query sums each per tenor and in the Σ
+    /// (total) row, the other reports' NULLs neither zeroing nor blanking
+    /// a sum.
     #[test]
-    fn a_term_and_a_diva_report_both_survive_and_sum_per_tenor() {
+    fn all_five_term_reports_survive_and_sum_per_tenor() {
         let w = world();
-        let term = load(&w, &w.term, &w.book, &term_measures());
-        let diva = load(&w, &w.diva, &format!("diva_{}", w.book), &diva_measures());
-        for (out, file) in [(&term, &w.term), (&diva, &w.diva)] {
-            assert_eq!(out.health, Health::Ok, "{out:?}");
-            assert!(out.missing_required.is_empty(), "{out:?}");
-            assert!(out.missing_optional.is_empty(), "{out:?}");
+        for report in TERM_REPORTS {
+            let out = load(&w, report, &own_batch(&w, report));
+            assert_eq!(out.health, Health::Ok, "{report}: {out:?}");
+            assert!(out.missing_required.is_empty(), "{report}: {out:?}");
+            assert!(out.missing_optional.is_empty(), "{report}: {out:?}");
             assert_eq!(
-                LoadNotes::of(&file.csv_path, out),
+                LoadNotes::of(&file(&w, report).csv_path, &out),
                 None,
-                "another report's measures earn no standing warning"
+                "{report}: the other reports' measures earn no warning"
             );
         }
 
         let s = by_tenor(&w);
-        let (repo, diva_sums) = (expected(&w, "repo"), expected(&w, "diva"));
-        assert_eq!(repo.len(), 10);
-        assert_eq!(diva_sums.len(), 10);
-        for (tenor, want) in &repo {
-            let got = cell(&s, Some(tenor), "repo");
-            assert!(close(got, *want), "repo at {tenor}: {got:?} vs {want}");
+        for measure in TERM_REPORTS {
+            let want = expected(&w, measure);
+            assert_eq!(want.len(), 10, "{measure}");
+            for (tenor, v) in &want {
+                let got = cell(&s, Some(tenor), measure);
+                assert!(close(got, *v), "{measure} at {tenor}: {got:?} vs {v}");
+            }
+            assert!(
+                want.values().any(|v| *v != 0.0),
+                "{measure}: a nonzero expectation"
+            );
+            let total = want.values().sum::<f64>();
+            let got = cell(&s, None, measure);
+            assert!(close(got, total), "Σ {measure}: {got:?} vs {total}");
         }
-        for (tenor, want) in &diva_sums {
-            let got = cell(&s, Some(tenor), "diva");
-            assert!(close(got, *want), "diva at {tenor}: {got:?} vs {want}");
-            assert!(*want != 0.0, "a nonzero expectation at {tenor}");
-        }
-        let (repo_total, diva_total) =
-            (repo.values().sum::<f64>(), diva_sums.values().sum::<f64>());
-        let got = cell(&s, None, "repo");
-        assert!(close(got, repo_total), "Σ repo: {got:?} vs {repo_total}");
-        let got = cell(&s, None, "diva");
-        assert!(close(got, diva_total), "Σ diva: {got:?} vs {diva_total}");
 
-        // The dataset time is the older of the two reports' times.
-        let older = w.term.as_of.clone().min(w.diva.as_of.clone());
+        // The dataset time is the oldest of the five reports' times.
+        let oldest = w.files.iter().map(|(_, f)| f.as_of.clone()).min().unwrap();
         let as_of = Catalog::new(w.store.writer())
             .dataset_as_of(DATASET, &[])
             .unwrap()
             .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-        assert_eq!(as_of.as_deref(), Some(older.as_str()));
+        assert_eq!(as_of.as_deref(), Some(oldest.as_str()));
     }
 
-    /// A term file missing one of its own measures still degrades: the
-    /// source lists `repo`, so its absence is the schema's required rule,
-    /// not another report's measure.
+    /// A report file missing its OWN measure degrades: the source lists
+    /// `repo`, so its absence is the schema's required rule. A report
+    /// missing the others' measures (every file here) does not.
     #[test]
-    fn a_term_file_missing_its_own_measure_is_degraded() {
+    fn a_report_missing_its_own_measure_is_degraded_and_not_the_others() {
         let w = world();
-        drop_column(&w.term, "Repo");
-        let out = load(&w, &w.term, &w.book, &term_measures());
+        drop_column(file(&w, "repo"), "Repo");
+        let out = load(&w, "repo", &own_batch(&w, "repo"));
         assert!(
             matches!(&out.health, Health::Degraded { reason } if reason.contains("repo")),
             "{out:?}"
         );
         assert_eq!(out.missing_required, ["repo"]);
+        let out = load(&w, "skew", &own_batch(&w, "skew"));
+        assert_eq!(out.health, Health::Ok, "{out:?}");
+        assert!(out.missing_required.is_empty() && out.missing_optional.is_empty());
     }
 
     /// Rewrite `file` without the header `column`, sentinel included.
@@ -1703,19 +1706,24 @@ mod several_reports_tests {
         std::fs::write(sentinel, doc.to_string()).unwrap();
     }
 
-    /// Why the batches must differ: a diva file loaded under the term
-    /// report's batch replaces the term rows of that book.
+    /// Why the batches must differ: two reports loaded under one batch
+    /// share a partition, so the newer replaces the older's rows.
     #[test]
-    fn a_diva_file_under_the_term_batch_replaces_the_term_rows() {
+    fn two_reports_sharing_a_batch_wipe_each_other() {
         let w = world();
-        assert!(
-            w.diva.as_of > w.term.as_of,
-            "the diva file is newer, so it publishes live rather than to the archive"
-        );
-        load(&w, &w.term, &w.book, &term_measures());
-        load(&w, &w.diva, &w.book, &diva_measures());
+        // An older and a newer report, so the second publishes live
+        // rather than to the archive.
+        let (older, newer) = w
+            .files
+            .iter()
+            .flat_map(|a| w.files.iter().map(move |b| (a, b)))
+            .find(|(a, b)| b.1.as_of > a.1.as_of)
+            .map(|(a, b)| (a.0, b.0))
+            .expect("two reports with different times");
+        load(&w, older, &w.book);
+        load(&w, newer, &w.book);
         let s = by_tenor(&w);
-        assert_eq!(cell(&s, None, "repo"), None, "the term rows are gone");
-        assert!(cell(&s, None, "diva").is_some());
+        assert_eq!(cell(&s, None, older), None, "{older}'s rows are gone");
+        assert!(cell(&s, None, newer).is_some());
     }
 }

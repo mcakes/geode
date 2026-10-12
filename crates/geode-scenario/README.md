@@ -14,10 +14,10 @@ builtin five, the pivot and the tile.
   `load_scenarios` hands it over against the demo schema, and `demo`
   holds that schema (`DEMO_DATASETS`, `demo_schema`). The tests here check
   the five against the demo `datasets.toml`, so a renamed demo column
-  refuses a builtin in CI. `by_maturity` reads five measures from two
-  reports into `term_sensitivities`: repo, atm vol, skew and curvature
-  from the term report and `diva` (`per 1% div`) from the dividend
-  sensitivity report; each sums its own report's partitions.
+  refuses a builtin in CI. `by_maturity` reads five measures from
+  `term_sensitivities`, each its own report: repo, atm vol, skew,
+  curvature and `diva` (`per 1% div`); each column sums its own report's
+  partitions.
 - `core/pivot.rs`: `Pivot::build` turns the tile's grouped snapshot (and
   the second, column-totals snapshot) into cells, Σ, diff and heat domain.
   Every Σ comes from the snapshot's subtotal and total rows, never from the

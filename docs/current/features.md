@@ -1682,16 +1682,17 @@ notice line on the left. On the right is the cursor readout (row, column and
 value, e.g. `1Y × 100 · 254.5`) or, while a selection holds, the aggregates
 strip. Its totals are unsummable down a scenario rows axis.
 
-**Several reports.** A dataset fed by several reports (By maturity's
-`term_sensitivities`: the term report and the diva report) is one dataset
-to the tile. Each report's partitions are separate, so each column sums its
-own report's rows. The dataset time is the oldest of each book's newest
-time per batch, so a lagging report shows, and turns stale, as the older
-time. Any report's publish moves the dataset's generation and requeries.
-The health chip is the worst of the dataset's sources. Each source lists
-the measures its files carry, so a report file missing one of its own
-measures degrades its source while the other report's measures read as
-NULL with no signal. A book that has never had a file from one report has
+**Several reports.** A dataset fed by several reports is one dataset to
+the tile. By maturity's `term_sensitivities` has five, one per column:
+repo, atm vol, skew, curvature and diva. Each report's partitions are
+separate, so each column sums its own report's rows. The dataset time is
+the oldest of each book's newest time per batch, so the tile shows the
+oldest of the five reports' times and turns stale when any report lags.
+Any report's publish moves the dataset's generation and requeries. The
+health chip is the worst of the dataset's sources. Each source lists the
+measures its files carry, so a report file missing its own measure
+degrades its source while the other reports' measures read as NULL with
+no signal. A book that has never had a file from one report has
 no partition from it: that report's columns leave the book out of every
 sum, Σ included, and nothing turns stale for it.
 
@@ -1725,8 +1726,8 @@ the record.
 **Limitations.**
 
 - No emission: a scenario tile follows a group but posts no scope.
-- The dataset time does not say which report is old: a lagging diva report
-  and a lagging term report read the same.
+- The dataset time does not say which report is old: any of the five
+  reports lagging reads the same.
 - When one report lags another by a business date, a position carries two
   `business_date` values across the live table, and every load of either
   report records a cross-file attribute conflict (diagnostic only, no

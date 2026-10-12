@@ -745,10 +745,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
-- A file carrying a measure another source over the same dataset reports
-  (a term file that starts carrying `Diva`) loads, and that book's sum
-  double-counts with no health signal. A source's `measures` list could
-  also refuse or degrade a column it does not list; that is undecided.
+- A file from any report that carries a measure another source over the
+  same dataset reports (a `repo` report that starts carrying `Diva`)
+  loads, and that book's sum of the measure double-counts with no health
+  signal. A source's `measures` list could also refuse or degrade a column
+  it does not list; that is undecided.
 - Within-file `MEASURE` conflicts in a scenario source file are not
   surfaced by the ingest runner.
 - The document family's axes lack a duplicate-name refusal.
@@ -765,8 +766,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   `geode_tile::following` would serve both.
 - `prepare_chips` (the chips and the scope readout) runs on every
   non-motion verb, whether or not the verb changed what they read.
-- A dataset fed by several reports shows one dataset time; nothing says
-  which report is the old one.
+- A dataset fed by several reports (By maturity's five) shows one dataset
+  time, the oldest report's; nothing says which report is the old one.
 - A report lagging another by a business date records a cross-file
   `business_date` attribute conflict on every load of either report;
   attribute conflicts do not know that rows come from different reports.
@@ -781,10 +782,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The ladder header (By maturity, spot ladder): each measure's name on the
   row above its unit, right-aligned over the numbers, nothing clipped; a Σ
   total wider than the cells keeps its minus sign.
-- By maturity's fifth column, `diva` (`per 1% div`), in `--demo` after
-  deleting `$TMPDIR/geode-demo/<rows>-42/`: present in every tenor row with
-  its Σ, negative where delta is long, nothing clipped at the default
-  width, and the four term columns unchanged beside it.
+- By maturity in `--demo` after deleting `$TMPDIR/geode-demo/<rows>-42/`,
+  each column from its own report: all five columns present in every
+  tenor row with their Σ, `diva` (`per 1% div`) negative where delta is
+  long, nothing clipped at the default width.
 - The `native` chip's warning tone and tooltip over a mixed-currency scope.
 - The base-row highlight on the spot ladder in diff mode, and its
   disappearance under `m`.
