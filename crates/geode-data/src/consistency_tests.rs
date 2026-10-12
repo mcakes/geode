@@ -61,6 +61,7 @@ grain = "instrument"
             csv_path: &csv,
             sentinel: &sentinel,
             batch: "risk",
+            measures: None,
         },
     )
     .unwrap();
@@ -79,6 +80,7 @@ grain = "instrument"
             csv_path: &csv,
             sentinel: &sentinel,
             batch: "risk",
+            measures: None,
         },
     );
     assert!(result.is_err());
@@ -109,6 +111,7 @@ grain = "instrument"
             csv_path: &csv,
             sentinel: &sentinel,
             batch: "risk",
+            measures: None,
         },
     )
     .unwrap();

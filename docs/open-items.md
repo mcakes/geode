@@ -763,6 +763,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   non-motion verb, whether or not the verb changed what they read.
 - A dataset fed by several reports shows one dataset time; nothing says
   which report is the old one.
+- A report lagging another by a business date records a cross-file
+  `business_date` attribute conflict on every load of either report;
+  attribute conflicts do not know that rows come from different reports.
 
 ### Display checks
 

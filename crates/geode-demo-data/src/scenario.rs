@@ -2,10 +2,10 @@
 //! ladder, a spot ladder, term sensitivities, rho by curve and the dividend
 //! sensitivity ("diva") report, for the first `coverage` distinct
 //! (instrument, underlying) rows. The diva report is a second report into
-//! `term_sensitivities`, written as its own files under [`DIVA_REPORT`]. Each bucket is a share
-//! of the position's risk measure so Σ over a bucket axis agrees with the
-//! blotter; curves exist only in the instrument's own currency so a scope's
-//! untouched curves stay blank.
+//! `term_sensitivities`, written as its own files under [`DIVA_REPORT`].
+//! Each bucket is a share of the position's risk measure so Σ over a bucket
+//! axis agrees with the blotter; curves exist only in the instrument's own
+//! currency so a scope's untouched curves stay blank.
 
 use crate::model::RiskBatch;
 use rand::rngs::StdRng;
@@ -143,7 +143,7 @@ fn f(v: f64) -> String {
 /// Diva per bucket is `-delta01 × bucket width in years`: higher dividends
 /// lower the forward, so it is opposite in sign to delta and grows with the
 /// bucket's time, and Σ over tenors is `-5 × delta01`. It draws nothing
-/// from the generator, so adding it left every other table unchanged.
+/// from the generator, so the other tables do not depend on it.
 pub fn generate_scenarios(batch: &RiskBatch, coverage: usize, seed: u64) -> ScenarioSet {
     let mut rng = StdRng::seed_from_u64(seed);
     // The first `coverage` distinct (instrument, underlying) rows in batch order.

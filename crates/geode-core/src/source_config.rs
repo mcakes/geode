@@ -125,6 +125,14 @@ pub struct SourceSpec {
     pub source_time: SourceTime,
     /// Snapshot only: the adapter-defined name of the table to read.
     pub table: Option<String>,
+    /// Directory only: the measures this source's files carry, when several
+    /// reports feed one measures dataset and each file holds only its own.
+    /// A listed measure the file lacks is missing under the schema's
+    /// `required` rule; an unlisted measure the file lacks belongs to another
+    /// report and reads as NULL with no degradation and no note. `None` means
+    /// the source carries every measure. Every name is a declared measure of
+    /// the dataset, or the source is refused.
+    pub measures: Option<Vec<String>>,
 }
 
 impl SourceSpec {
@@ -190,6 +198,7 @@ impl SourceSpec {
             recover_max_age: DEFAULT_RECOVER_MAX_AGE,
             source_time: SourceTime::Receive,
             table: None,
+            measures: None,
         }
     }
 }
@@ -530,6 +539,9 @@ impl SourceSpec {
             if !snapshot {
                 ignored("table", &mut diags);
             }
+            if subscribed {
+                ignored("measures", &mut diags);
+            }
             // Snapshots are taken ahead of every file: priority orders files only.
             if snapshot {
                 ignored("priority", &mut diags);
@@ -827,6 +839,43 @@ impl SourceSpec {
                 )
             };
 
+            // The measures a directory source's files carry. A name the
+            // dataset does not declare as a measure refuses the source: a
+            // misspelling would otherwise read the real measure as another
+            // report's, and a file missing it would load as healthy.
+            let measures = match (subscribed, table.get("measures")) {
+                (true, _) | (false, None) => None,
+                (false, Some(v)) => {
+                    let names: Option<Vec<String>> = v
+                        .as_array()
+                        .and_then(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect());
+                    let Some(names) = names.filter(|n| !n.is_empty()) else {
+                        diags.push(diag(
+                            Severity::Error,
+                            name,
+                            Some("measures"),
+                            "'measures' must be a nonempty list of measure names",
+                        ));
+                        continue;
+                    };
+                    let ds = schema.dataset(&dataset);
+                    let stranger = names.iter().find(|m| {
+                        !ds.and_then(|d| d.column(m))
+                            .is_some_and(|c| matches!(c.role, ColumnRole::Measure { .. }))
+                    });
+                    if let Some(m) = stranger {
+                        diags.push(diag(
+                            Severity::Error,
+                            name,
+                            Some("measures"),
+                            format!("'{m}' is not a measure of dataset '{dataset}'"),
+                        ));
+                        continue;
+                    }
+                    Some(names)
+                }
+            };
+
             if snapshot {
                 claimed.insert(dataset.clone(), name.clone());
             }
@@ -847,6 +896,7 @@ impl SourceSpec {
                 recover_max_age: recover.1,
                 source_time,
                 table: table_name,
+                measures,
             });
         }
 
@@ -870,6 +920,10 @@ role = "dimension"
 [risk_snapshot.columns.position_ref]
 type = "utf8"
 role = "key"
+[risk_snapshot.columns.npv]
+type = "f64"
+role = "measure"
+grain = "position"
 
 [cvi_params]
 family = "document"
@@ -1151,6 +1205,57 @@ batch_pattern = "^risk_.*$"
         assert_eq!(specs[0].batch_pattern, None);
         assert!(
             diags.iter().any(|d| d.message.contains("batch")),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn a_directory_source_lists_the_measures_its_files_carry() {
+        let (specs, diags) = from(
+            "[a]\ndataset = \"risk_snapshot\"\npaths = [\"/x/*.csv\"]\nmeasures = [\"npv\"]\n\
+             [b]\ndataset = \"risk_snapshot\"\npaths = [\"/x/*.csv\"]\n",
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(specs[0].measures.as_deref(), Some(&["npv".to_string()][..]));
+        assert_eq!(specs[1].measures, None, "absent: every measure");
+    }
+
+    /// A misspelt or non-measure name would read the real measure as
+    /// another report's and hide a file missing it, so the source is refused.
+    #[test]
+    fn a_measures_entry_that_is_not_a_measure_refuses_the_source() {
+        for (list, why) in [
+            ("[\"npvv\"]", "'npvv' is not a measure"),
+            ("[\"book\"]", "'book' is not a measure"),
+            ("[]", "nonempty list"),
+            ("\"npv\"", "nonempty list"),
+        ] {
+            let (specs, diags) = from(&format!(
+                "[a]\ndataset = \"risk_snapshot\"\npaths = [\"/x/*.csv\"]\nmeasures = {list}\n"
+            ));
+            assert!(specs.is_empty(), "{list}");
+            assert_eq!(diags.len(), 1, "{list}: {diags:?}");
+            assert_eq!(diags[0].severity, Severity::Error);
+            assert_eq!(diags[0].path.as_deref(), Some("sources.a.measures"));
+            assert!(
+                diags[0].message.contains(why),
+                "{list}: {}",
+                diags[0].message
+            );
+        }
+    }
+
+    #[test]
+    fn measures_on_a_subscribed_source_warn_as_ignored() {
+        let (specs, diags) = from(
+            "[c]\nadapter = \"bus\"\ndataset = \"cvi_params\"\ndocument = \"cvi\"\n\
+             topics = [\"a/*\"]\nmeasures = [\"param\"]\n",
+        );
+        assert_eq!(specs.len(), 1, "{diags:?}");
+        assert_eq!(specs[0].measures, None);
+        assert!(
+            diags.iter().any(|d| d.severity == Severity::Warning
+                && d.path.as_deref() == Some("sources.c.measures")),
             "{diags:?}"
         );
     }

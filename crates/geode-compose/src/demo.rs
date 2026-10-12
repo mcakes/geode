@@ -240,6 +240,21 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
     Ok(src)
 }
 
+/// The measures the demo term report's files carry, in `term_sensitivities`.
+const TERM_MEASURES: [&str; 8] = [
+    "repo",
+    "repo_usd",
+    "atm_vol",
+    "atm_vol_usd",
+    "skew",
+    "skew_usd",
+    "curvature",
+    "curvature_usd",
+];
+
+/// The measures the demo diva report's files carry, in `term_sensitivities`.
+const DIVA_MEASURES: [&str; 2] = ["diva", "diva_usd"];
+
 /// Builds the builtin demo layer from compiled-in example documents and
 /// source paths rooted at `source_dir`.
 ///
@@ -256,7 +271,8 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// 30 s. Each scenario dataset has a `demo_scenario_<dataset>` directory
 /// source over `scenario/` beside `source_dir`, polled every five seconds;
 /// `demo_scenario_diva` is a second source into `term_sensitivities` over
-/// the dividend sensitivity report's `diva_*.csv` files.
+/// the dividend sensitivity report's `diva_*.csv` files. Those two list the
+/// `measures` their files carry.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
     let scenario_dir = source_dir
         .parent()
@@ -270,6 +286,12 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
              pending_timeout = \"1m\"\nbatch_pattern = '^{ds}_\\d{{4}}-\\d{{2}}-\\d{{2}}_(?P<batch>.+)$'\n",
             scenario_dir.join(format!("{ds}_*.csv")).to_string_lossy()
         ));
+        // The term report shares its dataset with the diva report, so it
+        // lists the measures its files carry: diva reads as another
+        // report's, while a term file missing one of these still degrades.
+        if ds == "term_sensitivities" {
+            scenario_sources.push_str(&format!("measures = {TERM_MEASURES:?}\n"));
+        }
     }
     // The diva report is a second report into `term_sensitivities`. Its
     // files are `diva_<book>_<date>.csv` and its batch `diva_<book>`, never
@@ -282,6 +304,7 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          pending_timeout = \"1m\"\nbatch_pattern = '^(?P<batch>{diva}_.+)_\\d{{4}}-\\d{{2}}-\\d{{2}}$'\n",
         scenario_dir.join(format!("{diva}_*.csv")).to_string_lossy()
     ));
+    scenario_sources.push_str(&format!("measures = {DIVA_MEASURES:?}\n"));
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
          readiness = \"sentinel\"\npriority = \"latest_risk\"\npoll_interval = \"2s\"\n\
@@ -826,6 +849,31 @@ mod tests {
                 .starts_with("term_sensitivities_"),
             "the term source's glob never picks up a diva file"
         );
+        // Each lists the measures its files carry; together they are the
+        // dataset's measures, so none reads as nobody's.
+        let (schema, _) = demo_schema_and_sources();
+        let declared: Vec<String> = schema
+            .dataset("term_sensitivities")
+            .unwrap()
+            .columns
+            .iter()
+            .filter(|c| matches!(c.role, geode_core::schema::ColumnRole::Measure { .. }))
+            .map(|c| c.name.clone())
+            .collect();
+        assert_eq!(
+            diva.measures.as_deref(),
+            Some(&["diva".to_string(), "diva_usd".to_string()][..])
+        );
+        let mut listed: Vec<String> = term
+            .measures
+            .clone()
+            .expect("the term source lists its measures");
+        assert!(!listed.contains(&"diva".to_string()));
+        listed.extend(diva.measures.clone().unwrap());
+        listed.sort();
+        let mut declared = declared;
+        declared.sort();
+        assert_eq!(listed, declared);
         assert_eq!(term.batch_of(&term_file), *book);
         assert_eq!(diva.batch_of(&diva_file), format!("diva_{book}"));
         // A second date keeps the same batch, so it replaces, not adds.

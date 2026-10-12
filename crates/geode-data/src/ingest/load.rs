@@ -25,6 +25,11 @@ pub struct LoadRequest<'a> {
     pub sentinel: &'a Sentinel,
     /// The file's partition batch: its name with the date component removed.
     pub batch: &'a str,
+    /// The measures the file's source carries (`SourceSpec::measures`);
+    /// `None` is every measure. A measure the file lacks and the list
+    /// omits belongs to another report into the dataset: it reads as NULL
+    /// and is neither missing nor noted.
+    pub measures: Option<&'a [String]>,
 }
 
 #[derive(Debug)]
@@ -126,6 +131,13 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             ));
         } else {
             projection.push(format!("NULL::{} as \"{}\"", col.ty.sql(), col.name));
+            // A measure the source does not list is another report's,
+            // expected absent here: no degradation and no note.
+            let expected = !matches!(col.role, geode_core::schema::ColumnRole::Measure { .. })
+                || req.measures.is_none_or(|m| m.contains(&col.name));
+            if !expected {
+                continue;
+            }
             if col.required {
                 missing_required.push(col.name.clone());
             } else {
@@ -624,6 +636,7 @@ source_name = "ModelCode"
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch: &batch,
+                measures: None,
             },
         )
         .unwrap()
@@ -690,6 +703,7 @@ source_name = "ModelCode"
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch: &super::tests_support::batch_of(&file.csv_path),
+                measures: None,
             },
         )
         .unwrap();
@@ -834,6 +848,7 @@ source_name = "NPV"
                 csv_path: &csv_path,
                 sentinel: &sentinel,
                 batch: "BK0",
+                measures: None,
             },
         )
         .unwrap();
@@ -898,6 +913,7 @@ source_name = "NPV"
                 csv_path: &csv_path,
                 sentinel: &sentinel,
                 batch: "BK0",
+                measures: None,
             },
         )
         .expect_err("a NULL axis must refuse the file");
@@ -1004,6 +1020,7 @@ source_name = "NPV"
                     csv_path: path,
                     sentinel,
                     batch: "shift",
+                    measures: None,
                 },
             )
             .unwrap()
@@ -1083,6 +1100,7 @@ source_name = "NPV"
                     csv_path: &twin,
                     sentinel,
                     batch: "blank",
+                    measures: None,
                 },
             )
             .unwrap()
@@ -1146,6 +1164,7 @@ source_name = "NPV"
                 csv_path: &twin,
                 sentinel: &sentinel,
                 batch: "twin",
+                measures: None,
             },
         )
         .unwrap();
@@ -1308,6 +1327,7 @@ source_name = "NPV"
                 csv_path: &twin,
                 sentinel: &sentinel,
                 batch: &batch,
+                measures: None,
             },
         )
         .unwrap();
@@ -1363,6 +1383,7 @@ source_name = "NPV"
                 csv_path: &missing,
                 sentinel: &sentinel,
                 batch: "BK000",
+                measures: None,
             },
         );
         assert!(err.is_err());
@@ -1483,7 +1504,27 @@ mod several_reports_tests {
         }
     }
 
-    fn load(w: &World, file: &EmittedFile, batch: &str) -> LoadOutcome {
+    /// The measures each demo source lists (`demo.rs::layer`).
+    fn term_measures() -> Vec<String> {
+        [
+            "repo",
+            "repo_usd",
+            "atm_vol",
+            "atm_vol_usd",
+            "skew",
+            "skew_usd",
+            "curvature",
+            "curvature_usd",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    fn diva_measures() -> Vec<String> {
+        vec!["diva".into(), "diva_usd".into()]
+    }
+
+    fn load(w: &World, file: &EmittedFile, batch: &str, measures: &[String]) -> LoadOutcome {
         let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
         let sentinel = crate::source::parse_sentinel(&text).unwrap();
         load_file(
@@ -1494,6 +1535,7 @@ mod several_reports_tests {
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch,
+                measures: Some(measures),
             },
         )
         .unwrap()
@@ -1516,17 +1558,28 @@ mod several_reports_tests {
         out
     }
 
-    /// The By maturity query: grouped by tenor, `repo` and `diva` summed.
+    /// The By maturity query as the tile asks it: the view the builtin
+    /// `by_maturity` shape derives (every measure and twin, `currency`
+    /// ungrouped). The shape text is read from geode-scenario's file, not
+    /// through a dependency on it.
     fn by_tenor(w: &World) -> geode_core::snapshot::Snapshot {
-        let text = "[m]\ndataset = \"term_sensitivities\"\ngrouping = [\"tenor\"]\n\
-                    [[m.columns]]\nname = \"repo\"\nkind = \"measure\"\n\
-                    [[m.columns]]\nname = \"diva\"\nkind = \"measure\"\n";
-        let doc = merge_docs("views", &[LayerDoc::builtin("views", text).unwrap()]);
-        let view = geode_core::view::ViewSpec::from_doc(&doc)
-            .0
-            .into_iter()
-            .next()
-            .unwrap();
+        use geode_core::scenario::{SCENARIOS_DOC, load_scenarios};
+        let doc = merge_docs(
+            SCENARIOS_DOC,
+            &[LayerDoc::builtin(
+                SCENARIOS_DOC,
+                include_str!("../../../geode-scenario/src/core/builtin_scenarios.toml"),
+            )
+            .unwrap()],
+        );
+        let (shapes, diags) = load_scenarios(&doc, &w.schema);
+        assert!(diags.is_empty(), "{diags:?}");
+        let shape = shapes.iter().find(|s| s.kind == "by_maturity").unwrap();
+        let view = shape.derive_view(w.schema.dataset(DATASET).unwrap());
+        assert!(
+            view.columns.iter().any(|c| c.name() == "diva"),
+            "the derived view reads diva"
+        );
         let compiled = crate::query::compile::compile_view(
             w.store.writer(),
             &view,
@@ -1566,14 +1619,18 @@ mod several_reports_tests {
     #[test]
     fn a_term_and_a_diva_report_both_survive_and_sum_per_tenor() {
         let w = world();
-        let term = load(&w, &w.term, &w.book);
-        let diva = load(&w, &w.diva, &format!("diva_{}", w.book));
-        for out in [&term, &diva] {
+        let term = load(&w, &w.term, &w.book, &term_measures());
+        let diva = load(&w, &w.diva, &format!("diva_{}", w.book), &diva_measures());
+        for (out, file) in [(&term, &w.term), (&diva, &w.diva)] {
             assert_eq!(out.health, Health::Ok, "{out:?}");
             assert!(out.missing_required.is_empty(), "{out:?}");
+            assert!(out.missing_optional.is_empty(), "{out:?}");
+            assert_eq!(
+                LoadNotes::of(&file.csv_path, out),
+                None,
+                "another report's measures earn no standing warning"
+            );
         }
-        assert_eq!(term.missing_optional, ["diva", "diva_usd"]);
-        assert!(diva.missing_optional.contains(&"repo".to_string()));
 
         let s = by_tenor(&w);
         let (repo, diva_sums) = (expected(&w, "repo"), expected(&w, "diva"));
@@ -1604,6 +1661,48 @@ mod several_reports_tests {
         assert_eq!(as_of.as_deref(), Some(older.as_str()));
     }
 
+    /// A term file missing one of its own measures still degrades: the
+    /// source lists `repo`, so its absence is the schema's required rule,
+    /// not another report's measure.
+    #[test]
+    fn a_term_file_missing_its_own_measure_is_degraded() {
+        let w = world();
+        drop_column(&w.term, "Repo");
+        let out = load(&w, &w.term, &w.book, &term_measures());
+        assert!(
+            matches!(&out.health, Health::Degraded { reason } if reason.contains("repo")),
+            "{out:?}"
+        );
+        assert_eq!(out.missing_required, ["repo"]);
+    }
+
+    /// Rewrite `file` without the header `column`, sentinel included.
+    fn drop_column(file: &EmittedFile, column: &str) {
+        let text = std::fs::read_to_string(&file.csv_path).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let at = header.iter().position(|h| *h == column).unwrap();
+        let keep = |line: &str| -> String {
+            line.split(',')
+                .enumerate()
+                .filter(|(i, _)| *i != at)
+                .map(|(_, v)| v)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut out = vec![keep(&header.join(","))];
+        out.extend(lines.map(keep));
+        std::fs::write(&file.csv_path, out.join("\n") + "\n").unwrap();
+        let sentinel = file.sentinel_path.as_ref().unwrap();
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(sentinel).unwrap()).unwrap();
+        doc["columns"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|c| c.as_str() != Some(column));
+        std::fs::write(sentinel, doc.to_string()).unwrap();
+    }
+
     /// Why the batches must differ: a diva file loaded under the term
     /// report's batch replaces the term rows of that book.
     #[test]
@@ -1613,8 +1712,8 @@ mod several_reports_tests {
             w.diva.as_of > w.term.as_of,
             "the diva file is newer, so it publishes live rather than to the archive"
         );
-        load(&w, &w.term, &w.book);
-        load(&w, &w.diva, &w.book);
+        load(&w, &w.term, &w.book, &term_measures());
+        load(&w, &w.diva, &w.book, &diva_measures());
         let s = by_tenor(&w);
         assert_eq!(cell(&s, None, "repo"), None, "the term rows are gone");
         assert!(cell(&s, None, "diva").is_some());

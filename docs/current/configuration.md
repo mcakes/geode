@@ -255,17 +255,17 @@ under one key, and every sum over it would be plausible and wrong.
 
 Several reports can feed one measures dataset, each from its own directory
 source (the demo's term and diva reports both feed `term_sensitivities`).
-Two rules make that work. Each report's measures are `required = false`,
-because each file carries only its own measures: the others read as NULL
-and a missing required column would degrade every load. Each source's
-`batch_pattern` must yield a batch no other report's file yields for the
-same book, because a partition is (dataset, batch, book) and a load
-replaces its partitions' live rows: two reports under one batch delete
-each other's rows on every load. A query sums each measure over every
-partition, and SQL `sum` skips the other report's NULLs, so neither report
-zeroes or blanks the other's totals. A source still warns once per run for
-its combination of optional columns missing (`optional [...] missing, read
-as NULL`).
+Two rules make that work. Each source lists the measures its files carry
+in [`measures`](#source-configuration). A measure the file lacks and the
+list omits is another report's: it reads as NULL with no degradation and
+no note. A listed measure the file lacks keeps the schema's `required`
+rule, so a truncated report still degrades. Each source's `batch_pattern`
+must yield a batch no other report's file yields for the same book,
+because a partition is (dataset, batch, book) and a load replaces its
+partitions' live rows: two reports under one batch delete each other's
+rows on every load. A query sums each measure over every partition, and
+SQL `sum` skips the other report's NULLs, so neither report zeroes or
+blanks the other's totals.
 
 The `pricer` declaration marks its nine utf8 dimensions `textual = true`:
 `sheet`, `template`, `underlying_ref`, `expiry`, `option_type`, `currency`,
@@ -316,6 +316,15 @@ successive business dates belong to the same partition. An invalid pattern
 warns and is ignored; an absent or nonmatching pattern uses the whole stem.
 `readiness = { stable_mtime = 3 }` parses, but discovery does not implement
 that strategy and reports matched candidates as unusable.
+
+`measures` (directory sources only) lists the measures the source's files
+carry, for a measures dataset fed by several reports. Absent, the source
+carries every measure. Each entry must name a declared measure of the
+dataset, and the list must be nonempty; otherwise the source is refused
+with an Error at `sources.<name>.measures`, because a misspelt name would
+read the real measure as another report's and a file missing it would
+load as healthy. On an adapter-backed source it warns and is ignored. The
+Sources dialog does not edit it and keeps it on save.
 
 Subscription defaults are `coalesce = "500ms"` and `source_time = "receive"`.
 The coalescing interval spaces releases to ingest for each document key;

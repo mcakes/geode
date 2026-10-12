@@ -625,10 +625,11 @@ source_name = "Theta_USD"
 
 # Two reports feed this dataset: the term report (repo, ATM vol, skew,
 # curvature) and the dividend sensitivity report (diva), each from its own
-# source. Every measure is optional, because each report's files carry only
-# its own measures; a required one would degrade every load of the other
-# report. The sources' batches differ, so neither report's load replaces the
-# other's rows (a partition is dataset, batch and book).
+# source. Each source lists the measures its files carry (`measures` in
+# sources.toml), so another report's measures read as NULL without a
+# signal while a file missing one of its own still degrades. The sources'
+# batches differ, so neither report's load replaces the other's rows (a
+# partition is dataset, batch and book).
 [term_sensitivities]
 axes = ["tenor"]
 [term_sensitivities.columns.business_date]
@@ -698,61 +699,51 @@ source_name = "Tenor"
 [term_sensitivities.columns.repo]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "Repo"
 [term_sensitivities.columns.repo_usd]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "Repo_USD"
 [term_sensitivities.columns.atm_vol]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "ATMVol"
 [term_sensitivities.columns.atm_vol_usd]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "ATMVol_USD"
 [term_sensitivities.columns.skew]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "Skew"
 [term_sensitivities.columns.skew_usd]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "Skew_USD"
 [term_sensitivities.columns.curvature]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "Curvature"
 [term_sensitivities.columns.curvature_usd]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "Curvature_USD"
 [term_sensitivities.columns.diva]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "Diva"
 [term_sensitivities.columns.diva_usd]
 type = "f64"
 role = "measure"
-required = false
 grain = "underlying"
 source_name = "Diva_USD"
 

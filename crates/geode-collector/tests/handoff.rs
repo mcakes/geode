@@ -48,8 +48,10 @@ use geode_data::store::{Catalog, Store, StoreError};
 use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_geode-collector");
-/// The longest any test waits for anything.
+/// The longest any test waits for anything but the scenario burst.
 const WAIT: Duration = Duration::from_secs(10);
+/// The demo's scenario startup burst: every scenario report's files.
+const SCENARIO_WAIT: Duration = Duration::from_secs(40);
 /// The first launch of a freshly copied binary, which macOS scans before
 /// it runs.
 #[cfg(target_os = "macos")]
@@ -601,11 +603,13 @@ fn a_handoff_keeps_the_documents_the_collector_received() {
     });
     // The directory sources' startup loads, the scenario files last,
     // publish back to back for several seconds in a debug build, with no
-    // quiet second between them; wait for every scenario file first.
+    // quiet second between them; wait for every scenario file first. Thirty
+    // files (six reports over five books) take longer than `WAIT` in a
+    // loaded debug build, so this wait has its own bound.
     let scenario = world.db.parent().unwrap().join("scenario");
     let expected = scenario_batches(&scenario);
     assert!(!expected.is_empty(), "the demo emitted scenario files");
-    wait_until("every scenario file published", WAIT, || {
+    wait_until("every scenario file published", SCENARIO_WAIT, || {
         if let Some(status) = collector.exited() {
             panic!("{}", world.exited_message(status));
         }

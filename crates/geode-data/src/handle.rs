@@ -1721,6 +1721,7 @@ mod tests {
                     csv_path: &file.csv_path,
                     sentinel: &sentinel,
                     batch: &batch,
+                    measures: None,
                 },
             );
         }
@@ -1792,6 +1793,7 @@ mod tests {
                     csv_path: &file.csv_path,
                     sentinel: &sentinel,
                     batch: &batch,
+                    measures: None,
                 },
             );
         }
@@ -1947,6 +1949,7 @@ mod tests {
                     csv_path: &file.csv_path,
                     sentinel: &sentinel,
                     batch: &batch,
+                    measures: None,
                 },
             );
         }
@@ -2356,6 +2359,7 @@ mod tests {
                     csv_path: &file.csv_path,
                     sentinel: &sentinel,
                     batch: &batch,
+                    measures: None,
                 },
             );
         }

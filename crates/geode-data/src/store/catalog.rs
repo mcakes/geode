@@ -511,8 +511,23 @@ impl<'a> Catalog<'a> {
     /// without a file-catalog record has no recorded health and is omitted.
     /// Row decoding errors propagate instead of silently hiding a condition.
     pub fn live_health(&self, dataset: &str) -> Result<Vec<(String, Health)>, StoreError> {
-        let sql = "select batch, health, health_reason from (
-                       select batch, health, health_reason,
+        Ok(self
+            .live_health_with_paths(dataset)?
+            .into_iter()
+            .map(|(batch, health, _)| (batch, health))
+            .collect())
+    }
+
+    /// [`Self::live_health`] with the file path of each batch's worst
+    /// generation, so a restart can seed the condition onto the source whose
+    /// globs match that file rather than every source of the dataset. The
+    /// path is `None` when the catalog recorded none.
+    pub fn live_health_with_paths(
+        &self,
+        dataset: &str,
+    ) -> Result<Vec<(String, Health, Option<String>)>, StoreError> {
+        let sql = "select batch, health, health_reason, path from (
+                       select batch, health, health_reason, path,
                               row_number() over (
                                   partition by batch
                                   order by case health
@@ -529,6 +544,7 @@ impl<'a> Catalog<'a> {
                                   g.source_time as source_time,
                                   fg.health as health,
                                   fg.health_reason as health_reason,
+                                  fg.path as path,
                                   row_number() over (
                                       partition by g.batch, g.book
                                       order by g.source_time desc, g.gen_id desc
@@ -553,6 +569,7 @@ impl<'a> Catalog<'a> {
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(err)?;
@@ -560,8 +577,8 @@ impl<'a> Catalog<'a> {
         // source as clean.
         let mut out = Vec::new();
         for row in rows {
-            let (batch, label, reason) = row.map_err(err)?;
-            out.push((batch, Health::from_parts(&label, reason.as_deref())));
+            let (batch, label, reason, path) = row.map_err(err)?;
+            out.push((batch, Health::from_parts(&label, reason.as_deref()), path));
         }
         Ok(out)
     }

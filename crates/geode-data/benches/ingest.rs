@@ -152,6 +152,7 @@ fn run_full_ingest(db_dir: &Path, src: &Path, ds: &DatasetSpec) -> usize {
                 csv_path: &item.candidate.csv_path,
                 sentinel,
                 batch: &item.batch,
+                measures: None,
             },
         )
         .unwrap()
@@ -299,6 +300,7 @@ fn bench_single_file_load(c: &mut Criterion) {
                             csv_path: &file.csv_path,
                             sentinel: &sentinel,
                             batch: &batch,
+                            measures: None,
                         },
                     )
                     .unwrap()

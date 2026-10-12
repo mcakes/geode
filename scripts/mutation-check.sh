@@ -9224,9 +9224,9 @@ run_mutation 'bridge: a gone receiver is logged once per sink, not once per even
 run_mutation "service: open seeds the health load lane from the catalog" \
   crates/geode-data/src/service.rs \
   '        for dataset in datasets {
-            let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
+            let unhealthy = Catalog::new(&conn).live_health_with_paths(dataset)?;' \
   '        for dataset in datasets.into_iter().take(0) {
-            let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
+            let unhealthy = Catalog::new(&conn).live_health_with_paths(dataset)?;' \
   geode-data a_restart_seeds_the_load_lane_from_a_still_live_degraded_generation
 
 run_mutation "service: the seed is filed under the key a publish writes" \
@@ -37669,6 +37669,53 @@ run_mutation "demo scenario: the diva report carries only diva" \
   geode-demo-data the_diva_report_is_a_row_per_tenor_carrying_only_identity_tenor_and_diva
 
 # ---- scenario shapes (scenarios.toml) and the pivot ----
+# A measure the source does not list is another report's: a partial
+# report loads healthy with no note.
+run_mutation "multi-report: a partial report is not degraded" \
+  crates/geode-data/src/ingest/load.rs \
+  '            let expected = !matches!(col.role, geode_core::schema::ColumnRole::Measure { .. })' \
+  '            let expected = true || !matches!(col.role, geode_core::schema::ColumnRole::Measure { .. })' \
+  geode-data a_term_and_a_diva_report_both_survive_and_sum_per_tenor
+# A measure the source lists keeps the required rule: a truncated report
+# still degrades.
+run_mutation "multi-report: a listed measure the file lacks still degrades" \
+  crates/geode-data/src/ingest/load.rs \
+  '                || req.measures.is_none_or(|m| m.contains(&col.name));' \
+  '                || req.measures.is_none_or(|m| m.contains(&col.name) && false);' \
+  geode-data a_term_file_missing_its_own_measure_is_degraded
+# A `measures` name that is not a declared measure refuses the source.
+run_mutation "sources: a measures name that is not a measure refuses the source" \
+  crates/geode-core/src/source_config.rs \
+  '                    if let Some(m) = stranger {' \
+  '                    if let Some(m) = stranger.filter(|_| false) {' \
+  geode-core a_measures_entry_that_is_not_a_measure_refuses_the_source
+# The plan carries the source's list to each item.
+run_mutation "ingest: the plan carries the source's measures" \
+  crates/geode-data/src/ingest/plan.rs \
+  '                measures: spec.measures.clone(),' \
+  '                measures: None,' \
+  geode-data each_item_carries_its_sources_measures
+# The runner hands the item's list to the load.
+run_mutation "ingest: the runner hands the source's measures to the load" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                        measures: item.measures.as_deref(),' \
+  '                        measures: None,' \
+  geode-data a_measure_the_source_does_not_list_is_not_noted
+# A restart seeds a persisted condition onto the source whose globs own
+# its file, not onto another report's source over the same dataset.
+run_mutation "restart seed: a batch goes to the source owning its file" \
+  crates/geode-data/src/service.rs \
+  '    if owners.is_empty() {' \
+  '    if true {' \
+  geode-data a_restart_seeds_a_degraded_batch_onto_its_own_source_only
+# The demo term source lists its measures, so diva reads as another report's.
+run_mutation "demo scenario: the term source lists its measures" \
+  crates/geode-compose/src/demo.rs \
+  '        if ds == "term_sensitivities" {
+            scenario_sources.push_str' \
+  '        if false {
+            scenario_sources.push_str' \
+  geode-compose the_diva_report_feeds_term_sensitivities_under_its_own_batch
 # By maturity's fifth column is the diva report's measure.
 run_mutation "scenario: by_maturity paints diva" \
   crates/geode-scenario/src/core/builtin_scenarios.toml \

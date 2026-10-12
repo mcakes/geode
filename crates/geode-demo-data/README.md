@@ -72,14 +72,14 @@ The diva report (`DIVA_REPORT`) is a sixth table into `term_sensitivities`
 carrying only identity, `tenor` and `diva`: `-delta01 × bucket width in
 years` per tenor (`TENOR_YEARS`), opposite in sign to delta, so a row's
 buckets sum to `-5 × delta01`. It draws nothing from the seeded generator,
-so the other tables are unchanged by it.
-Axis values print without trailing zeros, so the spot ladder's base row is
-`0`.
+so the other tables do not depend on it. Axis values print without
+trailing zeros, so the spot ladder's base row is `0`.
 
 `emit_scenario_directory` writes `<dataset>_<date>_<book>.csv` with a `.done`
 sentinel naming the dataset; a second report into a dataset (diva) writes
-`<report>_<book>_<date>.csv`, so a batch pattern can capture `<report>_<book>`
-whole and its partitions never collide with the dataset's own report. Identity headers use the risk spelling; axis and
+`<report>_<book>_<date>.csv`, so a batch pattern can capture
+`<report>_<book>` whole and its partitions never collide with the
+dataset's own report. Identity headers use the risk spelling; axis and
 measure headers use `SCENARIO_SOURCE_NAMES`, each measure followed by its
 `_USD` twin at the same fixed factor.
 

@@ -1669,9 +1669,13 @@ future-stamped source data. Unknown health labels and generations without a
 file-catalog record do not establish a health report.
 
 The catalog does not record which configured source owns a file generation.
-Sources sharing a dataset therefore receive the same persisted degradation
-at startup, which can conservatively over-report a source's load health.
-Seeds use publication's batch key so a corrected load can clear them.
+A persisted condition is seeded onto the directory sources of its dataset
+whose globs match the condition's file path; a file no source's globs
+match, a generation with no recorded path, or a dataset with no directory
+source falls back to every source of the dataset, a conservative
+over-report. Seeding by path keeps one report's condition off another
+report's source, which never reports that batch and so could never clear
+it. Seeds use publication's batch key so a corrected load can clear them.
 
 Health reaches a tile through the shell's `Diagnostics` entity, never the
 data handle. The app bridge describes each source with its dataset at attach;

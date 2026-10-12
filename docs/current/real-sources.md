@@ -155,8 +155,10 @@ it opposes delta and grows with the bucket's time.
 **Seam:** the same as risk files: none to write. A real deployment needs a
 desk-layer `sources.toml` entry per report and a `datasets.toml`
 declaration with `axes`. Where several reports feed one dataset, each
-report's measures are `required = false` (a file carries only its own) and
-each source's `batch_pattern` yields a batch no other report's does.
+report's source lists the `measures` its files carry and each source's
+`batch_pattern` yields a batch no other report's does. The demo's term
+source lists repo, ATM vol, skew, curvature and their twins; the diva
+source lists `diva` and `diva_usd`.
 
 **Lag:** a position move rewrites the risk files only; scenario rows keep
 the old LHU until the next scenario run, and the scenario data's source
