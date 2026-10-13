@@ -9,9 +9,10 @@
 //! then separates pin, as-of, grouping, and scope with inset hairlines.
 //! The as-of chip alone uses warning colors. Grouping opens the Grouping
 //! dialog and stays visibly pressed while it is open. Filled selection chips contain
-//! a separate, occluding close target; add/load/save actions are bare
-//! glyphs. The load glyph opens the Scope dialog's Saved screen and, like the grouping
-//! readout, stays pressed while it is open.
+//! a separate, occluding close target; add/save actions are bare
+//! glyphs. The `+` is the scope bar's one door to the Scope dialog, which
+//! holds the current scope and the saved scopes and expressions; like the
+//! grouping readout, it stays pressed while that dialog is up.
 //!
 //! Scope chips show dimensions, named expressions, top-level expression
 //! terms, and any
@@ -188,10 +189,8 @@ fn divider(selector: &'static str, colour: Hsla) -> impl IntoElement {
 /// benefit. `grouping_open` is whether the Grouping dialog is up right
 /// now — the readout paints its pressed fill for as long as it is (a
 /// control that owns a popup stays visibly pressed until it closes);
-/// `scope_open` is the same for the load glyph and the Scope dialog's Saved
-/// screen, which `on_load` opens.
-/// `scope_dialog_open` is whether the Scope dialog is up; the `+` that
-/// opens it holds its pressed fill for as long as it is. `on_term_open` and
+/// `scope_dialog_open` is whether the Scope dialog is up; the `+` holds its
+/// pressed fill for as long as it is. `on_term_open` and
 /// `on_term_close` take the expression term's index; `on_named_open` and
 /// `on_named_close` take the named expression's name. `pin` is the active
 /// workspace and whether it is pinned; `on_pin` toggles that pin.
@@ -200,13 +199,11 @@ pub fn toolbar(
     filter_input: &Entity<InputState>,
     model: &ScopeBarModel,
     grouping_open: bool,
-    scope_open: bool,
     scope_dialog_open: bool,
     on_chip_close: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_chip_open: impl Fn(&str, &mut Window, &mut App) + Clone + 'static,
     on_add: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_save: impl Fn(&mut Window, &mut App) + Clone + 'static,
-    on_load: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_grouping: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_as_of: impl Fn(&mut Window, &mut App) + Clone + 'static,
     on_term_open: impl Fn(usize, &mut Window, &mut App) + Clone + 'static,
@@ -507,35 +504,6 @@ pub fn toolbar(
         ))
         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
             on_add(window, cx)
-        }),
-    );
-    // The load glyph opens the Scope dialog's Saved screen
-    // (`frame::scope_saved`). Always painted: loading a saved scope is as
-    // useful on an empty scope as on a full one, and the screen says how to
-    // save one when none exist. It sits before the conditional save glyph so
-    // save appearing never moves it, and it holds its pressed fill while
-    // the Saved screen is up, as the grouping readout does. `FolderOpen` is
-    // in the default icon bundle.
-    verbs = verbs.child(
-        verb(
-            "scope-load-chip",
-            Icon::new(CatalogIcon::FolderOpen),
-            chip_fg,
-            glyph_radius,
-            glyph_states,
-            scope_open.then_some("scope-load-chip-open"),
-            || "scope-load-chip".to_string(),
-        )
-        .tooltip(tips::tip(
-            "tip-scope-load-chip",
-            "Saved scopes and expressions",
-            // Unbound by default: the tip names a chord only once a keymap
-            // binds `frame::scope_saved`.
-            Some("frame::scope_saved"),
-            None,
-        ))
-        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-            on_load(window, cx)
         }),
     );
     if model.savable {

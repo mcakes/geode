@@ -825,6 +825,11 @@ pub struct ShellView {
     /// Scroll handle for the as-of rows. Navigation and refresh use
     /// `asof_rows::child_index_of` to keep the highlighted row visible.
     as_of_scroll: ScrollHandle,
+    /// Scroll handle for the Scope dialog's one list (current sections,
+    /// separator, filter row, saved sections). `scopedialog::view::follow_cursor`
+    /// keeps the cursor's row in view after every re-derive of its rows; it
+    /// outlives a close, so every opening resets its offset to the top.
+    pub(crate) scope_dialog_scroll: ScrollHandle,
     /// The frame data version used to build the open as-of dialog's rows.
     /// `on_frame_changed` refreshes them only when this version changes. Set on
     /// open and unused while the dialog is closed.
@@ -1072,8 +1077,8 @@ impl ShellView {
                 Some(dialog::DialogKind::Scope) => {
                     if let Some(state) = view.scope_dialog.as_mut() {
                         // The text step, the definition step and a name
-                        // prompt type their draft; the Saved screen filters
-                        // while in filter mode; Current ignores it.
+                        // prompt type their draft; the saved group filters
+                        // while in filter mode; the screen ignores it.
                         scopedialog::view::on_query_changed(state, &query);
                     }
                 }
@@ -1644,6 +1649,7 @@ impl ShellView {
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             as_of_scroll: ScrollHandle::new(),
+            scope_dialog_scroll: ScrollHandle::new(),
             as_of_data_version: 0,
             scope_expr_dialog: None,
             scope_dialog: None,
@@ -2084,8 +2090,8 @@ impl ShellView {
     /// Load saved scope `name` into [`Self::target_frame`]'s lane through
     /// `load_scope` (so it is one undoable `set_scope` step and honours a
     /// workspace pin), notifying on a change. The one path the
-    /// `scope::<name>` actions, the palette's Scope rows and the Saved screen
-    /// take. `Err` when no
+    /// `scope::<name>` actions, the palette's Scope rows and the Scope dialog's
+    /// saved rows take. `Err` when no
     /// saved scope has that name; `Ok(false)` when it is already current.
     pub(crate) fn load_saved_scope(
         &mut self,

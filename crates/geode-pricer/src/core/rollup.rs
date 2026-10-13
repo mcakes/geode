@@ -213,35 +213,15 @@ pub fn build(
     dims: &DerivedDimensions,
     clock: Clock,
 ) -> Rollup {
-    let groupable = pricer_dataset().groupable_columns();
-    let mut values: Vec<(&str, Level<'_>)> = Vec::new();
-    let mut tail = Level::Positions;
-    for name in &chain.kept {
-        match resolve(name, &groupable, dims) {
-            Some(end @ (Level::Positions | Level::Instruments)) => {
-                tail = end;
-                break;
-            }
-            Some(level) => values.push((name.as_str(), level)),
-            None => {}
-        }
-    }
+    let (values, tail) = levels(chain, dims);
     let items: Vec<Item> = (0..sheet.len())
         .filter(|&row| {
             vis.is_shown(row)
                 && (sheet.is_line(row) || (sheet.is_package(row) && sheet.children(row).is_empty()))
         })
-        .map(|row| {
-            let line = SheetRow { sheet, row, clock };
-            let keys = values
-                .iter()
-                .map(|(_, level)| match level {
-                    Level::Column(c) => line.value(c).map(zero),
-                    Level::Derived(d) => derived(d, line.value(&d.from)),
-                    Level::Positions | Level::Instruments => unreachable!("value levels only"),
-                })
-                .collect();
-            Item { row, keys }
+        .map(|row| Item {
+            row,
+            keys: keys(sheet, row, &values, clock),
         })
         .collect();
     let mut b = Builder {
@@ -257,6 +237,89 @@ pub fn build(
         nodes: b.nodes,
         roots,
     }
+}
+
+/// `chain`'s value levels in order, and the structural level that ends
+/// the tree (`position_ref` when the chain names none).
+fn levels<'a>(
+    chain: &'a EffectiveChain,
+    dims: &'a DerivedDimensions,
+) -> (Vec<(&'a str, Level<'a>)>, Level<'a>) {
+    let groupable = pricer_dataset().groupable_columns();
+    let mut values: Vec<(&str, Level<'_>)> = Vec::new();
+    let mut tail = Level::Positions;
+    for name in &chain.kept {
+        match resolve(name, &groupable, dims) {
+            Some(end @ (Level::Positions | Level::Instruments)) => {
+                tail = end;
+                break;
+            }
+            Some(level) => values.push((name.as_str(), level)),
+            None => {}
+        }
+    }
+    (values, tail)
+}
+
+/// The value `row` reads at each value level.
+fn keys(
+    sheet: &Sheet,
+    row: usize,
+    values: &[(&str, Level<'_>)],
+    clock: Clock,
+) -> Vec<Option<Value>> {
+    let line = SheetRow { sheet, row, clock };
+    values
+        .iter()
+        .map(|(_, level)| match level {
+            Level::Column(c) => line.value(c).map(zero),
+            Level::Derived(d) => derived(d, line.value(&d.from)),
+            Level::Positions | Level::Instruments => unreachable!("value levels only"),
+        })
+        .collect()
+}
+
+/// The group path [`build`] places `row` under when it is shown: one
+/// segment per value level, spelled as a group's path spells it. A hidden
+/// line has one too, which is how an edit through a group row tells the
+/// hidden lines that group would hold.
+fn path_of(
+    sheet: &Sheet,
+    row: usize,
+    chain: &EffectiveChain,
+    dims: &DerivedDimensions,
+    clock: Clock,
+) -> Path {
+    let (values, _) = levels(chain, dims);
+    keys(sheet, row, &values, clock)
+        .iter()
+        .map(|k| k.as_ref().map(text))
+        .collect()
+}
+
+/// The scope-hidden lines that would sit under any of the group paths
+/// `groups` were they shown, each once, in sheet order. An edit through a
+/// grouping row never writes these (it reaches only the lines the rollup
+/// placed); its notice counts them as skipped so a partial write does not
+/// read as the group's whole.
+pub fn hidden_under(
+    sheet: &Sheet,
+    vis: &Visibility,
+    chain: &EffectiveChain,
+    dims: &DerivedDimensions,
+    clock: Clock,
+    groups: &[Path],
+) -> Vec<usize> {
+    if groups.is_empty() {
+        return Vec::new();
+    }
+    (0..sheet.len())
+        .filter(|&row| sheet.is_line(row) && !vis.is_shown(row))
+        .filter(|&row| {
+            let path = path_of(sheet, row, chain, dims, clock);
+            groups.iter().any(|g| path.starts_with(g))
+        })
+        .collect()
 }
 
 /// `-0.0` groups with `0.0` (and would otherwise label `-0`).
@@ -854,6 +917,43 @@ mod tests {
         // Flat, the same package is partial too.
         let r = build(&s, &vis, &chain(&[]), &d, Clock::utc());
         assert_eq!(shape(&r)[1], "P1 [3] partial");
+    }
+
+    /// A scope-hidden line's group path is the one the rollup gives it
+    /// shown, so `hidden_under` names exactly the hidden lines a group
+    /// would hold: a group edit writes only shown lines and counts these.
+    #[test]
+    fn hidden_under_names_the_hidden_lines_a_group_would_hold() {
+        let s = sheet();
+        let scope = Scope {
+            expression: Some(parse_expr("strike != 4800").unwrap()),
+            ..Scope::default()
+        };
+        let d = DerivedDimensions::default();
+        let vis = apply_scope(&s, &scope, &d, Clock::utc()).unwrap();
+        assert!(!vis.is_shown(2));
+        let c = chain(&["underlying_ref", "expiry"]);
+        let shown = build(&s, &Visibility::all(&s), &c, &d, Clock::utc());
+        let leaf = |row: usize| {
+            shown
+                .nodes
+                .iter()
+                .find(|n| n.kind == NodeKind::Leaf { row })
+                .map(|n| n.path.clone())
+                .unwrap()
+        };
+        assert_eq!(path_of(&s, 2, &c, &d, Clock::utc()), leaf(2));
+        let under = |paths: &[Path]| hidden_under(&s, &vis, &c, &d, Clock::utc(), paths);
+        let none: Vec<usize> = Vec::new();
+        assert_eq!(under(&[leaf(2)[..1].to_vec()]), vec![2], "SPX holds it");
+        assert_eq!(under(&[leaf(2)]), vec![2], "and its expiry group");
+        assert_eq!(under(&[leaf(8)]), none, "H27 does not");
+        assert_eq!(under(&[leaf(4)[..1].to_vec()]), none, "NDX does not");
+        assert_eq!(
+            under(&[leaf(2)[..1].to_vec(), leaf(2)]),
+            vec![2],
+            "a line under two edited groups counts once"
+        );
     }
 
     #[test]

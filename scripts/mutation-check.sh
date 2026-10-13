@@ -16216,6 +16216,100 @@ run_mutation "settings: shift+click on the value chip steps back (spec §20.3)" 
   geode-shell \
   the_settings_value_chip_steps_and_a_row_click_only_selects
 
+# ---- Cell glyphs (vol watchlist Part 3a) ---- Each glyph's core decides
+# its numbers; these entries break one decision each.
+
+# A NaN or infinity in a column must not set the scale every chip and bar
+# is measured against.
+run_mutation "cell: the column scale counts a non-finite value" \
+  crates/geode-widgets/src/cell/mod.rs \
+  '        .filter(|v| v.is_finite())' \
+  '        .filter(|_| true)' \
+  geode-widgets \
+  column_scale_skips_non_finite
+
+# The host's ceiling caps the chip fill so its text stays readable.
+run_mutation "cell: the chip alpha ignores the ceiling" \
+  crates/geode-widgets/src/cell/delta_chip.rs \
+  '        ((value.abs() / scale).min(1.0) as f32) * ceiling' \
+  '        (value.abs() / scale) as f32' \
+  geode-widgets \
+  a_move_beyond_the_scale_clamps_at_the_ceiling
+
+# A zero or non-finite column scale tints nothing (a NaN alpha would paint
+# unpredictably).
+run_mutation "cell: a zero scale tints the chip" \
+  crates/geode-widgets/src/cell/delta_chip.rs \
+  '    let alpha = if scale.is_finite() && scale > 0.0 && sign != Sign::Zero {' \
+  '    let alpha = if sign != Sign::Zero {' \
+  geode-widgets \
+  a_zero_scale_tints_nothing
+
+# The warning tone is at or beyond the decile edges, inclusive.
+run_mutation "cell: the slider warns strictly beyond the deciles" \
+  crates/geode-widgets/src/cell/percent_slider.rs \
+  '        warn: rank <= WARN_LOW || rank >= WARN_HIGH,' \
+  '        warn: rank < WARN_LOW || rank > WARN_HIGH,' \
+  geode-widgets \
+  the_decile_edges_warn_inclusive
+
+# An out-of-range rank keeps the marker on the track.
+run_mutation "cell: the slider marker leaves the track" \
+  crates/geode-widgets/src/cell/percent_slider.rs \
+  '        position: rank.clamp(0.0, 1.0) as f32,' \
+  '        position: rank as f32,' \
+  geode-widgets \
+  an_out_of_range_rank_clamps_and_still_warns
+
+# A spread beyond the column scale fills its half and no more.
+run_mutation "cell: a bar beyond the scale overflows its half" \
+  crates/geode-widgets/src/cell/zero_bar.rs \
+  '        (value.abs() / scale).min(1.0) as f32' \
+  '        (value.abs() / scale) as f32' \
+  geode-widgets \
+  a_value_beyond_the_scale_fills_the_half_and_no_more
+
+# A grid whose values are all equal has no levels: no tint, not full tint.
+run_mutation "cell: a flat heat range tints fully" \
+  crates/geode-widgets/src/cell/heat.rs \
+  '    if !(value.is_finite() && lo.is_finite() && hi.is_finite()) || lo >= hi {' \
+  '    if !(value.is_finite() && lo.is_finite() && hi.is_finite()) {' \
+  geode-widgets \
+  a_flat_range_tints_nothing
+
+# The chip's tint follows the sign the host displays: a change shown as 0.0
+# is not tinted whatever its unrounded value.
+run_mutation "cell: a change displayed as zero is tinted" \
+  crates/geode-widgets/src/cell/delta_chip.rs \
+  '    let alpha = if scale.is_finite() && scale > 0.0 && sign != Sign::Zero {' \
+  '    let alpha = if scale.is_finite() && scale > 0.0 && value != 0.0 {' \
+  geode-widgets \
+  the_displayed_sign_decides_the_color_and_a_displayed_zero_has_no_fill
+
+# The bar follows the displayed sign too: no bar beside a 0.0.
+run_mutation "cell: a spread displayed as zero draws a bar" \
+  crates/geode-widgets/src/cell/zero_bar.rs \
+  '    let extent = if scale.is_finite() && scale > 0.0 && sign != Sign::Zero {' \
+  '    let extent = if scale.is_finite() && scale > 0.0 && value != 0.0 {' \
+  geode-widgets \
+  the_displayed_sign_decides_the_side_and_a_displayed_zero_draws_no_bar
+
+# Slider tracks start at the cell's leading edge (the glyph fills the cell)
+# so they line up down a column whatever the width of each rank.
+run_mutation "cell: a slider track floats with its number's width" \
+  crates/geode-widgets/src/cell/percent_slider.rs \
+  '    div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap(design(GAP))' \
+  '    div()
+        .flex()
+        .items_center()
+        .gap(design(GAP))' \
+  geode-widgets \
+  tracks_line_up_down_a_right_aligned_column
+
 # ---- Object-dialog action buttons ----
 
 # While confirmation is armed, render the value chip as plain text without a
@@ -18503,7 +18597,7 @@ run_mutation "grouping dialog: any object dialog presses the readout" \
   geode-shell \
   another_object_dialog_leaves_the_readout_at_rest
 
-# ---- Saved-scope chooser: the load glyph and `o` in the Scope dialog ----
+# ---- Saved-scope chooser: the saved door and `o` in the Scope dialog ----
 
 # open_shell_dialog_with_key prevents the shell root's bubble-phase focus
 # grab from taking focus back after an opening mouse-down. Title-bar chips
@@ -18611,7 +18705,7 @@ run_mutation "scope dialog: removing a moved term refuses" \
 # The cursor's identity is re-taken after each move, so a frame change keeps it.
 run_mutation "scope dialog: a move records the cursor's row" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
-  '    state.cursor_id = state.rows.rows.get(state.cursor).map(|r| r.id.clone());' \
+  '            state.cursor_id = state.rows.rows.get(at).map(|r| r.id.clone());' \
   '' \
   geode-shell \
   the_cursor_stays_on_its_row_when_another_row_goes
@@ -18648,19 +18742,22 @@ run_mutation "scope dialog: mod+s names a term" \
   geode-shell \
   mod_s_on_a_term_opens_its_name_entry
 
-# o pushes the Saved screen over Current.
-run_mutation "scope dialog: o pushes the Saved screen" \
+# o jumps the cursor from the current rows to the saved scopes.
+run_mutation "scope dialog: o jumps to the saved scopes" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
-  '        ("o", true, false) => {
-            if let Some(state) = shell.scope_dialog.as_mut() {
-                super::saved_view::push(state);
-            }' \
-  '        ("o", true, false) => {
-            if let Some(state) = shell.scope_dialog.as_mut() {
-                let _ = state;
-            }' \
+  '        ("o", true, false) => jump(shell, cx),' \
+  '        ("o", true, false) => {}' \
   geode-shell \
   o_opens_saved_with_scopes_then_expressions_in_name_order
+
+# escape on the screen is unclaimed, so the shell closes the dialog from
+# either door; claiming it here would leave the dialog up.
+run_mutation "scope dialog: escape on the screen closes from either door" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        ("o", true, false) => jump(shell, cx),' \
+  '        ("o" | "escape", true, false) => jump(shell, cx),' \
+  geode-shell \
+  escape_closes_the_dialog_from_either_door
 
 # s pushes the save prompt.
 run_mutation "scope dialog: s pushes the save prompt" \
@@ -18697,8 +18794,10 @@ run_mutation "scope dialog: naming a moved term refuses" \
 # A claimed key drops the last refusal, so the error names only the last action.
 run_mutation "scope dialog: a key clears the last refusal" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
-  '    let prior_error = state.error.take();' \
-  '    let prior_error = state.error.clone();' \
+  '    let prior_error = state.error.take();
+    let zone = state.zone;' \
+  '    let prior_error = state.error.clone();
+    let zone = state.zone;' \
   geode-shell \
   removing_a_term_that_moved_refuses
 
@@ -18761,6 +18860,66 @@ run_mutation "scope dialog: add controls under the text step ignore presses" \
   geode-shell \
   add_controls_under_the_text_step_ignore_the_pointer
 
+# The list's handle outlives a close: every opening resets its offset, or
+# the saved door's minimal follow keeps the last visit's offset and hides
+# the current sections above the landing row.
+run_mutation "scope dialog: every opening starts the list at the top" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    view.scope_dialog_scroll.set_offset(gpui::Point::default());' \
+  '' \
+  geode-shell \
+  the_dialog_reopens_at_the_top_after_a_scrolled_visit
+
+# The first current row follows to child 0, so the contradiction line and
+# the first header show with it.
+run_mutation "scope dialog: the first current row follows to the list top" \
+  crates/geode-shell/src/shell/scopedialog/screen.rs \
+  '    if first_current {' \
+  '    if false {' \
+  geode-shell \
+  following_up_to_a_section_start_shows_its_header
+
+# A section's first row brings its header when the header lies above.
+run_mutation "scope dialog: a section's first row follows with its header" \
+  crates/geode-shell/src/shell/scopedialog/screen.rs \
+  '    } else if at.within == 0 && header_above {' \
+  '    } else if false {' \
+  geode-shell \
+  following_up_to_a_section_start_shows_its_header
+
+# A header in view or below scrolls to the row itself: scrolling to such a
+# header would leave the row below the fold.
+run_mutation "scope dialog: a header in view follows the row, not the header" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    header.top() + scroll.offset().y < scroll.bounds().top()' \
+  '    { let _ = header; true }' \
+  geode-shell \
+  the_list_scrolls_to_a_saved_row_below_the_fold
+
+# `o` passes over a target a kept filter emptied instead of stalling.
+run_mutation "scope dialog: o passes over an emptied section" \
+  crates/geode-shell/src/shell/scopedialog/screen.rs \
+  '        if lands(jump) {' \
+  '        if { let _ = &lands; true } {' \
+  geode-shell \
+  o_passes_over_a_section_a_kept_filter_emptied
+
+# The saved footer shows `e` only on an expression row.
+run_mutation "scope dialog: the saved footer hides e off an expression" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if on_expression {' \
+  '    if true {' \
+  geode-shell \
+  the_saved_footer_shows_e_and_n_only_where_they_act
+
+# The empty SAVED EXPRESSIONS row ignores presses while the filter is live.
+run_mutation "scope dialog: the empty expressions row ignores the pointer while filtering" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '        .is_some_and(super::view::takes_pointer)' \
+  '        .is_some_and(|s| s.on_screen() && s.pending.is_none())' \
+  geode-shell \
+  the_empty_expressions_row_ignores_the_pointer_while_the_filter_is_live
+
 # A dimension row's value count is prepared when the rows derive.
 run_mutation "scope dialog: a dimension row prepares its count" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
@@ -18794,47 +18953,33 @@ run_mutation "scope dialog: escape leaves the text step untouched" \
   geode-shell \
   escape_leaves_the_text_step_without_a_change
 
-# ---- Scope dialog: the Saved screen and its doors ----
+# ---- Scope dialog: the saved group and its doors ----
 
-# The toolbar's load glyph opens the Scope dialog on its Saved screen.
-run_mutation "scope dialog: the load glyph opens Saved" \
+# The `+` reads pressed whichever door opened the dialog: it is the scope
+# bar's only door to it.
+run_mutation "scope dialog: the + reads pressed under the saved door too" \
   crates/geode-shell/src/shell/render.rs \
-  '                super::scopedialog::view::open_saved(view, window, cx);' \
-  '                let _ = (view, window, cx);' \
+  '        let scope_dialog_open = self.scope_dialog.is_some();' \
+  '        let scope_dialog_open = self.scope_dialog.as_ref().is_some_and(|s| s.opener == super::scopedialog::state::Opener::Scope);' \
   geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
+  the_plus_reads_pressed_whichever_door_opened_the_dialog
 
-# The load glyph reads pressed while Saved is up.
-run_mutation "scope dialog: the load glyph holds its pressed state while Saved is up" \
-  crates/geode-shell/src/shell/toolbar.rs \
-  '            scope_open.then_some("scope-load-chip-open"),' \
-  '            None,' \
-  geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
-
-# The pressed state is "Saved is the Scope dialog's top layer".
-run_mutation "scope dialog: the load glyph's pressed state reads the top layer" \
-  crates/geode-shell/src/shell/render.rs \
-  '            .is_some_and(super::scopedialog::saved_view::in_saved);' \
-  '            .is_some_and(|_| false);' \
-  geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
-
-# frame::scope_saved is the Saved screen's own action.
+# frame::scope_saved is the saved door's own action.
 run_mutation "scope dialog: frame::scope_saved opens Saved" \
   crates/geode-shell/src/shell/input.rs \
   '            // toggle or `escape` closes it.
-            super::scopedialog::view::open_saved(self, window, cx);' \
+            super::scopedialog::view::open_saved(self, Section::Scopes, window, cx);' \
   '            // toggle or `escape` closes it.
             let _ = window;' \
   geode-shell \
   config_scopes_and_config_expressions_open_saved
 
-# config::expressions opens Saved as config::scopes does.
+# config::expressions lands the cursor on the saved expressions, not the
+# saved scopes config::scopes lands on.
 run_mutation "scope dialog: config::expressions opens Saved" \
   crates/geode-shell/src/shell/input.rs \
-  '        } else if action.0 == "config::scopes" || action.0 == "config::expressions" {' \
-  '        } else if action.0 == "config::scopes" {' \
+  '            super::scopedialog::view::open_saved(self, Section::Expressions, window, cx);' \
+  '            super::scopedialog::view::open_saved(self, Section::Scopes, window, cx);' \
   geode-shell \
   config_scopes_and_config_expressions_open_saved
 
@@ -18847,7 +18992,7 @@ run_mutation "scope dialog: frame::scope_saved is listed as a dialog opener" \
   geode-shell \
   opens_dialog_matches_what_dispatch_pushes
 
-# The Saved rows derive with Current's under one key.
+# The saved rows derive with the current rows under one key.
 run_mutation "scope dialog: a refresh derives the Saved rows" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
   '        self.saved.refresh(saved, named, scope, key);' \
@@ -18901,7 +19046,7 @@ run_mutation "scope dialog: a restored Saved query re-filters" \
   geode-shell \
   the_filter_keeps_sections_and_escape_restores
 
-# Typing in Saved's filter reaches its query.
+# Typing in the saved group's filter reaches its query.
 run_mutation "scope dialog: the field's Change sets the Saved query" \
   crates/geode-shell/src/shell/scopedialog/view.rs \
   '        state.saved.set_query(text);' \
@@ -18909,7 +19054,7 @@ run_mutation "scope dialog: the field's Change sets the Saved query" \
   geode-shell \
   the_filter_keeps_sections_and_escape_restores
 
-# Saved's filter mode puts focus in the shared input.
+# The saved filter's mode puts focus in the shared input.
 run_mutation "scope dialog: Saved's filter mode focuses the input" \
   crates/geode-shell/src/shell/dialog.rs \
   '            (state.saved.mode, false, state.saved.query.as_str())' \
@@ -18917,7 +19062,7 @@ run_mutation "scope dialog: Saved's filter mode focuses the input" \
   geode-shell \
   the_filter_keeps_sections_and_escape_restores
 
-# A press on Saved's frozen filter row enters filter mode.
+# A press on the saved group's frozen filter row enters filter mode.
 run_mutation "scope dialog: the Saved filter row's press enters filter mode" \
   crates/geode-shell/src/shell/dialog.rs \
   '                super::scopedialog::saved_view::enter_filter(state);' \
@@ -18941,29 +19086,38 @@ run_mutation "scope dialog: a vanished expression refuses" \
   geode-shell \
   entering_a_vanished_expression_says_so
 
-# A Saved commit leaves for the layer beneath (Current), not always closing.
-run_mutation "scope dialog: a Saved commit returns to Current" \
-  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
-  '    let after = state.layers.commit_saved_row();' \
-  '    let after = After::Close;' \
+# A saved-row commit closes only when the saved door opened the dialog: from
+# mod+o it stays on the screen.
+run_mutation "scope dialog: a saved commit from mod+o stays open" \
+  crates/geode-shell/src/shell/scopedialog/state.rs \
+  '        self == Opener::Saved' \
+  '        true' \
   geode-shell \
   enter_on_a_scope_loads_it_and_returns_to_current
 
-# escape from Saved over Current returns there.
-run_mutation "scope dialog: escape from Saved returns to Current" \
-  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
-  '            let after = state.layers.escape();' \
-  '            let after = After::Close;' \
+run_mutation "scope dialog: a saved commit from the saved door closes" \
+  crates/geode-shell/src/shell/scopedialog/state.rs \
+  '        self == Opener::Saved' \
+  '        false' \
   geode-shell \
-  escape_from_saved_alone_closes_and_from_current_returns
+  the_saved_door_opens_on_saved_and_enter_closes
 
-# Saved as the bottom layer: its commit closes the dialog.
-run_mutation "scope dialog: a one-shot Saved commit closes the dialog" \
+# The commit reads the opener: without the close the saved door's dialog
+# would stay up.
+run_mutation "scope dialog: a saved-door commit closes the dialog" \
+  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
+  '    if state.opener.closes_on_saved_commit() {' \
+  '    if false {' \
+  geode-shell \
+  the_saved_door_opens_on_saved_and_enter_closes
+
+# A step opened alone is the bottom layer: its commit closes the dialog.
+run_mutation "scope dialog: a step opened alone closes on commit" \
   crates/geode-shell/src/shell/scopedialog/saved_view.rs \
   '        After::Close => shell.close_modal(window, cx),' \
   '        After::Close => {}' \
   geode-shell \
-  the_load_glyph_opens_saved_alone_and_enter_closes
+  the_save_chip_opens_the_prompt_alone_and_enter_closes
 
 # e and n on a scope row say how to do it instead.
 run_mutation "scope dialog: e on a saved scope refuses with the way" \
@@ -18988,14 +19142,129 @@ run_mutation "scope dialog: a Saved row double-click commits" \
   geode-shell \
   a_row_double_click_commits_it
 
-# The title row's Back button is the pointer route of escape from Saved
-# over Current.
-run_mutation "scope dialog: Back from Saved returns to Current" \
-  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
-  '    if !back_available(shell) {' \
-  '    if true || !back_available(shell) {' \
+# ---- Scope dialog: one screen, one cursor -----------------------------
+
+# j/k walk the current rows then the saved stops as one list.
+run_mutation "scope dialog: j crosses from the current rows into the saved stops" \
+  crates/geode-shell/src/shell/scopedialog/screen.rs \
+  '    if next < current_len {' \
+  '    if next <= current_len {' \
   geode-shell \
-  the_back_button_returns_from_saved_to_current
+  j_walks_current_rows_then_saved_stops_and_wraps
+
+# o cycles saved scopes, saved expressions, current rows.
+run_mutation "scope dialog: o from a saved scope goes to the expressions" \
+  crates/geode-shell/src/shell/scopedialog/screen.rs \
+  '        Zone::Saved if on_scopes => Jump::Expressions,' \
+  '        Zone::Saved if on_scopes => Jump::Current,' \
+  geode-shell \
+  o_cycles_scopes_expressions_current
+
+# A row verb acts by the cursor's group: d on a saved row asks, never
+# removes a current row.
+run_mutation "scope dialog: saved-row verbs route to the saved group" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        ("enter" | "e" | "n" | "c" | "d" | "r", true, false) if zone == Zone::Saved => {' \
+  '        ("enter" | "e" | "n" | "c" | "d" | "r", true, false) if false => {' \
+  geode-shell \
+  d_on_the_last_current_row_lands_on_saved_and_the_next_d_asks
+
+# Deleting the last current row moves the cursor into the saved group.
+run_mutation "scope dialog: an empty Current hands the cursor to Saved" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            Zone::Current if self.rows.rows.is_empty() && self.saved.stop_count() > 0 => {' \
+  '            Zone::Current if false => {' \
+  geode-shell \
+  d_on_the_last_current_row_lands_on_saved_and_the_next_d_asks
+
+# A cursor only forced into Saved by an empty scope returns to the first
+# current row once the scope gains one.
+run_mutation "scope dialog: the first ingredient takes the cursor back" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '            Zone::Saved if self.forced_saved && !self.rows.rows.is_empty() => {' \
+  '            Zone::Saved if false => {' \
+  geode-shell \
+  the_first_ingredient_takes_the_cursor_back_from_saved
+
+# A saved position the user chose survives an add: choosing clears the
+# forced flag.
+run_mutation "scope dialog: a chosen saved position is not forced" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        self.zone = zone;
+        self.forced_saved = false;' \
+  '        self.zone = zone;' \
+  geode-shell \
+  a_move_within_a_forced_saved_rest_survives_an_add
+
+# c and r off a saved row refuse with a line.
+run_mutation "scope dialog: c on a current row refuses" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        ("c", true, false) => set_error(shell, COPY_ONLY_SAVED),' \
+  '        ("c", true, false) => {}' \
+  geode-shell \
+  verbs_dispatch_by_row_kind
+
+run_mutation "scope dialog: r on a current row refuses" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        ("r", true, false) => set_error(shell, REVERT_ONLY_SAVED),' \
+  '        ("r", true, false) => {}' \
+  geode-shell \
+  verbs_dispatch_by_row_kind
+
+# The filter owns verb letters: they type rather than act.
+run_mutation "scope dialog: the filter claims keys before the verbs" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if state.saved.mode == crate::dialogmode::DialogMode::Filter {
+        let prior_error = state.error.take();' \
+  '    if false {
+        let prior_error = state.error.take();' \
+  geode-shell \
+  the_filter_types_verb_letters
+
+# While the filter is live, the current rows and add controls ignore the
+# pointer: a press would act behind the field.
+run_mutation "scope dialog: the current rows ignore the pointer while filtering" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        && state.pending.is_none()
+        && state.saved.mode != crate::dialogmode::DialogMode::Filter' \
+  '        && state.pending.is_none()' \
+  geode-shell \
+  the_current_rows_ignore_the_pointer_while_the_filter_is_live
+
+# The save prompt previews only the current sections.
+run_mutation "scope dialog: steps hide the saved group" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if state.on_screen() {
+        list = list.children(super::saved_view::group(shell, state, entity, cx));' \
+  '    if true {
+        list = list.children(super::saved_view::group(shell, state, entity, cx));' \
+  geode-shell \
+  the_save_prompt_hides_the_saved_group
+
+# The list scrolls to the cursor's child.
+run_mutation "scope dialog: the list scrolls to the cursor" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        shell.scope_dialog_scroll.scroll_to_item(target);' \
+  '        shell.scope_dialog_scroll.scroll_to_item(0);' \
+  geode-shell \
+  the_list_scrolls_to_a_saved_row_below_the_fold
+
+# A refresh that moves nothing leaves a wheel-scrolled list alone.
+run_mutation "scope dialog: a still refresh keeps a wheel scroll" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '    if state.followed.as_ref() != Some(&now) {' \
+  '    if true {' \
+  geode-shell \
+  a_refresh_that_moves_nothing_keeps_a_wheel_scroll
+
+# Every re-derive follows the cursor: a toggle that adds a current row above
+# a saved cursor near the fold keeps the saved row in view.
+run_mutation "scope dialog: every re-derive follows the cursor" \
+  crates/geode-shell/src/shell/rows.rs \
+  '        super::scopedialog::view::follow_cursor(self);' \
+  '' \
+  geode-shell \
+  a_toggle_that_adds_a_current_row_keeps_the_saved_row_in_view
 
 # ---- Scope dialog: the save prompt ------------------------------------
 
@@ -19287,9 +19556,9 @@ run_mutation "scope dialog: enter on the empty Scopes row refuses" \
 
 # The footer says enter starts a new expression on the empty row.
 run_mutation "scope dialog: the empty Expressions row's enter hint" \
-  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
-  '        Some(Stop::Empty(Section::Expressions)) => {' \
-  '        Some(Stop::Empty(Section::Expressions)) if false => {' \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        Some(Stop::Empty(Saved::Expressions)) => {' \
+  '        Some(Stop::Empty(Saved::Expressions)) if false => {' \
   geode-shell \
   the_empty_expressions_row_is_a_cursor_stop_for_n_and_enter
 
@@ -19317,7 +19586,7 @@ run_mutation "scope dialog: only the save prompt previews the scope" \
   geode-shell \
   naming_a_new_expression_previews_its_text_not_the_scope
 
-# ---- Scope dialog: copy, delete and revert in Saved ----
+# ---- Scope dialog: copy, delete and revert on saved rows ----
 
 # Delete asks only over the user's own definition: an inherited one has
 # nothing of the user's to remove, and refuses naming its layer.
@@ -19412,7 +19681,7 @@ run_mutation "scope dialog: a removal refreshes the frame at once" \
   geode-shell \
   d_deletes_a_user_scope_after_yes
 
-# Saved shows again with the cursor on the copy.
+# The screen shows again with the cursor on the copy.
 run_mutation "scope dialog: the cursor lands on the copy" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
   '    state.saved.cursor_id = Some(super::saved_view::StopId::Row(copy));' \
@@ -19436,23 +19705,15 @@ run_mutation "scope dialog: the copy prompt previews the source's summary" \
   geode-shell \
   c_copies_a_scope_under_a_new_name
 
-# A question over Saved owns the pointer: a row double-click would load.
+# A question over the saved group owns the pointer: a row double-click would load.
 run_mutation "scope dialog: rows under a question ignore presses" \
   crates/geode-shell/src/shell/scopedialog/saved_view.rs \
-  '    if !in_saved(state) || state.pending.is_some() {' \
-  '    if !in_saved(state) {' \
+  '    if !state.on_screen() || state.pending.is_some() {' \
+  '    if !state.on_screen() {' \
   geode-shell \
   a_question_over_saved_ignores_the_pointer
 
-# A question over Saved owns the pointer: Back would leave under it.
-run_mutation "scope dialog: Back is unavailable under a question" \
-  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
-  '        .is_some_and(|s| in_saved(s) && s.layers.depth() > 1 && s.pending.is_none())' \
-  '        .is_some_and(|s| in_saved(s) && s.layers.depth() > 1)' \
-  geode-shell \
-  a_question_over_saved_ignores_the_pointer
-
-# A question over Saved owns the pointer: the filter row would enter filter mode.
+# A question over the saved group owns the pointer: the filter row would enter filter mode.
 run_mutation "scope dialog: the filter row ignores presses under a question" \
   crates/geode-shell/src/shell/dialog.rs \
   '                if state.pending.is_some() {
@@ -19465,15 +19726,15 @@ run_mutation "scope dialog: the filter row ignores presses under a question" \
   geode-shell \
   a_question_over_saved_ignores_the_pointer
 
-# The empty Scopes row says `s` saves the current scope: on Saved, `s`
-# pushes the save prompt over the screen, or the row names a dead key.
-run_mutation "scope dialog: s on Saved pushes the save prompt" \
-  crates/geode-shell/src/shell/scopedialog/saved_view.rs \
-  '        "s" => {
-            super::prompt::push_save(shell, cx);
-            dialog::sync_dialog_text(shell, window, cx);
-        }' \
-  '        "s" => {}' \
+# The empty Scopes row says `s` saves the current scope: with the cursor on
+# a saved stop, `s` pushes the save prompt over the screen, or the row names
+# a dead key.
+run_mutation "scope dialog: s on a saved row pushes the save prompt" \
+  crates/geode-shell/src/shell/scopedialog/view.rs \
+  '        ("s", true, false) => {
+            super::prompt::push_save(shell, cx);' \
+  '        ("s", true, false) if zone == Zone::Current => {
+            super::prompt::push_save(shell, cx);' \
   geode-shell \
   s_on_saved_pushes_the_save_prompt_and_returns_to_saved
 
@@ -24586,8 +24847,9 @@ run_mutation "pricer entry bar: a tree-column double-click keeps the slid-up row
   crates/geode-pricer/src/tile.rs \
   '                self.cursor.at = Some(at);
                 self.sync_cursor(cx);
-                if group {' \
-  '                if group {' \
+                let Some(c) = SheetDelegate::plan_col(*col) else {' \
+  '                let _ = at;
+                let Some(c) = SheetDelegate::plan_col(*col) else {' \
   geode-pricer a_tree_column_double_click_while_the_bar_is_open_keeps_that_row
 
 # A chevron stops propagation, so no SelectCell hands off for it: without
@@ -25188,7 +25450,9 @@ run_mutation "pricer bridge: the reload observer is seeded with the startup key"
 run_mutation "pricer tile: an open editor follows its column through a reload" \
   crates/geode-pricer/src/tile.rs \
   '            Some(c) => {
-                editor.set_col(c);
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.set_col(c);
+                }
                 self.cursor.col = c;' \
   '            Some(c) => {
                 self.cursor.col = c;' \
@@ -25198,9 +25462,11 @@ run_mutation "pricer tile: an open editor follows its column through a reload" \
 # cursor highlight sit on the same column.
 run_mutation "pricer tile: the cursor follows a re-pointed editor" \
   crates/geode-pricer/src/tile.rs \
-  '                editor.set_col(c);
+  '                    editor.set_col(c);
+                }
                 self.cursor.col = c;' \
-  '                editor.set_col(c);' \
+  '                    editor.set_col(c);
+                }' \
   geode-pricer an_open_editor_follows_its_column_through_a_view_reload
 
 # An editor whose column left the plan closes; left open it stays focused
@@ -28447,9 +28713,16 @@ run_mutation "pricer select: totals drop the qty weighting" \
 # An unpriced or failed row makes its column incomplete, never a partial sum.
 run_mutation "pricer select: an unpriced row counts as zero in the totals" \
   crates/geode-pricer/src/core/select.rs \
-  '                _ => None,' \
-  '                _ => *s,' \
+  $'                _ => None,\n            };' \
+  $'                _ => *s,\n            };' \
   geode-pricer risk_totals_are_position_totals_and_refuse_an_incomplete_column
+
+# `v`/`V` anchor on a grouping row's path as on a line.
+run_mutation "pricer select: a selection refuses to start on a group row" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                let at = self.cursor_row().and_then(|g| self.at_of_row(g));' \
+  $'                let at = self\n                    .cursor_row()\n                    .and_then(|g| self.at_of_row(g))\n                    .filter(|at| matches!(at, At::Line { .. }));' \
+  geode-pricer a_selection_starts_on_a_group_row
 
 # An incomplete total paints as a refused dash, not a number.
 run_mutation "pricer select: an incomplete total paints as zero" \
@@ -28526,8 +28799,8 @@ run_mutation "pricer select: a typed commit under V writes the row's last column
 # per-leg path writes the bare number to every leg (-5/+5 → -5/-5).
 run_mutation "pricer select: a typed package qty writes every leg unweighted" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        if kind == ColumnKind::Qty && editable {\n            let packages' \
-  $'        if false {\n            let packages' \
+  '        let lines = if kind == ColumnKind::Qty && editable {' \
+  '        let lines = if false {' \
   geode-pricer a_typed_package_qty_over_a_selection_scales_its_legs_by_the_weights
 
 # The live step on a package qty steps the PACKAGE qty through the weights.
@@ -28540,8 +28813,8 @@ run_mutation "pricer select: a package qty step steps each leg by one" \
 # Every cancel of a live step's editor takes the steps back.
 run_mutation "pricer select: escape keeps the live steps" \
   crates/geode-pricer/src/tile.rs \
-  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, false, cx);\n        }\n        cx.notify();' \
-  $'        if let Some(bulk) = bulk {\n            self.settle_bulk(bulk, true, cx);\n        }\n        cx.notify();' \
+  '            self.as_own_write(frozen.clone(), |this| this.settle_bulk(bulk, false, cx));' \
+  '            self.as_own_write(frozen.clone(), |this| this.settle_bulk(bulk, true, cx));' \
   geode-pricer escape_rolls_every_step_back
 
 # A rollback runs only while the steps are the sheet's last change: a
@@ -28649,10 +28922,10 @@ run_mutation "pricer double-click: a package's tree cell toggles nothing" \
 # through tree_verb's leaf-to-parent rule.
 run_mutation "pricer double-click: a leg's tree cell collapses its package" \
   crates/geode-pricer/src/tile.rs \
-  '                            Some(GridRowKind::Package { .. })
+  '                            Some(GridRowKind::Package { .. } | GridRowKind::Group { .. })
                         )
                     {' \
-  '                            Some(GridRowKind::Package { .. })
+  '                            Some(GridRowKind::Package { .. } | GridRowKind::Group { .. })
                         ) || true
                     {' \
   geode-pricer double_clicking_a_legs_tree_cell_does_not_collapse_its_package
@@ -28723,8 +28996,8 @@ run_mutation "pricer select: a block step builds each column on the sheet (instr
 # columns span every column.
 run_mutation "pricer select: a V step moves every column of the rows" \
   crates/geode-pricer/src/tile/select.rs \
-  '            SelectKind::Rows => vec![self.cursor.col],' \
-  '            SelectKind::Rows => r.cols.clone().collect(),' \
+  '            (_, Some(r)) if r.kind == SelectKind::Block => r.cols.clone().collect(),' \
+  '            (_, Some(r)) => r.cols.clone().collect(),' \
   geode-pricer a_rows_step_moves_only_the_cursor_column
 
 # The table's click inside the open editor's cell is the editor's.
@@ -28775,9 +29048,19 @@ run_mutation "pricer select: a single-cell nudge moves an inherited shift from z
 # own value filled across the targets turned the 4000 P into a call.
 run_mutation "pricer select: an untouched choice or text enter fills the selection" \
   crates/geode-pricer/src/tile.rs \
-  '        if unchanged && self.selection.is_some() {' \
-  '        if false && self.selection.is_some() {' \
+  '        if unchanged && bulk {' \
+  '        if false && bulk {' \
   geode-pricer an_untouched_choice_enter_over_a_selection_writes_nothing
+
+# A grouping row's untouched editor writes nothing either: a typeahead on
+# a `mixed` cell opens on no option, and the list's first option sent to
+# every line would turn a put into a call. (A steppable cell's untouched
+# enter settles through the live step first and never reaches this.)
+run_mutation "pricer group edit: an untouched enter on a group row writes" \
+  crates/geode-pricer/src/tile.rs \
+  '        if unchanged && bulk {' \
+  '        if unchanged && self.selection.is_some() {' \
+  geode-pricer an_untouched_choice_on_a_mixed_group_row_writes_nothing
 
 run_mutation "pricer select: an untouched choice reads as changed" \
   crates/geode-pricer/src/tile.rs \
@@ -30532,26 +30815,47 @@ run_mutation "pricer scope: a hidden cursor falls back by index" \
   '        if true {' \
   geode-pricer the_cursor_on_a_hidden_leg_moves_to_a_visible_row
 
-# A partly hidden package row is read-only: the editor never opens on it.
+# A partly hidden package row is read-only on its own: the editor never
+# opens on it without a selection.
 run_mutation "pricer scope: the editor opens on a partly hidden package" \
   crates/geode-pricer/src/tile.rs \
-  $'        if let Some(why) = self.read_only(row) {\n            self.footer = Some(why.into());\n            return;\n        }' \
-  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            return;\n        }' \
+  '                    Some(_) if self.selection.is_some() => {' \
+  '                    Some(_) if true => {' \
   geode-pricer an_edit_on_a_partly_hidden_package_row_is_refused_with_the_footer
 
-# A selected package stands for every leg, hidden ones too: a typed
-# commit over it refuses whole.
-run_mutation "pricer scope: a selection commit writes a partly hidden package" \
+# A selected partial package row stands for the legs it paints: its
+# scope-hidden leg is never written.
+run_mutation "pricer scope: a selected partial package row writes its hidden leg" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        if let Some(why) = self.selection_read_only() {\n            self.footer = Some(why.into());\n            self.sync_editor(cx);' \
-  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            self.sync_editor(cx);' \
-  geode-pricer a_selection_commit_over_a_partly_hidden_package_is_refused
+  '                .filter(|&l| self.sheet.is_line(l) && self.visibility.is_shown(l));' \
+  '                .filter(|&l| self.sheet.is_line(l));' \
+  geode-pricer a_selection_step_over_a_partly_hidden_package_steps_its_shown_leg
 
-run_mutation "pricer scope: a selection step moves a partly hidden package" \
+# A selected partial package row is not a whole package: a quantity skips
+# it rather than rescaling legs the row does not paint.
+run_mutation "pricer scope: a selected partial package row takes the qty whole" \
   crates/geode-pricer/src/tile/select.rs \
-  $'        if let Some(why) = self.selection_read_only() {\n            self.footer = Some(why.into());\n            self.rebuild_chrome();' \
-  $'        if let Some(why) = None::<&str> {\n            self.footer = Some(why.into());\n            self.rebuild_chrome();' \
-  geode-pricer a_selection_step_over_a_partly_hidden_package_is_refused
+  '                    if self.read_only(row).is_some() {' \
+  '                    if false {' \
+  geode-pricer a_selection_qty_over_a_partly_hidden_package_skips_it
+
+run_mutation "pricer select: a selection over split package rows writes nothing" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                        partial.push((g, row));' \
+  '                        return Some(Default::default());' \
+  geode-pricer a_selection_over_split_package_rows_edits_every_leg
+
+run_mutation "pricer select: a split package reached in part takes the qty" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                    if self.read_only(row).is_some() {' \
+  '                    if false {' \
+  geode-pricer a_selection_qty_sets_a_wholly_reached_split_package_and_skips_a_part
+
+run_mutation "pricer select: i on a split package row under a selection refuses" \
+  crates/geode-pricer/src/tile.rs \
+  '                    Some(_) if self.selection.is_some() => {' \
+  '                    Some(_) if false => {' \
+  geode-pricer i_on_a_split_package_row_under_a_selection_commits_over_it
 
 # Selection totals over a partly hidden package count its shown legs, as
 # its row paints them.
@@ -30793,24 +31097,184 @@ run_mutation "pricer grouping: :group completes nothing after a column" \
   '        ["group", ..] => Vec::new(),' \
   geode-pricer completions_offer_each_positions_vocabulary_unfiltered
 
-# Group rows and split packages are read-only through the existing doors.
-run_mutation "pricer grouping: i opens on a group row" \
-  crates/geode-pricer/src/tile.rs \
-  $'        if self.cursor_on_group() {\n            self.footer = Some(GROUP_ROW.into());\n            return;\n        }' \
-  $'        if false {\n            self.footer = Some(GROUP_ROW.into());\n            return;\n        }' \
-  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
-
+# Group rows refuse structural verbs; split packages refuse those and
+# their own cell edits, through the existing doors.
 run_mutation "pricer grouping: a structural verb acts on a group row" \
   crates/geode-pricer/src/tile/select.rs \
   $'            if self.cursor_on_group() {\n                return Some(GROUP_ROW);\n            }' \
   '' \
-  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
+  geode-pricer a_group_row_refuses_structural_verbs_and_yanks_its_lines
 
 run_mutation "pricer grouping: a selection holding a group row acts" \
   crates/geode-pricer/src/tile/select.rs \
   $'        let targets: Vec<usize> = if selected {\n            if self.selection_holds_group() {\n                return Some(GROUP_ROW);\n            }' \
   $'        let targets: Vec<usize> = if selected {' \
-  geode-pricer a_group_row_is_read_only_and_yanks_its_lines
+  geode-pricer a_group_row_refuses_structural_verbs_and_yanks_its_lines
+
+# A grouping row's cell edit writes the shown lines beneath it.
+run_mutation "pricer group edit: i refuses on a group row" \
+  crates/geode-pricer/src/tile.rs \
+  '        let (on, row, opening) = match (&self.cursor.at, self.cursor_on_group()) {' \
+  $'        if self.cursor_on_group() {\n            self.footer = Some(GROUP_ROW.into());\n            return;\n        }\n        let (on, row, opening) = match (&self.cursor.at, self.cursor_on_group()) {' \
+  geode-pricer a_group_row_edit_writes_every_line_under_it_as_one_undo
+
+run_mutation "pricer group edit: a selected group row stands for nothing" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        let mut grouped: Vec<usize> = groups.iter().flat_map(|p| self.group_lines(p)).collect();' \
+  '        let mut grouped: Vec<usize> = Vec::new();' \
+  geode-pricer a_selection_over_a_closed_group_edits_its_lines_too
+
+run_mutation "pricer group edit: a line under a selected group is written twice" \
+  crates/geode-pricer/src/core/select.rs \
+  $'    lines.sort_unstable();\n    lines.dedup();\n    let mut packages' \
+  $'    lines.sort_unstable();\n    let mut packages' \
+  geode-pricer targets_merge_selected_rows_and_group_lines_once
+
+run_mutation "pricer group edit: a package a group holds in part takes the qty" \
+  crates/geode-pricer/src/core/select.rs \
+  '            split.push(p);' \
+  '            packages.push(p);' \
+  geode-pricer a_group_row_qty_skips_a_split_package
+
+run_mutation "pricer group edit: a package a group holds whole is skipped" \
+  crates/geode-pricer/src/core/select.rs \
+  '        if whole {' \
+  '        if false {' \
+  geode-pricer a_group_row_qty_sets_each_line_and_whole_package
+
+run_mutation "pricer group edit: a split package's quantity is not counted" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'            for _ in &t.split {\n                skips.add(Skip::Refused);\n            }\n            t.qty_lines' \
+  '            t.qty_lines' \
+  geode-pricer a_group_row_qty_skips_a_split_package
+
+run_mutation "pricer group edit: hidden lines are not counted" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        for _ in 0..hidden {\n            skips.add(Skip::Hidden);\n        }\n        if set == 0 {' \
+  '        if set == 0 {' \
+  geode-pricer a_group_row_edit_leaves_a_scope_hidden_line_and_counts_it
+
+run_mutation "pricer group edit: shown lines count as hidden" \
+  crates/geode-pricer/src/core/rollup.rs \
+  '        .filter(|&row| sheet.is_line(row) && !vis.is_shown(row))' \
+  '        .filter(|&row| sheet.is_line(row))' \
+  geode-pricer a_group_row_edit_leaves_a_scope_hidden_line_and_counts_it
+
+# A typed commit on a grouping row puts the cursor by the lead-line rule:
+# on the group its lines moved into, or the closed group above it.
+run_mutation "pricer group edit: the cursor is lost after a re-tag" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if let Some(frozen) = frozen {\n            self.place_cursor_by_lead(&frozen, cx);\n        }' \
+  '' \
+  geode-pricer a_group_row_retag_lands_the_cursor_on_the_merged_group
+
+# A grouping-row editor writes the lines it froze at open, not what its
+# path holds at commit: a delivery bringing a line in must not add it.
+run_mutation "pricer group edit: targets are read live, not frozen" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if let Some(EditOn::Group { frozen, .. }) = self.editor.as_ref().map(|e| e.target().0) {' \
+  '        if let Some(EditOn::Group { frozen, .. }) = None::<EditOn> {' \
+  geode-pricer a_line_joining_the_group_mid_edit_is_not_written
+
+# The lead line is the first line of the CURSOR's group row, not of the
+# selection: with a `V` from [3000] the editor on [5000] follows a 5000 line.
+run_mutation "pricer group edit: the lead line is the selection's first line" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        let lead = self.first_painted_line(path)?;' \
+  '        let lead = self.first_painted_line(path).and(Some(0))?;' \
+  geode-pricer a_step_keeps_a_selection_whose_anchor_group_it_moves
+
+# The editor follows its lead line on every rebuild, not only when its
+# row stops painting: stepping through a group that still paints carries
+# it on with the lines.
+run_mutation "pricer group edit: the editor moves only when its row is gone" \
+  crates/geode-pricer/src/tile.rs \
+  '            let why = match self.lead_place(frozen) {' \
+  '            let why = match if self.row_at(at).is_some() { LeadPlace::On(at.clone()) } else { self.lead_place(frozen) } {' \
+  geode-pricer a_step_through_a_still_painted_group_follows_the_lead_line
+
+run_mutation "pricer group edit: the editor stays behind in a merged group (qty)" \
+  crates/geode-pricer/src/tile.rs \
+  '            let why = match self.lead_place(frozen) {' \
+  '            let why = match if self.row_at(at).is_some() { LeadPlace::On(at.clone()) } else { self.lead_place(frozen) } {' \
+  geode-pricer a_qty_step_through_an_existing_group_follows_the_lead_line
+
+# A change of the effective grouping chain closes a grouping-row editor:
+# the lead row it would follow onto stands for other lines than it writes.
+run_mutation "pricer group edit: a chain change keeps the group editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.chain != frozen.chain {' \
+  '            if false && self.chain != frozen.chain {' \
+  geode-pricer a_chain_change_closes_a_stepped_group_editor
+
+run_mutation "pricer group edit: a chain change keeps the unstepped group editor" \
+  crates/geode-pricer/src/tile.rs \
+  '            if self.chain != frozen.chain {' \
+  '            if false && self.chain != frozen.chain {' \
+  geode-pricer a_chain_change_closes_a_group_editor
+
+# A block's columns are frozen with its targets: a selection cleared
+# mid-edit must not shrink the next press to the cursor's column.
+run_mutation "pricer group edit: block columns are read live" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if let Some(frozen) = self.editor.as_ref().and_then(|e| e.frozen()) {' \
+  '        if let Some(frozen) = None::<Rc<FrozenTargets>> {' \
+  geode-pricer a_block_step_keeps_its_columns_when_the_selection_clears
+
+# A selection anchored on a group the editor's own step moves follows the
+# group's first line instead of clearing.
+run_mutation "pricer group edit: an own step clears the selection" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        let Some(lead) = self.own_write.as_ref().and_then(|f| f.anchor_lead) else {' \
+  '        let Some(lead) = self.own_write.as_ref().and_then(|f| f.anchor_lead.filter(|_| false)) else {' \
+  geode-pricer a_step_keeps_a_selection_whose_anchor_group_it_moves
+
+# A drop after steps says the steps stand, never that the edit refused.
+run_mutation "pricer group edit: a drop after steps reads as a plain drop" \
+  crates/geode-pricer/src/tile.rs \
+  '                LeadPlace::Hidden if stepped => Some(STEPS_KEPT_HIDDEN),' \
+  '                LeadPlace::Hidden if false => Some(STEPS_KEPT_HIDDEN),' \
+  geode-pricer a_drop_after_steps_keeps_them_and_says_so
+
+# A successful commit closes the editor before its write: no drop footer
+# even when the lines land in a closed group.
+run_mutation "pricer group edit: a successful commit shows a drop footer" \
+  crates/geode-pricer/src/tile/select.rs \
+  $'        if frozen.is_some() {\n            self.release_editor(cx);\n        }' \
+  '' \
+  geode-pricer a_retag_into_a_closed_parent_lands_the_cursor_on_it
+
+# Escape's rollback puts the cursor home by the same lead-line rule.
+run_mutation "pricer group edit: escape leaves the cursor where the steps took it" \
+  crates/geode-pricer/src/tile.rs \
+  '                self.place_cursor_by_lead(&frozen, cx);' \
+  '' \
+  geode-pricer a_qty_step_through_an_existing_group_follows_the_lead_line
+
+# A hidden leg of a package a quantity skips as split counts once.
+run_mutation "pricer group edit: a hidden leg of a skipped package counts twice" \
+  crates/geode-pricer/src/tile/select.rs \
+  '                !(qty' \
+  '                !(false' \
+  geode-pricer a_hidden_leg_of_a_skipped_package_counts_once
+
+run_mutation "pricer group edit: a group row's arrows step its text alone" \
+  crates/geode-pricer/src/tile/select.rs \
+  '        if self.selection.is_none() && !matches!(on, EditOn::Group { .. }) {' \
+  '        if self.selection.is_none() {' \
+  geode-pricer arrows_step_a_group_rows_lines_live
+
+run_mutation "pricer group edit: a group row's editor has no live step" \
+  crates/geode-pricer/src/tile.rs \
+  '        let live = self.selection.is_some() || matches!(on, EditOn::Group { .. });' \
+  '        let live = self.selection.is_some();' \
+  geode-pricer arrows_step_a_group_rows_lines_live
+
+run_mutation "pricer group edit: the editor seeds one line's value over mixed" \
+  crates/geode-pricer/src/core/select.rs \
+  '    items.all(|v| v.as_ref() == Some(&first)).then_some(first)' \
+  '    Some(first)' \
+  geode-pricer a_group_row_editor_opens_on_its_lines_shared_value
 
 run_mutation "pricer grouping: a split package edits" \
   crates/geode-pricer/src/tile.rs \
@@ -31106,8 +31570,8 @@ run_mutation "pricer grouping: a NULL path segment reads as empty" \
 # package's second row, it stays there.
 run_mutation "pricer grouping: a split anchor resolves to the package's first row" \
   crates/geode-pricer/src/tile/select.rs \
-  '                    .filter(|at| matches!(at, At::Line { .. }));' \
-  $'                    .filter(|at| matches!(at, At::Line { .. }))\n                    .map(|at| match at {\n                        At::Line { id, .. } => At::Line { id, within: None },\n                        g => g,\n                    });' \
+  '                let at = self.cursor_row().and_then(|g| self.at_of_row(g));' \
+  $'                let at = self.cursor_row().and_then(|g| self.at_of_row(g)).map(|at| match at {\n                    At::Line { id, .. } => At::Line { id, within: None },\n                    g => g,\n                });' \
   geode-pricer a_selection_anchored_on_a_split_packages_second_row_stays_there
 
 # A split package's cursor whose node a regroup removed lands on the
@@ -32268,20 +32732,6 @@ run_mutation "visual commit: marketdata untouched choice keeps the selection" \
             self.end_selection_on_commit(cx);' \
   '            self.close_popup_with_window(window, cx);' \
   geode-marketdata an_untouched_choice_commit_over_a_selection_writes_nothing
-
-# A selection's edit passes over group rows, open or closed, and writes
-# only the visible lines it holds.
-run_mutation "pricer selection: a group row refuses the edit" \
-  crates/geode-pricer/src/tile/select.rs \
-  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n' \
-  $'    pub(crate) fn selection_read_only(&self) -> Option<&\'static str> {\n        if self.selection_holds_group() {\n            return Some(GROUP_ROW);\n        }\n' \
-  geode-pricer a_selection_across_groups_edits_its_lines
-
-run_mutation "pricer selection: a closed group's hidden lines are written" \
-  crates/geode-pricer/src/tile/select.rs \
-  '            .filter_map(|g| self.model.sheet_row(g))' \
-  '            .flat_map(|g| self.grid_rows_under(g))' \
-  geode-pricer a_selection_over_a_closed_group_edits_only_the_visible_lines
 
 run_mutation "nemo: ids are not encoded" \
   crates/geode-nemo/src/lib.rs \
@@ -35056,13 +35506,19 @@ run_mutation "silence: a matching pattern is checked for its prefix" \
   geode-data \
   a_match_under_an_unlistable_prefix_is_not_a_path_problem
 
-# A double-click on a group row toggles it; the edit route it would
-# otherwise take only refuses on a row with no editable cell.
-run_mutation "pricer tile: a double-click on a group row toggles it" \
+# A double-click on a group row's label toggles it, as on a package's
+# name; on a value cell it opens the editor, which writes the group's lines.
+run_mutation "pricer tile: a double-click on a group row's label edits" \
   crates/geode-pricer/src/tile.rs \
-  '                let group = matches!(at, At::Group(_));' \
-  '                let group = false;' \
-  geode-pricer a_double_click_on_a_group_row_toggles_it
+  '                            Some(GridRowKind::Package { .. } | GridRowKind::Group { .. })' \
+  '                            Some(GridRowKind::Package { .. })' \
+  geode-pricer a_double_click_on_a_group_rows_label_toggles_it_and_a_value_cell_edits
+
+run_mutation "pricer tile: a double-click on a group row's value cell toggles it" \
+  crates/geode-pricer/src/tile.rs \
+  $'                let Some(c) = SheetDelegate::plan_col(*col) else {\n                    // A package or grouping row' \
+  $'                if matches!(self.cursor.at, Some(At::Group(_))) {\n                    self.tree_verb(None, cx);\n                    return;\n                }\n                let Some(c) = SheetDelegate::plan_col(*col) else {\n                    // A package or grouping row' \
+  geode-pricer a_double_click_on_a_group_rows_label_toggles_it_and_a_value_cell_edits
 
 # The blotter's, pricer's and market data's find tables highlight the match
 # run in the table accent every table's match highlights share.
@@ -39780,6 +40236,87 @@ run_mutation "shell: the watchlist key range's upper edge is exclusive" \
   '    key.0 >= WATCHLIST_KEY_BASE.0 && key.0 <= WATCHLIST_KEY_BASE.0 + WATCHLIST_KEY_COUNT' \
   geode-shell \
   watchlist_keys_are_the_reserved_range_and_nothing_else
+
+# ---- Watchlists: tile ----
+#
+# The tile shows one list from the global and writes the whole object
+# through the config door. The grid's pending rows and order, the verbs'
+# gates and refusals, the history's reload rule and the emission are the
+# contracts.
+
+# A row whose manual state differs between the pending and the saved
+# definition is marked pending.
+run_mutation "watchlist tile: a pending manual change marks its row" \
+  crates/geode-watchlist/src/core/rows.rs \
+  '                .is_some_and(|p| p.of(&m.name) != saved.of(&m.name));' \
+  '                .is_some_and(|p| false && p.of(&m.name) != saved.of(&m.name));' \
+  geode-watchlist \
+  a_pending_include_adds_a_manual_pending_row
+
+# The default order puts excluded rows last.
+run_mutation "watchlist tile: excluded rows sort last by default" \
+  crates/geode-watchlist/src/core/grid.rs \
+  '            .cmp(&b.is_excluded())' \
+  '            .cmp(&a.is_excluded())' \
+  geode-watchlist \
+  the_default_order_is_by_name_with_excluded_last
+
+# A name a rule already supplies is refused under the field, not written.
+run_mutation "watchlist tile: add refusal stays under the field" \
+  crates/geode-watchlist/src/tile/field.rs \
+  '                match edit::add(&current, &members, &names) {' \
+  '                match edit::add(&current, &members, &names).or_else(|_| edit::add(&current, &[], &names)) {' \
+  geode-watchlist \
+  add_of_a_rule_supplied_name_is_refused_under_the_field
+
+# x on a name that is manual and rule-supplied says it did both.
+run_mutation "watchlist tile: x names both outcomes on a manual-and-rule name" \
+  crates/geode-watchlist/src/tile/verbs.rs \
+  '            Origin::Both(_) => format!("removed and excluded {one}"),' \
+  '            Origin::Both(_) => format!("removed {one}"),' \
+  geode-watchlist \
+  remove_of_a_manual_and_rule_name_writes_once_and_undoes_whole
+
+# A reload equal to the base keeps the pending object: the write is still
+# on its way.
+run_mutation "watchlist tile: a reload equal to the base keeps the pending edit" \
+  crates/geode-watchlist/src/core/history.rs \
+  '        } else if self.base.as_ref() == Some(config) {' \
+  '        } else if false {' \
+  geode-watchlist \
+  an_unrelated_reload_keeps_the_pending_edit
+
+# A clone writes the new object only; the source is never touched.
+run_mutation "watchlist tile: clone never touches the source list" \
+  crates/geode-watchlist/src/tile/objects.rs \
+  '            vec![set_edit(&to, &current)],' \
+  '            vec![set_edit(&to, &current), set_edit(&from, &current)],' \
+  geode-watchlist \
+  clone_writes_one_new_user_object_and_no_fork
+
+# The member verbs are refused while the shown list's revert is on its way.
+run_mutation "watchlist tile: the revert gate refuses the member verbs" \
+  crates/geode-watchlist/src/tile/verbs.rs \
+  '            Some(name) => Err(Self::reverting_text(name)),' \
+  '            Some(_name) => Ok(()),' \
+  geode-watchlist \
+  revert_is_offered_only_over_a_shadowed_user_copy_and_gates_the_verbs
+
+# An expression a rule cannot run is refused before it is written.
+run_mutation "watchlist tile: an unfoldable expression is refused" \
+  crates/geode-watchlist/src/core/prompt.rs \
+  '            let r = rule(dataset, None, Some(text));' \
+  '            let r = rule(dataset, None, Some(text)); return Step::Rules(ctx.with(r, *replace));' \
+  geode-watchlist \
+  the_expression_step_folds_against_the_dataset_and_replaces_in_place
+
+# No row under the cursor posts nothing: the group keeps its scope.
+run_mutation "watchlist tile: no cursor emits nothing" \
+  crates/geode-watchlist/src/tile/mod.rs \
+  '                None => CursorScope::Nothing,' \
+  '                None => CursorScope::Path(underlying_scope("")),' \
+  geode-watchlist \
+  no_cursor_emits_nothing
 
 # The help line describes the innermost call the caret is inside. Answering
 # from the first open frame would describe `sma` while the caret sits in

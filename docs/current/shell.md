@@ -40,7 +40,9 @@ application setting.
 
 The shell writes the first four. It installs `ReferenceGlobal` and
 `WatchlistGlobal` empty, and the app's bridge alone replaces them; modules
-only read and observe them. At attach
+only read and observe them (the watchlist tile observes both: its lists
+from `WatchlistGlobal`, the reference name beside each member from
+`ReferenceGlobal`). At attach
 the bridge reads every reference dataset of the startup schema at
 `AsOf::Live` under the reserved `REFERENCE_KEY`, and it reads a dataset again
 on each of its publishes. Only a dataset's latest-tagged answer
@@ -809,24 +811,18 @@ chip's, is the [Scope dialog](input-and-dialogs.md#scope-dialog): `d` on
 that name's `≡` row. A scope whose only content is a name is not empty: the
 chips row and the save glyph paint for it.
 
-The load glyph (a folder-open icon, `scope-load-chip`) follows the `+` and
-paints whatever the scope holds, empty included; a click opens the Scope
-dialog on its [Saved](input-and-dialogs.md#saved) screen, alone
-(`frame::scope_saved`), and the glyph holds its pressed fill while Saved is
-the dialog's top layer. Its tooltip, `Saved scopes and expressions`, names
-`frame::scope_saved`'s chord once one is bound; it has none by default, and
-from the keyboard Saved is also `o` in the Scope dialog. The save glyph, when
-the scope is savable, comes after it, so its appearance never moves the load
-glyph. A click on it opens the Scope dialog's
-[save prompt](input-and-dialogs.md#save-prompt) alone, as
-`scope::save_current` does, seeded with the saved scope the lane's scope was
-loaded from.
+The save glyph, when the scope is savable, follows the `+`. A click on it
+opens the Scope dialog's [save prompt](input-and-dialogs.md#save-prompt)
+alone, as `scope::save_current` does, seeded with the saved scope the lane's
+scope was loaded from.
 
 The `+` verb opens the [Scope dialog](input-and-dialogs.md#scope-dialog)
 (`frame::scope`, `mod+o`), where every ingredient is added — by key, or by
 pointer through each section header's `add` control or an empty section's
-row — and holds its pressed fill while that dialog is open; its tooltip names `frame::scope`'s
-chord. It paints on an empty scope too, since adding a filter is how a scope
+row — and holds its pressed fill while the Scope dialog is up, whichever
+door opened it. It is the scope bar's only door to that dialog: the saved
+scopes and expressions are part of it (`o` there), so the bar paints no
+separate load glyph. Its tooltip names `frame::scope`'s chord. It paints on an empty scope too, since adding a filter is how a scope
 starts. Opened while the scope text field held focus, the dialog hands focus
 back to the field when it closes.
 

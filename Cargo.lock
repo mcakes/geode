@@ -2521,6 +2521,7 @@ dependencies = [
  "geode-shell",
  "geode-timeseries",
  "geode-volslice",
+ "geode-watchlist",
  "gpui-base",
  "gpui-component",
  "gpui-component-macros",
@@ -2839,6 +2840,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "geode-watchlist"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "criterion",
+ "geode-core",
+ "geode-shell",
+ "geode-tile",
+ "gpui-component",
+ "gpui-pre",
+ "toml 1.1.4+spec-1.1.0",
+]
+
+[[package]]
 name = "geode-widgets"
 version = "0.1.0"
 dependencies = [
@@ -2846,6 +2861,7 @@ dependencies = [
  "geode-core",
  "gpui-component",
  "gpui-pre",
+ "gpui-pre-platform",
 ]
 
 [[package]]

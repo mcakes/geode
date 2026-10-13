@@ -14,6 +14,7 @@ use geode_core::named::NamedExpressions;
 use geode_core::query::{QueryKey, ResolvedRule, WatchlistOutcome, WatchlistParams};
 use geode_core::schema::SchemaSpec;
 use geode_core::scope::complete::ExprVocab;
+use geode_core::scopes::SavedScopes;
 use geode_core::watchlist::fold::{RuleError, fold_rules};
 use geode_core::watchlist::state::{
     Folded, Status, WatchlistState, diff_definitions, lists_naming,
@@ -52,6 +53,28 @@ pub fn object_provenance<'a>(
     (layers, shadowed)
 }
 
+/// The saved scopes and named expressions a rule may name, read from the
+/// config against `schema` and `dims` as the shell's reload reads them. The
+/// fold and the tile's rule validation read the same two, so a rule the
+/// tile accepts is one the fold accepts.
+pub(crate) fn scopes_and_named(
+    config: &Config,
+    schema: &SchemaSpec,
+    dims: &DerivedDimensions,
+) -> (SavedScopes, NamedExpressions) {
+    // `geode_core::config` exports no constant for the scopes doc.
+    let saved = config
+        .doc("scopes")
+        .map(|d| geode_core::scopes::saved_scopes_from_doc(d, schema, dims).0)
+        .unwrap_or_default();
+    let vocab = ExprVocab::new(schema, dims);
+    let named = config
+        .doc(EXPRESSIONS_DOC)
+        .map(|d| NamedExpressions::from_doc(d, &vocab).0)
+        .unwrap_or_default();
+    (saved, named)
+}
+
 /// Every list in the config, folded against the schema the service serves.
 /// Saved scopes and named expressions are read from the same config, as
 /// the shell's reload reads them, so the fold does not depend on the frame
@@ -66,16 +89,7 @@ pub fn fold_watchlists(
         return (BTreeMap::new(), Vec::new());
     };
     let (lists, mut diags) = geode_core::watchlist::from_doc(doc);
-    // `geode_core::config` exports no constant for the scopes doc.
-    let saved = config
-        .doc("scopes")
-        .map(|d| geode_core::scopes::saved_scopes_from_doc(d, schema, dims).0)
-        .unwrap_or_default();
-    let vocab = ExprVocab::new(schema, dims);
-    let named = config
-        .doc(EXPRESSIONS_DOC)
-        .map(|d| NamedExpressions::from_doc(d, &vocab).0)
-        .unwrap_or_default();
+    let (saved, named) = scopes_and_named(config, schema, dims);
     let (layers, shadowed) = object_provenance(config, WATCHLISTS_DOC, lists.names());
     let mut out = BTreeMap::new();
     for (name, list) in lists.iter() {

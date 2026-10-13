@@ -13,11 +13,13 @@ Current architecture:
 |---|---|
 | `datefield` | `DateTimeField` state, date/date-time precision, segment navigation and entry, and shared key routing. |
 | `datefield::paint` | Stateless GPUI painter using prepared segment text and host-supplied colors, radius, and padding policy. |
+| `cell` | Stateless cell glyphs for dense grids, each a pure core plus a painter: `delta_chip` (the signed number on its sign's color, alpha by magnitude over the column scale up to a host ceiling), `percent_slider` (track filled to the rank, quartile ticks, warning marker at or beyond 0.10 / 0.90), `zero_bar` (a bar from a center axis on the sign's side, length by magnitude over the column scale), `heat` (one hue behind the number, alpha by position in the grid's range). `column_scale` and `heat::range` give the host its scales. |
 
 ## Commands
 
 ```sh
 cargo test -p geode-widgets
+cargo run -p geode-widgets --example cells   # every cell glyph at grid density; t toggles light/dark
 ```
 
 ## Host integration
@@ -54,3 +56,19 @@ focus, and repaint notification.
 - Time segment stepping wraps within its segment without carrying into another.
 - The painter receives presentation values from the host and does not read the
   theme or retain field state.
+- A cell glyph paints the host's preformatted number every time; color, length
+  and position are second channels. A core returns `None` for a non-finite
+  value, and the painter then draws the text alone in the plain text color.
+- The chip and the bar take the sign the host displays (`Formatted::sign`,
+  which follows the rounded value), so a change shown as `0.0` gets no tint
+  and no bar. The slider warns on the rank it is given; pass it at display
+  precision so a rank shown as `90` warns.
+- In a column, slider tracks and bar axes start at the cell's leading edge
+  and the number takes the rest, right-aligned, so tracks and axes line up
+  whatever the width of each row's number. A missing value's text carries the
+  chip's inset so it lines up with the chips' numbers.
+- Alpha ceilings (`delta_chip`, `heat`) and the bar's fill alpha are host
+  inputs, so light and dark readability is the host's theme choice. A zero or
+  non-finite column scale, or a flat heat range, tints nothing.
+- Glyph sizes are design-rem constants (`cell::design`), so they scale with
+  interface zoom; the only fixed pixels are the one-pixel axis and ticks.

@@ -1,6 +1,6 @@
-//! The Scope dialog's Saved screen: saved scopes then saved expressions,
-//! `enter` loading a scope or toggling an expression, the filter, and the
-//! doors that open the screen.
+//! The Scope dialog's saved group: saved scopes then saved expressions
+//! under the current sections on one screen, `enter` loading a scope or
+//! toggling an expression, the filter, and the doors that land on it.
 
 use super::*;
 use geode_core::scope::Scope;
@@ -12,6 +12,14 @@ use super::scope_dialog::{draw, frame_of};
 /// and `asia` (book BK002); expressions `liq` (`npv > 0`) and `big`
 /// (`npv > 100`).
 fn services() -> ShellServices {
+    services_with_scopes(
+        "[eu]\n[eu.dimensions]\nbook = [\"BK001\"]\n\
+         [asia]\n[asia.dimensions]\nbook = [\"BK002\"]\n",
+    )
+}
+
+/// `services()` with `scopes_toml` as the builtin saved scopes.
+fn services_with_scopes(scopes_toml: &str) -> ShellServices {
     let mut services = test_services();
     (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![
@@ -23,12 +31,7 @@ fn services() -> ShellServices {
                  [risk.columns.npv]\ntype = \"f64\"\nrole = \"measure\"\ngrain = \"position\"\n",
             )
             .unwrap(),
-            LayerDoc::builtin(
-                "scopes",
-                "[eu]\n[eu.dimensions]\nbook = [\"BK001\"]\n\
-                 [asia]\n[asia.dimensions]\nbook = [\"BK002\"]\n",
-            )
-            .unwrap(),
+            LayerDoc::builtin("scopes", scopes_toml).unwrap(),
             LayerDoc::builtin(
                 "expressions",
                 "[liq]\nexpression = \"npv > 0\"\n[big]\nexpression = \"npv > 100\"\n",
@@ -61,7 +64,7 @@ fn shell_on_liq(cx: &mut gpui::TestAppContext) -> (Entity<ShellView>, gpui::Visu
     (shell, vcx)
 }
 
-/// The Scope dialog on Current, then `o` to the Saved screen, drawn.
+/// The Scope dialog, then `o` to the saved scopes, drawn.
 fn open_saved_from_current(
     cx: &mut gpui::TestAppContext,
 ) -> (Entity<ShellView>, gpui::VisualTestContext) {
@@ -83,13 +86,30 @@ fn top_layer(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<
     })
 }
 
+/// Whether the cursor rests in the saved group of the open dialog's screen.
+fn on_saved(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> bool {
+    shell.read_with(cx, |s, _| {
+        s.scope_dialog.as_ref().is_some_and(|d| {
+            d.on_screen() && d.zone == crate::shell::scopedialog::screen::Zone::Saved
+        })
+    })
+}
+
+/// The saved row under the saved group's cursor, by name.
+fn saved_name(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Option<String> {
+    shell.read_with(cx, |s, _| {
+        let d = s.scope_dialog.as_ref()?;
+        d.saved.cursor_row().map(|r| r.name.clone())
+    })
+}
+
 fn depth(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> usize {
     shell.read_with(cx, |s, _| {
         s.scope_dialog.as_ref().map_or(0, |d| d.layers.depth())
     })
 }
 
-/// The Saved screen's visible rows' names, in painted order.
+/// The saved group's visible rows' names, in painted order.
 fn visible_names(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> Vec<String> {
     shell.read_with(cx, |s, _| {
         let saved = &s.scope_dialog.as_ref().expect("dialog open").saved;
@@ -119,10 +139,14 @@ use crate::shell::scopedialog::state::Layer;
 #[gpui::test]
 fn o_opens_saved_with_scopes_then_expressions_in_name_order(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_saved_from_current(cx);
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
-    assert_eq!(depth(&shell, &vcx), 2, "Saved is pushed over Current");
+    assert!(on_saved(&shell, &vcx));
+    assert_eq!(depth(&shell, &vcx), 1, "one screen");
     assert_eq!(visible_names(&shell, &vcx), ["asia", "eu", "big", "liq"]);
     assert!(vcx.debug_bounds("scope-saved").is_some());
+    assert!(
+        vcx.debug_bounds("scope-dialog").is_some(),
+        "the current sections paint too"
+    );
     for section in ["scopes", "expressions"] {
         assert!(bounds(&mut vcx, format!("scope-saved-section-{section}")).is_some());
         assert!(bounds(&mut vcx, format!("scope-saved-note-{section}")).is_some());
@@ -146,6 +170,174 @@ fn o_opens_saved_with_scopes_then_expressions_in_name_order(cx: &mut gpui::TestA
         "liq is applied"
     );
     assert!(vcx.debug_bounds("scope-saved-tag-applied-2").is_none());
+}
+
+#[gpui::test]
+fn o_cycles_scopes_expressions_and_current(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_saved_from_current(cx);
+    let saved_name = |shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext| {
+        shell.read_with(vcx, |s, _| {
+            let d = s.scope_dialog.as_ref()?;
+            d.saved.cursor_row().map(|r| r.name.clone())
+        })
+    };
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("asia"));
+    vcx.simulate_keystrokes("o");
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    vcx.simulate_keystrokes("o");
+    assert!(!on_saved(&shell, &vcx), "back on the current rows");
+    // To the scopes (asia), down to eu, load it: the dialog stays open.
+    vcx.simulate_keystrokes("o j enter");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(
+        frame_of(&shell, &vcx).read_with(&vcx, |f, _| f.shared().loaded_from().map(str::to_string)),
+        Some("eu".to_string())
+    );
+    // Expressions, current rows, then the scopes again: `o` now lands on
+    // the loaded scope, not the first one.
+    vcx.simulate_keystrokes("o o o");
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("eu"));
+}
+
+#[gpui::test]
+fn verbs_dispatch_by_row_kind(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    // Cursor on the current `≡ liq` row.
+    vcx.simulate_keystrokes("c");
+    assert_eq!(
+        error(&shell, &vcx).as_deref(),
+        Some(crate::shell::scopedialog::view::COPY_ONLY_SAVED)
+    );
+    vcx.simulate_keystrokes("r");
+    assert_eq!(
+        error(&shell, &vcx).as_deref(),
+        Some(crate::shell::scopedialog::view::REVERT_ONLY_SAVED)
+    );
+    vcx.simulate_keystrokes("o"); // asia
+    vcx.simulate_keystrokes("i");
+    assert_eq!(
+        error(&shell, &vcx).as_deref(),
+        Some(crate::shell::scopedialog::view::INLINE_ONLY_NAMED)
+    );
+    vcx.simulate_keystrokes("d");
+    let asked = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog.as_ref().is_some_and(|d| d.pending.is_some())
+    });
+    // `asia` is builtin: `d` refuses with its layer rather than ask.
+    assert!(!asked);
+    assert!(
+        error(&shell, &vcx).is_some_and(|e| e.contains("there is nothing of yours to delete")),
+        "{:?}",
+        error(&shell, &vcx)
+    );
+    assert_eq!(
+        lane_scope(&shell, &vcx),
+        liq_scope(),
+        "the scope is untouched"
+    );
+}
+
+#[gpui::test]
+fn d_on_the_last_current_row_lands_on_saved_and_the_next_d_asks(cx: &mut gpui::TestAppContext) {
+    let mut f = save_fixture(cx);
+    f.set_lane(liq_scope());
+    f.open_current();
+    f.keys("d");
+    assert!(lane_scope(&f.shell, &f.vcx).is_empty());
+    assert!(
+        on_saved(&f.shell, &f.vcx),
+        "the cursor moved into the saved group"
+    );
+    // The fixture's first saved scope is `desk_eu` (desk layer): move to the
+    // user's `eu`, then `d` must ask, not delete.
+    f.keys("j");
+    f.keys("d");
+    assert!(f.question().is_some(), "a saved delete always asks");
+    assert!(f.user_scopes().contains("[eu"), "nothing deleted yet");
+}
+
+#[gpui::test]
+fn a_filter_matching_nothing_over_an_empty_scope_leaves_keys_inert(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(Scope::default());
+        cx.notify();
+    });
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("/");
+    vcx.simulate_input("zzzz");
+    vcx.run_until_parked();
+    vcx.simulate_keystrokes("enter"); // keeps the query
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("j k enter e d n");
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(lane_scope(&shell, &vcx), Scope::default());
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope)
+    );
+    assert_eq!(
+        top_layer(&shell, &vcx),
+        definition_step(None),
+        "the final `n` opened a new definition"
+    );
+}
+
+#[gpui::test]
+fn the_filter_types_verb_letters(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_saved_from_current(cx);
+    vcx.simulate_keystrokes("/");
+    vcx.simulate_input("odncr");
+    vcx.run_until_parked();
+    let query = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog.as_ref().map(|d| d.saved.query.clone())
+    });
+    assert_eq!(query.as_deref(), Some("odncr"));
+    assert_eq!(lane_scope(&shell, &vcx), liq_scope());
+    let asked = shell.read_with(&vcx, |s, _| {
+        s.scope_dialog.as_ref().is_some_and(|d| d.pending.is_some())
+    });
+    assert!(!asked);
+}
+
+#[gpui::test]
+fn the_save_prompt_hides_the_saved_group(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_saved_from_current(cx);
+    assert!(vcx.debug_bounds("scope-saved").is_some());
+    vcx.simulate_keystrokes("s");
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("scope-dialog").is_some(),
+        "the preview stays"
+    );
+    assert!(vcx.debug_bounds("scope-saved").is_none());
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-saved").is_some());
+    let _shell = shell;
+}
+
+#[gpui::test]
+fn the_plus_reads_pressed_whichever_door_opened_the_dialog(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    assert!(vcx.debug_bounds("scope-pick-chip-open").is_none());
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-pick-chip-open").is_some());
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert!(vcx.debug_bounds("scope-pick-chip-open").is_none());
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("scope-pick-chip-open").is_some(),
+        "the + is the bar's only door to the dialog"
+    );
 }
 
 #[gpui::test]
@@ -173,7 +365,13 @@ fn enter_on_a_scope_loads_it_and_returns_to_current(cx: &mut gpui::TestAppContex
         frame_of(&shell, &vcx).read_with(&vcx, |f, _| f.shared().loaded_from().map(str::to_string)),
         Some("eu".to_string())
     );
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current));
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope),
+        "the dialog stays open"
+    );
+    assert!(on_saved(&shell, &vcx));
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("eu"));
     vcx.simulate_keystrokes("u");
     assert_eq!(lane_scope(&shell, &vcx), liq_scope(), "one undo restores");
 }
@@ -184,8 +382,16 @@ fn enter_on_an_expression_toggles_it_and_returns(cx: &mut gpui::TestAppContext) 
     vcx.simulate_keystrokes("j j enter"); // big
     draw(&mut vcx);
     assert_eq!(lane_scope(&shell, &vcx).named, ["liq", "big"]);
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current));
-    vcx.simulate_keystrokes("o");
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope),
+        "the dialog stays open"
+    );
+    assert!(on_saved(&shell, &vcx));
+    // Current gained a `≡ big` row above the saved group; the cursor keeps
+    // its saved row by identity, not its flat index.
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    vcx.simulate_keystrokes("o"); // the first current row
     draw(&mut vcx);
     vcx.simulate_keystrokes("k enter"); // wraps to liq
     draw(&mut vcx);
@@ -194,42 +400,27 @@ fn enter_on_an_expression_toggles_it_and_returns(cx: &mut gpui::TestAppContext) 
 }
 
 #[gpui::test]
-fn the_load_glyph_opens_saved_alone_and_enter_closes(cx: &mut gpui::TestAppContext) {
+fn the_saved_door_opens_on_saved_and_enter_closes(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = shell_on_liq(cx);
-    assert!(vcx.debug_bounds("scope-load-chip-open").is_none());
-    let glyph = vcx
-        .debug_bounds("scope-load-chip")
-        .expect("the load glyph paints");
-    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
     vcx.run_until_parked();
     draw(&mut vcx);
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.top_kind()),
         Some(dialog::DialogKind::Scope)
     );
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
-    assert_eq!(depth(&shell, &vcx), 1, "Saved is the bottom layer");
-    assert!(
-        vcx.debug_bounds("scope-load-chip-open").is_some(),
-        "the glyph reads pressed while Saved is up"
-    );
+    assert!(on_saved(&shell, &vcx));
+    assert_eq!(depth(&shell, &vcx), 1, "one screen");
     vcx.simulate_keystrokes("enter"); // asia
     vcx.run_until_parked();
     draw(&mut vcx);
     assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None);
     assert_eq!(lane_scope(&shell, &vcx).sole("book"), Some("BK002"));
-    assert!(vcx.debug_bounds("scope-load-chip-open").is_none());
 }
 
 #[gpui::test]
-fn escape_from_saved_alone_closes_and_from_current_returns(cx: &mut gpui::TestAppContext) {
+fn escape_closes_the_dialog_from_either_door(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_saved_from_current(cx);
-    vcx.simulate_keystrokes("escape");
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current));
-    assert_eq!(
-        shell.read_with(&vcx, |s, _| s.top_kind()),
-        Some(dialog::DialogKind::Scope)
-    );
     vcx.simulate_keystrokes("escape");
     assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None);
 
@@ -255,8 +446,18 @@ fn config_scopes_and_config_expressions_open_saved(cx: &mut gpui::TestAppContext
             Some(dialog::DialogKind::Scope),
             "{action}"
         );
-        assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved), "{action}");
+        assert!(on_saved(&shell, &vcx), "{action}");
         assert_eq!(depth(&shell, &vcx), 1, "{action}");
+        let landed = if action == "config::expressions" {
+            "big"
+        } else {
+            "asia"
+        };
+        assert_eq!(
+            saved_name(&shell, &vcx).as_deref(),
+            Some(landed),
+            "{action}"
+        );
         assert!(vcx.debug_bounds("scope-saved").is_some(), "{action}");
         vcx.simulate_keystrokes("escape");
         assert_eq!(shell.read_with(&vcx, |s, _| s.top_kind()), None, "{action}");
@@ -282,11 +483,7 @@ fn the_filter_keeps_sections_and_escape_restores(cx: &mut gpui::TestAppContext) 
     assert_eq!(query, "");
     assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
     assert_eq!(visible_names(&shell, &vcx), ["asia", "eu", "big", "liq"]);
-    assert_eq!(
-        top_layer(&shell, &vcx),
-        Some(Layer::Saved),
-        "escape only left the filter"
-    );
+    assert!(on_saved(&shell, &vcx), "escape only left the filter");
 
     // `b` ranks `big` (a prefix) above both scopes; the rows stay in row
     // order all the same, scopes first.
@@ -307,7 +504,10 @@ fn the_filter_keeps_sections_and_escape_restores(cx: &mut gpui::TestAppContext) 
     });
     assert_eq!(query, "x");
     assert_eq!(mode, crate::dialogmode::DialogMode::Normal);
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    // The kept filter left the saved group no stop: the cursor rests on the
+    // current rows instead, on the same screen.
+    assert!(!on_saved(&shell, &vcx));
+    assert_eq!(depth(&shell, &vcx), 1);
     assert_eq!(lane_scope(&shell, &vcx), liq_scope(), "nothing loaded");
 }
 
@@ -351,7 +551,7 @@ fn entering_a_vanished_scope_says_so(cx: &mut gpui::TestAppContext) {
     );
     assert!(vcx.debug_bounds("scope-dialog-error").is_some());
     assert_eq!(lane_scope(&shell, &vcx), liq_scope());
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    assert!(on_saved(&shell, &vcx));
     assert_eq!(
         visible_names(&shell, &vcx),
         ["eu", "big", "liq"],
@@ -376,7 +576,7 @@ fn entering_a_vanished_expression_says_so(cx: &mut gpui::TestAppContext) {
         Some("that expression no longer exists")
     );
     assert_eq!(lane_scope(&shell, &vcx), liq_scope());
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    assert!(on_saved(&shell, &vcx));
 }
 
 #[gpui::test]
@@ -397,52 +597,28 @@ fn e_and_n_on_a_scope_row_refuse_with_the_way_to_do_it(cx: &mut gpui::TestAppCon
     );
     vcx.simulate_keystrokes("j");
     assert_eq!(error(&shell, &vcx), None, "a claimed key drops the refusal");
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    assert!(on_saved(&shell, &vcx));
     assert_eq!(lane_scope(&shell, &vcx), liq_scope());
 }
 
-/// The pointer route of `escape` from Saved over Current: the title row's
-/// Back button returns to Current, leaving a filter on the way, in one click.
+/// Back is retired: the saved scopes share the one screen, so neither door
+/// has a screen to go back to.
 #[gpui::test]
-fn the_back_button_returns_from_saved_to_current(cx: &mut gpui::TestAppContext) {
+fn the_scope_dialog_paints_no_back_button(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = open_saved_from_current(cx);
-    vcx.simulate_keystrokes("/");
-    vcx.simulate_input("eu");
+    assert!(on_saved(&shell, &vcx));
+    assert!(vcx.debug_bounds("shell-modal-back").is_none(), "after o");
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
     vcx.run_until_parked();
     draw(&mut vcx);
-    let back = vcx
-        .debug_bounds("shell-modal-back")
-        .expect("Saved over Current paints Back");
-    vcx.simulate_click(back.center(), gpui::Modifiers::default());
-    vcx.run_until_parked();
-    draw(&mut vcx);
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current));
-    assert_eq!(
-        shell.read_with(&vcx, |s, _| s.top_kind()),
-        Some(dialog::DialogKind::Scope)
-    );
-    assert!(vcx.debug_bounds("scope-saved").is_none());
-    assert!(vcx.debug_bounds("scope-dialog").is_some());
+    assert!(on_saved(&shell, &vcx));
+    assert!(vcx.debug_bounds("scope-saved").is_some());
     assert!(
         vcx.debug_bounds("shell-modal-back").is_none(),
-        "Current is the first screen"
+        "after the saved door"
     );
-    assert_eq!(lane_scope(&shell, &vcx), liq_scope(), "nothing loaded");
-}
-
-/// Saved opened alone has no screen behind it: no Back button.
-#[gpui::test]
-fn saved_opened_alone_paints_no_back_button(cx: &mut gpui::TestAppContext) {
-    let (shell, mut vcx) = shell_on_liq(cx);
-    let glyph = vcx
-        .debug_bounds("scope-load-chip")
-        .expect("the load glyph paints");
-    vcx.simulate_click(glyph.center(), gpui::Modifiers::default());
-    vcx.run_until_parked();
-    draw(&mut vcx);
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
-    assert!(vcx.debug_bounds("scope-saved").is_some());
-    assert!(vcx.debug_bounds("shell-modal-back").is_none());
 }
 
 // ---- The save prompt -------------------------------------------------
@@ -1010,7 +1186,7 @@ impl SaveFixture {
         text
     }
 
-    /// Open `liq`'s definition from Saved and change it to `npv > 5`.
+    /// Open `liq`'s definition from the saved group and change it to `npv > 5`.
     fn edit_liq_to_npv_gt_5(&mut self) -> Option<String> {
         self.open_saved_over_liq();
         self.keys("j j j e");
@@ -1024,7 +1200,7 @@ impl SaveFixture {
 
 /// `e` on an expression row opens its definition, seeded with its text and
 /// a note saying who uses it; `enter` writes it, resolved in the frame at
-/// once, and Saved shows again.
+/// once, and the screen shows again with the cursor in the saved group.
 #[gpui::test]
 fn e_on_an_expression_edits_its_definition_with_a_used_by_note(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -1047,7 +1223,7 @@ fn e_on_an_expression_edits_its_definition_with_a_used_by_note(cx: &mut gpui::Te
         Some("npv > 5"),
         "resolved before the flush"
     );
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     assert!(
         f.notice()
             .is_some_and(|n| n.starts_with("copied 'liq' to your config")),
@@ -1197,7 +1373,7 @@ fn the_definition_field_offers_columns_but_no_named_rows(cx: &mut gpui::TestAppC
     assert_eq!(f.top(), definition_step(Some("big")));
     assert_eq!(f.definition_note().as_deref(), Some("not used"));
     f.keys("escape");
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     f.keys("n");
     assert_eq!(f.top(), definition_step(None));
     assert_eq!(f.input_text(), "");
@@ -1267,8 +1443,8 @@ fn an_empty_or_broken_definition_refuses_inline(cx: &mut gpui::TestAppContext) {
 }
 
 /// `n` opens an empty definition; `enter` turns it into a name prompt in
-/// place; naming it writes it without touching the lane's scope, and Saved
-/// shows again.
+/// place; naming it writes it without touching the lane's scope, and the
+/// screen shows again with the cursor in the saved group.
 #[gpui::test]
 fn n_names_a_new_expression_without_applying_it(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -1283,12 +1459,12 @@ fn n_names_a_new_expression_without_applying_it(cx: &mut gpui::TestAppContext) {
             text: "npv < 1".into()
         }))
     );
-    assert_eq!(depth(&f.shell, &f.vcx), 3, "replaces the step in place");
+    assert_eq!(depth(&f.shell, &f.vcx), 2, "replaces the step in place");
     assert!(f.painted("scope-dialog-name-field"));
     assert_eq!(f.input_text(), "", "the field is the name now");
     f.type_text("small");
     assert_eq!(f.enter_and_read_named("small").as_deref(), Some("npv < 1"));
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     assert_eq!(lane_scope(&f.shell, &f.vcx), liq_scope(), "not applied");
     assert_eq!(f.notice(), None, "a new name forks nothing");
     f.flush();
@@ -1313,7 +1489,7 @@ fn naming_a_new_expression_previews_its_text_not_the_scope(cx: &mut gpui::TestAp
     assert!(!f.painted("scope-dialog"), "Current's rows do not paint");
     assert!(!f.painted("scope-dialog-row-0"));
     // The save prompt still previews the lane's scope: that is what it saves.
-    f.keys("escape escape");
+    f.keys("escape");
     assert_eq!(f.top(), Some(Layer::Current));
     f.keys("s");
     assert!(f.painted("scope-dialog-row-0"));
@@ -1373,7 +1549,8 @@ fn the_named_chip_opens_its_definition_alone(cx: &mut gpui::TestAppContext) {
     assert_eq!(f.named_text("liq").as_deref(), Some("npv > 5"));
 }
 
-/// Saved opened alone over a frame with `scopes` and no saved expressions.
+/// The saved door's dialog over a frame with `scopes` and no saved
+/// expressions.
 fn saved_without_expressions(
     cx: &mut gpui::TestAppContext,
     keep_scopes: bool,
@@ -1412,7 +1589,7 @@ fn the_empty_expressions_row_is_a_cursor_stop_for_n_and_enter(cx: &mut gpui::Tes
     assert_eq!(top_layer(&shell, &vcx), definition_step(None));
     vcx.simulate_keystrokes("escape");
     draw(&mut vcx);
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    assert!(on_saved(&shell, &vcx));
     vcx.simulate_keystrokes("enter");
     draw(&mut vcx);
     assert_eq!(
@@ -1439,7 +1616,7 @@ fn the_empty_scopes_row_refuses_with_the_way_to_save_one(cx: &mut gpui::TestAppC
         error(&shell, &vcx).as_deref(),
         Some("narrow the current scope, then save it (s)")
     );
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    assert!(on_saved(&shell, &vcx));
     vcx.simulate_keystrokes("j n");
     draw(&mut vcx);
     assert_eq!(top_layer(&shell, &vcx), definition_step(None));
@@ -1474,7 +1651,7 @@ fn e_on_a_vanished_expression_says_so(cx: &mut gpui::TestAppContext) {
         error(&shell, &vcx).as_deref(),
         Some("that expression no longer exists")
     );
-    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Saved));
+    assert!(on_saved(&shell, &vcx));
 }
 
 // ---- Copy, delete and revert ------------------------------------------
@@ -1541,7 +1718,7 @@ impl SaveFixture {
     }
 
     /// Fork `desk_eu` into the user layer with book BK002 (the desk copy
-    /// holds BK003), flush it, and open Saved over Current on `desk_eu`.
+    /// holds BK003), flush it, and `o` to the saved scopes, on `desk_eu`.
     fn fork_desk_eu_and_open_saved(&mut self) {
         self.set_lane(book("BK002"));
         self.open_current();
@@ -1551,7 +1728,7 @@ impl SaveFixture {
         self.flush();
         assert!(self.user_scopes().contains("[desk_eu"));
         self.keys("o");
-        assert_eq!(top_layer(&self.shell, &self.vcx), Some(Layer::Saved));
+        assert!(on_saved(&self.shell, &self.vcx));
         assert_eq!(self.saved_cursor(), Some(SavedId::Scope("desk_eu".into())));
     }
 
@@ -1585,8 +1762,8 @@ fn copy_step(from: SavedId) -> Option<Layer> {
 
 /// `c` names a copy of the scope under the cursor: the prompt says what it
 /// copies and previews its summary; a taken name refuses; `enter` writes
-/// the source's definition under the new name and Saved shows again with
-/// the cursor on the copy.
+/// the source's definition under the new name and the screen shows again
+/// with the cursor on the copy.
 #[gpui::test]
 fn c_copies_a_scope_under_a_new_name(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -1614,7 +1791,7 @@ fn c_copies_a_scope_under_a_new_name(cx: &mut gpui::TestAppContext) {
         f.key_and_read_saved("enter", "eu2"),
         "resolved before the flush"
     );
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     assert_eq!(f.saved_summary("eu2").as_deref(), Some("book BK001"));
     assert_eq!(f.saved_cursor(), Some(SavedId::Scope("eu2".into())));
     assert_eq!(f.notice(), None, "a new name forks nothing");
@@ -1640,7 +1817,7 @@ fn c_copies_an_expression_with_its_text(cx: &mut gpui::TestAppContext) {
     );
     f.type_text("liq2");
     f.keys("enter");
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     assert_eq!(f.named_text("liq2").as_deref(), Some("npv > 0"));
     assert_eq!(f.saved_cursor(), Some(SavedId::Expression("liq2".into())));
     assert_eq!(lane_scope(&f.shell, &f.vcx), liq_scope(), "not applied");
@@ -1667,7 +1844,7 @@ fn d_deletes_a_user_scope_after_yes(cx: &mut gpui::TestAppContext) {
     assert!(!f.queued(), "nothing queued before the answer");
     assert!(!f.key_and_read_saved("y", "eu"), "removed before the flush");
     assert!(!f.painted("scope-dialog-confirm"));
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     assert_eq!(visible_names(&f.shell, &f.vcx), ["desk_eu", "big", "liq"]);
     assert_eq!(f.saved_cursor(), Some(SavedId::Expression("big".into())));
     f.flush();
@@ -1701,8 +1878,10 @@ fn deleting_a_used_expression_leaves_a_broken_reference(cx: &mut gpui::TestAppCo
     );
     f.keys("y");
     assert_eq!(f.named_text("mine"), None);
-    f.keys("escape");
-    assert_eq!(f.top(), Some(Layer::Current));
+    // The current sections share the screen: the broken reference shows
+    // without leaving the saved group.
+    assert!(on_saved(&f.shell, &f.vcx));
+    assert_eq!(depth(&f.shell, &f.vcx), 1, "the screen, no step over it");
     assert_eq!(
         lane_scope(&f.shell, &f.vcx).named,
         ["mine"],
@@ -1814,17 +1993,13 @@ fn a_question_answered_after_the_row_vanished_removes_nothing(cx: &mut gpui::Tes
     assert!(!f.queued());
 }
 
-/// A question over Saved owns the pointer as well as the keys: a row's
-/// double-click, the Back button and the filter row do nothing.
+/// A question over the saved group owns the pointer as well as the keys: a
+/// row's double-click and the filter row do nothing.
 #[gpui::test]
 fn a_question_over_saved_ignores_the_pointer(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
     f.open_saved_over_liq();
     let row = f.vcx.debug_bounds("scope-saved-row-1").expect("eu paints");
-    let back = f
-        .vcx
-        .debug_bounds("shell-modal-back")
-        .expect("Saved over Current paints Back");
     let filter = f
         .vcx
         .debug_bounds("scope-saved-filter")
@@ -1835,14 +2010,10 @@ fn a_question_over_saved_ignores_the_pointer(cx: &mut gpui::TestAppContext) {
     f.vcx.run_until_parked();
     draw(&mut f.vcx);
     f.vcx
-        .simulate_click(back.center(), gpui::Modifiers::default());
-    f.vcx.run_until_parked();
-    draw(&mut f.vcx);
-    f.vcx
         .simulate_click(filter.center(), gpui::Modifiers::default());
     f.vcx.run_until_parked();
     draw(&mut f.vcx);
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     assert!(
         f.painted("scope-dialog-confirm"),
         "the question is still up"
@@ -1856,7 +2027,7 @@ fn a_question_over_saved_ignores_the_pointer(cx: &mut gpui::TestAppContext) {
     assert_eq!(mode, Some(crate::dialogmode::DialogMode::Normal));
 }
 
-// ---- `s` on Saved, unchanged writes, a definition deleted under its step --
+// ---- `s` on a saved row, unchanged writes, a definition deleted under its step --
 
 fn owner(f: &SaveFixture, doc: &str, name: &str) -> crate::shell::objectdialog::apply::Owner {
     f.shell.read_with(&f.vcx, |s, _| {
@@ -1864,9 +2035,9 @@ fn owner(f: &SaveFixture, doc: &str, name: &str) -> crate::shell::objectdialog::
     })
 }
 
-/// The empty Scopes row says `s` saves the current scope, so `s` on Saved
+/// The empty Scopes row says `s` saves the current scope, so `s` there
 /// pushes the save prompt over the screen, previewing the lane's scope;
-/// `enter` saves and Saved shows again, the new scope listed.
+/// `enter` saves and the screen shows again, the new scope listed.
 #[gpui::test]
 fn s_on_saved_pushes_the_save_prompt_and_returns_to_saved(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
@@ -1881,39 +2052,42 @@ fn s_on_saved_pushes_the_save_prompt_and_returns_to_saved(cx: &mut gpui::TestApp
     assert!(f.painted("scope-saved-empty-scopes"));
     f.keys("s");
     assert_eq!(f.top(), save_step());
-    assert_eq!(depth(&f.shell, &f.vcx), 2, "pushed over Saved");
+    assert_eq!(depth(&f.shell, &f.vcx), 2, "pushed over the screen");
     assert!(f.painted("scope-dialog-name-field"));
     assert!(f.painted("scope-dialog"), "the lane's scope previews");
     f.type_text("mine");
     f.keys("enter");
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     assert_eq!(f.top_kind(), Some(dialog::DialogKind::Scope));
     assert!(visible_names(&f.shell, &f.vcx).contains(&"mine".to_string()));
     assert_eq!(f.loaded_from().as_deref(), Some("mine"));
     f.keys("s");
     assert_eq!(f.top(), save_step());
     f.keys("escape");
-    assert_eq!(f.top(), Some(Layer::Saved), "escape returns to Saved too");
+    assert!(
+        on_saved(&f.shell, &f.vcx),
+        "escape returns to the saved group too"
+    );
 }
 
 /// The save door (`scope::save_current`, the save chip) with the dialog on
-/// top on Saved pushes the prompt over it, as `s` does there.
+/// top on its screen pushes the prompt over it, as `s` does there.
 #[gpui::test]
 fn the_save_door_over_saved_pushes_the_prompt(cx: &mut gpui::TestAppContext) {
     let mut f = save_fixture(cx);
     f.set_lane(book("BK002"));
     dispatch_action(&f.shell, "frame::scope_saved", &mut f.vcx);
     draw(&mut f.vcx);
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     dispatch_action(&f.shell, "scope::save_current", &mut f.vcx);
     draw(&mut f.vcx);
     assert_eq!(f.top(), save_step());
     assert_eq!(depth(&f.shell, &f.vcx), 2);
     f.keys("escape");
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
 }
 
-/// The empty Expressions row names the key that works on Saved.
+/// The empty Expressions row names the key that works on it.
 #[gpui::test]
 fn the_empty_expressions_row_names_n(cx: &mut gpui::TestAppContext) {
     assert_eq!(
@@ -1935,7 +2109,7 @@ fn an_unchanged_definition_enter_writes_nothing(cx: &mut gpui::TestAppContext) {
     f.keys("j j j e");
     assert_eq!(f.top(), definition_step(Some("liq")));
     f.keys("enter");
-    assert_eq!(f.top(), Some(Layer::Saved));
+    assert!(on_saved(&f.shell, &f.vcx));
     assert!(!f.queued(), "nothing queued");
     assert_eq!(f.notice(), None, "no fork announced");
     assert_eq!(
@@ -2013,4 +2187,413 @@ fn a_definition_deleted_under_the_step_refuses_and_writes_nothing(cx: &mut gpui:
     assert_eq!(f.top(), definition_step(Some("mine")));
     assert!(!f.queued(), "nothing queued");
     assert_eq!(f.named_text("mine"), None);
+}
+
+/// Forty saved scopes: the last is far below the list's height.
+#[gpui::test]
+fn the_list_scrolls_to_a_saved_row_below_the_fold(cx: &mut gpui::TestAppContext) {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&scopes));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    // From s00: `o` to the first expression (`big`), far below the fold.
+    // The list scrolls the least that shows it, so it sits on the bottom
+    // edge: an index one child too high would leave `liq` there instead.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let big = bounds(&mut vcx, "scope-saved-row-40".to_string()).expect("big paints");
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    assert!(
+        big.top() >= list.top() && big.bottom() <= list.bottom(),
+        "{big:?} inside {list:?}"
+    );
+    assert!(
+        (list.bottom() - big.bottom()).abs() < gpui::px(1.),
+        "{big:?} on the bottom edge of {list:?}"
+    );
+    // `k` back to s39.
+    vcx.simulate_keystrokes("k");
+    draw(&mut vcx);
+    let at = shell.read_with(&vcx, |s, _| {
+        let d = s.scope_dialog.as_ref().expect("dialog open");
+        d.saved.cursor_row().map(|r| r.name.clone())
+    });
+    assert_eq!(at.as_deref(), Some("s39"));
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(&mut vcx, "scope-saved-row-39".to_string()).expect("the row paints");
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "{row:?} inside {list:?}"
+    );
+}
+
+/// A toggle from `mod+o` adds a current row above the saved cursor: the
+/// list follows the cursor's row down rather than leaving it under the fold.
+#[gpui::test]
+fn a_toggle_that_adds_a_current_row_keeps_the_saved_row_in_view(cx: &mut gpui::TestAppContext) {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&scopes));
+    let shell = shell_of(&window, &mut vcx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(liq_scope());
+        f.shared_mut().clear_history();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    // The saved scopes, then the saved expressions: `big`, on the bottom edge.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert!(
+        lane_scope(&shell, &vcx).named.iter().any(|n| n == "big"),
+        "big toggled on"
+    );
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current), "stays open");
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(&mut vcx, "scope-saved-row-40".to_string()).expect("big paints");
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "{row:?} inside {list:?}"
+    );
+}
+
+/// A refresh that moves nothing (a data or frame tick, an unchanged key)
+/// leaves a wheel-scrolled list where the wheel put it; the next key that
+/// moves the cursor brings it back into view.
+#[gpui::test]
+fn a_refresh_that_moves_nothing_keeps_a_wheel_scroll(cx: &mut gpui::TestAppContext) {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&scopes));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let before = shell.read_with(&vcx, |s, _| s.scope_dialog_scroll.offset());
+    vcx.simulate_event(gpui::ScrollWheelEvent {
+        position: list.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(-400.))),
+        modifiers: gpui::Modifiers::default(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    draw(&mut vcx);
+    let wheeled = shell.read_with(&vcx, |s, _| s.scope_dialog_scroll.offset());
+    assert!(
+        wheeled.y < before.y,
+        "the wheel scrolled: {before:?} -> {wheeled:?}"
+    );
+    shell.update(&mut vcx, |s, cx| s.refresh_dialog_rows(cx));
+    draw(&mut vcx);
+    let after = shell.read_with(&vcx, |s, _| s.scope_dialog_scroll.offset());
+    assert_eq!(after, wheeled, "no snap back to the cursor");
+    // `j` moves the cursor: the list follows it again.
+    vcx.simulate_keystrokes("j");
+    draw(&mut vcx);
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(&mut vcx, "scope-saved-row-1".to_string()).expect("s01 paints");
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "{row:?} inside {list:?}"
+    );
+}
+
+/// A step drawn over the screen previews the current sections alone, so
+/// the list's offset clamps while it is up: leaving it brings the saved
+/// cursor back into view, though its row and child never changed.
+#[gpui::test]
+fn leaving_the_text_step_brings_the_saved_cursor_back_into_view(cx: &mut gpui::TestAppContext) {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&scopes));
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    // `o` to `big`, far below the fold, then `k` to s39.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("k");
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("s39"));
+    vcx.simulate_keystrokes("t");
+    draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("scope-saved").is_none(),
+        "the step hides saved"
+    );
+    vcx.simulate_keystrokes("escape");
+    draw(&mut vcx);
+    assert_eq!(top_layer(&shell, &vcx), Some(Layer::Current));
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("s39"));
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let row = bounds(&mut vcx, "scope-saved-row-39".to_string()).expect("s39 paints");
+    assert!(
+        row.top() >= list.top() && row.bottom() <= list.bottom(),
+        "{row:?} inside {list:?}"
+    );
+}
+
+/// While the filter is live the field owns the keyboard: a press on a
+/// current row or an `add` control would act behind it, so neither moves
+/// the cursor out of the saved group nor opens a step.
+#[gpui::test]
+fn the_current_rows_ignore_the_pointer_while_the_filter_is_live(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    let row = vcx
+        .debug_bounds("scope-dialog-row-0")
+        .expect("the liq row paints");
+    let add = vcx
+        .debug_bounds("scope-dialog-add-dimensions")
+        .expect("the add control paints");
+    vcx.simulate_keystrokes("/");
+    draw(&mut vcx);
+    super::double_click(&mut vcx, row.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    vcx.simulate_click(add.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.top_kind()),
+        Some(dialog::DialogKind::Scope),
+        "no picker opened"
+    );
+    assert_eq!(depth(&shell, &vcx), 1, "no step pushed");
+    assert!(
+        on_saved(&shell, &vcx),
+        "the cursor stays in the saved group"
+    );
+    let mode = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.saved.mode));
+    assert_eq!(mode, Some(crate::dialogmode::DialogMode::Filter));
+}
+
+/// Forty saved scopes as builtin TOML: the saved group overflows the list.
+fn forty_scopes() -> String {
+    let mut scopes = String::new();
+    for i in 0..40 {
+        scopes.push_str(&format!(
+            "[s{i:02}]\n[s{i:02}.dimensions]\nbook = [\"BK{i:03}\"]\n"
+        ));
+    }
+    scopes
+}
+
+/// Whether the element under `selector` paints wholly inside the list.
+fn in_list(vcx: &mut gpui::VisualTestContext, selector: &str) -> bool {
+    let list = vcx
+        .debug_bounds("scope-dialog-scroll")
+        .expect("the list paints");
+    let el = bounds(vcx, selector.to_string()).unwrap_or_else(|| panic!("{selector} paints"));
+    el.top() >= list.top() && el.bottom() <= list.bottom()
+}
+
+/// The list's offset survives a close on the shell's handle: a reopened
+/// dialog still starts at the top, from either door, with the Dimensions
+/// header in view — not where the last visit left it.
+#[gpui::test]
+fn the_dialog_reopens_at_the_top_after_a_scrolled_visit(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&forty_scopes()));
+    let shell = shell_of(&window, &mut vcx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(liq_scope());
+        f.shared_mut().clear_history();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    let scroll_away = |vcx: &mut gpui::VisualTestContext| {
+        // The saved scopes, then `big`, far below the fold.
+        vcx.simulate_keystrokes("o");
+        draw(vcx);
+        vcx.simulate_keystrokes("o");
+        draw(vcx);
+        let offset = shell.read_with(vcx, |s, _| s.scope_dialog_scroll.offset());
+        assert!(offset.y < gpui::px(-200.), "scrolled away: {offset:?}");
+        vcx.simulate_keystrokes("escape");
+        draw(vcx);
+        assert!(shell.read_with(vcx, |s, _| s.scope_dialog.is_none()));
+    };
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    scroll_away(&mut vcx);
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    assert!(
+        in_list(&mut vcx, "scope-dialog-section-dimensions"),
+        "mod+o reopens with the Dimensions header in view"
+    );
+    scroll_away(&mut vcx);
+    // The saved door lands on s00, a few rows down: from the top the list
+    // need not move, so the current sections stay in view above it.
+    dispatch_action(&shell, "frame::scope_saved", &mut vcx);
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("s00"));
+    assert!(
+        in_list(&mut vcx, "scope-dialog-section-dimensions"),
+        "the saved door reopens with the Dimensions header in view"
+    );
+    assert!(in_list(&mut vcx, "scope-saved-row-0"), "and its row");
+}
+
+/// Following the cursor up onto a section's first row shows the section's
+/// header with it, and the first current row shows the contradiction line
+/// above its header: a minimal scroll to the row alone would pin it to the
+/// top edge with both hidden above.
+#[gpui::test]
+fn following_up_to_a_section_start_shows_its_header(cx: &mut gpui::TestAppContext) {
+    let (window, mut vcx) = open_shell(cx, services_with_scopes(&forty_scopes()));
+    let shell = shell_of(&window, &mut vcx);
+    frame_of(&shell, &vcx).update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(Scope {
+            impossible: true,
+            ..liq_scope()
+        });
+        f.shared_mut().clear_history();
+        cx.notify();
+    });
+    vcx.run_until_parked();
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    assert!(in_list(&mut vcx, "scope-dialog-contradiction"));
+    // Down to `big`, then `k` up through all forty scopes to s00.
+    vcx.simulate_keystrokes("o o");
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    for _ in 0..40 {
+        vcx.simulate_keystrokes("k");
+        draw(&mut vcx);
+    }
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("s00"));
+    assert!(in_list(&mut vcx, "scope-saved-row-0"));
+    assert!(
+        in_list(&mut vcx, "scope-saved-section-scopes"),
+        "the SAVED SCOPES header shows with its first row"
+    );
+    // Down to `big` again, then `o` back to the first current row.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    assert!(!in_list(&mut vcx, "scope-saved-row-0"), "scrolled down");
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert!(!on_saved(&shell, &vcx));
+    assert!(in_list(&mut vcx, "scope-dialog-row-0"));
+    assert!(
+        in_list(&mut vcx, "scope-dialog-section-dimensions"),
+        "the first header shows above the first current row"
+    );
+    assert!(
+        in_list(&mut vcx, "scope-dialog-contradiction"),
+        "and the contradiction line above it"
+    );
+}
+
+/// A kept filter that emptied the saved scopes: `o` from a current row
+/// passes over them to the saved expressions instead of stalling.
+#[gpui::test]
+fn o_passes_over_a_section_a_kept_filter_emptied(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = shell_on_liq(cx);
+    dispatch_action(&shell, "frame::scope", &mut vcx);
+    draw(&mut vcx);
+    vcx.simulate_keystrokes("/");
+    vcx.simulate_input("liq");
+    vcx.simulate_keystrokes("enter");
+    draw(&mut vcx);
+    assert_eq!(visible_names(&shell, &vcx), ["liq"]);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("liq"));
+    // liq → the current row → past the empty scopes to liq again.
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert!(!on_saved(&shell, &vcx), "on the current row");
+    vcx.simulate_keystrokes("o");
+    draw(&mut vcx);
+    assert!(on_saved(&shell, &vcx), "o reached the saved expressions");
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("liq"));
+}
+
+/// The saved footer shows `e` and `n` only where they act: neither on a
+/// scope row (where both refuse), both on an expression row, and `n` alone
+/// on the empty Expressions row.
+#[gpui::test]
+fn the_saved_footer_shows_e_and_n_only_where_they_act(cx: &mut gpui::TestAppContext) {
+    let (shell, mut vcx) = open_saved_from_current(cx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("asia"));
+    assert!(vcx.debug_bounds("scope-saved-hint-e").is_none());
+    assert!(vcx.debug_bounds("scope-saved-hint-n").is_none());
+    vcx.simulate_keystrokes("j j"); // big
+    draw(&mut vcx);
+    assert_eq!(saved_name(&shell, &vcx).as_deref(), Some("big"));
+    assert!(vcx.debug_bounds("scope-saved-hint-e").is_some());
+    assert!(vcx.debug_bounds("scope-saved-hint-n").is_some());
+
+    let (shell, mut vcx) = saved_without_expressions(cx, true);
+    vcx.simulate_keystrokes("j j");
+    draw(&mut vcx);
+    assert!(on_saved(&shell, &vcx));
+    assert!(
+        vcx.debug_bounds("scope-saved-hint-new").is_some(),
+        "on the empty row"
+    );
+    assert!(vcx.debug_bounds("scope-saved-hint-e").is_none());
+    assert!(vcx.debug_bounds("scope-saved-hint-n").is_some());
+}
+
+/// While the filter is live a press on the empty Expressions row would open
+/// the definition step over the typing: it is ignored, as the current rows'
+/// presses are.
+#[gpui::test]
+fn the_empty_expressions_row_ignores_the_pointer_while_the_filter_is_live(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (shell, mut vcx) = saved_without_expressions(cx, true);
+    vcx.simulate_keystrokes("/");
+    draw(&mut vcx);
+    let empty = vcx
+        .debug_bounds("scope-saved-empty-expressions")
+        .expect("the empty row paints under the filter");
+    vcx.simulate_click(empty.center(), gpui::Modifiers::default());
+    vcx.run_until_parked();
+    draw(&mut vcx);
+    assert_eq!(depth(&shell, &vcx), 1, "no step pushed");
+    let mode = shell.read_with(&vcx, |s, _| s.scope_dialog.as_ref().map(|d| d.saved.mode));
+    assert_eq!(mode, Some(crate::dialogmode::DialogMode::Filter));
 }

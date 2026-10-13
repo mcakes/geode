@@ -101,6 +101,8 @@ fn main() {
             geode_volslice::init(cx);
             // The classifications grid keeps its own keys from the table.
             geode_classifications::init(cx);
+            // The watchlist grid likewise.
+            geode_watchlist::init(cx);
             // Keep table bindings from consuming the pricer's editing keys.
             geode_pricer::init(cx);
 
@@ -298,6 +300,7 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.volslice.clone()));
     roster.add(Box::new(bridge.classifications.clone()));
+    roster.add(Box::new(bridge.watchlist.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
     // Dimension actions: Open in Nemo on a position or an instrument, and
     // Move LHU on a position.
@@ -1322,6 +1325,23 @@ label = "skew"
                 expected,
                 "{chord} vs {vim} in {stack:?}"
             );
+        }
+        // A surface that neither copies nor pastes binds neither half: a
+        // chord without its vim key, or the reverse, would be the
+        // inconsistency this test exists to catch.
+        let without = [tile("watchlist", "normal"), tile("watchlist", "visual")];
+        for stack in &without {
+            for (chord, vim) in [("ctrl+c", "y y"), ("ctrl+v", "p")] {
+                for keys in [chord, vim] {
+                    let bound = resolve(stack, keys);
+                    assert!(
+                        bound
+                            .as_deref()
+                            .is_none_or(|a| !a.starts_with("watchlist::")),
+                        "{keys} in {stack:?} resolved to {bound:?}: the kind has no yank or paste"
+                    );
+                }
+            }
         }
     }
 

@@ -163,9 +163,10 @@ sits in the same context-free block beside `mod+g` (`frame::grouping`) and
 [Scope dialog](input-and-dialogs.md#scope-dialog)). It acts on
 the focused tile, so over a page the chord still dispatches and the action
 is refused with `close the page first (esc)`.
-`frame::scope_saved` ("Saved scopes and expressions…") opens that dialog on
-its [Saved](input-and-dialogs.md#saved) screen and has no default binding:
-`o` inside the dialog and the toolbar's load glyph already reach it, and
+`frame::scope_saved` ("Saved scopes and expressions…") opens that dialog
+with the cursor on its [saved scopes](input-and-dialogs.md#saved), closing
+it after a load, and has no default binding: `o` inside the dialog already
+reaches them, and
 the palette lists it for a user who wants a chord.
 
 Predicates support flags, comparisons, boolean operators, and parentheses:

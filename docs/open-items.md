@@ -31,9 +31,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   slot from the list drops its activation; `restore_ad_hoc(_, false)` bumps the
   grouping generation; a hand-edited session with both a slot and an active ad
   hoc chain drops the slot silently; lead rows are rebuilt eagerly.
-- Scope dialog: the Saved screen's `e`/`d`/`r` have no pointer route (a `⋯`
-  menu would give one). Row ids on Current and Saved are positional.
-  `note_saved_as` is kept after a failed write, and an optimistic refresh survives
+- Scope dialog: a saved row's `e`/`d`/`r` have no pointer route (a `⋯`
+  menu would give one). `note_saved_as` is kept after a failed write, and an optimistic refresh survives
   a rejected merge.
 - Scope dialog: a saved scope deleted mid-session leaves `loaded_from` until
   restart (the title is correct). `mod+s` naming then `escape` takes two escapes
@@ -163,11 +162,17 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   create → Escape returns correctly; back button in the title row.
 - Grouping dialog: rows, badges, hover controls, save prompt, the `* · chain`
   readout.
-- Scope dialog Current: sections, empty rows, add controls, glyphs, counts,
-  title, text field, `+` pressed fill and tooltip, stacked step titles. Saved:
-  sections, notes, applied/broken marks, filter, empty-row stops, save prompt and
+- Scope dialog current sections: empty rows, add controls, glyphs, counts,
+  title, text field, `+` pressed fill and tooltip, stacked step titles. Saved
+  sections: notes, applied/broken marks, filter, empty-row stops, save prompt and
   its question, definition field with suggestions and used-by note, name preview,
   load glyph pressed.
+- Scope dialog one screen: the separator hairline staying 1 px in the scroll
+  list, the `SAVED SCOPES` / `SAVED EXPRESSIONS` headers, the filter row's
+  placement above the saved group, the list's 16-row height and its scrolling
+  (keys and mouse wheel; a refresh must not snap a wheel scroll back), the
+  cursor highlight crossing between the groups, and the load glyph vs `+`
+  pressed fills by opener.
 - Scope expression suggestions: row layout and detail alignment, warning color
   across themes, dialog height as the list changes.
 - Toolbar: mono expression term chips with `×` inset; `≡` named-expression chip
@@ -398,8 +403,12 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   chip, unscoped chip and tooltip, refusal notice, `· N of M legs`, hidden-landing
   footer.
 - Grouping and sort: group-row grounds, sort arrow after a header click, the icon
-  beside labels at Large font, rows reordering live, group-row double-click, find
-  highlight color.
+  beside labels at Large font, rows reordering live, group-row double-click (label
+  toggles, value cell edits), find highlight color.
+- Group-row edit: the editor, typeahead and date field painted on a group row's
+  cell over its ground; the empty seed on a `mixed` cell; a live step on a closed
+  group repainting its folded cells; the cursor landing on the merged group after
+  a re-tag; the `hidden` count in the notice.
 - Selection: tint over package ground, footer position-risk totals, held
   `shift+up` repaint and reprice, shift+click/drag, click inside the editor, the
   entry-bar shift press, light and dark.
@@ -583,6 +592,18 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The `⋯` button, action menu placement, `y −2.75%…2.75%` ylim chip, out-of-domain
   clipping.
 
+## Cell glyphs
+
+### Display checks
+
+- Cell glyphs (`cargo run -p geode-widgets --example cells`, `t` toggles the
+  theme): the change chip's tint ceiling against its text on light and dark;
+  the slider marker's warning tone at 0.05, 0.10, 0.90 and 0.97 and the plain
+  marker between; the heat tint's spread across the level column; the bar's
+  sides and zero axis lined up down the column (SMI's two-digit spread); the
+  `NKY` change shown as `+0.0` with no tint; the `KOSPI2` change and rank
+  paint `—` with no glyph, lined up with the numbers above and below.
+
 ## Data path
 
 ### Open work
@@ -724,10 +745,6 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
-- `validate_name` does not yet refuse names the watchlist actions will
-  reserve; add that refusal when Part 2 registers the actions.
-- The tile's `shift+r` refresh trigger (spec §4.3) arrives with the tile in
-  Part 2; the cache has no caller for a manual refresh yet.
 - The vol watchlist spec's `europe_risk` member the demo surface lacks (so the
   tile can show a muted missing member) is not in `watchlists.toml` yet; it
   lands with the vol watchlist tile in Part 4.
@@ -738,12 +755,64 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   harness anchors the `watchlists` conjunct of `views_changed` in
   `hot_reload.rs` and the `dims` term of the fold comparison, not the
   `scopes` and `expressions` conjuncts.
+- The grid rebuild bench (`watchlist_rebuild_after_edit_5k` 4.0 ms,
+  `watchlist_rows_and_grid_5k` 1.7 ms) was taken on a loaded machine;
+  re-measure quiet.
+- `resolve_members` scans `include` once per name (O(m×n)); a set over the
+  manual names would make it linear.
+- A `/` filter hiding a waiting seed's row lets the next `Current` snapshot
+  forget the seed (untested).
+- `edit::undo` puts a restored name back at the end of `include` rather
+  than its old position, so the file's order moves.
+- `History::unsaved` is cleared only when the history is forgotten, so a
+  name refused once reads `not saved` on a later foreign skip instead of
+  `changed elsewhere`.
+- The chord-to-text `spell` helper in the watchlist tile is the first of
+  its kind and belongs on `geode_shell::keymap::Keystroke`.
+- The tile's choice painter is a third per-module copy (classifications,
+  pricer have their own) and should fold into `geode_tile`.
+- `rule_config()` clones the saved scopes and named expressions on every
+  rule commit and prompt open; an `Rc<WatchlistConfig>` on the factory
+  removes the copy.
+- `own` and `revertible` return differently shaped results.
+- Untested object paths: a withdraw when the asked-about list vanishes, a
+  `New…` field surviving a snapshot change, the refused-delete restore,
+  `not renamed: <why>` on a late clash, `not cloned: … no longer exists`.
+- `geode::watchlist` is not a `[log]` target: its lines follow `default`.
+- The expression completion offers no categorical values (the tile issues
+  no distinct query).
+- The rules popup binds its own keys only: `u`, `ctrl+r`, `shift+r`, `g w`
+  and `.` act after it is closed, or from the palette.
+- `snapshot_changed` rebuilds the rows on every `WatchlistGlobal`
+  replacement, and the bridge replaces the global when any list's state
+  changes; comparing the shown entry against the last one seen
+  (`WatchlistState` is `PartialEq`) would make the rebuild change-only.
+- `set_visible` is a no-op in the watchlist tile as in classifications: a
+  hidden stack member with an open add field keeps window focus. A fix is
+  a shell-wide mechanism for every tile with an input, not one tile's.
 
 ### Display checks
 
-- The demo lists (`us_core`, `europe_risk`) on first open. Part 1 has no
-  tile; the `geode::watchlist` debug line (resolution time and live member
-  count) is the only check so far.
+- The header: counts, the resolution state (`resolving…` / `as of` /
+  `failed`), the layer badge.
+- Excluded rows at the foot in the muted tone, and the `not in reference`
+  mark beside the name.
+- The add field's typeahead under the prompt bar.
+- The rules popup hung from the `<k> rules` item, and painted inline under
+  the prompt bar while a rule prompt is open with the field's completion
+  rows over it.
+- Expression completion rows, the error line, and the `values not
+  suggested here` hint tones.
+- The confirm bar wrapping on a narrow tile.
+- The empty, `saving <name>…` and removed states, and the switcher after
+  Delete.
+- The header sort icon reaching the sort.
+- Tile focus loss leaving the rules popup open (consistent with the `⋯`
+  menu).
+- The demo walk-through: switch to `europe_risk`, `o` add HSI, `x` on DAX,
+  `r` → `o` → a dataset → whole dataset, `u` twice, Clone… as `eu_copy`,
+  Rename… and Delete… the copy, reading the `geode::watchlist` log line
+  for each re-resolution.
 
 ## Diagnostics page
 
