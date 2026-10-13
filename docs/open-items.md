@@ -553,6 +553,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - As-of: backfilled bars paint under a historical as-of.
 - The `geode-chart` example (`cargo run -p geode-chart --example chart`) against
   the chart spec's display list, including content masks.
+- Spark (`cargo run -p geode-chart --example spark`, `t` toggles the theme): line
+  and end-dot contrast on light and dark; the ring separates the dot from a tinted
+  row; the term glyph's shared range and 3M mark; the NaN-gap and NaN-end rows;
+  the one-year column at band width.
 
 ## Vol slice and link groups
 

@@ -153,6 +153,9 @@ the measurement log for fixture and hardware details.
 | Series query with a rolling expression | one minute slot plus `sma(diff(A), 20) / A[0]` over one month | 7.76 ms |
 | Series query with `ema` | one minute slot plus `ema(A, 20)` over one month | 14.3 ms |
 | Chart path rebuild | 500,000 points into 1,600 columns | 1.51 ms |
+| Spark layout | 30 values into a 72 px cell (layout only: index spacing, range, clamp, decimation; excludes path tessellation and paint) | 171 ns |
+| Spark layout, band width | 252 values into a 140 px cell (layout only, as above) | 1.08 µs |
+| Spark column | 25 rows × 30 values with a shared range (layout only, as above) | 4.26 µs |
 | Timeseries chart model | 500,000 buckets × four slots | 259 µs |
 | Blotter fully expanded flatten | 720,881 result nodes | 1.18 ms |
 | Blotter selection summary | 720,881 rows, every measure column | 1.20 ms |

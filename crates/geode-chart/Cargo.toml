@@ -31,6 +31,10 @@ proptest = "1"
 name = "decimate"
 harness = false
 
+[[bench]]
+name = "spark"
+harness = false
+
 # Exclude the examples from the built-in benchmark harness.
 [[example]]
 name = "chart"
@@ -38,4 +42,8 @@ bench = false
 
 [[example]]
 name = "xy"
+bench = false
+
+[[example]]
+name = "spark"
 bench = false

@@ -18,10 +18,12 @@ xy element's in the vol slice viewer:
 | `core` | Window-free geometry and labels: y scales and 1-2-5 ticks, axes and panes, layout and the plot under a point, the view window, the time x scale with its ticks and crosshair, the linear x scale with its formats, ticks and zoom and pan orientation (`linear`), dash and point-mark stroke geometry and the outline under a filled line (`marks`), hit testing, decimation, and theme-derived palette values. |
 | `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid and y axes), the x-axis painter, stroke builders, the fill builder, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
 | `timeseries` | `ChartModel` and `ChartSlot`, the immutable prepared input, and `ChartElement`: polylines over a session or continuous time axis, with percentile rules and density bars. |
+| `spark` | `Spark`, the grid-cell glyph: a sparkline or term glyph laid out by `core::spark` (values evenly spaced by index; the series' own or a column's shared y-range, a value outside it clamped inside the cell; decimated to the width; the last finite value as the end point and an optional marked point) and painted with the kit's stroke builder, a ringed end dot and a mark dot, clipped to its cell. No axes, grid, labels, tooltip or keyed state; the host supplies every color in `SparkPaint`. |
 | `xy` | `XyModel` and `XySlot`, the immutable prepared input, and `XyElement`: lines, solid or dashed and optionally shaded down to zero, and point marks with a range bar, over a linear x axis that can run reversed. Re-exports the axis's `XFormat` and `LinearX`. |
 
-Both elements paint through gpui-component's `Plot`, in up to two panes with
-four y axes, with cached data paths and chrome.
+Both chart elements paint through gpui-component's `Plot`, in up to two panes
+with four y axes, with cached data paths and chrome. `Spark` paints through
+the same `Plot` surface but has no panes, chrome or caches.
 
 ## Commands
 
@@ -122,6 +124,21 @@ need readback or a fork of gpui; none is used.
   palette tests sweep them). A `HuePalette` color costs a conversion and a
   bisection per call: callers prepare colors when the theme or the indices
   change, never per frame.
+
+### `spark`
+
+- A value outside the y-range is clamped to the cell's inset edge, never
+  painted into a neighbouring row; a flat range draws through the middle.
+- Non-finite values break the line, which never connects across a gap. Each
+  run starts and ends on its true first and last values, decimation
+  notwithstanding, so the line ends under the end dot. A value with a gap or
+  the series' edge on both sides paints as a dot in the line's color. The end
+  dot marks the last finite value; a mark on a non-finite or out-of-range
+  index is not painted. A series with no finite value, or a cell no larger
+  than the dots' inset, paints nothing.
+- Layout reuses one thread-local scratch, so a grid of sparklines repaints
+  without growing memory; the stroke's gpui path is the only per-paint
+  allocation. The element has no id, so it carries no keyed state.
 
 ### `timeseries`
 
