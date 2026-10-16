@@ -13,7 +13,8 @@ use chrono::{TimeZone as _, Utc};
 use geode_core::config::Layer;
 use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
-use geode_core::query::{HistoryKeysOutcome, HistoryKeysParams, QueryKey};
+use geode_core::query::{HistoryKeysOutcome, HistoryKeysParams, QueryKey, ReferenceTable};
+use geode_core::reference::ReferenceData;
 use geode_core::scopes::SavedScopes;
 use geode_core::volboard::{
     Cell, Change, Lookback, VolBoard, VolBoardOutcome, VolBoardParams, VolRow,
@@ -27,6 +28,7 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{Frame, FrameRef};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
 use geode_shell::module::{Delivery, FindEvent, ModuleFactory, ModuleRoster, TileContent};
+use geode_shell::reference::ReferenceGlobal;
 use geode_shell::tiling::{TileId, WorkspaceIx};
 use geode_shell::watchlist::WatchlistGlobal;
 use gpui::{AppContext as _, Entity, Window};
@@ -52,6 +54,9 @@ struct ShellStandIn {
     content: Rc<dyn TileContent>,
     keymap: Rc<Keymap>,
     matcher: Matcher,
+    /// Every action id the keymap matched, in order, whether or not the
+    /// tile carried it out.
+    dispatched: Rc<RefCell<Vec<String>>>,
 }
 
 impl gpui::Render for ShellStandIn {
@@ -59,6 +64,9 @@ impl gpui::Render for ShellStandIn {
         use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
         gpui::div()
             .size_full()
+            // The shell root's context, under which the app reclaims tab
+            // from gpui-component's Root focus cycling.
+            .key_context("GeodeShell")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let context = this.content.key_context(cx);
@@ -74,6 +82,7 @@ impl gpui::Render for ShellStandIn {
                 if let MatchResult::Matched { action, count } =
                     this.matcher.press(&this.keymap, keystroke, &stack)
                 {
+                    this.dispatched.borrow_mut().push(action.0.clone());
                     this.content.dispatch(&action, count, window, cx);
                     cx.stop_propagation();
                 }
@@ -112,6 +121,7 @@ pub(super) struct Harness {
     pub rx: RefCell<Option<Receiver<Request>>>,
     pub frame: Entity<Frame>,
     pub diagnostics: Entity<Diagnostics>,
+    dispatched: Rc<RefCell<Vec<String>>>,
 }
 
 struct Built {
@@ -133,6 +143,7 @@ pub(super) fn open_with(
 ) -> (Harness, gpui::VisualTestContext) {
     cx.update(gpui_component::init);
     cx.update(crate::init);
+    cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
     cx.update(|cx| cx.set_global(WatchlistGlobal(Arc::new(snap))));
     let (data, rx) = DataHandle::for_tests();
     let factory = Rc::new(VolwatchFactory::new(data.clone(), settings));
@@ -143,10 +154,12 @@ pub(super) fn open_with(
         )))
     });
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
+    let dispatched: Rc<RefCell<Vec<String>>> = Rc::default();
     let window = cx
         .update(|cx| {
             let slot = slot.clone();
             let factory = factory.clone();
+            let dispatched = dispatched.clone();
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let frame =
                     cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
@@ -171,6 +184,7 @@ pub(super) fn open_with(
                     content: content.clone(),
                     keymap: keymap.clone(),
                     matcher: Matcher::default(),
+                    dispatched,
                 });
                 *slot.borrow_mut() = Some(Built {
                     content,
@@ -199,6 +213,7 @@ pub(super) fn open_with(
             rx: RefCell::new(Some(rx)),
             frame: built.frame,
             diagnostics: built.diagnostics,
+            dispatched,
         },
         vcx,
     )
@@ -289,8 +304,94 @@ pub(super) fn board_for(members: &[&str], asked: &Ask) -> VolBoard {
     board
 }
 
+/// A tile on [`LIST`] (`DAX, SX5E, NEW`) whose first board has landed,
+/// with `edit` applied to that board first; the requests are drained.
+pub(super) fn landed_board(
+    cx: &mut gpui::TestAppContext,
+    edit: impl FnOnce(&mut VolBoard),
+) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        one_list(),
+        Some(restored(LIST)),
+        VolwatchSettings::default(),
+    );
+    let tag = Harness::boards(&h.requests())[0].tag;
+    let asked = h.asked_of(&vcx);
+    let mut board = board_for(&["DAX", "SX5E", "NEW"], &asked);
+    edit(&mut board);
+    h.answer_board(&mut vcx, tag, board);
+    h.requests();
+    (h, vcx)
+}
+
+/// [`landed_board`] with the fixture board as it is.
+pub(super) fn landed(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    landed_board(cx, |_| {})
+}
+
+/// [`landed`] with an `underlyings` reference table naming `names`.
+pub(super) fn landed_with_reference(
+    cx: &mut gpui::TestAppContext,
+    names: &[(&str, &str)],
+) -> (Harness, gpui::VisualTestContext) {
+    let table = ReferenceTable {
+        columns: vec!["underlying_ref".into(), "name".into()],
+        rows: names
+            .iter()
+            .map(|(k, n)| vec![Some(k.to_string()), Some(n.to_string())])
+            .collect(),
+        gen_id: 1,
+        source_time: chrono::DateTime::from_timestamp(0, 0).unwrap(),
+    };
+    let data = ReferenceData::default()
+        .with_table("underlyings", &table, 1)
+        .unwrap();
+    cx.update(|cx| cx.set_global(ReferenceGlobal(Arc::new(data))));
+    landed(cx)
+}
+
 #[allow(dead_code, reason = "the key, chrome and band tests drive the rest")]
 impl Harness {
+    /// Every action id the keymap matched so far, in order.
+    pub(super) fn dispatched(&self, _vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.dispatched.borrow().clone()
+    }
+
+    /// The latest board ask's tag.
+    pub(super) fn tag_of(&self, vcx: &gpui::VisualTestContext) -> u64 {
+        self.tile.read_with(vcx, |t, _| t.tag)
+    }
+
+    /// The latest board ask admitted.
+    pub(super) fn asked_of(&self, vcx: &gpui::VisualTestContext) -> Ask {
+        self.tile
+            .read_with(vcx, |t, _| t.asked.clone().expect("a board was asked"))
+    }
+
+    /// The index of column `id` in the view's columns.
+    pub(super) fn column_index(&self, vcx: &gpui::VisualTestContext, id: &str) -> usize {
+        self.tile.read_with(vcx, |t, _| {
+            t.columns
+                .iter()
+                .position(|c| c.id == id)
+                .unwrap_or_else(|| panic!("no column {id}"))
+        })
+    }
+
+    /// Press `l` or `h` until the cursor column is `id`.
+    pub(super) fn move_to_column(&self, vcx: &mut gpui::VisualTestContext, id: &str) {
+        let want = self.column_index(vcx, id);
+        for _ in 0..64 {
+            let at = self.tile.read_with(vcx, |t, _| t.cursor_col);
+            if at == want {
+                return;
+            }
+            self.press(vcx, if at < want { "l" } else { "h" });
+        }
+        panic!("the cursor never reached {id}");
+    }
+
     /// Every request the tile made since the last call. Submission is
     /// synchronous, so the channel already holds them.
     pub(super) fn requests(&self) -> Vec<Request> {

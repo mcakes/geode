@@ -3,7 +3,7 @@
 //! answers the shell's door (`crate::content::VolwatchContent`). This
 //! file holds the entity, the snapshot settle and the keys; `data` the
 //! board's request lifecycle; `chrome` the header model, notices, empty
-//! state and the switcher menu.
+//! state and the switcher menu; `table` the grid's delegate and paints.
 //!
 //! What paint reads (`prepared`, `header`, the notices and the empty
 //! state) is rebuilt when the snapshot, the board, the view, the lookback
@@ -11,6 +11,7 @@
 
 mod chrome;
 mod data;
+pub(crate) mod table;
 
 #[cfg(test)]
 pub(crate) use chrome::MenuKind;
@@ -22,6 +23,7 @@ mod tests;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use geode_core::link::{CursorScope, Emission, underlying_scope};
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
 use geode_core::volboard::{Lookback, VolBoard};
@@ -33,17 +35,21 @@ use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::reference::ReferenceGlobal;
+use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::watchlist::WatchlistGlobal;
 use geode_tile::header::HealthWatch;
 use geode_tile::menu::{self, MenuHost};
+use geode_tile::motion::{self, Motion};
 use geode_tile::notice::{Dismissals, Notice};
 use geode_tile::rows::{Order, RowModel};
 use geode_tile::stale::StaleTimer;
 use gpui::prelude::*;
-use gpui::{App, Context, Entity, SharedString, Task, Window, div};
+use gpui::{App, ClipboardItem, Context, Entity, SharedString, Task, Window, div};
+use gpui_component::table::TableState;
 use gpui_component::{ActiveTheme as _, v_flex};
+use table::{GridDelegate, GridEvent, Paints, sortable, table_el};
 
 use crate::content::Shared;
 use crate::core::commands::{self, Command};
@@ -66,6 +72,24 @@ const REFRESH_ACTION: &str = "volwatch::refresh";
 pub(super) const SWITCH_ACTION: &str = "volwatch::switch";
 const ESCAPE_ACTION: &str = "volwatch::escape";
 const COMMIT_ACTION: &str = "volwatch::commit";
+const PAINT_ACTION: &str = "volwatch::paint";
+const SORT_ACTION: &str = "volwatch::sort";
+const YANK_ACTION: &str = "volwatch::yank";
+const VISUAL_ACTION: &str = "volwatch::visual_rows";
+
+/// The tile's motion actions and the shared grid motions they name.
+const MOTIONS: [(&str, &str); 6] = [
+    ("volwatch::down", motion::DOWN),
+    ("volwatch::up", motion::UP),
+    ("volwatch::left", motion::LEFT),
+    ("volwatch::right", motion::RIGHT),
+    ("volwatch::top", motion::TOP),
+    ("volwatch::bottom", motion::BOTTOM),
+];
+
+/// The grid's empty states: no members, and a `/` keeping none.
+const NO_MEMBERS: &str = "no members";
+const NO_MATCH: &str = "no member matches \u{2014} escape restores the filter";
 
 /// The reference table and column a member's long name comes from.
 const REFERENCE_DATASET: &str = "underlyings";
@@ -145,8 +169,13 @@ pub struct VolwatchTile {
     pub(crate) grid: RowModel<Row>,
     /// The board ask the grid's sort comparator reads values through.
     sorted_with: Option<Ask>,
-    pub(crate) prepared: Prepared,
-    pub(crate) columns: Vec<Column>,
+    pub(crate) prepared: Rc<Prepared>,
+    pub(crate) columns: Rc<Vec<Column>>,
+    /// The grid's table, created once; the prepared model and the cursor
+    /// are handed to its delegate whenever they change.
+    pub(crate) table: Entity<TableState<GridDelegate>>,
+    /// The rem the table's widths were last scaled to.
+    last_rem: f32,
     pub(crate) cursor_col: usize,
     pub(crate) paint: bool,
     pub(crate) header: HeaderModel,
@@ -183,7 +212,7 @@ impl VolwatchTile {
         data: DataHandle,
         shared: Rc<Shared>,
         diagnostics: Entity<Diagnostics>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let (state, restore) = restored.map(session::from_table).unwrap_or_default();
@@ -224,7 +253,36 @@ impl VolwatchTile {
         .detach();
         // A stale wake-up notifies the tile; the rows it turned stale are
         // re-prepared here, outside render.
-        cx.observe_self(|this, _| this.stale_fired()).detach();
+        cx.observe_self(|this, cx| {
+            if this.stale_fired() {
+                this.sync_table(cx);
+            }
+        })
+        .detach();
+        let paints = Paints::from_theme(cx.theme());
+        let table = cx.new(|cx| {
+            TableState::new(GridDelegate::new(paints), window, cx)
+                .row_selectable(true)
+                .col_selectable(false)
+                .cell_selectable(false)
+                .col_resizable(false)
+                .col_movable(false)
+                .sortable(true)
+                .loop_selection(false)
+        });
+        cx.subscribe(&table, |this, _, e: &GridEvent, cx| this.grid_event(*e, cx))
+            .detach();
+        // Prepared cells hold glyph cores, not colors: a theme change
+        // rebuilds the paints alone.
+        cx.observe_global::<gpui_component::theme::Theme>(|this, cx| {
+            let paints = Paints::from_theme(cx.theme());
+            this.table.update(cx, |t, cx| {
+                t.delegate_mut().set_paints(paints);
+                cx.notify();
+            });
+            cx.notify();
+        })
+        .detach();
         let mut this = VolwatchTile {
             tile,
             frame,
@@ -242,8 +300,10 @@ impl VolwatchTile {
             members: Vec::new(),
             grid,
             sorted_with: None,
-            prepared: Prepared::default(),
-            columns: Vec::new(),
+            prepared: Rc::default(),
+            columns: Rc::default(),
+            table,
+            last_rem: scale::DESIGN_REM,
             cursor_col: 1,
             paint: true,
             header: HeaderModel::default(),
@@ -278,7 +338,7 @@ impl VolwatchTile {
     }
 
     fn rebuild_columns(&mut self) {
-        self.columns = columns(self.state.view, &self.ordered_tenors());
+        self.columns = Rc::new(columns(self.state.view, &self.ordered_tenors()));
         self.cursor_col = self.cursor_col.clamp(1, self.columns.len().max(2) - 1);
     }
 
@@ -287,6 +347,7 @@ impl VolwatchTile {
     pub(crate) fn settings_changed(&mut self, cx: &mut Context<Self>) {
         self.arm_refresh(cx);
         self.prepare();
+        self.sync_table(cx);
         cx.notify();
     }
 
@@ -383,6 +444,95 @@ impl VolwatchTile {
         self.grid.set_rows(rows);
         self.prepare();
         self.arm_stale(cx);
+        self.sync_table(cx);
+    }
+
+    /// Hand the table what it paints: the prepared model, the columns, the
+    /// shown rows, the cursor, the selection and the sort mark. The
+    /// table's selected row is the cursor row (its highlight, and its
+    /// scroll-to); its columns are re-read only when their layout changed.
+    pub(crate) fn sync_table(&mut self, cx: &mut Context<Self>) {
+        let prepared = self.prepared.clone();
+        let columns = self.columns.clone();
+        let sorted = self.state.sort.as_ref().and_then(|(id, o)| {
+            self.columns
+                .iter()
+                .position(|c| c.id == *id)
+                .map(|i| (i, o.descending()))
+        });
+        let visible = self.grid.visible().to_vec();
+        let cursor = self.grid.cursor().map(|r| (r, self.cursor_col));
+        let selection = self.grid.selected();
+        let empty = SharedString::new_static(if self.grid.query().is_empty() {
+            NO_MEMBERS
+        } else {
+            NO_MATCH
+        });
+        self.table.update(cx, |t, cx| {
+            let d = t.delegate_mut();
+            let relayout = d.set_model(prepared, columns, sorted);
+            d.set_view(visible, cursor, selection, empty);
+            if relayout {
+                t.refresh(cx);
+            }
+            match cursor.map(|(r, _)| r) {
+                Some(r) if t.selected_row() != Some(r) => t.set_selected_row(r, cx),
+                Some(_) => {}
+                None => t.clear_selection(cx),
+            }
+            cx.notify();
+        });
+    }
+
+    /// A press in the grid: a row takes the cursor (shift extends the
+    /// selection); a sortable head walks its click cycle. The right press
+    /// is the action menu's, which this tile does not open yet.
+    fn grid_event(&mut self, e: GridEvent, cx: &mut Context<Self>) {
+        match e {
+            GridEvent::RowPressed { row, shift } => {
+                self.grid.click(row, shift);
+                self.sync_table(cx);
+                cx.notify();
+            }
+            GridEvent::RowContext { .. } => {}
+            GridEvent::HeadPressed(col) => {
+                let Some(c) = self.columns.get(col) else {
+                    return;
+                };
+                if !sortable(&c.kind) {
+                    return;
+                }
+                let id = c.id.clone();
+                let next = SortOrder::click_cycle(self.sort_on(&id), true);
+                self.set_sort(next.map(|o| (id, o)), cx);
+            }
+        }
+    }
+
+    /// The order in force on column `id`, if the sort is on it.
+    fn sort_on(&self, id: &str) -> Option<SortOrder> {
+        self.state
+            .sort
+            .as_ref()
+            .filter(|(s, _)| s == id)
+            .map(|(_, o)| *o)
+    }
+
+    /// The header's sort chip: the column's head with its group (an ATFM
+    /// group by tenor alone), wrapped in `|…|` for an absolute order:
+    /// `|Δ 3M|`, `vol 3M`, `ATFM 3M` under Levels.
+    pub(crate) fn sort_label(&self) -> Option<String> {
+        let (id, order) = self.state.sort.as_ref()?;
+        let c = self.columns.iter().find(|c| c.id == *id)?;
+        let name = match &c.group {
+            Some(g) => format!("{} {}", c.head, g.strip_prefix("ATFM ").unwrap_or(g)),
+            None => c.head.clone(),
+        };
+        Some(if order.absolute() {
+            format!("|{name}|")
+        } else {
+            name
+        })
     }
 
     /// Hand the grid the order the state names, reading values through the
@@ -411,6 +561,8 @@ impl VolwatchTile {
         self.sorted_with = None;
         self.grid.set_sort(None);
         self.sync_sort();
+        self.rebuild_header();
+        self.sync_table(cx);
         cx.notify();
     }
 
@@ -439,7 +591,7 @@ impl VolwatchTile {
     pub(crate) fn dispatch(
         &mut self,
         action: &ActionId,
-        _count: Option<u32>,
+        count: Option<u32>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
@@ -447,6 +599,14 @@ impl VolwatchTile {
         let id = action.0.as_str();
         if let Some(i) = VIEW_ACTIONS.iter().position(|a| *a == id) {
             self.set_view(View::ALL[i], cx);
+            return true;
+        }
+        if self.menu.is_none()
+            && let Some((_, shared)) = MOTIONS.iter().find(|(a, _)| *a == id)
+        {
+            if let Some(m) = motion::parse(&ActionId((*shared).to_string()), count) {
+                self.motion(m, cx);
+            }
             return true;
         }
         match id {
@@ -472,6 +632,17 @@ impl VolwatchTile {
                 self.menu = None;
                 cx.notify();
             }
+            ESCAPE_ACTION if self.grid.selecting() => {
+                self.grid.clear_selection();
+                self.sync_table(cx);
+                cx.notify();
+            }
+            ESCAPE_ACTION if !self.grid.query().is_empty() => {
+                self.find_entry = None;
+                self.grid.set_filter("");
+                self.sync_table(cx);
+                cx.notify();
+            }
             // Last in line: dismiss every warning and danger notice showing.
             ESCAPE_ACTION => {
                 let shown = self.dismissed.visible(self.reported.iter().cloned());
@@ -490,9 +661,94 @@ impl VolwatchTile {
                 self.resubmit(true, cx);
                 cx.notify();
             }
+            VISUAL_ACTION => {
+                self.grid.start_selection();
+                self.sync_table(cx);
+                cx.notify();
+            }
+            PAINT_ACTION => {
+                self.paint = !self.paint;
+                self.prepare();
+                self.sync_table(cx);
+                cx.notify();
+            }
+            SORT_ACTION => self.sort_cursor_column(cx),
+            YANK_ACTION => self.yank(cx),
             _ => return false,
         }
         true
+    }
+
+    /// A row motion moves the cursor (extending a live selection); a
+    /// column motion steps the cursor column, never onto Underlying.
+    fn motion(&mut self, m: Motion, cx: &mut Context<Self>) {
+        if m.moves_rows() {
+            let selecting = self.grid.selecting();
+            self.grid.move_cursor(m, selecting);
+        } else {
+            self.cursor_col = motion::col(self.cursor_col, self.columns.len(), m).max(1);
+        }
+        self.sync_table(cx);
+        cx.notify();
+    }
+
+    /// `s`: asc → desc → member order on the cursor column, through the
+    /// shared cycle. A column with no number to order by refuses.
+    fn sort_cursor_column(&mut self, cx: &mut Context<Self>) {
+        let Some(c) = self.columns.get(self.cursor_col) else {
+            return;
+        };
+        if !sortable(&c.kind) {
+            self.notices.refused = Some(format!("{} is not sortable", c.head));
+            self.rebuild_chrome(cx);
+            cx.notify();
+            return;
+        }
+        let id = c.id.clone();
+        let next = SortOrder::cycle(self.sort_on(&id), false, true);
+        self.set_sort(next.map(|o| (id, o)), cx);
+    }
+
+    /// `y`: the cursor cell's text, or the cursor column's text of every
+    /// selected row, one per line; a selection ends.
+    fn yank(&mut self, cx: &mut Context<Self>) {
+        let col = self.cursor_col;
+        let text_at = |at: usize| {
+            self.grid
+                .visible()
+                .get(at)
+                .and_then(|&i| self.prepared.rows.get(i))
+                .and_then(|r| r.cells.get(col))
+                .map(|c| c.text.to_string())
+        };
+        let text = match self.grid.selected() {
+            Some(span) => span.filter_map(text_at).collect::<Vec<_>>().join("\n"),
+            None => match self.grid.cursor().and_then(text_at) {
+                Some(t) => t,
+                None => return,
+            },
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.grid.clear_selection();
+        self.sync_table(cx);
+        cx.notify();
+    }
+
+    /// The cursor row's member as a one-value `underlying_ref` path;
+    /// `Nothing` while no row is under the cursor.
+    pub(crate) fn emission(&self) -> Emission {
+        let name = self
+            .grid
+            .cursor()
+            .and_then(|at| self.grid.visible().get(at))
+            .map(|&i| self.grid.row(i).name.as_str());
+        Emission {
+            cursor: match name {
+                Some(name) => CursorScope::Path(underlying_scope(name)),
+                None => CursorScope::Nothing,
+            },
+            ..Emission::default()
+        }
     }
 
     /// A view switch lays out its columns and asks again only when its ask
@@ -503,6 +759,7 @@ impl VolwatchTile {
         self.sync_sort();
         self.resubmit(false, cx);
         self.prepare();
+        self.sync_table(cx);
         cx.notify();
     }
 
@@ -515,6 +772,7 @@ impl VolwatchTile {
         };
         self.resubmit(false, cx);
         self.prepare();
+        self.sync_table(cx);
         cx.notify();
     }
 
@@ -551,6 +809,7 @@ impl VolwatchTile {
             },
         };
         self.grid.set_filter(&query);
+        self.sync_table(cx);
         cx.notify();
     }
 
@@ -616,11 +875,21 @@ impl VolwatchTile {
     }
 }
 
-/// A plain placeholder paint: the title, the empty state or the shown
-/// rows' names, and the close control. The grid, the header and the
-/// switcher's popup paint over this with the glyph work.
+/// The title line above the grid (the header proper is the chrome's),
+/// then the empty state or the grid.
 impl Render for VolwatchTile {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Column widths follow the window's rem, which the delegate cannot
+        // read itself; only a changed rem re-lays the columns.
+        let rem = f32::from(window.rem_size());
+        if rem != self.last_rem {
+            self.last_rem = rem;
+            self.table.update(cx, |t, cx| {
+                if t.delegate_mut().set_rem(rem) {
+                    t.refresh(cx);
+                }
+            });
+        }
         let theme = cx.theme();
         let id = self.tile.0;
         let close = self.close.as_ref().map(|c| c.button(theme, self.tile));
@@ -629,15 +898,7 @@ impl Render for VolwatchTile {
                 .text_color(theme.muted_foreground)
                 .child(text.clone())
                 .into_any_element(),
-            None => v_flex()
-                .children(
-                    self.grid
-                        .visible()
-                        .iter()
-                        .filter_map(|&i| self.prepared.rows.get(i))
-                        .map(|r| r.name.clone()),
-                )
-                .into_any_element(),
+            None => table_el(&self.table, id).into_any_element(),
         };
         v_flex()
             .size_full()

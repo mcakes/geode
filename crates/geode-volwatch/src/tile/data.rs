@@ -204,7 +204,7 @@ impl VolwatchTile {
                 }
             }
         }
-        self.prepared = prepared;
+        self.prepared = std::rc::Rc::new(prepared);
         self.rebuild_header();
     }
 
@@ -232,8 +232,9 @@ impl VolwatchTile {
     }
 
     /// After any notify: a row the stale timer has turned stale since the
-    /// last prepare is re-prepared. A cheap scan over tens of rows.
-    pub(crate) fn stale_fired(&mut self) {
+    /// last prepare is re-prepared. A cheap scan over tens of rows; `true`
+    /// when it re-prepared.
+    pub(crate) fn stale_fired(&mut self) -> bool {
         let after = self.shared.settings.borrow().stale_after;
         let turned = self
             .grid
@@ -250,6 +251,7 @@ impl VolwatchTile {
         if turned {
             self.prepare();
         }
+        turned
     }
 }
 

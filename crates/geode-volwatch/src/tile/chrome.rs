@@ -51,6 +51,9 @@ pub(crate) struct Notices {
     pub(crate) refusal: Option<String>,
     /// The last board failed; stands until a board lands.
     pub(crate) failure: Option<String>,
+    /// A key's refusal (a sort on an unsortable column); cleared by the
+    /// trader's next action in the tile.
+    pub(crate) refused: Option<String>,
 }
 
 /// A chord in the keymap's own spelling (`g w`, `shift+r`).
@@ -169,11 +172,12 @@ impl VolwatchTile {
     /// the shown list's name: rebuilt with the chrome, so a list switch or
     /// a restore whose snapshot has not arrived names its list at once.
     pub(crate) fn rebuild_header(&mut self) {
+        let sort = self.sort_label();
         self.header = header(
             self.state.list.as_deref(),
             self.members.len(),
             self.state.lookback,
-            None,
+            sort.as_deref(),
             self.board.as_deref(),
         );
     }
@@ -207,6 +211,7 @@ impl VolwatchTile {
             .refusal
             .iter()
             .chain(n.failure.iter())
+            .chain(n.refused.iter())
             .cloned()
             .map(Notice::warning)
             .chain(unresolved)
@@ -229,6 +234,9 @@ impl VolwatchTile {
         let transient = if self.notices.refusal.as_deref() == Some(text) {
             self.notices.refusal = None;
             true
+        } else if self.notices.refused.as_deref() == Some(text) {
+            self.notices.refused = None;
+            true
         } else if self.notices.nothing_to_switch && text == NOTHING_TO_SWITCH {
             self.notices.nothing_to_switch = false;
             true
@@ -247,8 +255,9 @@ impl VolwatchTile {
 
     /// The trader acted in the tile: the restore's notices have been seen.
     pub(super) fn user_acted(&mut self, cx: &mut Context<Self>) {
-        if !self.notices.restore.is_empty() {
+        if !self.notices.restore.is_empty() || self.notices.refused.is_some() {
             self.notices.restore.clear();
+            self.notices.refused = None;
             self.rebuild_chrome(cx);
             cx.notify();
         }

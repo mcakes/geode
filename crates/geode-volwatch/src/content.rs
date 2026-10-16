@@ -209,6 +209,28 @@ impl TileContent for VolwatchContent {
         }
     }
 
+    /// The tile can always emit: the answer is the kind's capability, not
+    /// whether a row is under the cursor.
+    fn emits(&self) -> bool {
+        true
+    }
+
+    /// The cursor row's member as a one-value `underlying_ref` path, or
+    /// nothing while no row is under the cursor.
+    fn emission(&self, cx: &App) -> geode_core::link::Emission {
+        self.tile.read(cx).emission()
+    }
+
+    /// Every route that moves the cursor or rebuilds the rows notifies the
+    /// tile, so observing it covers each way the emission can change.
+    fn watch_emission(
+        &self,
+        changed: Rc<dyn Fn(&mut App)>,
+        cx: &mut App,
+    ) -> Option<gpui::Subscription> {
+        Some(cx.observe(&self.tile, move |_, cx| changed(cx)))
+    }
+
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
     }
