@@ -31,3 +31,7 @@ geode-shell = { workspace = true, features = ["test-support"] }
 geode-data = { workspace = true, features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support"] }
 criterion = "0.8.2"
+
+[[bench]]
+name = "prepare"
+harness = false
