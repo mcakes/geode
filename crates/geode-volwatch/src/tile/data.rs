@@ -14,7 +14,7 @@ use gpui::Context;
 
 use super::{MONO_ADVANCE_PX, RETRIES, VolwatchTile};
 use crate::content::VolwatchSettings;
-use crate::core::model::{Inputs, header, prepare};
+use crate::core::model::{Inputs, prepare};
 use crate::core::views::{Ask, REALIZED, SURFACE, VARSWAP, ask, needs_requery};
 
 /// The surface key the tenor listing enumerates.
@@ -114,7 +114,7 @@ impl VolwatchTile {
                 self.board_ask = self.asked.clone();
                 self.notices.failure = None;
             }
-            Err(e) => self.notices.failure = Some(format!("{e} {RETRIES}")),
+            Err(e) => self.notices.failure = Some(format!("surface: {e} {RETRIES}")),
         }
         self.rebuild_rows(cx);
         self.rebuild_chrome(cx);
@@ -161,6 +161,11 @@ impl VolwatchTile {
                 t.refresh = None;
                 if !t.in_flight {
                     t.resubmit(true, cx);
+                    // A refused timer ask waits for the next interval; a
+                    // refused `shift+r` only says so.
+                    if !t.in_flight {
+                        t.arm_refresh(cx);
+                    }
                     cx.notify();
                 }
             });
@@ -200,13 +205,7 @@ impl VolwatchTile {
             }
         }
         self.prepared = prepared;
-        self.header = header(
-            self.state.list.as_deref(),
-            self.members.len(),
-            self.state.lookback,
-            None,
-            self.board.as_deref(),
-        );
+        self.rebuild_header();
     }
 
     fn stale_slot(t: &mut Self) -> &mut StaleTimer {

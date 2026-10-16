@@ -1,13 +1,21 @@
 //! The shell-hosted vol watchlist entity. It shows one list from the
-//! resolved snapshot in `WatchlistGlobal` as rows of a vol board, answers
-//! the shell's door (`crate::content::VolwatchContent`), and owns the
-//! board's request lifecycle (`data`).
+//! resolved snapshot in `WatchlistGlobal` as rows of a vol board and
+//! answers the shell's door (`crate::content::VolwatchContent`). This
+//! file holds the entity, the snapshot settle and the keys; `data` the
+//! board's request lifecycle; `chrome` the header model, notices, empty
+//! state and the switcher menu.
 //!
 //! What paint reads (`prepared`, `header`, the notices and the empty
 //! state) is rebuilt when the snapshot, the board, the view, the lookback
 //! or the reference tables change, never in render.
 
+mod chrome;
 mod data;
+
+#[cfg(test)]
+pub(crate) use chrome::MenuKind;
+pub(crate) use chrome::MenuState;
+use chrome::Notices;
 #[cfg(test)]
 mod tests;
 
@@ -22,15 +30,15 @@ use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
-use geode_shell::keymap::{Binding, KeyContext, Keystroke};
+use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::reference::ReferenceGlobal;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::watchlist::WatchlistGlobal;
 use geode_tile::header::HealthWatch;
-use geode_tile::menu::{self, ActionRow, Menu, MenuHost, MenuPick, Row as MenuRow};
-use geode_tile::notice::{Dismissals, Notice, Tone};
+use geode_tile::menu::{self, MenuHost};
+use geode_tile::notice::{Dismissals, Notice};
 use geode_tile::rows::{Order, RowModel};
 use geode_tile::stale::StaleTimer;
 use gpui::prelude::*;
@@ -55,7 +63,7 @@ const VIEW_ACTIONS: [&str; 5] = [
 const VIEW_NEXT_ACTION: &str = "volwatch::view_next";
 const LOOKBACK_ACTION: &str = "volwatch::lookback";
 const REFRESH_ACTION: &str = "volwatch::refresh";
-const SWITCH_ACTION: &str = "volwatch::switch";
+pub(super) const SWITCH_ACTION: &str = "volwatch::switch";
 const ESCAPE_ACTION: &str = "volwatch::escape";
 const COMMIT_ACTION: &str = "volwatch::commit";
 
@@ -66,9 +74,6 @@ const REFERENCE_NAME: &str = "name";
 /// The history datasets the header's health chip asks about.
 const HEALTH_DATASETS: [&str; 3] = [SURFACE, REALIZED, VARSWAP];
 
-/// The switcher's refusal while there is nothing to list.
-const NOTHING_TO_SWITCH: &str = "no watchlists to switch to";
-
 /// What every failure and refusal says the remedy is.
 pub(crate) const RETRIES: &str = "\u{2014} shift+r retries";
 
@@ -76,51 +81,9 @@ pub(crate) const RETRIES: &str = "\u{2014} shift+r retries";
 /// measures its own font.
 const MONO_ADVANCE_PX: f32 = 7.0;
 
-/// Which menu is up. Menu mode, its keys and its pick door are shared by
-/// every kind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MenuKind {
-    Switch,
-}
-
-/// What a menu row does when picked.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Pick {
-    /// Show this watchlist.
-    Show(SharedString),
-}
-
-impl MenuPick for Pick {
-    fn element_name(&self) -> SharedString {
-        match self {
-            Pick::Show(name) => name.clone(),
-        }
-    }
-}
-
-pub(crate) struct MenuState {
-    pub(crate) kind: MenuKind,
-    pub(crate) menu: Menu<Pick>,
-}
-
-/// The header's notices, by how long each lives.
-#[derive(Default)]
-struct Notices {
-    /// What the session restore dropped; cleared by the trader's first
-    /// action in the tile.
-    restore: Vec<String>,
-    /// The switcher refused with nothing to list; cleared once a snapshot
-    /// defines something to switch to.
-    nothing_to_switch: bool,
-    /// The last submission was refused; cleared by the next admitted one.
-    refusal: Option<String>,
-    /// The last board failed; stands until a board lands.
-    failure: Option<String>,
-}
-
 /// The resolved lists as the bridge last published them; empty for a
 /// tile hosted without the global.
-fn snapshot(cx: &App) -> Arc<WatchlistSnapshot> {
+pub(super) fn snapshot(cx: &App) -> Arc<WatchlistSnapshot> {
     cx.try_global::<WatchlistGlobal>()
         .map(|g| g.0.clone())
         .unwrap_or_default()
@@ -131,31 +94,6 @@ fn reference(cx: &App) -> Arc<ReferenceData> {
     cx.try_global::<ReferenceGlobal>()
         .map(|g| g.0.clone())
         .unwrap_or_default()
-}
-
-/// A chord in the keymap's own spelling (`g w`, `shift+r`).
-fn spell(keystrokes: &[Keystroke]) -> String {
-    keystrokes
-        .iter()
-        .map(|k| {
-            let mut parts = Vec::new();
-            if k.mods.ctrl {
-                parts.push("ctrl");
-            }
-            if k.mods.alt {
-                parts.push("alt");
-            }
-            if k.mods.shift {
-                parts.push("shift");
-            }
-            if k.mods.cmd {
-                parts.push("cmd");
-            }
-            parts.push(k.key.as_str());
-            parts.join("+")
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// The grid order for `(column id, order)` over `columns`, reading values
@@ -401,68 +339,6 @@ impl VolwatchTile {
         }
     }
 
-    fn settle_menu(&mut self, shown: bool, snapshot: &WatchlistSnapshot) {
-        let listed = !snapshot.lists.is_empty();
-        let first = listed && !self.settled;
-        let gone = self.was_shown && !shown;
-        self.settled |= listed;
-        self.was_shown = shown;
-        match self.menu.as_ref().map(|m| m.kind) {
-            Some(MenuKind::Switch) => {
-                let rows = self.switch_rows(snapshot);
-                if rows.is_empty() {
-                    self.menu = None;
-                } else if let Some(m) = self.menu.as_mut() {
-                    m.menu.replace_rows(rows, &self.chords);
-                }
-            }
-            None if !shown && (first || gone) => {
-                let rows = self.switch_rows(snapshot);
-                if !rows.is_empty() {
-                    self.menu = Some(MenuState {
-                        kind: MenuKind::Switch,
-                        menu: Menu::new(rows, &self.chords),
-                    });
-                }
-            }
-            None => {}
-        }
-    }
-
-    /// One row per watchlist, alphabetical, the shown one ticked.
-    fn switch_rows(&self, snapshot: &WatchlistSnapshot) -> Vec<MenuRow<Pick>> {
-        snapshot
-            .lists
-            .keys()
-            .map(|name| {
-                let checked = self.state.list.as_deref() == Some(name.as_str());
-                let label = SharedString::from(name.clone());
-                MenuRow::Action(ActionRow::new(Pick::Show(label.clone()), label).checked(checked))
-            })
-            .collect()
-    }
-
-    fn toggle_switcher(&mut self, cx: &mut Context<Self>) {
-        if self.menu.is_some() {
-            self.menu = None;
-        } else {
-            let rows = self.switch_rows(&snapshot(cx));
-            if rows.is_empty() {
-                self.notices.nothing_to_switch = true;
-                self.rebuild_chrome(cx);
-            } else {
-                let at = rows
-                    .iter()
-                    .position(|r| r.action().is_some_and(|a| a.tick() == Some(true)));
-                self.menu = Some(MenuState {
-                    kind: MenuKind::Switch,
-                    menu: Menu::new(rows, &self.chords).open_at(at),
-                });
-            }
-        }
-        cx.notify();
-    }
-
     /// Show `name`: the cursor, the filter, the board and every answer on
     /// its way belonged to the previous list; the view, lookback and sort
     /// are the tile's and stay.
@@ -536,72 +412,6 @@ impl VolwatchTile {
         self.grid.set_sort(None);
         self.sync_sort();
         cx.notify();
-    }
-
-    pub(crate) fn rebuild_chrome(&mut self, cx: &App) {
-        let snapshot = snapshot(cx);
-        let list = self.state.list.as_deref();
-        let state = list.and_then(|n| snapshot.lists.get(n));
-        let none_defined = snapshot.lists.is_empty();
-        let switch = tips::chord_for(&self.chords, SWITCH_ACTION)
-            .map(|ks| spell(&ks))
-            .unwrap_or_else(|| "Vol: Switch list".to_string());
-        self.empty = match (list, state.is_some()) {
-            (_, true) => None,
-            (_, false) if none_defined => Some("no watchlists defined".into()),
-            (Some(gone), false) => {
-                Some(format!("{gone} no longer exists \u{2014} {switch} switches").into())
-            }
-            (None, false) => Some(format!("no watchlist shown \u{2014} {switch} switches").into()),
-        };
-        let unresolved = state.and_then(|s| match &s.status {
-            Status::Failed(err) => Some(Notice::warning(format!(
-                "{} not resolved: {err}",
-                list.unwrap_or_default()
-            ))),
-            Status::Resolving | Status::Current => None,
-        });
-        let n = &self.notices;
-        self.reported = n
-            .refusal
-            .iter()
-            .chain(n.failure.iter())
-            .cloned()
-            .map(Notice::warning)
-            .chain(unresolved)
-            .chain(
-                n.nothing_to_switch
-                    .then(|| Notice::danger(NOTHING_TO_SWITCH)),
-            )
-            .chain(n.restore.iter().cloned().map(Notice::danger))
-            .collect();
-        self.dismissed.prune(&self.reported);
-    }
-
-    /// A transient notice goes for good; a standing one hides until it
-    /// changes.
-    pub(crate) fn dismiss_notice(&mut self, n: &Notice, cx: &App) -> bool {
-        if !n.dismissable() {
-            return false;
-        }
-        let text = n.text().as_ref();
-        let transient = if self.notices.refusal.as_deref() == Some(text) {
-            self.notices.refusal = None;
-            true
-        } else if self.notices.nothing_to_switch && text == NOTHING_TO_SWITCH {
-            self.notices.nothing_to_switch = false;
-            true
-        } else if n.tone() == Tone::Danger && self.notices.restore.iter().any(|r| r == text) {
-            self.notices.restore.retain(|r| r != text);
-            true
-        } else {
-            false
-        };
-        if transient {
-            self.rebuild_chrome(cx);
-            return true;
-        }
-        self.dismissed.dismiss(n)
     }
 
     fn mode(&self) -> &'static str {
@@ -708,15 +518,6 @@ impl VolwatchTile {
         cx.notify();
     }
 
-    /// The trader acted in the tile: the restore's notices have been seen.
-    fn user_acted(&mut self, cx: &mut Context<Self>) {
-        if !self.notices.restore.is_empty() {
-            self.notices.restore.clear();
-            self.rebuild_chrome(cx);
-            cx.notify();
-        }
-    }
-
     /// `:sort <col> [asc|desc|abs]`, bare `:sort` restores member order.
     pub(crate) fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
         match commands::parse(line, &self.columns)? {
@@ -812,32 +613,6 @@ impl VolwatchTile {
             .iter()
             .map(|&i| self.grid.row(i).name.clone())
             .collect()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn notice_texts(&self) -> Vec<String> {
-        self.reported.iter().map(|n| n.text().to_string()).collect()
-    }
-}
-
-impl MenuHost for VolwatchTile {
-    fn menu_pick(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        let Some(picked) = self.menu.as_ref().and_then(|m| m.menu.pick(index)) else {
-            return;
-        };
-        match picked {
-            Err(_) => {}
-            Ok(Pick::Show(name)) => {
-                self.menu = None;
-                self.show(&name, cx);
-            }
-        }
-    }
-
-    fn menu_hover(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.menu.as_mut().is_some_and(|m| m.menu.highlight(index)) {
-            cx.notify();
-        }
     }
 }
 

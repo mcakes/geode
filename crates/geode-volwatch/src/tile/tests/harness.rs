@@ -45,10 +45,11 @@ const IN_SURFACE: &[&str] = &["DAX", "SX5E", "UKX", "SPX"];
 /// What the shell root is to a tile for keys: a focused ancestor whose
 /// listener matches each keystroke against the app's keymap under the
 /// stack `[workspace, tile, <tile's context>]` and dispatches the match
-/// through the tile's door.
+/// through the tile's `TileContent` door, as the shell does.
 struct ShellStandIn {
     focus: gpui::FocusHandle,
     tile: Entity<VolwatchTile>,
+    content: Rc<dyn TileContent>,
     keymap: Rc<Keymap>,
     matcher: Matcher,
 }
@@ -60,7 +61,7 @@ impl gpui::Render for ShellStandIn {
             .size_full()
             .track_focus(&self.focus)
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
-                let context = this.tile.read(cx).key_context();
+                let context = this.content.key_context(cx);
                 let Some(keystroke) = geode_shell::shell::keys::convert_keystroke(&event.keystroke)
                 else {
                     return;
@@ -73,8 +74,7 @@ impl gpui::Render for ShellStandIn {
                 if let MatchResult::Matched { action, count } =
                     this.matcher.press(&this.keymap, keystroke, &stack)
                 {
-                    this.tile
-                        .update(cx, |t, cx| t.dispatch(&action, count, window, cx));
+                    this.content.dispatch(&action, count, window, cx);
                     cx.stop_propagation();
                 }
             }))
@@ -168,6 +168,7 @@ pub(super) fn open_with(
                 let host = cx.new(|_| ShellStandIn {
                     focus: shell_focus.clone(),
                     tile: tile.clone(),
+                    content: content.clone(),
                     keymap: keymap.clone(),
                     matcher: Matcher::default(),
                 });

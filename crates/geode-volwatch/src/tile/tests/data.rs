@@ -106,7 +106,7 @@ fn a_surface_failure_keeps_the_last_board_and_stands_a_warning(cx: &mut gpui::Te
     h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
     h.press(&mut vcx, "shift-r");
     let tag = Harness::boards(&h.requests())[0].tag;
-    h.fail_board(&mut vcx, tag, "surface: connection refused");
+    h.fail_board(&mut vcx, tag, "connection refused");
     assert_eq!(
         h.shown(&vcx),
         ["DAX", "SX5E", "NEW"],
@@ -355,5 +355,91 @@ fn a_late_snapshot_asks_once_it_holds_the_restored_list(cx: &mut gpui::TestAppCo
     assert!(
         h.tile.read_with(&vcx, |t, _| t.menu.is_none()),
         "a shown list opens no switcher"
+    );
+}
+
+#[gpui::test]
+fn the_title_names_the_list_before_its_members_arrive_and_after_a_switch(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_with(
+        cx,
+        Default::default(),
+        Some(restored("europe_risk")),
+        VolwatchSettings::default(),
+    );
+    assert_eq!(
+        h.title(&vcx),
+        "Vol · europe_risk",
+        "a restore names its list before the snapshot"
+    );
+    let mut snap = one_list();
+    let mut empty = snap.lists["europe_risk"].clone();
+    empty.members.clear();
+    snap.lists.insert("bare".into(), empty);
+    vcx.update(|_, cx| cx.set_global(WatchlistGlobal(Arc::new(snap))));
+    vcx.run_until_parked();
+    assert_eq!(h.title(&vcx), "Vol · europe_risk");
+    // The switcher opens on the shown list; `bare` sorts above it and has
+    // no live members.
+    h.press(&mut vcx, "g w");
+    h.press(&mut vcx, "k");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.title(&vcx), "Vol · bare");
+    assert!(h.shown(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn a_refused_timer_refresh_asks_again_at_the_next_interval(cx: &mut gpui::TestAppContext) {
+    let every = Duration::from_secs(10);
+    let settings = VolwatchSettings {
+        refresh: Some(every),
+        ..Default::default()
+    };
+    let (h, mut vcx) = open_with(cx, one_list(), Some(restored("europe_risk")), settings);
+    let tag = Harness::boards(&h.requests())[0].tag;
+    let asked = h.tile.read_with(&vcx, |t, _| t.asked.clone().unwrap());
+    h.answer_board(&mut vcx, tag, board_for(&["DAX"], &asked));
+    h.data.fill_for_tests();
+    cx.executor().advance_clock(every);
+    vcx.run_until_parked();
+    assert_eq!(
+        h.notices(&vcx),
+        ["the data service is busy — shift+r retries"]
+    );
+    assert!(
+        Harness::boards(&h.requests()).is_empty(),
+        "the refused ask never reached the queue"
+    );
+    cx.executor().advance_clock(every);
+    vcx.run_until_parked();
+    assert_eq!(
+        Harness::boards(&h.requests()).len(),
+        1,
+        "the timer kept running"
+    );
+}
+
+#[gpui::test]
+fn a_refused_shift_r_does_not_arm_a_retry(cx: &mut gpui::TestAppContext) {
+    let every = Duration::from_secs(10);
+    let settings = VolwatchSettings {
+        refresh: Some(every),
+        ..Default::default()
+    };
+    let (h, mut vcx) = open_with(cx, one_list(), Some(restored("europe_risk")), settings);
+    let _ = h.requests();
+    // No board landed, so no refresh is armed past the one at show; let
+    // that one find the ask in flight and lapse.
+    cx.executor().advance_clock(every);
+    vcx.run_until_parked();
+    h.data.fill_for_tests();
+    h.press(&mut vcx, "shift-r");
+    let _ = h.requests();
+    cx.executor().advance_clock(every * 3);
+    vcx.run_until_parked();
+    assert!(
+        Harness::boards(&h.requests()).is_empty(),
+        "a refused key only says so"
     );
 }
