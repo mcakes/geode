@@ -42247,11 +42247,15 @@ run_mutation "volwatch: the lookback chip lit is the one in force" \
   the_header_names_the_list_count_lookback_sort_and_the_missing
 
 # Blanks sort last in both directions: a member the surface lacks must not
-# head an ascending sort.
+# head an ascending sort. Both arms swap together: the default order already
+# puts the missing at the foot, so a stable sort that only stops calling a
+# blank greater leaves it there.
 run_mutation "volwatch: blanks sort last" \
   crates/geode-volwatch/src/tile/mod.rs \
-  '            (Some(_), None) => std::cmp::Ordering::Less,' \
-  '            (Some(_), None) => std::cmp::Ordering::Greater,' \
+  '            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,' \
+  '            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,' \
   geode-volwatch \
   s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last
 
