@@ -87,6 +87,15 @@ pub const WINDOW_1Y: Duration = Duration::from_secs(365 * 86_400);
 pub const SPARK_30D: Duration = Duration::from_secs(30 * 86_400);
 pub const PCTL_MIN_COUNT: usize = 60;
 
+/// Whether a column of `kind` takes a sort: `s`, a header press and
+/// `:sort` all refuse the rest with `<head> is not sortable`.
+pub fn sortable(kind: &ColumnKind) -> bool {
+    !matches!(
+        kind,
+        ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Term
+    )
+}
+
 /// What a column paints. Every variant but `Underlying`, `Spark`, `Term` and
 /// `Vega` names its board measure.
 #[derive(Debug, Clone, PartialEq)]

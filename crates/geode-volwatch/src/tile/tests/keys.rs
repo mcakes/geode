@@ -142,7 +142,8 @@ fn s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last(cx: &mut gpui::Te
     );
     assert_eq!(
         h.tile.read_with(&vcx, |t, _| t.header.sort.clone()),
-        Some("vol 3M".into())
+        Some("vol 3M ↑".into()),
+        "the chip names the direction"
     );
     h.press(&mut vcx, "s");
     assert_eq!(
@@ -150,13 +151,18 @@ fn s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last(cx: &mut gpui::Te
         ["SX5E", "DAX", "NEW"],
         "desc, the missing member last"
     );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.header.sort.clone()),
+        Some("vol 3M ↓".into()),
+        "desc reads apart from asc"
+    );
     h.press(&mut vcx, "s");
     assert_eq!(h.shown(&vcx), ["DAX", "SX5E", "NEW"], "off: member order");
     assert!(h.tile.read_with(&vcx, |t, _| t.state.sort.is_none()));
     h.command(&mut vcx, "sort atfm-3M-change abs").unwrap();
     assert!(
         h.tile
-            .read_with(&vcx, |t, _| t.header.sort.as_deref() == Some("|Δ 3M|"))
+            .read_with(&vcx, |t, _| t.header.sort.as_deref() == Some("|Δ 3M| ↓"))
     );
     h.command(&mut vcx, "sort").unwrap();
     assert!(h.tile.read_with(&vcx, |t, _| t.header.sort.is_none()));

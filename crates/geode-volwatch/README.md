@@ -19,17 +19,20 @@ scales and ranges). Behaviour and limits are in the features guide's
 - `core/`: pure state, tested without gpui.
   - `views.rs`: the five views (Changes, Levels, Rich / cheap, Term, Skew)
     as column tables, `order_tenors`, the board `Ask` each view implies
-    (the union of its columns' measures, plus the band's while open) and
+    (the union of its columns' measures, plus the band's while open),
     `needs_requery`, which asks again only for something the last ask
-    lacked.
+    lacked, and `sortable`, the one test `s`, a head press and `:sort`
+    share.
   - `model.rs`: the prepared model. `rows` (members in list order, the
     board's missing at the foot), `prepare` (each cell's text, glyph core,
     id and muted flag, the column widths; glyph hosts get the displayed
-    sign and the rank at display precision), `readout`, `sort_value`,
+    sign and the rank at display precision), `readout` (a cell with no
+    change names the board's note for its dataset), `sort_value`,
     `prepare_band` (`BandModel`) and `header` (`HeaderModel`).
   - `session.rs`: the session table (list, view, lookback, sort, cursor,
     band); an unreadable key drops alone with a notice.
-  - `commands.rs`: the `:sort` grammar and its completions.
+  - `commands.rs`: the `:sort` grammar and its completions; an
+    unsortable column refuses as `s` does.
 - `tile/`: the hosted entity.
   - `mod.rs`: the entity, the watchlist snapshot settle, the keys and the
     escape order, `t`'s refusal, yank, emission and autosize.

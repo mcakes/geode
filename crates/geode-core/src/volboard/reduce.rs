@@ -365,14 +365,22 @@ mod tests {
 
     #[test]
     fn each_sparkline_reduces_over_its_own_span() {
-        // 40 daily points; sparklines of 3 and 30 days end at day 20_500.
+        // 40 daily points; ATFM 3M over 3 days and 25Δ skew 3M over 30
+        // days, both ending at day 20_500. The skew is twice the ATFM level
+        // (25Δ put vol 2x, call vol 0), so each line reads its own measure.
+        let skew = Measure::Skew { tenor: "3M".into() };
         let mut p = params(vec![Measure::atfm("3M")]);
         p.sparklines = vec![
             (Measure::atfm("3M"), Duration::from_secs(3 * 86_400)),
-            (Measure::atfm("3M"), Duration::from_secs(30 * 86_400)),
+            (skew, Duration::from_secs(30 * 86_400)),
         ];
-        let mut observed = observed_atfm();
-        observed.daily = (20_461..20_501).map(|d| (d, d as f64 / 1e5)).collect();
+        p.validate().expect("two distinct sparklines validate");
+        let days = 20_461..20_501;
+        let series = |f: &dyn Fn(f64) -> f64| {
+            let mut o = observed_atfm();
+            o.daily = days.clone().map(|d| (d, f(d as f64 / 1e5))).collect();
+            o
+        };
         let mut obs = Observations {
             window_from_day: Some(20_000),
             spark_from_days: vec![20_498, 20_471],
@@ -380,7 +388,13 @@ mod tests {
             ..Default::default()
         };
         obs.by_input
-            .insert(("SPX".into(), point("3M", "0.5", "vol")), observed);
+            .insert(("SPX".into(), point("3M", "0.5", "vol")), series(&|x| x));
+        obs.by_input.insert(
+            ("SPX".into(), point("3M", "0.75", "vol")),
+            series(&|x| 2.0 * x),
+        );
+        obs.by_input
+            .insert(("SPX".into(), point("3M", "0.25", "vol")), series(&|_| 0.0));
         let r = reduce(&p, &obs, &Clock::utc());
         let sparks = &r.rows[0].sparks;
         assert_eq!(sparks.len(), 2);
@@ -388,7 +402,7 @@ mod tests {
         let long = sparks[1].as_ref().unwrap();
         assert_eq!(short, &vec![0.20498, 0.20499, 0.20500]);
         assert_eq!(long.len(), 30);
-        assert_eq!(long[0], 0.20471);
+        assert_eq!(long[0], 0.40942, "the skew line, not the ATFM one");
     }
 
     #[test]

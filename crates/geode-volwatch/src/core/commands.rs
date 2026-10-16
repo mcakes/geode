@@ -1,10 +1,11 @@
 //! The tile's `:` grammar: `sort <column> [asc|desc|abs [asc|desc]]`, a bare
 //! `sort` or `sort clear` to restore the default order. A column is named by
-//! its id, or by its head when the head is one word.
+//! its id, or by its head when the head is one word; a column `s` refuses
+//! (underlying, a sparkline, the term curve) refuses here too.
 
 use geode_core::sort::{SortArg, SortOrder};
 
-use super::views::Column;
+use super::views::{Column, sortable};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -12,10 +13,11 @@ pub enum Command {
     SortClear,
 }
 
-/// Resolve a typed word to a column id: exact id first, then a one-word
-/// head, case-insensitively.
-fn resolve(word: &str, columns: &[Column]) -> Option<String> {
-    columns
+/// Resolve a typed word to a sortable column id: exact id first, then a
+/// one-word head, case-insensitively. A column with no number to order by
+/// refuses as `s` does, so `:sort` never sets a sort that orders nothing.
+fn resolve(word: &str, columns: &[Column]) -> Result<String, String> {
+    let c = columns
         .iter()
         .find(|c| c.id == word)
         .or_else(|| {
@@ -23,7 +25,11 @@ fn resolve(word: &str, columns: &[Column]) -> Option<String> {
                 !c.head.contains(char::is_whitespace) && c.head.eq_ignore_ascii_case(word)
             })
         })
-        .map(|c| c.id.clone())
+        .ok_or_else(|| format!("no column '{word}'"))?;
+    if !sortable(&c.kind) {
+        return Err(format!("{} is not sortable", c.head));
+    }
+    Ok(c.id.clone())
 }
 
 pub fn parse(line: &str, columns: &[Column]) -> Result<Command, String> {
@@ -35,9 +41,9 @@ pub fn parse(line: &str, columns: &[Column]) -> Result<Command, String> {
         "sort" if rest.is_empty() => Ok(Command::SortClear),
         "sort" => match geode_core::sort::parse_args(rest)? {
             SortArg::Clear => Ok(Command::SortClear),
-            SortArg::Column { column, order } => resolve(&column, columns)
-                .map(|column| Command::Sort { column, order })
-                .ok_or_else(|| format!("no column '{column}'")),
+            SortArg::Column { column, order } => {
+                resolve(&column, columns).map(|column| Command::Sort { column, order })
+            }
         },
         "" => Err("empty command".into()),
         other => Err(format!("unknown command '{other}'")),
@@ -75,7 +81,7 @@ pub fn completions(line: &str, cursor: usize, columns: &[Column]) -> Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::views::{View, columns, order_tenors};
+    use crate::core::views::{ColumnKind, View, columns, order_tenors};
 
     fn cols() -> Vec<Column> {
         columns(View::Changes, &order_tenors(None))
@@ -97,12 +103,36 @@ mod tests {
     }
 
     #[test]
+    fn colon_sort_refuses_a_column_s_refuses() {
+        let mut cols = cols();
+        cols.extend(columns(View::Term, &order_tenors(None)));
+        for kind in ["underlying", "spark", "term"] {
+            let c = cols
+                .iter()
+                .find(|c| {
+                    matches!(
+                        (&c.kind, kind),
+                        (ColumnKind::Underlying, "underlying")
+                            | (ColumnKind::Spark { .. }, "spark")
+                            | (ColumnKind::Term, "term")
+                    )
+                })
+                .expect(kind);
+            assert_eq!(
+                parse(&format!("sort {}", c.id), &cols).unwrap_err(),
+                format!("{} is not sortable", c.head),
+                "{kind}"
+            );
+        }
+    }
+
+    #[test]
     fn a_one_word_head_resolves_case_insensitively_and_orders_parse() {
         let cols = cols();
         let c = cols
             .iter()
-            .find(|c| !c.head.contains(char::is_whitespace))
-            .expect("a one-word head");
+            .find(|c| !c.head.contains(char::is_whitespace) && sortable(&c.kind))
+            .expect("a sortable one-word head");
         let typed = c.head.to_uppercase();
         for (words, order) in [
             ("", SortOrder::Asc),

@@ -421,6 +421,9 @@ impl VolwatchTile {
             self.submit_vega(cx);
         }
         self.arm_refresh(cx);
+        // A new `stale_after` moves every deadline: re-arm the wake-ups so
+        // a row turns stale at the new threshold, not the old one.
+        self.arm_stale(cx);
         self.prepare();
         self.sync_table(cx);
         cx.notify();
@@ -539,9 +542,13 @@ impl VolwatchTile {
             .and_then(|at| self.grid.visible().get(at))
             .map(|&i| self.grid.row(i));
         let column = self.columns.get(self.cursor_col);
+        let notes = self
+            .board
+            .as_deref()
+            .map_or(&[][..], |b| b.notes.as_slice());
         self.readout = match (row, column, self.board_ask.as_ref()) {
             (Some(row), Some(column), Some(asked)) => {
-                crate::core::model::readout(row, column, asked, &self.clock).into()
+                crate::core::model::readout(row, column, asked, notes, &self.clock).into()
             }
             _ => SharedString::default(),
         };
@@ -635,8 +642,9 @@ impl VolwatchTile {
     }
 
     /// The header's sort chip: the column's head with its group (an ATFM
-    /// group by tenor alone), wrapped in `|…|` for an absolute order:
-    /// `|Δ 3M|`, `vol 3M`, `ATFM 3M` under Levels.
+    /// group by tenor alone), wrapped in `|…|` for an absolute order, then
+    /// the direction (`↓` descending, `↑` ascending): `|Δ 3M| ↓`,
+    /// `vol 3M ↑`, `ATFM 3M ↓` under Levels.
     pub(crate) fn sort_label(&self) -> Option<String> {
         let (id, order) = self.state.sort.as_ref()?;
         let c = self.columns.iter().find(|c| c.id == *id)?;
@@ -644,11 +652,17 @@ impl VolwatchTile {
             Some(g) => format!("{} {}", c.head, g.strip_prefix("ATFM ").unwrap_or(g)),
             None => c.head.clone(),
         };
-        Some(if order.absolute() {
+        let name = if order.absolute() {
             format!("|{name}|")
         } else {
             name
-        })
+        };
+        let arrow = if order.descending() {
+            '\u{2193}'
+        } else {
+            '\u{2191}'
+        };
+        Some(format!("{name} {arrow}"))
     }
 
     /// Hand the grid the order the state names, reading values through the

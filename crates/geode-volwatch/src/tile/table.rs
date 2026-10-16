@@ -175,13 +175,7 @@ pub(crate) fn table_el(state: &Entity<TableState<GridDelegate>>, tile_id: u64) -
         )
 }
 
-/// Whether a column of `kind` takes a sort.
-pub(crate) fn sortable(kind: &ColumnKind) -> bool {
-    !matches!(
-        kind,
-        ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Term
-    )
-}
+pub(crate) use crate::core::views::sortable;
 
 pub(crate) struct GridDelegate {
     pub(crate) prepared: Rc<Prepared>,

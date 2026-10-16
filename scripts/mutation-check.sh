@@ -42336,6 +42336,45 @@ run_mutation "tile: the row model keeps a put cursor on its row across a rebuild
   geode-tile \
   the_cursor_follows_its_name_across_a_row_rebuild
 
+# A cell with a level but no change names why from the board's note for
+# its measure's dataset (`history starts <date>`); without the lookup the
+# readout shows a bare dash and the desk cannot tell short history from a
+# missing fix.
+run_mutation "volwatch: the readout names where a changeless cell's history starts" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                if let Some(note) = note_for(notes, measure_dataset(m)) {' \
+  '                if let Some(note) = None::<&str> {' \
+  geode-volwatch \
+  a_cell_without_a_change_names_where_its_history_starts
+
+# The sort chip names the direction: without the arrow an ascending and a
+# descending sort read the same.
+run_mutation "volwatch: the sort chip names its direction" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '        let arrow = if order.descending() {' \
+  '        let arrow = if true {' \
+  geode-volwatch \
+  s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last
+
+# `:sort` refuses a column `s` refuses: accepted, it sets a sort that
+# orders nothing and a chip that says it does.
+run_mutation "volwatch: :sort refuses an unsortable column" \
+  crates/geode-volwatch/src/core/commands.rs \
+  '    if !sortable(&c.kind) {' \
+  '    if false && !sortable(&c.kind) {' \
+  geode-volwatch \
+  colon_sort_refuses_a_column_s_refuses
+
+# A `stale_after` reload re-arms the rows' stale wake-ups; without it a
+# row turns stale only at the old threshold's deadline.
+run_mutation "volwatch: a stale_after reload re-arms the stale wake-ups" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '        // a row turns stale at the new threshold, not the old one.
+        self.arm_stale(cx);' \
+  '        // a row turns stale at the new threshold, not the old one.' \
+  geode-volwatch \
+  a_stale_after_reload_rearms_the_row_wake_ups
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

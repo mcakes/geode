@@ -92,6 +92,38 @@ fn the_stalest_row_times_the_header_and_each_row_arms_its_own_stale(cx: &mut gpu
 }
 
 #[gpui::test]
+fn a_stale_after_reload_rearms_the_row_wake_ups(cx: &mut gpui::TestAppContext) {
+    let settings = VolwatchSettings {
+        stale_after: Duration::from_secs(600),
+        ..Default::default()
+    };
+    let (h, mut vcx) = open_with(cx, one_list(), Some(restored("europe_risk")), settings);
+    let tag = Harness::boards(&h.requests())[0].tag;
+    let asked = h.tile.read_with(&vcx, |t, _| t.asked.clone().unwrap());
+    let mut b = board_for(&["DAX"], &asked);
+    b.rows[0].as_of = Some(Utc::now() - chrono::Duration::seconds(120));
+    h.answer_board(&mut vcx, tag, b);
+    assert!(h.tile.read_with(&vcx, |t, _| !t.prepared.rows[0].stale));
+    // 120 s old: fresh under 600 s, stale 60 s from now under 180 s.
+    vcx.update(|_, cx| {
+        h.factory.set_settings(
+            VolwatchSettings {
+                stale_after: Duration::from_secs(180),
+                ..Default::default()
+            },
+            cx,
+        )
+    });
+    assert!(h.tile.read_with(&vcx, |t, _| !t.prepared.rows[0].stale));
+    cx.executor().advance_clock(Duration::from_secs(70));
+    vcx.run_until_parked();
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.prepared.rows[0].stale),
+        "the row turns stale at the reloaded threshold"
+    );
+}
+
+#[gpui::test]
 fn the_view_strip_lights_the_active_view_and_a_press_switches(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
     assert!(vcx.debug_bounds("volwatch-view-lit-changes").is_some());

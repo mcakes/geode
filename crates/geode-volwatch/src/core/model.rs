@@ -26,7 +26,9 @@ use geode_widgets::cell::zero_bar::{Bar, bar};
 use geode_widgets::cell::{column_scale, widths};
 use gpui::SharedString;
 
-use super::views::{Ask, Column, ColumnKind, PCTL_MIN_COUNT, TITLE, WINDOW_1Y};
+use super::views::{
+    Ask, Column, ColumnKind, PCTL_MIN_COUNT, REALIZED, SURFACE, TITLE, VARSWAP, WINDOW_1Y,
+};
 
 /// Fill alpha of a change chip at the column's largest move.
 pub const CHIP_CEILING: f32 = 0.55;
@@ -262,6 +264,12 @@ fn text(kind: &ColumnKind, v: f64) -> Formatted {
 
 /// The tail of a board sparkline a column of `wanted` span shows: the
 /// board answers the longest span any column or the band asked.
+///
+/// The cut is by proportion and assumes the values fill `board_span` (one
+/// a day across it). A member whose history is shorter than the span is
+/// cut too hard: under the band's 1Y ask, ~40 days of history leave ~4 in
+/// a 30d column until the next ask narrows the span. A known limit,
+/// listed in `docs/open-items.md`; the spark shape stays as it is.
 fn spark_tail(values: &[f64], board_span: Duration, wanted: Duration) -> &[f64] {
     let (have, want) = (board_span.as_secs(), wanted.as_secs());
     if have <= want || have == 0 {
@@ -544,8 +552,29 @@ pub fn sort_value(row: &Row, column: &Column, asked: &Ask) -> Option<f64> {
     value(row, &column.kind, asked)
 }
 
+/// The dataset a measure's change is read from: its first input's role,
+/// under the dataset names the tile asks with.
+fn measure_dataset(m: &Measure) -> &'static str {
+    match m.inputs().first().map(|i| i.role) {
+        Some(Role::Realized) => REALIZED,
+        Some(Role::Varswap) => VARSWAP,
+        Some(Role::Surface) | None => SURFACE,
+    }
+}
+
+/// The board note for `dataset` with its `<dataset>: ` prefix removed
+/// (`history starts 2026-09-01`), if the board carries one.
+fn note_for<'n>(notes: &'n [String], dataset: &str) -> Option<&'n str> {
+    notes
+        .iter()
+        .find_map(|n| n.strip_prefix(dataset)?.strip_prefix(": "))
+}
+
 /// `SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · 1Y pctl 91 of 251`, or `SX5E · not in surface`.
-pub fn readout(row: &Row, column: &Column, asked: &Ask, clock: &Clock) -> String {
+/// A cell with a level but no change says why when the board knows:
+/// `SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01` (the board
+/// note for the measure's dataset).
+pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock: &Clock) -> String {
     if !row.present {
         return format!("{} \u{b7} not in surface", row.name);
     }
@@ -566,6 +595,15 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, clock: &Clock) -> String
                     format_number(ch.from, &ONE_DP).text,
                     clock.local(ch.at).format("%Y-%m-%d"),
                 ));
+            } else if c.is_some_and(|c| c.current.is_some()) {
+                parts.push(format!(
+                    "\u{394}{} {}",
+                    asked.lookback.label(),
+                    widths::DASH
+                ));
+                if let Some(note) = note_for(notes, measure_dataset(m)) {
+                    parts.push(note.to_string());
+                }
             }
             if let Some((rank, count)) = c.and_then(|c| c.pctl) {
                 parts.push(format!("1Y pctl {:.0} of {count}", rank_percent(rank)));
@@ -1210,6 +1248,7 @@ mod tests {
                 &rows[0],
                 &col("atfm-3M-pctl"),
                 &ask_of(View::RichCheap),
+                &[],
                 &clock_utc()
             )
             .ends_with("1Y pctl 50 of 12")
@@ -1388,7 +1427,13 @@ mod tests {
         assert_eq!(p.rows[0].cells[column_index("vega")].text.as_ref(), "-312");
         assert_eq!(col("vega").head, "vega k");
         assert_eq!(
-            readout(&rows[0], &col("vega"), &ask_of(View::Changes), &clock_utc()),
+            readout(
+                &rows[0],
+                &col("vega"),
+                &ask_of(View::Changes),
+                &[],
+                &clock_utc()
+            ),
             "SX5E · vega k -312"
         );
         assert_eq!(
@@ -1409,6 +1454,7 @@ mod tests {
             &rows[0],
             &col("atfm-3M-level"),
             &ask_of(View::Changes),
+            &[],
             &clock_utc(),
         );
         assert_eq!(
@@ -1419,9 +1465,39 @@ mod tests {
             &rows[1],
             &col("atfm-3M-level"),
             &ask_of(View::Changes),
+            &[],
             &clock_utc(),
         );
         assert_eq!(text, "NEW · not in surface");
+    }
+
+    #[test]
+    fn a_cell_without_a_change_names_where_its_history_starts() {
+        let asked = ask_of(View::Changes);
+        let atfm3m = Measure::atfm("3M");
+        let board = VolBoard {
+            rows: vec![row_of(&asked, "SX5E", true, &|m| {
+                (*m == atfm3m).then_some((Some(15.9), None, None))
+            })],
+            notes: vec![
+                "realized_vol: history starts 2026-08-01".into(),
+                "vol_surface: history starts 2026-09-01".into(),
+            ],
+            ..VolBoard::default()
+        };
+        let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, None);
+        for id in ["atfm-3M-level", "atfm-3M-change"] {
+            assert_eq!(
+                readout(&rows[0], &col(id), &asked, &board.notes, &clock_utc()),
+                "SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01",
+                "{id}"
+            );
+        }
+        assert_eq!(
+            readout(&rows[0], &col("atfm-3M-change"), &asked, &[], &clock_utc()),
+            "SX5E · ATFM 3M 15.9 · Δ1d —",
+            "no note, no reason"
+        );
     }
 
     #[test]
