@@ -2018,33 +2018,26 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     }
                     // No other requester submits a watchlist resolution yet.
                     DataEvent::Watchlist(_) => {}
-                    // No tile asks for history yet, so the variant has no
-                    // consumer: an answer is noted and dropped.
+                    // No tile submits `Request::History`, so an answer is
+                    // noted and dropped.
                     DataEvent::History(outcome) => {
                         tracing::debug!(
                             target: "geode::query",
-                            "history answer for key {} tag {} dropped: no consumer",
+                            "history answer for key {} tag {} dropped: no tile submits Request::History",
                             outcome.key.0,
                             outcome.tag
                         );
                     }
-                    // Nor for a history key listing.
+                    // A key listing and a board are routed by tile key.
                     DataEvent::HistoryKeys(outcome) => {
-                        tracing::debug!(
-                            target: "geode::query",
-                            "history keys answer for key {} tag {} dropped: no consumer",
-                            outcome.key.0,
-                            outcome.tag
-                        );
+                        shell.update(cx, |s, cx| {
+                            s.deliver(Delivery::HistoryKeys(outcome), window, cx)
+                        });
                     }
-                    // Nor for a board.
                     DataEvent::VolBoard(outcome) => {
-                        tracing::debug!(
-                            target: "geode::query",
-                            "board answer for key {} tag {} dropped: no consumer",
-                            outcome.key.0,
-                            outcome.tag
-                        );
+                        shell.update(cx, |s, cx| {
+                            s.deliver(Delivery::VolBoard(outcome), window, cx)
+                        });
                     }
                     // The live lane keeps `ReferenceGlobal`; see `ReferenceCache`.
                     DataEvent::Reference(outcome) if outcome.key == REFERENCE_KEY => {
@@ -7514,6 +7507,52 @@ grain = "underlying"
             fixture.log.borrow().contains(&Recorded::VolSliced(tile, 6)),
             "the VolSlices delivery must reach the tile's occupant: {:?}",
             fixture.log.borrow()
+        );
+    }
+
+    /// A board answer takes the keyed route: the drain hands it to the shell
+    /// as `Delivery::VolBoard`, the occupant under that key sees it, and an
+    /// answer for a key no tile holds reaches nobody (it is not broadcast).
+    /// A history key listing takes the same route.
+    #[gpui::test]
+    fn a_board_answer_reaches_its_tile(cx: &mut gpui::TestAppContext) {
+        let fixture = recording_tile_with_bridge(cx);
+        let tile = fixture.tile;
+        let board = |key: u64, tag: u64| {
+            DataEvent::VolBoard(geode_core::volboard::VolBoardOutcome {
+                key: QueryKey(key),
+                tag,
+                submitted: std::time::Instant::now(),
+                result: Ok(geode_core::volboard::VolBoard::default()),
+            })
+        };
+        fixture.events.try_send(board(tile.0 + 1000, 8)).unwrap();
+        fixture.events.try_send(board(tile.0, 9)).unwrap();
+        fixture
+            .events
+            .try_send(DataEvent::HistoryKeys(
+                geode_core::query::HistoryKeysOutcome {
+                    key: QueryKey(tile.0),
+                    tag: 10,
+                    dataset: "vol_surface".into(),
+                    column: "tenor".into(),
+                    values: None,
+                },
+            ))
+            .unwrap();
+        fixture.vcx.run_until_parked();
+        let log = fixture.log.borrow();
+        assert!(
+            log.contains(&Recorded::Boarded(tile, 9)),
+            "the board must reach the tile held under its key: {log:?}"
+        );
+        assert!(
+            !log.contains(&Recorded::Boarded(tile, 8)),
+            "a board for another key must not reach this tile: {log:?}"
+        );
+        assert!(
+            log.contains(&Recorded::HistoryKeyed(tile, 10)),
+            "the key listing must reach its tile: {log:?}"
         );
     }
 

@@ -659,14 +659,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The subscription shutdown test in `subscribe.rs` is timing-based (125 ms); adopt
   the deterministic form (unsubscribe, wait for the thread to exit on
   `Disconnected`) if it flakes.
-- History family: `DataEvent::History` and `DataEvent::HistoryKeys` have no
-  consumer, so the app bridge and the collector log and drop them.
-  `Delivery::History` and `Delivery::HistoryKeys` and their first consumer
-  (the vol watchlist tile) land together in Part 4 of the vol watchlist.
-- Vol board (Part 2): `DataEvent::VolBoard` has no consumer; the app bridge
-  and the collector log and drop it. `Delivery::VolBoard` lands with the
-  tile in Part 4, which submits its vega `Request::Query` under the tile key
-  (the board read runs under `board_pool_key`, so they do not coalesce).
+- History family: `DataEvent::History` has no consumer (no tile submits
+  `Request::History`), so the app bridge and the collector log and drop it.
 - Vol board: daily buckets are UTC days (a session straddling UTC midnight
   would split into two buckets).
 - History family: an exact tuple the source never answers refetches on every

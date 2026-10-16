@@ -253,6 +253,8 @@ impl TileContent for ClassificationsContent {
             Delivery::SeriesFetched { .. } => {}
             Delivery::Upload(_) => {}
             Delivery::VolSlices(_) => {}
+            Delivery::VolBoard(_) => {}
+            Delivery::HistoryKeys(_) => {}
         }
     }
 

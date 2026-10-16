@@ -19,11 +19,12 @@ use crate::tiling::TileId;
 use geode_core::config::{Diagnostic, LayerDoc};
 use geode_core::context::DimensionContext;
 use geode_core::pricing::PriceOutcome;
-use geode_core::query::{DistinctOutcome, QueryKey, QueryOutcome};
+use geode_core::query::{DistinctOutcome, HistoryKeysOutcome, QueryKey, QueryOutcome};
 use geode_core::series::SeriesOutcome;
 use geode_core::textfile::TextFileOutcome;
 use geode_core::tile_columns::TileColumns;
 use geode_core::vol::VolSliceOutcome;
+use geode_core::volboard::VolBoardOutcome;
 use gpui::{AnyView, App, Entity, SharedString, Window};
 use std::rc::Rc;
 
@@ -68,6 +69,10 @@ pub enum Delivery {
     Distinct(DistinctOutcome),
     /// A text file read or write this tile asked for, routed by tile key.
     TextFile(TextFileOutcome),
+    /// A board request's answer, routed by tile key like a `Query`.
+    VolBoard(VolBoardOutcome),
+    /// A history key listing's answer, routed by tile key.
+    HistoryKeys(HistoryKeysOutcome),
 }
 
 /// [`Delivery::Upload`]'s fields, mirroring `geode_data::egress::
@@ -98,6 +103,8 @@ impl Delivery {
             Delivery::Upload(u) => Some(u.key),
             Delivery::Distinct(outcome) => Some(outcome.key),
             Delivery::TextFile(o) => Some(o.key),
+            Delivery::VolBoard(outcome) => Some(outcome.key),
+            Delivery::HistoryKeys(outcome) => Some(outcome.key),
         }
     }
 }
@@ -1053,6 +1060,8 @@ pub mod placeholder {
                 Delivery::Distinct(_) => {}
                 // This tile has no module; nothing is ever addressed here.
                 Delivery::TextFile(_) => {}
+                Delivery::VolBoard(_) => {}
+                Delivery::HistoryKeys(_) => {}
             }
         }
         fn set_visible(&self, _: bool, _: &mut App) {}
@@ -1140,6 +1149,10 @@ pub mod recording {
         Delivered(TileId, u64),
         Priced(TileId, u64),
         VolSliced(TileId, u64),
+        /// A keyed [`Delivery::VolBoard`] this tile was handed, with its tag.
+        Boarded(TileId, u64),
+        /// A keyed [`Delivery::HistoryKeys`] this tile was handed, with its tag.
+        HistoryKeyed(TileId, u64),
         /// A key-less [`Delivery::SeriesFetched`] this tile was handed,
         /// as `"{identity}@{source}"` — the pair spelled the way a
         /// timeseries slot names it, so a broadcast test can assert on
@@ -1648,6 +1661,16 @@ pub mod recording {
                     self.log
                         .borrow_mut()
                         .push(Recorded::Delivered(self.tile, o.tag));
+                }
+                Delivery::VolBoard(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Boarded(self.tile, outcome.tag));
+                }
+                Delivery::HistoryKeys(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::HistoryKeyed(self.tile, outcome.tag));
                 }
             }
         }
@@ -2207,6 +2230,28 @@ pub mod recording {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geode_core::query::HistoryKeysOutcome;
+    use geode_core::volboard::{VolBoard, VolBoardOutcome};
+    use std::time::Instant;
+
+    #[test]
+    fn a_board_and_a_key_listing_are_keyed_deliveries() {
+        let board = Delivery::VolBoard(VolBoardOutcome {
+            key: QueryKey(7),
+            tag: 1,
+            submitted: Instant::now(),
+            result: Ok(VolBoard::default()),
+        });
+        assert_eq!(board.key(), Some(QueryKey(7)));
+        let keys = Delivery::HistoryKeys(HistoryKeysOutcome {
+            key: QueryKey(7),
+            tag: 1,
+            dataset: "vol_surface".into(),
+            column: "tenor".into(),
+            values: None,
+        });
+        assert_eq!(keys.key(), Some(QueryKey(7)));
+    }
 
     #[test]
     fn stack_handle_prepares_its_text_once() {

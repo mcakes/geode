@@ -1132,7 +1132,9 @@ feature.
 
 `Delivery` is an exhaustive enum. Adding a new outcome type forces every
 occupant to decide how it handles that variant at compile time. Query, pricing,
-series, upload, and text file outcomes route by tile key, and so does a
+series, upload, and text file outcomes route by tile key, as do vol board
+(`Delivery::VolBoard`) and history key listing (`Delivery::HistoryKeys`)
+answers, and so does a
 distinct-values answer under a tile's key (`Delivery::Distinct`); answers
 under the shell's own keys (`shell::is_shell_key`) never reach a tile. A
 series fetch completion has no tile key and is broadcast to visible occupants

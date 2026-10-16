@@ -203,6 +203,8 @@ impl TileContent for VolsliceContent {
             Delivery::Distinct(_) => {}
             // This tile reads and writes no files.
             Delivery::TextFile(_) => {}
+            Delivery::VolBoard(_) => {}
+            Delivery::HistoryKeys(_) => {}
         }
     }
 

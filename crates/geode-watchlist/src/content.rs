@@ -207,6 +207,8 @@ impl TileContent for WatchlistContent {
             Delivery::Upload(_) => {}
             Delivery::Distinct(_) => {}
             Delivery::TextFile(_) => {}
+            Delivery::VolBoard(_) => {}
+            Delivery::HistoryKeys(_) => {}
         }
     }
 

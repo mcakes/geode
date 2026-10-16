@@ -277,6 +277,8 @@ impl TileContent for ScenarioContent {
             Delivery::Upload(_) => {}
             // This tile reads and writes no files.
             Delivery::TextFile(_) => {}
+            Delivery::VolBoard(_) => {}
+            Delivery::HistoryKeys(_) => {}
         }
     }
 

@@ -17715,6 +17715,18 @@ run_mutation "app: vol slices coalesce by key" \
   '        DataEvent::VolSlices(_) => Key::Diagnostics,' \
   geode-app vol_slices_coalesce_by_key_and_a_lower_tag_never_replaces_a_higher_one
 
+run_mutation "shell: a board delivery is routed by key" \
+  crates/geode-shell/src/module.rs \
+  '            Delivery::VolBoard(outcome) => Some(outcome.key),' \
+  '            Delivery::VolBoard(_) => None,' \
+  geode-shell a_board_and_a_key_listing_are_keyed_deliveries
+
+run_mutation "app: a board answer reaches its tile" \
+  crates/geode-app/src/bridge.rs \
+  '                            s.deliver(Delivery::VolBoard(outcome), window, cx)' \
+  '                            let _ = outcome;' \
+  geode-app a_board_answer_reaches_its_tile
+
 # ---- Vol slice Part 2: option chains, prefix query and watch ----
 # Entry names start "vol chain" so one substring selects exactly this set
 # ("chain" alone also selects older groupings entries).

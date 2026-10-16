@@ -215,6 +215,8 @@ impl TileContent for TimeseriesContent {
             Delivery::Distinct(_) => {}
             // This tile reads and writes no files.
             Delivery::TextFile(_) => {}
+            Delivery::VolBoard(_) => {}
+            Delivery::HistoryKeys(_) => {}
         }
         let _ = window;
     }

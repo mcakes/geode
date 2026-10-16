@@ -1580,9 +1580,11 @@ key. `DataHandle::cancel(key)` supersedes the older request and cancels its
 read in the pool. Because the pool coalesces and cancels per key, a history
 request must use a `QueryKey` no other pool request uses.
 
-`DataEvent::History`, `DataEvent::VolBoard` and `DataEvent::HistoryKeys`
-have no UI consumer yet: the app bridge and the collector log each answer
-at debug level and drop it. The vol watchlist tile consumes them in Part 4.
+`DataEvent::VolBoard` and `DataEvent::HistoryKeys` reach the tile that
+asked as `Delivery::VolBoard` and `Delivery::HistoryKeys`, routed by tile
+key like a `Query`. `DataEvent::History` has no UI consumer (no tile submits
+`Request::History`): the app bridge logs it at debug level and drops it. The
+collector has no shell and logs and drops all three.
 
 ### Board requests
 
@@ -1696,7 +1698,8 @@ the Hanweck closes do not.
 service thread, with `DataEvent::HistoryKeys`: the values the source listed
 at open for one history key column, in the column's declared order, or
 `None` when it listed nothing or the dataset or column is unknown. It never
-waits on the source. No consumer reads it yet.
+waits on the source. The app bridge delivers it to the asking tile as
+`Delivery::HistoryKeys`.
 
 ### Ungrouped dimension columns
 

@@ -222,6 +222,8 @@ impl TileContent for MarketDataContent {
             Delivery::Distinct(_) => {}
             // This tile reads and writes no files.
             Delivery::TextFile(_) => {}
+            Delivery::VolBoard(_) => {}
+            Delivery::HistoryKeys(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

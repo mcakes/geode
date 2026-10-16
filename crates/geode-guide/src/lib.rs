@@ -118,7 +118,9 @@ impl TileContent for GuideContent {
             | Delivery::SeriesFetched { .. }
             | Delivery::Upload(_)
             | Delivery::Distinct(_)
-            | Delivery::TextFile(_) => {}
+            | Delivery::TextFile(_)
+            | Delivery::VolBoard(_)
+            | Delivery::HistoryKeys(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {
