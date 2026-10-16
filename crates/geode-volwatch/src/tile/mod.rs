@@ -14,6 +14,7 @@ mod chrome;
 mod data;
 mod header;
 pub(crate) mod table;
+mod vega;
 
 #[cfg(test)]
 pub(crate) use chrome::MenuKind;
@@ -60,7 +61,7 @@ use crate::core::commands::{self, Command};
 use crate::core::model::{BandModel, HeaderModel, Prepared, Row, sort_value};
 use crate::core::session::{self, State};
 use crate::core::views::{
-    Ask, Column, KIND, REALIZED, SURFACE, VARSWAP, View, columns, order_tenors,
+    Ask, Column, ColumnKind, KIND, REALIZED, SURFACE, VARSWAP, View, columns, order_tenors,
 };
 
 const VIEW_ACTIONS: [&str; 5] = [
@@ -213,6 +214,7 @@ pub struct VolwatchTile {
     health: HealthWatch,
     pub(crate) stale_timer: StaleTimer,
     notices: Notices,
+    pub(crate) vega: vega::VegaState,
     /// Every notice the header reports, rebuilt with the chrome.
     reported: Vec<Notice>,
     dismissed: Dismissals,
@@ -242,6 +244,7 @@ impl VolwatchTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let vega_setting = shared.settings.borrow().vega.clone();
         let (state, restore) = restored.map(session::from_table).unwrap_or_default();
         let mut grid = RowModel::new();
         if let Some(name) = &state.cursor {
@@ -294,6 +297,9 @@ impl VolwatchTile {
             }
         })
         .detach();
+        // Only the vega query reads the frame; the board does not.
+        cx.observe(frame.entity(), |this, _, cx| this.on_frame_changed(cx))
+            .detach();
         let paints = Paints::from_theme(cx.theme());
         let table = cx.new(|cx| {
             TableState::new(GridDelegate::new(paints), window, cx)
@@ -352,6 +358,10 @@ impl VolwatchTile {
             find_entry: None,
             health,
             stale_timer: StaleTimer::new(),
+            vega: vega::VegaState {
+                setting: vega_setting,
+                ..Default::default()
+            },
             notices: Notices {
                 restore,
                 ..Notices::default()
@@ -379,13 +389,26 @@ impl VolwatchTile {
     }
 
     fn rebuild_columns(&mut self) {
-        self.columns = Rc::new(columns(self.state.view, &self.ordered_tenors()));
+        let mut columns = columns(self.state.view, &self.ordered_tenors());
+        // No setting, or a refused view: no vega column.
+        if !self.vega_offered() {
+            columns.retain(|c| c.kind != ColumnKind::Vega);
+        }
+        self.columns = Rc::new(columns);
         self.cursor_col = self.cursor_col.clamp(1, self.columns.len().max(2) - 1);
     }
 
     /// The factory stored new settings: the refresh interval and the stale
     /// threshold apply at once.
     pub(crate) fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        let vega = self.shared.settings.borrow().vega.clone();
+        if vega != self.vega.setting {
+            self.forget_vega();
+            self.vega.setting = vega;
+            self.rebuild_columns();
+            self.rebuild_rows(cx);
+            self.submit_vega(cx);
+        }
         self.arm_refresh(cx);
         self.prepare();
         self.sync_table(cx);
@@ -469,6 +492,8 @@ impl VolwatchTile {
         self.notices.failure = None;
         self.refresh = None;
         self.stale_timer.disarm();
+        self.forget_vega();
+        self.rebuild_columns();
     }
 
     /// Rebuild the rows from the members, the board and the reference
@@ -480,7 +505,12 @@ impl VolwatchTile {
                 .lookup(REFERENCE_DATASET, name, REFERENCE_NAME)
                 .map(str::to_string)
         };
-        let rows = crate::core::model::rows(&self.members, self.board.as_deref(), &lookup, None);
+        let rows = crate::core::model::rows(
+            &self.members,
+            self.board.as_deref(),
+            &lookup,
+            self.vega.values.as_ref(),
+        );
         self.sync_sort();
         self.grid.set_rows(rows);
         self.prepare();

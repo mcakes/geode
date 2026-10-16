@@ -5,13 +5,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use geode_core::query::QueryOutcome;
+use geode_core::snapshot::Snapshot;
 use geode_core::volboard::{Lookback, Measure};
 use geode_core::watchlist::state::Status;
+use geode_shell::module::Delivery;
 use geode_shell::watchlist::WatchlistGlobal;
+use geode_widgets::cell::widths;
+use std::time::Instant;
 
 use super::harness::*;
 use crate::content::{MIN_REFRESH, VolwatchSettings};
-use crate::core::views::{ALL_TENORS, SPARK_30D, WINDOW_1Y};
+use crate::core::views::{ALL_TENORS, ColumnKind, SPARK_30D, WINDOW_1Y};
 use crate::tile::{MenuKind, MenuState};
 
 #[gpui::test]
@@ -579,4 +584,137 @@ fn a_restored_open_band_asks_for_its_measures_and_shows_once_the_row_lands(
             .read_with(&vcx, |t, _| t.serialize().get("band").cloned()),
         Some(toml::Value::Boolean(true))
     );
+}
+
+#[gpui::test]
+fn vega_is_one_grouped_query_under_the_tile_key_scoped_to_the_members(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, _vcx) = open_with(
+        cx,
+        one_list(),
+        Some(restored("europe_risk")),
+        vega_settings(),
+    );
+    let reqs = h.requests();
+    let q = queries(&reqs);
+    assert_eq!(q.len(), 1);
+    assert_eq!(
+        (q[0].key, q[0].view.as_str(), q[0].max_depth),
+        (KEY, "wide", 1)
+    );
+    assert_eq!(q[0].grouping, Some(vec!["underlying_ref".into()]));
+    assert_eq!(q[0].scope.dimensions[0].values, ["DAX", "SX5E", "NEW"]);
+    assert_eq!(Harness::boards(&reqs).len(), 1, "the board is its own ask");
+}
+
+fn vega_outcome(tag: u64, snapshot: Result<Arc<Snapshot>, String>) -> Delivery {
+    Delivery::Query(QueryOutcome {
+        key: KEY,
+        tag,
+        submitted: Instant::now(),
+        snapshot,
+    })
+}
+
+#[gpui::test]
+fn vega_joins_by_name_into_the_column(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed_with_vega(cx);
+    let tag = queries(&h.requests())[0].tag;
+    let snap = vega_snapshot(&[("SX5E", -312_000.0), ("DAX", 40_000.0)]);
+    h.deliver(&mut vcx, vega_outcome(tag, Ok(Arc::new(snap))));
+    let col = h.column_index(&vcx, "vega");
+    let text = |row: usize| {
+        h.tile.read_with(&vcx, |t, _| {
+            t.prepared.rows[row].cells[col].text.to_string()
+        })
+    };
+    assert_eq!(text(0), "40", "DAX");
+    assert_eq!(text(1), "-312", "SX5E, not the depth-0 total");
+    assert_eq!(text(2), widths::DASH, "NEW has no vega");
+}
+
+#[gpui::test]
+fn a_refused_vega_view_drops_the_column_and_warns(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed_with_vega(cx);
+    let tag = queries(&h.requests())[0].tag;
+    assert!(h.tile.read_with(&vcx, |t, _| {
+        t.columns.iter().any(|c| c.kind == ColumnKind::Vega)
+    }));
+    h.deliver(
+        &mut vcx,
+        vega_outcome(tag, Err("'vega01_usd' is not a column".into())),
+    );
+    assert!(h.tile.read_with(&vcx, |t, _| {
+        t.columns.iter().all(|c| c.kind != ColumnKind::Vega)
+    }));
+    assert_eq!(
+        h.notices(&vcx),
+        ["[volwatch] vega: 'vega01_usd' is not a column"]
+    );
+    assert_eq!(
+        h.shown(&vcx),
+        ["DAX", "SX5E", "NEW"],
+        "the board keeps painting"
+    );
+}
+
+#[gpui::test]
+fn a_later_vega_answer_restores_the_column_and_clears_the_warning(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed_with_vega(cx);
+    let tag = queries(&h.requests())[0].tag;
+    h.deliver(&mut vcx, vega_outcome(tag, Err("gone".into())));
+    h.press(&mut vcx, "shift-r");
+    let reqs = h.requests();
+    let tag = queries(&reqs)[0].tag;
+    assert!(tag > 1);
+    h.deliver(
+        &mut vcx,
+        vega_outcome(tag, Ok(Arc::new(vega_snapshot(&[("DAX", 1_000.0)])))),
+    );
+    assert!(h.tile.read_with(&vcx, |t, _| {
+        t.columns.iter().any(|c| c.kind == ColumnKind::Vega)
+    }));
+    assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn a_stale_vega_tag_is_dropped(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed_with_vega(cx);
+    let first = queries(&h.requests())[0].tag;
+    h.press(&mut vcx, "shift-r");
+    h.deliver(&mut vcx, vega_outcome(first, Err("old".into())));
+    assert!(
+        h.notices(&vcx).is_empty(),
+        "the superseded answer paints nothing"
+    );
+}
+
+#[gpui::test]
+fn a_frame_scope_change_asks_vega_alone(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed_with_vega(cx);
+    h.requests();
+    let sel = geode_core::scope::DimensionSelection {
+        column: "book".into(),
+        values: vec!["b1".into()],
+    };
+    h.frame.update(&mut vcx, |f, cx| {
+        f.shared_mut().set_scope(geode_core::scope::Scope {
+            dimensions: vec![sel],
+            ..Default::default()
+        });
+        cx.notify();
+    });
+    let reqs = h.requests();
+    assert_eq!(queries(&reqs).len(), 1);
+    assert!(Harness::boards(&reqs).is_empty());
+}
+
+#[gpui::test]
+fn no_vega_setting_means_no_vega_column_and_no_query(cx: &mut gpui::TestAppContext) {
+    let (h, vcx) = landed(cx);
+    assert!(queries(&h.requests()).is_empty());
+    assert!(h.tile.read_with(&vcx, |t, _| {
+        t.columns.iter().all(|c| c.kind != ColumnKind::Vega)
+    }));
 }

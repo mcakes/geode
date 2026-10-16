@@ -220,6 +220,12 @@ impl VolwatchTile {
             .chain(n.refused.iter())
             .cloned()
             .map(Notice::warning)
+            .chain(
+                self.vega
+                    .refused
+                    .iter()
+                    .map(|e| Notice::warning(format!("[volwatch] vega: {e}"))),
+            )
             .chain(unresolved)
             .chain(
                 n.nothing_to_switch

@@ -198,7 +198,7 @@ impl TileContent for VolwatchContent {
             Delivery::HistoryKeys(outcome) => {
                 self.tile.update(cx, |t, cx| t.deliver_keys(outcome, cx))
             }
-            Delivery::Query(_) => {}
+            Delivery::Query(outcome) => self.tile.update(cx, |t, cx| t.deliver_vega(outcome, cx)),
             Delivery::Price(_) => {}
             Delivery::VolSlices(_) => {}
             Delivery::Series(_) => {}

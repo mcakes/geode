@@ -75,6 +75,10 @@ impl VolwatchTile {
         if !force && base.is_some_and(|b| !needs_requery(b, &next)) {
             return;
         }
+        if force {
+            // Vega rides with every forced ask, apart from the board.
+            self.submit_vega(cx);
+        }
         let tag = self.tag + 1;
         let params = VolBoardParams {
             key: self.key(),

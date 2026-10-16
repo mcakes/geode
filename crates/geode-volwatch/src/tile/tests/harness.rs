@@ -574,3 +574,64 @@ impl Harness {
         self.tile.read_with(vcx, |t, _| t.state.band)
     }
 }
+
+/// The vega queries among `reqs`.
+pub(super) fn queries(reqs: &[Request]) -> Vec<&geode_data::QueryParams> {
+    reqs.iter()
+        .filter_map(|r| match r {
+            Request::Query(p) => Some(p),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The settings that ask book vega from `wide`'s `vega01_usd`.
+pub(super) fn vega_settings() -> VolwatchSettings {
+    VolwatchSettings {
+        vega: Some(crate::content::VegaSetting {
+            view: "wide".into(),
+            column: "vega01_usd".into(),
+        }),
+        ..Default::default()
+    }
+}
+
+/// A grouped answer: one depth-1 row per `(name, value)` and a depth-0
+/// total carrying a number no member has.
+pub(super) fn vega_snapshot(rows: &[(&'static str, f64)]) -> geode_core::snapshot::Snapshot {
+    use geode_core::attribution::{Attribution, ScopeSemantics};
+    use geode_core::snapshot::{ColumnMeta, Snapshot, TestColumn};
+    let meta = |name: &str, summable: bool| ColumnMeta {
+        name: name.into(),
+        attribution_by_depth: vec![Attribution::Additive; 2],
+        scope_semantics: ScopeSemantics::Direct,
+        summable,
+        mixed_flag: None,
+    };
+    let mut names: Vec<Option<&'static str>> = rows.iter().map(|(n, _)| Some(*n)).collect();
+    let mut values: Vec<Option<f64>> = rows.iter().map(|(_, v)| Some(*v)).collect();
+    let mut depth = vec![1; rows.len()];
+    names.push(None);
+    values.push(Some(9_999_999.0));
+    depth.push(0);
+    Snapshot::for_tests(
+        vec![
+            (meta("underlying_ref", false), TestColumn::Str(names)),
+            (meta("vega01_usd", true), TestColumn::F64(values)),
+            (meta("row_depth", false), TestColumn::I32(depth)),
+        ],
+        1,
+    )
+}
+
+/// A vega-configured tile on [`LIST`] whose board has landed; the vega
+/// query is still out and not drained.
+pub(super) fn landed_with_vega(
+    cx: &mut gpui::TestAppContext,
+) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open_with(cx, one_list(), Some(restored(LIST)), vega_settings());
+    let tag = h.tag_of(&vcx);
+    let asked = h.asked_of(&vcx);
+    h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    (h, vcx)
+}
