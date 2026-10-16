@@ -112,9 +112,11 @@ pub enum ColumnKind {
     Bar {
         measure: Measure,
     },
-    /// `sparklines[index]` of the ask.
+    /// The tail `span` of `measure`'s sparkline, found in the ask by
+    /// measure (the board's span may be longer).
     Spark {
-        index: usize,
+        measure: Measure,
+        span: Duration,
     },
     /// ATFM across every tenor, on a shared range.
     Term,
@@ -252,9 +254,12 @@ pub fn columns(view: View, tenors: &[String]) -> Vec<Column> {
                 "spark-0".into(),
                 Some("ATFM 3M \u{b7} 30d"),
                 "ATFM 3M \u{b7} 30d",
-                ColumnKind::Spark { index: 0 },
+                ColumnKind::Spark {
+                    measure: Measure::atfm("3M"),
+                    span: SPARK_30D,
+                },
             ));
-            cols.push(col("vega".into(), None, "vega", ColumnKind::Vega));
+            cols.push(col("vega".into(), None, "vega k", ColumnKind::Vega));
         }
         View::Levels => {
             for t in ATFM_TENORS {
@@ -303,7 +308,7 @@ pub fn columns(view: View, tenors: &[String]) -> Vec<Column> {
                 varswap("3M"),
                 false,
             ));
-            cols.push(col("vega".into(), None, "vega", ColumnKind::Vega));
+            cols.push(col("vega".into(), None, "vega k", ColumnKind::Vega));
         }
         View::RichCheap => {
             cols.push(level(
@@ -534,9 +539,7 @@ pub fn ask(view: View, tenors: &[String], lookback: Lookback, band: bool) -> Ask
                 push_unique(&mut measures, measure);
                 window = Some(WINDOW_1Y);
             }
-            ColumnKind::Spark { .. } => {
-                merge_spark(&mut sparklines, Measure::atfm("3M"), SPARK_30D);
-            }
+            ColumnKind::Spark { measure, span } => merge_spark(&mut sparklines, measure, span),
             ColumnKind::Term => {
                 for t in tenors {
                     push_unique(&mut measures, Measure::atfm(t));
@@ -643,6 +646,11 @@ mod tests {
         );
         assert_eq!(a.window, None, "Changes asks no percentile");
         assert_eq!(a.sparklines, vec![(Measure::atfm("3M"), SPARK_30D)]);
+        assert!(columns(View::Changes, &tenors).iter().any(|c| c.kind
+            == ColumnKind::Spark {
+                measure: Measure::atfm("3M"),
+                span: SPARK_30D
+            }));
         let r = ask(View::RichCheap, &tenors, Lookback::D1, false);
         assert_eq!(r.window, Some(WINDOW_1Y));
         assert!(r.measures.contains(&Measure::IvRv {

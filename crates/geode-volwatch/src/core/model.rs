@@ -26,7 +26,7 @@ use geode_widgets::cell::zero_bar::{Bar, bar};
 use geode_widgets::cell::{column_scale, widths};
 use gpui::SharedString;
 
-use super::views::{Ask, Column, ColumnKind, PCTL_MIN_COUNT, SPARK_30D, TITLE};
+use super::views::{Ask, Column, ColumnKind, PCTL_MIN_COUNT, TITLE};
 
 /// Fill alpha of a change chip at the column's largest move.
 pub const CHIP_CEILING: f32 = 0.55;
@@ -154,6 +154,9 @@ pub struct Inputs<'a> {
     pub tile: u64,
     pub rows: &'a [Row],
     pub columns: &'a [Column],
+    /// The ask the board ANSWERED, not the view's current one: cells and
+    /// sparklines are found by their position in it, so reading a board
+    /// through any other ask misplaces every cell.
     pub asked: &'a Ask,
     /// the lookback the board was asked with; cells paint muted when it differs from `shown`
     pub board_lookback: Lookback,
@@ -174,6 +177,22 @@ fn cell<'r>(row: &'r Row, measure: &Measure, asked: &Ask) -> Option<&'r Cell> {
         .cells
         .get(pos)
         .filter(|c| c.measure == *measure)
+}
+
+/// A measure's sparkline and the span the board answered it over, found by
+/// measure in the ask as cells are; `None` for a row the surface lacks.
+fn spark<'r>(
+    row: &'r Row,
+    measure: &Measure,
+    asked: &Ask,
+) -> Option<(&'r Option<Vec<f64>>, Duration)> {
+    let pos = asked.sparklines.iter().position(|(m, _)| m == measure)?;
+    let series = row
+        .present
+        .then_some(row.board.as_ref())??
+        .sparks
+        .get(pos)?;
+    Some((series, asked.sparklines[pos].1))
 }
 
 /// The change over the one lookback the tile asks.
@@ -277,6 +296,7 @@ fn term_values(row: &Row, measures: &[&Measure], asked: &Ask) -> Option<Vec<f64>
         .map(|m| {
             cell(row, m, asked)
                 .and_then(|c| c.current)
+                .filter(|v| v.is_finite())
                 .unwrap_or(f64::NAN)
         })
         .collect();
@@ -427,14 +447,12 @@ fn prepare_cell(
         glyph: Glyph::None,
         muted: true,
     };
-    if let ColumnKind::Spark { index } = column.kind {
-        let Some((Some(series), (_, span))) = row
-            .present
-            .then_some(row.board.as_ref())
-            .flatten()
-            .and_then(|b| b.sparks.get(index))
-            .zip(i.asked.sparklines.get(index))
-        else {
+    if let ColumnKind::Spark {
+        measure,
+        span: wanted,
+    } = &column.kind
+    {
+        let Some((Some(series), board_span)) = spark(row, measure, i.asked) else {
             return blank;
         };
         if series.is_empty() {
@@ -444,7 +462,7 @@ fn prepare_cell(
             text: SharedString::default(),
             muted: false,
             glyph: Glyph::Spark {
-                values: Arc::from(spark_tail(series, *span, SPARK_30D)),
+                values: Arc::from(spark_tail(series, board_span, *wanted)),
                 range: None,
                 mark: None,
                 end_dot: true,
@@ -490,14 +508,14 @@ fn prepare_cell(
 
 /// The measure a column reads, for the readout; a sparkline column reads
 /// its sparkline's measure.
-fn column_measure<'a>(column: &'a Column, asked: &'a Ask) -> Option<&'a Measure> {
+fn column_measure(column: &Column) -> Option<&Measure> {
     match &column.kind {
         ColumnKind::Level { measure, .. }
         | ColumnKind::Change { measure }
         | ColumnKind::ForwardChange { measure }
         | ColumnKind::Pctl { measure }
         | ColumnKind::Bar { measure } => Some(measure),
-        ColumnKind::Spark { index } => asked.sparklines.get(*index).map(|(m, _)| m),
+        ColumnKind::Spark { measure, .. } => Some(measure),
         ColumnKind::Underlying | ColumnKind::Term | ColumnKind::Vega => None,
     }
 }
@@ -532,7 +550,7 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, clock: &Clock) -> String
         return format!("{} \u{b7} not in surface", row.name);
     }
     let mut parts = vec![row.name.clone()];
-    match column_measure(column, asked) {
+    match column_measure(column) {
         Some(m) => {
             let c = cell(row, m, asked);
             let current = c.and_then(|c| c.current).map_or_else(
@@ -555,7 +573,8 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, clock: &Clock) -> String
         }
         None => match &column.kind {
             ColumnKind::Vega => parts.push(format!(
-                "vega {}",
+                "{} {}",
+                column.head,
                 row.vega.map_or_else(
                     || widths::DASH.to_string(),
                     |v| format_number(v, &VEGA).text
@@ -978,6 +997,45 @@ mod tests {
     }
 
     #[test]
+    fn a_spark_column_reads_its_measures_series_wherever_the_ask_lists_it() {
+        // A band-open ask lists skew 3M first: the Changes spark still shows ATFM 3M.
+        let skew = Measure::Skew { tenor: "3M".into() };
+        let mut asked = ask_of(View::Changes);
+        asked.sparklines = vec![(skew, WINDOW_1Y), (Measure::atfm("3M"), WINDOW_1Y)];
+        let mut board = board_two();
+        board.rows[0].sparks = vec![
+            Some((0..365).map(|v| -f64::from(v)).collect()),
+            Some((0..365).map(f64::from).collect()),
+        ];
+        let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, None);
+        let mut i = inputs(&rows, View::Changes);
+        i.asked = &asked;
+        let p = prepare(&i);
+        let Glyph::Spark { values, .. } = &p.rows[0].cells[column_index("spark-0")].glyph else {
+            panic!("a spark");
+        };
+        assert_eq!(values.len(), 30);
+        assert_eq!(values[29], 364.0, "the ATFM series' tail, not the skew's");
+    }
+
+    #[test]
+    fn a_non_finite_level_leaves_the_term_range_finite() {
+        let p = prepare(&inputs(
+            rows_with_levels(&[[10.0, f64::INFINITY], [30.0, 40.0]]),
+            View::Term,
+        ));
+        let t = &p.rows[1].cells[column_index("term")];
+        assert!(
+            matches!(&t.glyph, Glyph::Spark { range: Some((lo, hi)), .. } if *lo == 10.0 && *hi == 40.0)
+        );
+        let t = &p.rows[0].cells[column_index("term")];
+        assert!(
+            matches!(&t.glyph, Glyph::Spark { values, .. } if values.iter().all(|v| !v.is_infinite())),
+            "the infinite 3M is a gap"
+        );
+    }
+
+    #[test]
     fn a_measure_the_board_was_not_asked_for_is_blank() {
         // A Levels column read against the Changes board: realized was not asked.
         let rows = rows(&members(["SX5E"]), Some(&board_two()), &no_reference, None);
@@ -1012,6 +1070,11 @@ mod tests {
             "+1.0"
         );
         assert_eq!(p.rows[0].cells[column_index("vega")].text.as_ref(), "-312");
+        assert_eq!(col("vega").head, "vega k");
+        assert_eq!(
+            readout(&rows[0], &col("vega"), &ask_of(View::Changes), &clock_utc()),
+            "SX5E · vega k -312"
+        );
         assert_eq!(
             p.rows[0].cells[column_index("vega")].id.as_ref(),
             "7-SX5E-vega"
