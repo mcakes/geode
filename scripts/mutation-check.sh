@@ -41848,8 +41848,8 @@ run_mutation "volboard: the board SQL reads At strictly before the instant" \
 # The daily bucket keeps the last mark of the day.
 run_mutation "volboard: the daily bucket takes the first mark of the day" \
   crates/geode-data/src/query/volboard.rs \
-  '                 select *, row_number() over (partition by {key_list}, epoch_us(ts) // {DAY_US} order by ts desc) as rn' \
-  '                 select *, row_number() over (partition by {key_list}, epoch_us(ts) // {DAY_US} order by ts asc) as rn' \
+  '                 select *, row_number() over (partition by asked_ix, epoch_us(ts) // {DAY_US} order by ts desc) as rn' \
+  '                 select *, row_number() over (partition by asked_ix, epoch_us(ts) // {DAY_US} order by ts asc) as rn' \
   geode-data \
   the_daily_bucket_keeps_the_last_mark_of_the_day
 
@@ -41913,8 +41913,8 @@ run_mutation "volboard: the rank ignores the window's first day" \
 # current is the earliest cached row and every change is measured from it.
 run_mutation "volboard: the current is the earliest observation" \
   crates/geode-data/src/query/volboard.rs \
-  '                 select *, row_number() over (partition by {key_list} order by ts desc) as rn from live' \
-  '                 select *, row_number() over (partition by {key_list} order by ts asc) as rn from live' \
+  '                 select *, row_number() over (partition by asked_ix order by ts desc) as rn from live' \
+  '                 select *, row_number() over (partition by asked_ix order by ts asc) as rn from live' \
   geode-data \
   the_board_reads_current_changes_rank_spark_and_lists_the_missing_member
 
@@ -41923,9 +41923,9 @@ run_mutation "volboard: the current is the earliest observation" \
 # 0.18. Two lines: the first alone is also the current select's prefix.
 run_mutation "volboard: an At lookback takes the earliest observation" \
   crates/geode-data/src/query/volboard.rs \
-  '                 select *, row_number() over (partition by {key_list} order by ts desc) as rn
+  '                 select *, row_number() over (partition by asked_ix order by ts desc) as rn
                  from live where ts <= make_timestamp(?)' \
-  '                 select *, row_number() over (partition by {key_list} order by ts asc) as rn
+  '                 select *, row_number() over (partition by asked_ix order by ts asc) as rn
                  from live where ts <= make_timestamp(?)' \
   geode-data \
   the_live_version_wins
@@ -41934,10 +41934,29 @@ run_mutation "volboard: an At lookback takes the earliest observation" \
 # 3M tuples' history reads as starting on the 10th, not the 8th.
 run_mutation "volboard: first reads the latest cached ts" \
   crates/geode-data/src/query/volboard.rs \
-  '                 select *, row_number() over (partition by {key_list} order by ts asc) as rn from live' \
-  '                 select *, row_number() over (partition by {key_list} order by ts desc) as rn from live' \
+  '                 select *, row_number() over (partition by asked_ix order by ts asc) as rn from live' \
+  '                 select *, row_number() over (partition by asked_ix order by ts desc) as rn from live' \
   geode-data \
   the_board_reads_current_changes_rank_spark_and_lists_the_missing_member
+
+# A row names its asked tuple by index; the reader feeds that tuple's
+# slots. Mutated to always feed the first tuple, every 3M delta and the
+# 1M tuple land on one slot.
+run_mutation "volboard: every row feeds the first asked tuple" \
+  crates/geode-data/src/query/volboard.rs \
+  '.and_then(|i| feeds.get(i))' \
+  '.and_then(|_| feeds.first())' \
+  geode-data \
+  the_board_reads_current_changes_rank_spark_and_lists_the_missing_member
+
+# Only a slot some row reached joins the observations. Mutated to every
+# slot, an uncached member reads as a failed lookback and gains a note.
+run_mutation "volboard: an unreached slot joins the observations" \
+  crates/geode-data/src/query/volboard.rs \
+  '.filter_map(|(slot, reached)| reached.then_some(slot)),' \
+  '.filter_map(|(slot, _reached)| Some(slot)),' \
+  geode-data \
+  a_member_with_no_cached_rows_adds_no_observation_or_note
 
 # A drifted or sourceless realized or varswap blanks its columns: the
 # surface is the board, the others are not. Mutated back to refusing, a

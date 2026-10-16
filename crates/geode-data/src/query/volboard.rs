@@ -13,7 +13,7 @@ use duckdb::Connection;
 use duckdb::types::Value;
 use geode_core::clock::Clock;
 use geode_core::query::{QueryKey, normalize_key};
-use geode_core::schema::{ColumnSpec, ColumnType, DatasetSpec, SchemaSpec};
+use geode_core::schema::{ColumnSpec, DatasetSpec, SchemaSpec};
 use geode_core::volboard::plan::{daily_span, day_index};
 use geode_core::volboard::reduce::{Observations, Observed, reduce};
 use geode_core::volboard::{Input, Role, VolBoard, VolBoardParams};
@@ -98,9 +98,14 @@ pub fn check_dataset<'a>(
 
 /// One statement: the live version of every asked tuple's rows, then the
 /// four projections unioned with a `kind` and an `idx` (the lookback
-/// position for `KIND_AT`, the day index for `KIND_DAILY`). `tuples` is
-/// not empty (a `values` list with no rows does not parse) and holds each
-/// key in its canonical text spelling.
+/// position for `KIND_AT`, the day index for `KIND_DAILY`). Each row is
+/// `(kind, idx, asked_ix, epoch_us(ts), values…)`, ordered by `kind, idx,
+/// asked_ix`, where `asked_ix` is the tuple's position in `tuples`: the
+/// rows carry no key columns, so the reader maps a row to its tuple by
+/// index, not by reading and comparing key text. `tuples` is not empty (a
+/// `values` list with no rows does not parse), holds each key in its
+/// canonical text spelling, and holds no tuple twice (`live` groups by
+/// `asked_ix`, so a repeated tuple would answer twice).
 fn board_sql(
     ds: &DatasetSpec,
     tuples: &[Vec<String>],
@@ -110,7 +115,6 @@ fn board_sql(
     let keys = ds.history_key();
     let values = ds.history_values();
     let table = history_table(&ds.name);
-    let key_list = joined(&keys, |c| quote(&c.name), ", ");
     let value_list = joined(&values, |c| quote(&c.name), ", ");
     let live_values = joined(
         &values,
@@ -119,18 +123,17 @@ fn board_sql(
     );
     let mut params: Vec<Value> = Vec::new();
     // The asked tuples as a VALUES list joined on the key, each cell bound
-    // as text and cast to the declared type in the join. These bind first:
-    // the `live` CTE is the first parameterised text in the statement.
-    let row = format!(
-        "({})",
-        keys.iter()
-            .map(|_| "CAST(? AS VARCHAR)")
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
-    let asked_rows = tuples
+    // as text and cast to the declared type in the join, and each row
+    // closed by its index in `tuples` as a literal (`ix`). The key cells
+    // bind first: the `live` CTE is the first parameterised text in the
+    // statement.
+    let cells = keys
         .iter()
-        .map(|_| row.as_str())
+        .map(|_| "CAST(? AS VARCHAR)")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let asked_rows = (0..tuples.len())
+        .map(|i| format!("({cells}, {i}::INTEGER)"))
         .collect::<Vec<_>>()
         .join(", ");
     for tuple in tuples {
@@ -146,23 +149,24 @@ fn board_sql(
         .map(|(i, c)| format!("t.{} = CAST(asked.a{i} AS {})", quote(&c.name), c.ty.sql()))
         .collect::<Vec<_>>()
         .join(" and ");
+    // One row per asked tuple and ts: the latest-received version.
     let live = format!(
         "live as (
-             select {key_list}, ts, {live_values} from {table} t
-             join (values {asked_rows}) as asked({asked_cols}) on {on}
-             group by {key_list}, ts
+             select asked.ix as asked_ix, t.ts as ts, {live_values} from {table} t
+             join (values {asked_rows}) as asked({asked_cols}, ix) on {on}
+             group by asked.ix, t.ts
          )"
     );
-    let projection = format!("{key_list}, epoch_us(ts), {value_list}");
+    let projection = format!("asked_ix, epoch_us(ts), {value_list}");
     let mut selects = vec![
         format!(
             "select {KIND_CURRENT} as kind, 0::BIGINT as idx, {projection} from (
-                 select *, row_number() over (partition by {key_list} order by ts desc) as rn from live
+                 select *, row_number() over (partition by asked_ix order by ts desc) as rn from live
              ) where rn = 1"
         ),
         format!(
             "select {KIND_FIRST} as kind, 0::BIGINT as idx, {projection} from (
-                 select *, row_number() over (partition by {key_list} order by ts asc) as rn from live
+                 select *, row_number() over (partition by asked_ix order by ts asc) as rn from live
              ) where rn = 1"
         ),
     ];
@@ -171,7 +175,7 @@ fn board_sql(
     for (i, t) in instants.iter().enumerate() {
         selects.push(format!(
             "select {KIND_AT} as kind, {i}::BIGINT as idx, {projection} from (
-                 select *, row_number() over (partition by {key_list} order by ts desc) as rn
+                 select *, row_number() over (partition by asked_ix order by ts desc) as rn
                  from live where ts <= make_timestamp(?)
              ) where rn = 1"
         ));
@@ -183,14 +187,14 @@ fn board_sql(
         // and a cached observation before 1970 would bucket one day late.
         selects.push(format!(
             "select {KIND_DAILY} as kind, epoch_us(ts) // {DAY_US} as idx, {projection} from (
-                 select *, row_number() over (partition by {key_list}, epoch_us(ts) // {DAY_US} order by ts desc) as rn
+                 select *, row_number() over (partition by asked_ix, epoch_us(ts) // {DAY_US} order by ts desc) as rn
                  from live where ts >= make_timestamp(?) and ts < make_timestamp(?)
              ) where rn = 1"
         ));
         params.extend([Value::BigInt(micros(from)), Value::BigInt(micros(to))]);
     }
     let sql = format!(
-        "with {live} {} order by kind, idx, {key_list}",
+        "with {live} {} order by kind, idx, asked_ix",
         selects.join(" union all ")
     );
     (sql, params)
@@ -198,10 +202,11 @@ fn board_sql(
 
 /// Read one dataset's observations of `inputs` (all of `role`) into
 /// `obs`, keyed by each request member and each input exactly as given:
-/// `reduce` looks them up by those values. Members and suffixes are
-/// compared with the stored keys in `normalize_key`'s spelling, so a
-/// suffix spelt `0.250` reads the `0.25` key. A key that does not
-/// normalize names no stored row and reads nothing. The observations
+/// `reduce` looks them up by those values. Members and suffixes are asked
+/// in `normalize_key`'s spelling and matched to the stored keys by value
+/// in SQL, so a suffix spelt `0.250` reads the `0.25` key; each row names
+/// its asked tuple by index (`board_sql`). A key that does not normalize
+/// names no stored row and reads nothing. The observations
 /// reach `obs` only once the whole statement has been read: a read failing
 /// partway (rows come by kind, so current and lookback rows precede the
 /// daily ones) must not leave a current or a truncated day set beside the
@@ -256,16 +261,44 @@ fn read_role(
     }
     let mut member_keys: Vec<&String> = members.keys().collect();
     member_keys.sort();
-    let tuples: Vec<Vec<String>> = member_keys
-        .iter()
-        .flat_map(|m| {
-            by_suffix.iter().map(move |(s, _)| {
-                std::iter::once((*m).clone())
-                    .chain(s.iter().cloned())
-                    .collect()
-            })
-        })
-        .collect();
+    let n_lookbacks = plan.instants.len();
+    // The asked tuples and, parallel to them, what each feeds: (value
+    // column, slot) per (member spelling, input) asking it. Every slot is
+    // made here, before the row loop, so a row costs an index into `feeds`
+    // and `slots`: no key text read back, no hash, no clone. A tuple
+    // feeding nothing (no input names a declared column) is not asked.
+    let mut tuples: Vec<Vec<String>> = Vec::new();
+    let mut feeds: Vec<Vec<(usize, usize)>> = Vec::new();
+    let mut slots: Vec<((String, Input), Observed)> = Vec::new();
+    for member in &member_keys {
+        for (suffix, asking) in &by_suffix {
+            let mut feed = Vec::new();
+            for input in asking {
+                let Some(&ci) = column_index.get(input.column) else {
+                    continue;
+                };
+                for spelling in &members[*member] {
+                    feed.push((ci, slots.len()));
+                    slots.push((
+                        (spelling.to_string(), (*input).clone()),
+                        Observed {
+                            at: vec![None; n_lookbacks],
+                            ..Default::default()
+                        },
+                    ));
+                }
+            }
+            if feed.is_empty() {
+                continue;
+            }
+            tuples.push(
+                std::iter::once((*member).clone())
+                    .chain(suffix.iter().cloned())
+                    .collect(),
+            );
+            feeds.push(feed);
+        }
+    }
     if tuples.is_empty() {
         return Ok(());
     }
@@ -276,73 +309,57 @@ fn read_role(
         Some((from, plan.now))
     });
     let (sql, params) = board_sql(ds, &tuples, &plan.instants, daily);
-    let n_keys = keys.len();
-    let n_lookbacks = plan.instants.len();
     let err = |e: duckdb::Error| StoreError::Sql {
         statement: sql.clone(),
         source: e,
     };
-    let mut found: HashMap<(String, Input), Observed> = HashMap::new();
+    // Only a slot some row reached joins `obs`: a tuple with no cached row
+    // stays absent, not an empty observation.
+    let mut touched = vec![false; slots.len()];
     let mut stmt = conn.prepare(&sql).map_err(err)?;
     let mut rows = stmt.query(duckdb::params_from_iter(params)).map_err(err)?;
     while let Some(r) = rows.next().map_err(err)? {
         let kind: i32 = r.get(0).map_err(err)?;
         let idx: i64 = r.get(1).map_err(err)?;
-        let key: Vec<String> = keys
-            .iter()
-            .enumerate()
-            .map(|(i, c)| match c.ty {
-                // Read back in the spelling `normalize_key` writes.
-                ColumnType::F64 => r.get::<_, f64>(2 + i).map(|f| format!("{f}")),
-                _ => r.get::<_, String>(2 + i),
-            })
-            .collect::<Result<_, _>>()
-            .map_err(err)?;
-        let at = from_micros(r.get::<_, i64>(2 + n_keys).map_err(err)?);
-        let Some(spellings) = members.get(&key[0]) else {
+        let asked_ix: i32 = r.get(2).map_err(err)?;
+        let at = from_micros(r.get::<_, i64>(3).map_err(err)?);
+        let Some(feed) = usize::try_from(asked_ix).ok().and_then(|i| feeds.get(i)) else {
             continue;
         };
-        let Some((_, asking)) = by_suffix.iter().find(|(s, _)| s[..] == key[1..]) else {
-            continue;
-        };
-        for input in asking {
-            let Some(&ci) = column_index.get(input.column) else {
-                continue;
-            };
-            let value: f64 = r.get(3 + n_keys + ci).map_err(err)?;
-            for member in spellings {
-                let o = found
-                    .entry((member.to_string(), (*input).clone()))
-                    .or_insert_with(|| Observed {
-                        at: vec![None; n_lookbacks],
-                        ..Default::default()
-                    });
-                match kind {
-                    KIND_CURRENT => o.current = Some((at, value)),
-                    KIND_FIRST => o.first = Some(at),
-                    KIND_AT => {
-                        if let Some(slot) = o.at.get_mut(idx as usize) {
-                            *slot = Some((at, value));
-                        }
+        for &(ci, slot) in feed {
+            let value: f64 = r.get(4 + ci).map_err(err)?;
+            touched[slot] = true;
+            let o = &mut slots[slot].1;
+            match kind {
+                KIND_CURRENT => o.current = Some((at, value)),
+                KIND_FIRST => o.first = Some(at),
+                KIND_AT => {
+                    if let Some(at_slot) = o.at.get_mut(idx as usize) {
+                        *at_slot = Some((at, value));
                     }
-                    // The projection answers one row per tuple per UTC
-                    // day; a second would double-count the day in a rank
-                    // or keep whichever mark came last in row order.
-                    KIND_DAILY => {
-                        let earlier = o.daily.insert(idx, value);
-                        if earlier.is_some() {
-                            return Err(StoreError::History(format!(
-                                "'{name}': two daily observations of one day for {}",
-                                key.join(" / ")
-                            )));
-                        }
-                    }
-                    _ => {}
                 }
+                // The projection answers one row per tuple per UTC
+                // day; a second would double-count the day in a rank
+                // or keep whichever mark came last in row order.
+                KIND_DAILY => {
+                    let earlier = o.daily.insert(idx, value);
+                    if earlier.is_some() {
+                        return Err(StoreError::History(format!(
+                            "'{name}': two daily observations of one day for {}",
+                            tuples[asked_ix as usize].join(" / ")
+                        )));
+                    }
+                }
+                _ => {}
             }
         }
     }
-    obs.by_input.extend(found);
+    obs.by_input.extend(
+        slots
+            .into_iter()
+            .zip(touched)
+            .filter_map(|(slot, reached)| reached.then_some(slot)),
+    );
     Ok(())
 }
 
@@ -782,6 +799,19 @@ role = "value"
             assert!(cell.changes.iter().all(Option::is_none), "{cell:?}");
             assert_eq!(cell.pctl, None, "{cell:?}");
         }
+    }
+
+    /// A member the cache holds nothing for has no observation at all, not
+    /// an empty one: an empty one would read as a failed lookback and add
+    /// a "no observation at or before" note for a member never cached.
+    #[test]
+    fn a_member_with_no_cached_rows_adds_no_observation_or_note() {
+        let (_dir, store, schema) = seeded();
+        let mut p = plan(vec![Measure::atfm("3M")], None, None);
+        p.params.members = vec!["NDX".into()];
+        let board = read_board(store.writer(), &schema, &p).unwrap();
+        assert_eq!(board.missing, vec!["NDX"]);
+        assert!(board.notes.is_empty(), "{:?}", board.notes);
     }
 
     #[test]
