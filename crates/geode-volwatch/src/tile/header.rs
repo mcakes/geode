@@ -59,8 +59,7 @@ const VIEW_IDS: [&str; 5] = [
 /// The view digits as static text, parallel to `View::ALL`.
 const DIGITS: [&str; 5] = ["1", "2", "3", "4", "5"];
 
-/// The `⋯` action's id.
-const MENU_ACTION: &str = "volwatch::menu";
+use super::MENU_ACTION;
 
 /// Run `action` through the tile's own door, as its key would.
 fn dispatch(
@@ -87,12 +86,30 @@ pub(crate) fn render(tile: &VolwatchTile, cx: &mut Context<VolwatchTile>) -> Div
         None => table_el(&tile.table, id),
     };
     let footer = render_footer(tile, &theme, cx);
+    let actions = actions_menu(tile, cx);
     v_flex()
         .size_full()
         .bg(theme.background)
         .text_color(theme.foreground)
         .debug_selector(move || format!("volwatch-{id}"))
-        .child(header)
+        .child(
+            // The `.` menu hangs from the header's right edge, under `⋯`; a
+            // right press hangs it from the pointer instead.
+            div()
+                .relative()
+                .w_full()
+                .child(header)
+                .when_some(actions.0, |el, menu| {
+                    el.child(
+                        div()
+                            .absolute()
+                            .right_0()
+                            .top(scale::design(geode_tile::header::HEADER_HEIGHT))
+                            .child(menu),
+                    )
+                }),
+        )
+        .when_some(actions.1, |el, menu| el.child(menu))
         .child(strip)
         .child(body)
         // The inspection band docks between the grid and the footer.
@@ -101,6 +118,47 @@ pub(crate) fn render(tile: &VolwatchTile, cx: &mut Context<VolwatchTile>) -> Div
             el.child(super::band::render(&tile.band_model, &paints, &theme, id))
         })
         .child(footer)
+}
+
+/// The actions menu, as (hung under the header, hung at the pointer).
+fn actions_menu(
+    tile: &VolwatchTile,
+    cx: &mut Context<VolwatchTile>,
+) -> (Option<gpui::Deferred>, Option<gpui::Anchored>) {
+    let Some(m) = tile.menu.as_ref().filter(|m| m.kind == MenuKind::Actions) else {
+        return (None, None);
+    };
+    let ids = MenuIds::new("volwatch-actions", "volwatch-actions-row");
+    let corner = if tile.menu_at.is_some() {
+        gpui::Anchor::TopLeft
+    } else {
+        gpui::Anchor::TopRight
+    };
+    let menu = menu::render_menu(
+        &m.menu,
+        &ids,
+        corner,
+        &cx.entity(),
+        |t: &mut VolwatchTile, _, cx| {
+            if t.is_actions() {
+                t.close_menu();
+                cx.notify();
+            }
+        },
+        cx,
+    );
+    match tile.menu_at {
+        Some(at) => (
+            None,
+            Some(
+                gpui::anchored()
+                    .position_mode(gpui::AnchoredPositionMode::Window)
+                    .position(at)
+                    .child(menu),
+            ),
+        ),
+        None => (Some(menu), None),
+    }
 }
 
 /// The `Vol · <list> ▾` control: a press toggles the switcher (`g w`'s
@@ -130,7 +188,7 @@ fn switch_control(
                     &entity,
                     |t: &mut VolwatchTile, _, cx| {
                         if t.menu.is_some() {
-                            t.menu = None;
+                            t.close_menu();
                             cx.notify();
                         }
                     },
@@ -303,7 +361,7 @@ fn render_header(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTi
         selector: SharedString::new_static("volwatch-menu-button"),
         tip_selector: SharedString::new_static("tip-volwatch-menu"),
         action: MENU_ACTION,
-        open: false,
+        open: tile.is_actions(),
         on_press: Rc::new(move |_, cx| {
             entity.update(cx, |t, cx| t.toggle_menu(cx));
         }),

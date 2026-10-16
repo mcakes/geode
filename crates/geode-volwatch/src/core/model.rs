@@ -311,7 +311,7 @@ fn is_stale(row: &Row, now: DateTime<Utc>, stale_after: Duration) -> bool {
 }
 
 /// Text px → the narrowest cell a column of `kind` paints it in.
-fn glyph_width(kind: &ColumnKind, text_px: f32) -> f32 {
+pub(crate) fn glyph_width(kind: &ColumnKind, text_px: f32) -> f32 {
     match kind {
         ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } => widths::chip(text_px),
         ColumnKind::Pctl { .. } => widths::slider(text_px),

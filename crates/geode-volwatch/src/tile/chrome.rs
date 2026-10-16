@@ -2,20 +2,28 @@
 //! dismissal, the empty state, and the watchlist switcher's menu.
 
 use geode_core::watchlist::state::{Status, WatchlistSnapshot};
+use geode_shell::actions::ActionId;
 use geode_shell::keymap::Keystroke;
 use geode_shell::tips;
-use geode_tile::menu::{ActionRow, Menu, MenuHost, MenuPick, Row as MenuRow};
+use geode_tile::menu::{ActionRow, Hint, Menu, MenuHost, MenuPick, Row as MenuRow};
 use geode_tile::notice::{Notice, Tone};
 use gpui::{App, Context, SharedString, Window};
 
-use super::{SWITCH_ACTION, VIEW_NEXT_ACTION, VolwatchTile, snapshot};
+use super::table::sortable;
+use super::{
+    INSPECT_ACTION, LOOKBACK_ACTION, PAINT_ACTION, REFRESH_ACTION, SORT_ACTION, SWITCH_ACTION,
+    TIMESERIES_ACTION, VIEW_ACTIONS, VIEW_NEXT_ACTION, VolwatchTile, YANK_ACTION, snapshot,
+};
 use crate::core::model::header;
+use crate::core::views::View;
 
 /// Which menu is up. Menu mode, its keys and its pick door are shared by
 /// every kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MenuKind {
     Switch,
+    /// The `.` / `\u{22ef}` / right-press menu of the tile's verbs.
+    Actions,
 }
 
 /// What a menu row does when picked.
@@ -23,12 +31,15 @@ pub(crate) enum MenuKind {
 pub(crate) enum Pick {
     /// Show this watchlist.
     Show(SharedString),
+    /// Run this action id through the tile's own door, as its key would.
+    Verb(&'static str),
 }
 
 impl MenuPick for Pick {
     fn element_name(&self) -> SharedString {
         match self {
             Pick::Show(name) => name.clone(),
+            Pick::Verb(id) => SharedString::new_static(id),
         }
     }
 }
@@ -82,15 +93,26 @@ fn spell(keystrokes: &[Keystroke]) -> String {
 }
 
 impl MenuHost for VolwatchTile {
-    fn menu_pick(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+    fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(picked) = self.menu.as_ref().and_then(|m| m.menu.pick(index)) else {
             return;
         };
         match picked {
+            Err(reason) if self.is_actions() => {
+                self.close_menu();
+                self.notices.refused = Some(reason.to_string());
+                self.rebuild_chrome(cx);
+                cx.notify();
+            }
             Err(_) => {}
             Ok(Pick::Show(name)) => {
-                self.menu = None;
+                self.close_menu();
                 self.show(&name, cx);
+            }
+            Ok(Pick::Verb(id)) => {
+                self.close_menu();
+                self.dispatch(&ActionId(id.to_string()), None, window, cx);
+                cx.notify();
             }
         }
     }
@@ -113,10 +135,11 @@ impl VolwatchTile {
         self.settled |= listed;
         self.was_shown = shown;
         match self.menu.as_ref().map(|m| m.kind) {
+            Some(MenuKind::Actions) => {}
             Some(MenuKind::Switch) => {
                 let rows = self.switch_rows(snapshot);
                 if rows.is_empty() {
-                    self.menu = None;
+                    self.close_menu();
                 } else if let Some(m) = self.menu.as_mut() {
                     m.menu.replace_rows(rows, &self.chords);
                 }
@@ -149,7 +172,7 @@ impl VolwatchTile {
 
     pub(super) fn toggle_switcher(&mut self, cx: &mut Context<Self>) {
         if self.menu.is_some() {
-            self.menu = None;
+            self.close_menu();
         } else {
             let rows = self.switch_rows(&snapshot(cx));
             if rows.is_empty() {
@@ -168,10 +191,110 @@ impl VolwatchTile {
         cx.notify();
     }
 
-    /// The header's `⋯` press. The action menu is not built yet: the
-    /// trigger is wired so its press already reaches this door, and asks
-    /// nothing.
-    pub(super) fn toggle_menu(&mut self, _cx: &mut Context<Self>) {}
+    /// Close whichever menu is up, and release the pointer anchor.
+    pub(super) fn close_menu(&mut self) {
+        self.menu = None;
+        self.menu_at = None;
+    }
+
+    pub(super) fn is_actions(&self) -> bool {
+        self.menu
+            .as_ref()
+            .is_some_and(|m| m.kind == MenuKind::Actions)
+    }
+
+    /// `.` and the header's `\u{22ef}`: the actions menu hung under the
+    /// header; a second press (or a switcher in the way) replaces or closes it.
+    pub(super) fn toggle_menu(&mut self, cx: &mut Context<Self>) {
+        if self.is_actions() {
+            self.close_menu();
+        } else {
+            self.open_actions(None);
+        }
+        cx.notify();
+    }
+
+    /// Open the actions menu, hung from `at` when it came from a pointer.
+    pub(super) fn open_actions(&mut self, at: Option<gpui::Point<gpui::Pixels>>) {
+        self.menu = Some(MenuState {
+            kind: MenuKind::Actions,
+            menu: Menu::new(self.actions_rows(), &self.chords),
+        });
+        self.menu_at = at;
+    }
+
+    fn verb(&self, id: &'static str, title: impl Into<SharedString>) -> ActionRow<Pick> {
+        ActionRow::new(Pick::Verb(id), title).hint(Hint::chord(id))
+    }
+
+    /// The verbs for the current state: the active view and paint are
+    /// ticked; a verb its key would refuse is disabled with the reason.
+    pub(super) fn actions_rows(&self) -> Vec<MenuRow<Pick>> {
+        let column = self.columns.get(self.cursor_col);
+        let sort = match column {
+            Some(c) if sortable(&c.kind) => Ok(()),
+            Some(c) => Err(SharedString::from(format!("{} is not sortable", c.head))),
+            None => Err(SharedString::new_static("no column")),
+        };
+        let row = self
+            .grid
+            .cursor()
+            .and_then(|at| self.grid.visible().get(at))
+            .map(|&i| self.grid.row(i));
+        let inspect = match row {
+            None => Err(SharedString::new_static("no row")),
+            Some(r) if self.board.is_some() && !r.present => Err(SharedString::from(format!(
+                "{} is not in the surface",
+                r.name
+            ))),
+            Some(_) => Ok(()),
+        };
+        let mut rows = vec![
+            MenuRow::Action(self.verb(SWITCH_ACTION, "Switch list\u{2026}")),
+            MenuRow::Separator,
+        ];
+        rows.extend(View::ALL.iter().zip(VIEW_ACTIONS).map(|(v, id)| {
+            MenuRow::Action(
+                self.verb(id, format!("{} view", v.label()))
+                    .checked(self.state.view == *v),
+            )
+        }));
+        rows.extend([
+            MenuRow::Separator,
+            MenuRow::Action(self.verb(LOOKBACK_ACTION, "Cycle lookback")),
+            MenuRow::Action(self.verb(PAINT_ACTION, "Paint").checked(self.paint)),
+            MenuRow::Action(self.verb(SORT_ACTION, "Sort by column").enabled(sort)),
+            MenuRow::Separator,
+            MenuRow::Action(self.verb(INSPECT_ACTION, "Inspect row").enabled(inspect)),
+            MenuRow::Action(self.verb(TIMESERIES_ACTION, "Open timeseries")),
+            MenuRow::Action(self.verb(YANK_ACTION, "Yank cell")),
+            MenuRow::Separator,
+            MenuRow::Action(self.verb(REFRESH_ACTION, "Refresh now")),
+        ]);
+        rows
+    }
+
+    /// Ticks and enablement follow the state while the actions menu is up.
+    fn refresh_actions(&mut self) {
+        if !self.is_actions() {
+            return;
+        }
+        let rows = self.actions_rows();
+        if let Some(m) = self.menu.as_mut() {
+            m.menu.replace_rows(rows, &self.chords);
+        }
+    }
+
+    /// The open menu's action titles in order.
+    #[cfg(test)]
+    pub(crate) fn menu_titles(&self) -> Vec<String> {
+        self.menu
+            .iter()
+            .flat_map(|m| m.menu.rows())
+            .filter_map(MenuRow::action)
+            .map(|a| a.title().to_string())
+            .collect()
+    }
 
     /// The header's title, count, lookback chips and board counts, from
     /// the shown list's name: rebuilt with the chrome, so a list switch or
@@ -189,6 +312,7 @@ impl VolwatchTile {
 
     pub(crate) fn rebuild_chrome(&mut self, cx: &App) {
         self.rebuild_header();
+        self.refresh_actions();
         self.strip_keys = tips::chord_for(&self.chords, VIEW_NEXT_ACTION);
         let snapshot = snapshot(cx);
         let list = self.state.list.as_deref();

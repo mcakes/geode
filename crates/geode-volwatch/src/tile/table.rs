@@ -8,6 +8,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use geode_chart::spark::{Spark, SparkPaint, sizes};
+use geode_shell::colfit::{FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
@@ -25,7 +26,7 @@ use gpui_component::table::{
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme};
 
-use crate::core::model::{BAR_ALPHA, Glyph, Prepared};
+use crate::core::model::{BAR_ALPHA, Glyph, Prepared, glyph_width};
 use crate::core::views::{Column, ColumnKind};
 
 /// Whether alternate rows are striped. Every geode grid paints unstriped;
@@ -196,6 +197,9 @@ pub(crate) struct GridDelegate {
     rem_px: f32,
     /// Column widths at the window's rem, from the prepared design px.
     widths: Vec<Pixels>,
+    /// Widths `:autosize` fitted, by column id, in pixels at the rem they
+    /// were measured at; each replaces its column's prepared width.
+    pub(crate) fitted: FittedWidths,
     /// One run of equal `Column::group`s per entry; empty when no column
     /// is grouped.
     groups: Vec<ColumnGroup>,
@@ -217,6 +221,7 @@ impl GridDelegate {
             paints,
             rem_px: scale::DESIGN_REM,
             widths: Vec::new(),
+            fitted: FittedWidths::new(),
             groups: Vec::new(),
             heads: Vec::new(),
             ids: Vec::new(),
@@ -289,8 +294,51 @@ impl GridDelegate {
             .prepared
             .widths
             .iter()
-            .map(|w| px(scale::design_px(*w, rem)))
+            .enumerate()
+            .map(
+                |(ix, w)| match self.ids.get(ix).and_then(|id| self.fitted.get(&**id)) {
+                    Some(fitted) => px(*fitted),
+                    None => px(scale::design_px(*w, rem)),
+                },
+            )
             .collect();
+    }
+
+    /// Install fitted widths (empty returns to the prepared ones).
+    pub(crate) fn set_fitted(&mut self, fitted: FittedWidths) {
+        self.fitted = fitted;
+        self.relayout();
+    }
+
+    /// Each column fitted to its head and widest cell in the real mono
+    /// metrics: a glyph column keeps the glyph's own minimum around its
+    /// text. `None` while there are no rows to measure.
+    pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
+        if self.prepared.rows.is_empty() || self.columns.is_empty() {
+            return None;
+        }
+        let rem = px(m.rem_px);
+        // The glyph minima are design px over a design-rem text advance.
+        let design_advance = m.advance_px * scale::DESIGN_REM / m.rem_px;
+        Some(
+            self.columns
+                .iter()
+                .enumerate()
+                .map(|(ci, c)| {
+                    let cells = self
+                        .prepared
+                        .rows
+                        .iter()
+                        .filter_map(|r| r.cells.get(ci))
+                        .map(|cell| {
+                            let text = cell.text.chars().count() as f32 * design_advance;
+                            scale::design_px(glyph_width(&c.kind, text), rem)
+                        });
+                    let width = m.fit(std::iter::once(m.text_px(&c.head)).chain(cells));
+                    (c.id.clone(), width)
+                })
+                .collect(),
+        )
     }
 
     /// Column `ix`'s width. `prepare` measures every column of the view,

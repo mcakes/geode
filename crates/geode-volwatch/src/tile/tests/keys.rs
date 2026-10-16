@@ -322,3 +322,310 @@ fn the_cursor_waits_for_its_restored_row(cx: &mut gpui::TestAppContext) {
     h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
     assert_eq!(h.cursor(&vcx), Some("SX5E".into()));
 }
+
+#[gpui::test]
+fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, ".");
+    assert_eq!(
+        h.menu_titles(&vcx),
+        [
+            "Switch list\u{2026}",
+            "Changes view",
+            "Levels view",
+            "Rich / cheap view",
+            "Term view",
+            "Skew view",
+            "Cycle lookback",
+            "Paint",
+            "Sort by column",
+            "Inspect row",
+            "Open timeseries",
+            "Yank cell",
+            "Refresh now",
+        ]
+    );
+    let titles = h.menu_titles(&vcx);
+    let at = titles.iter().position(|t| t == "Term view").unwrap();
+    for _ in 0..at {
+        h.press(&mut vcx, "j");
+    }
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.view(&vcx), View::Term);
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_none()));
+}
+
+#[gpui::test]
+fn the_menu_rows_carry_their_chords_ticks_and_reasons(cx: &mut gpui::TestAppContext) {
+    use geode_tile::menu::Trailing;
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "l");
+    h.press(&mut vcx, ".");
+    h.tile.read_with(&vcx, |t, _| {
+        let m = t.menu.as_ref().unwrap();
+        let row = |title: &str| {
+            m.menu
+                .rows()
+                .iter()
+                .filter_map(geode_tile::menu::Row::action)
+                .find(|a| a.title().as_ref() == title)
+                .unwrap_or_else(|| panic!("no row {title}"))
+                .clone()
+        };
+        assert_eq!(row("Changes view").tick(), Some(true));
+        assert_eq!(row("Term view").tick(), Some(false));
+        assert_eq!(row("Paint").tick(), Some(t.paint));
+        assert!(row("Sort by column").is_enabled(), "a numeric column sorts");
+        assert!(matches!(row("Yank cell").trailing(), Trailing::Keys(_)));
+        assert!(matches!(
+            row("Switch list\u{2026}").trailing(),
+            Trailing::Keys(_)
+        ));
+    });
+    // Back on Underlying, the sort row says why it is off.
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "4");
+    h.move_to_column(&mut vcx, "term");
+    h.press(&mut vcx, ".");
+    h.tile.read_with(&vcx, |t, _| {
+        let sort = t
+            .menu
+            .as_ref()
+            .unwrap()
+            .menu
+            .rows()
+            .iter()
+            .filter_map(geode_tile::menu::Row::action)
+            .find(|a| a.title().as_ref() == "Sort by column")
+            .unwrap()
+            .clone();
+        assert!(!sort.is_enabled());
+        assert!(sort.reason().unwrap().contains("is not sortable"));
+    });
+    // A pointer press on the disabled row gives its reason as a notice
+    // (the keys step over it).
+    let index = h.tile.read_with(&vcx, |t, _| {
+        t.menu
+            .as_ref()
+            .unwrap()
+            .menu
+            .rows()
+            .iter()
+            .position(|r| {
+                r.action()
+                    .is_some_and(|a| a.title().as_ref() == "Sort by column")
+            })
+            .unwrap()
+    });
+    let tile = h.tile.clone();
+    vcx.update(|window, cx| {
+        use geode_tile::menu::MenuHost as _;
+        tile.update(cx, |t, cx| t.menu_pick(index, window, cx))
+    });
+    assert!(
+        h.notices(&vcx)
+            .iter()
+            .any(|n| n.contains("is not sortable"))
+    );
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_none()));
+}
+
+#[gpui::test]
+fn the_header_trigger_opens_the_same_menu_and_shows_it_open(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.draw(&mut vcx);
+    let button = vcx
+        .debug_bounds("volwatch-menu-button")
+        .expect("the trigger");
+    vcx.simulate_click(button.center(), gpui::Modifiers::none());
+    assert_eq!(h.menu_titles(&vcx)[0], "Switch list\u{2026}");
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("volwatch-actions").is_some());
+    let menu = vcx.debug_bounds("volwatch-actions").unwrap();
+    assert!(menu.origin.y >= button.origin.y, "hung under the header");
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu_at.is_none()));
+}
+
+#[gpui::test]
+fn a_right_press_moves_the_cursor_and_opens_the_menu_at_the_pointer(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.draw(&mut vcx);
+    let row = vcx.debug_bounds("volwatch-row-SX5E").unwrap();
+    vcx.simulate_mouse_down(
+        row.center(),
+        gpui::MouseButton::Right,
+        gpui::Modifiers::none(),
+    );
+    assert_eq!(h.cursor(&vcx), Some("SX5E".into()));
+    assert!(h.tile.read_with(&vcx, |t, _| t.is_actions()));
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.menu_at), Some(row.center()));
+    h.draw(&mut vcx);
+    let menu = vcx.debug_bounds("volwatch-actions").expect("painted");
+    let at = row.center();
+    assert!(
+        (menu.origin.x - at.x).abs() <= gpui::px(1.0)
+            && (menu.origin.y - at.y).abs() <= gpui::px(1.0),
+        "{:?} is at the pointer {at:?}",
+        menu.origin
+    );
+    h.press(&mut vcx, "escape");
+    assert!(
+        h.tile
+            .read_with(&vcx, |t, _| t.menu.is_none() && t.menu_at.is_none())
+    );
+    release_the_table_menu(&mut vcx, row.center());
+}
+
+/// gpui-component's table builds an empty context menu on every right
+/// press, held in a cycle only the next right press breaks, so a test
+/// ending after a right press leaks it. One more right press, whose
+/// deferred rebuild never runs because the window closes in the same
+/// update, breaks it (the watchlist's tests have the same helper).
+fn release_the_table_menu(vcx: &mut gpui::VisualTestContext, at: gpui::Point<gpui::Pixels>) {
+    vcx.update(|window, cx| {
+        window.dispatch_event(
+            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                button: gpui::MouseButton::Right,
+                position: at,
+                modifiers: gpui::Modifiers::default(),
+                click_count: 1,
+                first_mouse: false,
+            }),
+            cx,
+        );
+        window.remove_window();
+    });
+    vcx.run_until_parked();
+}
+
+#[gpui::test]
+fn t_is_refused_with_a_notice_naming_the_gap(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "j");
+    h.move_to_column(&mut vcx, "atfm-3M-level");
+    h.press(&mut vcx, "t");
+    assert_eq!(
+        h.notices(&vcx),
+        ["timeseries cannot open a history series yet: vol_surface [SX5E, 3M, 0.5] vol"]
+    );
+    // A column with no measure says so.
+    h.press(&mut vcx, "4");
+    h.move_to_column(&mut vcx, "term");
+    h.press(&mut vcx, "t");
+    let n = h.notices(&vcx);
+    assert_eq!(n.len(), 1, "{n:?}");
+    assert!(n[0].ends_with("has no series"), "{n:?}");
+}
+
+#[gpui::test]
+fn escape_peels_menu_band_selection_narrowing_then_notices(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.find(&mut vcx, FindEvent::Committed("S".into()));
+    let shown = h.shown(&vcx).len();
+    h.press(&mut vcx, "enter");
+    assert!(h.band_open(&vcx));
+    h.move_to_column(&mut vcx, "atfm-3M-level");
+    h.press(&mut vcx, "t");
+    assert_eq!(h.notices(&vcx).len(), 1);
+    // The pointer routes touch no verb, so the notice stands: a shift
+    // press starts a selection, the header's trigger opens the menu.
+    h.draw(&mut vcx);
+    let row = vcx.debug_bounds("volwatch-row-SX5E").unwrap();
+    vcx.simulate_click(row.center(), gpui::Modifiers::shift());
+    assert!(h.tile.read_with(&vcx, |t, _| t.grid.selecting()));
+    h.draw(&mut vcx);
+    let button = vcx.debug_bounds("volwatch-menu-button").unwrap();
+    vcx.simulate_click(button.center(), gpui::Modifiers::none());
+    assert!(h.tile.read_with(&vcx, |t, _| t.is_actions()));
+    h.press(&mut vcx, "escape");
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_none()));
+    assert!(h.band_open(&vcx), "the band outlives the menu");
+    h.press(&mut vcx, "escape");
+    assert!(!h.band_open(&vcx));
+    assert!(h.tile.read_with(&vcx, |t, _| t.grid.selecting()));
+    h.press(&mut vcx, "escape");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.grid.selecting()));
+    assert_eq!(h.shown(&vcx).len(), shown);
+    h.press(&mut vcx, "escape");
+    assert!(h.shown(&vcx).len() > shown, "narrowing cleared");
+    assert_eq!(h.notices(&vcx).len(), 1);
+    h.press(&mut vcx, "escape");
+    assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn a_verbs_notice_lasts_until_the_next_verb(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "j");
+    h.move_to_column(&mut vcx, "atfm-3M-level");
+    h.press(&mut vcx, "t");
+    assert_eq!(h.notices(&vcx).len(), 1);
+    h.press(&mut vcx, "p");
+    assert!(h.notices(&vcx).is_empty());
+}
+
+#[gpui::test]
+fn autosize_refuses_before_a_board_lands(cx: &mut gpui::TestAppContext) {
+    use geode_shell::colfit::NOTHING_TO_FIT;
+    let (h, mut vcx) = open_on(cx, View::Changes);
+    let tile = h.content.clone();
+    assert_eq!(
+        vcx.update(|window, cx| tile.autosize_columns(false, window, cx)),
+        Err(NOTHING_TO_FIT)
+    );
+    // A reset never refuses.
+    assert_eq!(
+        vcx.update(|window, cx| tile.autosize_columns(true, window, cx)),
+        Ok(())
+    );
+}
+
+#[gpui::test]
+fn autosize_fits_resets_and_persists(cx: &mut gpui::TestAppContext) {
+    use geode_shell::colfit::SESSION_KEY;
+    let (h, mut vcx) = landed(cx);
+    let tile = h.content.clone();
+    let widths = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile
+            .read_with(vcx, |t, cx| t.table.read(cx).delegate().fitted.clone())
+    };
+    assert!(widths(&h, &vcx).is_empty());
+    assert_eq!(
+        vcx.update(|window, cx| tile.autosize_columns(false, window, cx)),
+        Ok(())
+    );
+    let fitted = widths(&h, &vcx);
+    assert_eq!(fitted.len(), h.tile.read_with(&vcx, |t, _| t.columns.len()));
+    // Persisted in the session record.
+    let saved = vcx.update(|_, cx| tile.serialize(cx));
+    assert!(saved.contains_key(SESSION_KEY));
+    // A reset returns to the prepared widths and drops the key.
+    assert_eq!(
+        vcx.update(|window, cx| tile.autosize_columns(true, window, cx)),
+        Ok(())
+    );
+    assert!(widths(&h, &vcx).is_empty());
+    assert!(
+        !vcx.update(|_, cx| tile.serialize(cx))
+            .contains_key(SESSION_KEY)
+    );
+}
+
+#[gpui::test]
+fn fitted_widths_restore_from_the_session_record(cx: &mut gpui::TestAppContext) {
+    use geode_shell::colfit::SESSION_KEY;
+    let mut record = restored(LIST);
+    let mut widths = toml::Table::new();
+    widths.insert("atfm-3M-level".into(), toml::Value::Float(123.0));
+    record.insert(SESSION_KEY.into(), toml::Value::Table(widths));
+    let (h, vcx) = open_with(cx, one_list(), Some(record), VolwatchSettings::default());
+    let got = h.tile.read_with(&vcx, |t, cx| {
+        t.table
+            .read(cx)
+            .delegate()
+            .fitted
+            .get("atfm-3M-level")
+            .copied()
+    });
+    assert_eq!(got, Some(123.0));
+}

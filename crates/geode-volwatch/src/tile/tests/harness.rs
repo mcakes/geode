@@ -406,6 +406,18 @@ impl Harness {
         self.dispatched.borrow().clone()
     }
 
+    /// Paint a frame, so debug bounds follow the state.
+    pub(super) fn draw(&self, vcx: &mut gpui::VisualTestContext) {
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+
+    /// The open menu's action titles, in order.
+    pub(super) fn menu_titles(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+        self.tile.read_with(vcx, |t, _| t.menu_titles())
+    }
+
     /// The latest board ask's tag.
     pub(super) fn tag_of(&self, vcx: &gpui::VisualTestContext) -> u64 {
         self.tile.read_with(vcx, |t, _| t.tag)

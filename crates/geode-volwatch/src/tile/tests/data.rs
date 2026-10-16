@@ -581,7 +581,7 @@ fn a_restored_open_band_asks_for_its_measures_and_shows_once_the_row_lands(
     );
     assert_eq!(
         h.tile
-            .read_with(&vcx, |t, _| t.serialize().get("band").cloned()),
+            .read_with(&vcx, |t, cx| t.serialize(cx).get("band").cloned()),
         Some(toml::Value::Boolean(true))
     );
 }

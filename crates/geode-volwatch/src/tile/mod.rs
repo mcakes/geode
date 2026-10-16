@@ -31,10 +31,13 @@ use geode_core::clock::Clock;
 use geode_core::link::{CursorScope, Emission, underlying_scope};
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
-use geode_core::volboard::{Lookback, VolBoard};
+use geode_core::volboard::{Lookback, Role, VolBoard};
 use geode_core::watchlist::state::{Status, WatchlistSnapshot};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
+use geode_shell::colfit::{
+    FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
+};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext, Keystroke};
@@ -82,6 +85,8 @@ const SORT_ACTION: &str = "volwatch::sort";
 const YANK_ACTION: &str = "volwatch::yank";
 const VISUAL_ACTION: &str = "volwatch::visual_rows";
 const INSPECT_ACTION: &str = "volwatch::inspect";
+const TIMESERIES_ACTION: &str = "volwatch::timeseries";
+pub(super) const MENU_ACTION: &str = "volwatch::menu";
 
 /// The tile's motion actions and the shared grid motions they name.
 const MOTIONS: [(&str, &str); 6] = [
@@ -219,6 +224,9 @@ pub struct VolwatchTile {
     reported: Vec<Notice>,
     dismissed: Dismissals,
     pub(crate) menu: Option<MenuState>,
+    /// Where a right press hung the actions menu; `None` hangs it from the
+    /// header.
+    pub(crate) menu_at: Option<gpui::Point<gpui::Pixels>>,
     chords: Arc<Vec<Binding>>,
     /// Whether a snapshot with lists has been settled yet, and whether the
     /// last settle showed a list: the switcher opens on the first, and
@@ -301,8 +309,10 @@ impl VolwatchTile {
         cx.observe(frame.entity(), |this, _, cx| this.on_frame_changed(cx))
             .detach();
         let paints = Paints::from_theme(cx.theme());
+        let mut delegate = GridDelegate::new(paints);
+        delegate.fitted = widths_from_record(restored);
         let table = cx.new(|cx| {
-            TableState::new(GridDelegate::new(paints), window, cx)
+            TableState::new(delegate, window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
                 .cell_selectable(false)
@@ -369,6 +379,7 @@ impl VolwatchTile {
             reported: Vec::new(),
             dismissed: Dismissals::default(),
             menu: None,
+            menu_at: None,
             chords: menu::live_bindings(cx),
             settled: false,
             was_shown: false,
@@ -579,7 +590,7 @@ impl VolwatchTile {
 
     /// A press in the grid: a row takes the cursor (shift extends the
     /// selection); a sortable head walks its click cycle. The right press
-    /// is the action menu's, which this tile does not open yet.
+    /// opens the actions menu at the pointer.
     fn grid_event(&mut self, e: GridEvent, cx: &mut Context<Self>) {
         match e {
             GridEvent::RowPressed { row, shift } => {
@@ -587,7 +598,19 @@ impl VolwatchTile {
                 self.sync_table(cx);
                 cx.notify();
             }
-            GridEvent::RowContext { .. } => {}
+            GridEvent::RowContext { row, position } => {
+                self.user_acted(cx);
+                if !self.grid.selected().is_some_and(|s| s.contains(&row)) {
+                    self.grid.click(row, false);
+                }
+                // The tile paints the cursor and the selection itself, not
+                // the table's right-press outline.
+                self.table
+                    .update(cx, |t, cx| t.set_right_clicked_row(None, cx));
+                self.sync_table(cx);
+                self.open_actions(Some(position));
+                cx.notify();
+            }
             GridEvent::HeadPressed(col) => {
                 let Some(c) = self.columns.get(col) else {
                     return;
@@ -688,8 +711,12 @@ impl VolwatchTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        self.user_acted(cx);
         let id = action.0.as_str();
+        // `escape` peels layers and finally dismisses the notices itself, so
+        // it must not clear a verb's notice before the peel reaches it.
+        if id != ESCAPE_ACTION {
+            self.user_acted(cx);
+        }
         if let Some(i) = VIEW_ACTIONS.iter().position(|a| *a == id) {
             self.set_view(View::ALL[i], cx);
             return true;
@@ -715,6 +742,8 @@ impl VolwatchTile {
                 cx.notify();
             }
             SWITCH_ACTION => self.toggle_switcher(cx),
+            MENU_ACTION => self.toggle_menu(cx),
+            TIMESERIES_ACTION => self.timeseries(cx),
             COMMIT_ACTION if self.menu.is_some() => {
                 let Some(at) = self.menu.as_ref().and_then(|m| m.menu.highlighted()) else {
                     return false;
@@ -722,7 +751,7 @@ impl VolwatchTile {
                 self.menu_pick(at, window, cx);
             }
             ESCAPE_ACTION if self.menu.is_some() => {
-                self.menu = None;
+                self.close_menu();
                 cx.notify();
             }
             ESCAPE_ACTION if self.state.band => self.close_band(cx),
@@ -837,6 +866,57 @@ impl VolwatchTile {
         let id = c.id.clone();
         let next = SortOrder::cycle(self.sort_on(&id), false, true);
         self.set_sort(next.map(|o| (id, o)), cx);
+    }
+
+    /// `t`: the history series behind the cursor cell. No timeseries tile
+    /// can open a vol-surface history series yet, so this names the gap: the
+    /// dataset, the key tuple (member, then the measure's first input's
+    /// suffix) and the value column. A column with no series says so.
+    fn timeseries(&mut self, cx: &mut Context<Self>) {
+        let Some(c) = self.columns.get(self.cursor_col) else {
+            return;
+        };
+        let measure = match &c.kind {
+            ColumnKind::Level { measure, .. }
+            | ColumnKind::Change { measure }
+            | ColumnKind::ForwardChange { measure }
+            | ColumnKind::Pctl { measure }
+            | ColumnKind::Bar { measure } => Some(measure),
+            ColumnKind::Underlying
+            | ColumnKind::Spark { .. }
+            | ColumnKind::Term
+            | ColumnKind::Vega => None,
+        };
+        let name = self
+            .grid
+            .cursor()
+            .and_then(|at| self.grid.visible().get(at))
+            .map(|&i| self.grid.row(i).name.clone());
+        let text = match (measure.and_then(|m| m.inputs().into_iter().next()), name) {
+            (Some(input), Some(member)) => {
+                let dataset = match input.role {
+                    Role::Surface => SURFACE,
+                    Role::Realized => REALIZED,
+                    Role::Varswap => VARSWAP,
+                };
+                let key = std::iter::once(member)
+                    .chain(input.suffix)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!(
+                    "timeseries cannot open a history series yet: {dataset} [{key}] {}",
+                    input.column
+                )
+            }
+            (None, _) => format!(
+                "timeseries cannot open a history series yet: {} has no series",
+                c.head
+            ),
+            (Some(_), None) => return,
+        };
+        self.notices.refused = Some(text);
+        self.rebuild_chrome(cx);
+        cx.notify();
     }
 
     /// `y`: the cursor cell's text, or the cursor column's text of every
@@ -978,7 +1058,7 @@ impl VolwatchTile {
     pub(crate) fn closed(&mut self, _cx: &mut Context<Self>) {
         self.data.cancel(self.key());
         self.in_flight = false;
-        self.menu = None;
+        self.close_menu();
         self.refresh = None;
         self.stale_timer.disarm();
     }
@@ -997,11 +1077,46 @@ impl VolwatchTile {
 
     /// The cursor is saved by name: a restored one still waiting, else the
     /// grid's.
-    pub(crate) fn serialize(&self) -> toml::Table {
-        session::to_table(&State {
+    pub(crate) fn serialize(&self, cx: &App) -> toml::Table {
+        let mut t = session::to_table(&State {
             cursor: self.grid.saved_cursor().map(str::to_string),
             ..self.state.clone()
-        })
+        });
+        if let Some(w) = widths_to_toml(&self.table.read(cx).delegate().fitted) {
+            t.insert(SESSION_KEY.into(), w);
+        }
+        t
+    }
+
+    /// `:autosize` / `tile::autosize_columns`: fit every column to its
+    /// head and widest cell at the window's rem, or `reset` to the prepared
+    /// widths. Nothing to measure before a board has landed refuses.
+    pub(crate) fn autosize_columns(
+        &mut self,
+        reset: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), &'static str> {
+        let fitted = if reset {
+            FittedWidths::new()
+        } else {
+            // Before a board lands the rows are blank placeholders.
+            if self.board.is_none() {
+                return Err(NOTHING_TO_FIT);
+            }
+            let metrics = FitMetrics::xsmall_mono(window.rem_size());
+            self.table
+                .read(cx)
+                .delegate()
+                .fit_columns(&metrics)
+                .ok_or(NOTHING_TO_FIT)?
+        };
+        self.table.update(cx, |t, cx| {
+            t.delegate_mut().set_fitted(fitted);
+            t.refresh(cx);
+        });
+        cx.notify();
+        Ok(())
     }
 
     /// The shown rows' names, in painted order.
