@@ -5,10 +5,12 @@ config_version = 1
 include = ["SPX", "NDX", "RTY"]
 
 # A dynamic list: every underlying the risk snapshot holds in the Europe
-# region (the demo `region` classification), plus SMI by hand, minus UKX.
+# region (the demo `region` classification), plus SMI and EU50X by hand, minus
+# UKX. EU50X is a member the vol surface and the risk both lack: the vol
+# watchlist shows it as `not in surface`.
 # Members follow the risk data as it publishes.
 [europe_risk]
-include = ["SMI"]
+include = ["SMI", "EU50X"]
 exclude = ["UKX"]
 [[europe_risk.rules]]
 dataset = "risk_snapshot"

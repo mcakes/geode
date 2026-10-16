@@ -306,7 +306,7 @@ mod demo_config_integration {
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
         let names: Vec<&str> = setup.views.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, vec!["tree", "wide"]);
+        assert_eq!(names, vec!["tree", "by_underlying", "wide"]);
         let wide = setup.views.iter().find(|v| v.name == "wide").unwrap();
         assert_eq!(wide.columns.len(), 100, "the wide view has 100 columns");
         // All nineteen source definitions survive setup: risk CSVs, the CVI,
@@ -348,6 +348,30 @@ mod demo_config_integration {
     /// The default timeseries source must name a declared fetch source.
     /// The shell uses this validation at startup; an invalid default would
     /// warn and require an explicit `@source` for added series.
+    /// The vol watchlist's demo member: `europe_risk` lists `EU50X`, which
+    /// is not a demo underlying, so neither the vol surface nor the risk
+    /// carries it and the tile shows `not in surface`. Asserted at the
+    /// watchlist layer: no public route reaches a tile's rows.
+    #[test]
+    fn europe_risk_lists_a_member_the_demo_surface_lacks() {
+        let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");
+        let config = Config::load(&ConfigSources {
+            builtin: layer(src),
+            ..ConfigSources::default()
+        });
+        let doc = config.doc("watchlists").expect("the demo ships watchlists");
+        let (lists, diags) = geode_core::watchlist::from_doc(doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let europe = lists.get("europe_risk").expect("europe_risk");
+        assert!(europe.include.iter().any(|n| n == "EU50X"), "{europe:?}");
+        assert!(
+            !geode_demo_data::demo_underlyings()
+                .iter()
+                .any(|u| u == "EU50X"),
+            "EU50X must stay outside the generated underlyings"
+        );
+    }
+
     #[test]
     fn the_demo_layers_default_timeseries_source_names_one_of_its_own() {
         let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");

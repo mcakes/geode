@@ -1,6 +1,9 @@
 # Demo views: `tree` is the default blotter view and query benchmark shape;
 # `wide` exercises rendering and querying with 100 selected columns.
 config_version = 1
+# The blotter opens on `tree`; without this the alphabetical first view
+# (`by_underlying`) would win.
+default = "tree"
 
 [tree]
 dataset = "risk_snapshot"
@@ -21,6 +24,13 @@ format = { precision = 0, scale = "k" }
 [[tree.columns]]
 name = "daily_trading_pnl"
 format = { precision = 0, negative = "parens" }
+
+# Book vega by underlying: the vol watchlist's vega column reads this view.
+[by_underlying]
+dataset = "risk_snapshot"
+grouping = ["underlying_ref"]
+[[by_underlying.columns]]
+name = "vega01_usd"
 
 [wide]
 dataset = "risk_snapshot"

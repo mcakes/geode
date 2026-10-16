@@ -110,6 +110,8 @@ fn main() {
             geode_classifications::init(cx);
             // The watchlist grid likewise.
             geode_watchlist::init(cx);
+            // The vol watchlist's grid likewise.
+            geode_volwatch::init(cx);
             // The scenario grid likewise.
             geode_scenario::init(cx);
             // Keep table bindings from consuming the pricer's editing keys.
@@ -315,6 +317,7 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     roster.add(Box::new(bridge.volslice.clone()));
     roster.add(Box::new(bridge.classifications.clone()));
     roster.add(Box::new(bridge.watchlist.clone()));
+    roster.add(Box::new(bridge.volwatch.clone()));
     roster.add(Box::new(bridge.pricer.clone()));
     // Dimension actions: Open in Nemo on a position or an instrument, and
     // Move LHU on a position.
@@ -1089,6 +1092,44 @@ label = "skew"
         {
             assert!(bridge::MODULE_KINDS.contains(&kind), "{kind}");
         }
+        bridge.handle.shutdown();
+    }
+
+    /// The production roster hosts the vol watchlist, titled `Vol`.
+    #[gpui::test]
+    fn the_roster_lists_volwatch_titled_vol(cx: &mut gpui::TestAppContext) {
+        use geode_shell::actions::ActionId;
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            ..ConfigSources::default()
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        add_bridge_modules(&mut roster, &bridge);
+        let titled = roster.titled_kinds();
+        assert!(
+            titled.contains(&("volwatch", "Vol".to_string())),
+            "{titled:?}"
+        );
+        let mut registry = ActionRegistry::default();
+        register_add_actions(&mut registry, &titled);
+        assert_eq!(
+            registry
+                .get(&ActionId("tile::add_volwatch".to_string()))
+                .expect("the volwatch kind gets an add-tile row")
+                .title,
+            "Vol: Split"
+        );
         bridge.handle.shutdown();
     }
 

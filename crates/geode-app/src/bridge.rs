@@ -39,6 +39,7 @@ use geode_shell::shell::{
     DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView, is_shell_key, is_watchlist_key,
 };
 use geode_shell::vimfind::FindStyle;
+use geode_volwatch::content::{VegaSetting, VolwatchFactory, VolwatchSettings};
 use geode_watchlist::{WatchlistConfig, WatchlistFactory};
 use gpui::{App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
@@ -73,6 +74,8 @@ pub struct DataSetup {
     /// What the pricer read out of this config (`pricer_config_key`), so
     /// the reload observer can tell a reload that changed none of it.
     pub pricer_key: PricerConfigKey,
+    /// `[volwatch]` as read at startup; `stale_after` is filled by `start`.
+    pub volwatch_settings: VolwatchSettings,
     /// The accepted market-data panels in `panels` document order, and an
     /// Error per refused panel for the shell's config section.
     pub panels: Vec<PanelSpec>,
@@ -106,6 +109,7 @@ pub(crate) const MODULE_KINDS: &[&str] = &[
     "volslice",
     "classifications",
     "watchlist",
+    "volwatch",
     "pricer",
     "diagnostics",
     "guide",
@@ -317,6 +321,8 @@ pub fn data_setup(
     diagnostics.extend(underlying_diags);
     let (payout, payout_diags) = pricing_payout_currency_from_config(config, &service.schema);
     diagnostics.extend(payout_diags);
+    let (volwatch_settings, volwatch_diags) = volwatch_settings_from_config(config);
+    diagnostics.extend(volwatch_diags);
     let pricer_settings = PricerSettings {
         pricer: pricer_name.clone(),
         pricer_missing: pricer.pricer.is_none(),
@@ -377,6 +383,7 @@ pub fn data_setup(
         pricer_settings,
         pricer_underlyings,
         pricer_key: pricer_config_key(config),
+        volwatch_settings,
         panels,
         panel_diagnostics,
         scenarios,
@@ -408,6 +415,85 @@ pub fn stale_after_from_config(config: &Config) -> Duration {
         .and_then(|v| v.as_str())
         .and_then(geode_data::source::parse_duration)
         .unwrap_or(geode_blotter::tile::DEFAULT_STALE_AFTER)
+}
+
+/// What the vol watchlist reads from `[volwatch]` and the shared
+/// `[blotter] stale_after`. `refresh` is `"off"` or a duration, raised to the
+/// tile's minimum with a warning; `vega` needs `view` and `column` strings,
+/// else it is ignored with a warning. Absent keys use the defaults silently.
+pub fn volwatch_settings_from_config(config: &Config) -> (VolwatchSettings, Vec<Diagnostic>) {
+    use geode_volwatch::content::{DEFAULT_REFRESH, MIN_REFRESH};
+    let warn = |key: &str, message: String| Diagnostic {
+        severity: Severity::Warning,
+        layer: config.explain("app", key),
+        file: None,
+        message,
+        path: Some(format!("app.{key}")),
+    };
+    let mut diags = Vec::new();
+    let mut settings = VolwatchSettings {
+        stale_after: stale_after_from_config(config),
+        ..VolwatchSettings::default()
+    };
+    if let Some(value) = config.get("app", "volwatch.refresh") {
+        if value.as_str() == Some("off") {
+            settings.refresh = None;
+        } else if let Some(d) = value
+            .as_str()
+            .and_then(parse_duration)
+            .filter(|d| !d.is_zero())
+        {
+            if d < MIN_REFRESH {
+                diags.push(warn(
+                    "volwatch.refresh",
+                    format!(
+                        "[volwatch] refresh = {value} is below the {}s minimum; using {}s",
+                        MIN_REFRESH.as_secs(),
+                        MIN_REFRESH.as_secs()
+                    ),
+                ));
+            }
+            settings.refresh = VolwatchSettings::clamp_refresh(Some(d));
+        } else {
+            settings.refresh = Some(DEFAULT_REFRESH);
+            diags.push(warn(
+                "volwatch.refresh",
+                format!(
+                    "[volwatch] refresh = {value} is not a duration or \"off\"; using {}s",
+                    DEFAULT_REFRESH.as_secs()
+                ),
+            ));
+        }
+    }
+    if let Some(value) = config.get("app", "volwatch.vega") {
+        let field = |k: &str| value.get(k).and_then(|v| v.as_str()).map(str::to_string);
+        match (field("view"), field("column")) {
+            (Some(view), Some(column)) => settings.vega = Some(VegaSetting { view, column }),
+            _ => diags.push(warn(
+                "volwatch.vega",
+                "[volwatch] vega needs view and column strings; ignoring it".to_string(),
+            )),
+        }
+    }
+    (settings, diags)
+}
+
+/// Everything the vol watchlist reads from the config, as raw values, so a
+/// reload that changes none of it neither pushes settings nor repeats a
+/// warning.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VolwatchConfigKey {
+    refresh: Option<toml::Value>,
+    vega: Option<toml::Value>,
+    stale_after: Duration,
+}
+
+pub fn volwatch_config_key(config: &Config) -> VolwatchConfigKey {
+    VolwatchConfigKey {
+        refresh: config.get("app", "volwatch.refresh").cloned(),
+        vega: config.get("app", "volwatch.vega").cloned(),
+        stale_after: stale_after_from_config(config),
+    }
 }
 
 /// Default periodic repricing interval when `app.pricing.refresh` is absent
@@ -674,6 +760,9 @@ pub struct Bridge {
     /// saved scopes and named expressions a rule is validated against, and
     /// so `attach` can install the cache's refresh as its `shift+r` route.
     pub watchlist: Rc<WatchlistFactory>,
+    /// The vol watchlist's factory, sharing the handle. Retained so a
+    /// reload pushes it `[volwatch]` (refresh and the vega view).
+    pub volwatch: Rc<VolwatchFactory>,
     /// The line pricer's factory, sharing the handle. Retained so a reload
     /// reaches its views and settings.
     pub pricer: Rc<PricerFactory>,
@@ -888,6 +977,11 @@ pub fn start(
         setup.colours.clone(),
     ));
     let volslice = Rc::new(geode_volslice::VolsliceFactory::new(handle.clone()));
+    let volwatch = {
+        let mut settings = setup.volwatch_settings.clone();
+        settings.stale_after = stale_after;
+        Rc::new(VolwatchFactory::new(handle.clone(), settings))
+    };
     // Pushed its startup snapshot now, before any tile is restored; every
     // reload pushes the next one.
     let classifications = Rc::new(geode_classifications::ClassificationsFactory::new(
@@ -962,6 +1056,7 @@ pub fn start(
         volslice,
         classifications,
         watchlist,
+        volwatch,
         pricer,
         underlyings,
         handle,
@@ -1692,6 +1787,49 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             pricer.reload(views, templates, colours, refresh, stale_after, payout, cx);
             for d in &diags {
                 tracing::warn!(target: "geode::pricing", "{d}");
+            }
+            if !diags.is_empty() {
+                diagnostics.update(cx, |dg, cx| {
+                    let before = dg.version();
+                    dg.note_data_diagnostics(std::mem::take(&mut diags), SystemTime::now());
+                    if dg.version() != before {
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
+
+    // `[volwatch]` is hot: re-read on each applied reload, pushed only when
+    // something it reads changed so an unchanged bad value warns once.
+    {
+        let volwatch = bridge.volwatch.clone();
+        let diagnostics = diagnostics.clone();
+        let shell = shell.clone();
+        let frame = shell.read(cx).frame().clone();
+        let last = Rc::new(Cell::new(frame.read(cx).config_version()));
+        let last_key = Rc::new(std::cell::RefCell::new(Some(volwatch_config_key(
+            shell.read(cx).config(),
+        ))));
+        cx.observe(&frame, move |frame, cx| {
+            let now = frame.read(cx).config_version();
+            if now == last.get() {
+                return;
+            }
+            last.set(now);
+            let (settings, mut diags) = {
+                let config = shell.read(cx).config();
+                let key = volwatch_config_key(config);
+                if last_key.borrow().as_ref() == Some(&key) {
+                    return;
+                }
+                *last_key.borrow_mut() = Some(key);
+                volwatch_settings_from_config(config)
+            };
+            volwatch.set_settings(settings, cx);
+            for d in &diags {
+                tracing::warn!(target: "geode::volwatch", "{d}");
             }
             if !diags.is_empty() {
                 diagnostics.update(cx, |dg, cx| {
@@ -2469,6 +2607,10 @@ role = "key"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -2559,6 +2701,69 @@ role = "key"
             desk: None,
             user: None,
         })
+    }
+
+    #[test]
+    fn volwatch_settings_read_refresh_and_vega_and_warn_on_a_short_refresh() {
+        let config = app_config(
+            "[volwatch]\nrefresh = \"3s\"\nvega = { view = \"by_underlying\", column = \"vega01_usd\" }\n",
+        );
+        let (s, diags) = volwatch_settings_from_config(&config);
+        assert_eq!(s.refresh, Some(Duration::from_secs(10)));
+        assert_eq!(
+            diags[0].message,
+            "[volwatch] refresh = \"3s\" is below the 10s minimum; using 10s"
+        );
+        assert_eq!(
+            s.vega,
+            Some(VegaSetting {
+                view: "by_underlying".into(),
+                column: "vega01_usd".into()
+            })
+        );
+        let (s, diags) =
+            volwatch_settings_from_config(&app_config("[volwatch]\nvega = \"wide\"\n"));
+        assert_eq!(s.vega, None);
+        assert!(
+            diags[0]
+                .message
+                .starts_with("[volwatch] vega needs view and column")
+        );
+        let (s, diags) =
+            volwatch_settings_from_config(&app_config("[volwatch]\nrefresh = \"off\"\n"));
+        assert_eq!((s.refresh, diags.len()), (None, 0));
+        let (s, diags) = volwatch_settings_from_config(&app_config("[volwatch]\nrefresh = 5\n"));
+        assert_eq!(s.refresh, Some(Duration::from_secs(60)));
+        assert_eq!(
+            diags[0].message,
+            "[volwatch] refresh = 5 is not a duration or \"off\"; using 60s"
+        );
+        let (s, diags) = volwatch_settings_from_config(&app_config(""));
+        assert_eq!(
+            (s.refresh, s.vega, diags.len()),
+            (Some(Duration::from_secs(60)), None, 0)
+        );
+    }
+
+    #[test]
+    fn the_volwatch_config_key_changes_only_with_what_the_tile_reads() {
+        let base = volwatch_config_key(&app_config("[volwatch]\nrefresh = \"60s\"\n"));
+        assert_eq!(
+            base,
+            volwatch_config_key(&app_config(
+                "[volwatch]\nrefresh = \"60s\"\n[pricing]\nrefresh = \"5s\"\n"
+            ))
+        );
+        assert_ne!(
+            base,
+            volwatch_config_key(&app_config("[volwatch]\nrefresh = \"30s\"\n"))
+        );
+        assert_ne!(
+            base,
+            volwatch_config_key(&app_config(
+                "[volwatch]\nrefresh = \"60s\"\n[blotter]\nstale_after = \"5m\"\n"
+            ))
+        );
     }
 
     /// A schema whose `underlyings` reference dataset is keyed by
@@ -7315,6 +7520,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7431,6 +7640,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7585,6 +7798,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7712,6 +7929,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7781,6 +8002,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7856,6 +8081,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -7924,6 +8153,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8025,6 +8258,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8234,6 +8471,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8317,6 +8558,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8402,6 +8647,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8510,6 +8759,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8614,6 +8867,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8685,6 +8942,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8835,6 +9096,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -8911,6 +9176,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),
@@ -9589,6 +9858,10 @@ grain = "underlying"
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
+            volwatch: Rc::new(VolwatchFactory::new(
+                handle.clone(),
+                VolwatchSettings::default(),
+            )),
             classifications: Rc::new(geode_classifications::ClassificationsFactory::new(
                 handle.clone(),
             )),

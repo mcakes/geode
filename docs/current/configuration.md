@@ -827,6 +827,7 @@ Accepted candidates update runtime state according to their inputs:
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, colors, value colors, watchlists, scopes, or expressions | Emit `ConfigReloaded` for the app bridge |
 | `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter, panel and scenario factories |
+| `app.volwatch` (`refresh`, `vega`) or `blotter.stale_after` | The vol watchlist's own revision observer re-reads `[volwatch]` and pushes it to the factory; an unchanged key neither pushes nor repeats a warning |
 | Sources, datasets, egress, positions, panels, scenarios, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
@@ -1077,6 +1078,22 @@ vol slice requests use. `model` names a model the binary registers; the
 default and the only one in every build is `demo`, a smooth stand-in that is
 not a financial model. A name the binary lacks warns at startup and every vol
 slice answers with that reason. Changing `model` marks restart required, as `[pricing] adapter` does.
+
+## Vol watchlist
+
+`[volwatch]` in `app.toml` configures the vol watchlist tile. Both keys are
+hot: a reload that changes either (or `[blotter] stale_after`, which the tile
+shares) pushes the new settings to the factory and the open tiles.
+
+- `refresh` is a duration or `"off"`; the default is `"60s"`. Below the 10s
+  minimum it is raised to 10s with a warning; a value that is neither a
+  duration nor `"off"` warns and uses 60s.
+- `vega = { view, column }` names a grouped view over the risk dataset
+  (grouped by `underlying_ref`) and the measure column the tile joins by
+  underlying as book vega. Anything but two strings warns and ignores the
+  setting. A view that later fails to load or lacks the column drops the
+  column with a standing warning naming the setting; the board keeps
+  painting.
 
 ## Maintaining configuration
 

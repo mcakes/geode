@@ -2533,6 +2533,7 @@ dependencies = [
  "geode-shell",
  "geode-timeseries",
  "geode-volslice",
+ "geode-volwatch",
  "geode-watchlist",
  "gpui-base",
  "gpui-component",
