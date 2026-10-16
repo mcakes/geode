@@ -14,6 +14,7 @@ members = [
     "crates/geode-scenario",
     "crates/geode-classifications",
     "crates/geode-watchlist",
+    "crates/geode-volwatch",
     "crates/geode-diagnostics",
     "crates/geode-guide",
     "crates/geode-documents",
@@ -48,6 +49,7 @@ geode-volslice = { path = "crates/geode-volslice" }
 geode-scenario = { path = "crates/geode-scenario" }
 geode-classifications = { path = "crates/geode-classifications" }
 geode-watchlist = { path = "crates/geode-watchlist" }
+geode-volwatch = { path = "crates/geode-volwatch" }
 geode-pricer = { path = "crates/geode-pricer" }
 geode-compose = { path = "crates/geode-compose" }
 geode-collector = { path = "crates/geode-collector" }
