@@ -562,14 +562,19 @@ pub fn ask(view: View, tenors: &[String], lookback: Lookback, band: bool) -> Ask
     }
 }
 
-/// True when `next` asks anything `last` did not (measures, window,
-/// sparklines or lookback). A narrower ask does not requery: the last board
-/// still holds what the view needs.
+/// True when `next` asks anything `last` did not: a different lookback; a
+/// window the last ask lacked or a different one (dropping the window never
+/// requeries); a measure `last` lacks; or a sparkline for which no `last`
+/// entry has the same measure with a span at least as long (the model slices
+/// the tail of a longer series). A narrower ask never requeries.
 pub fn needs_requery(last: &Ask, next: &Ask) -> bool {
     next.lookback != last.lookback
-        || next.window != last.window
+        || next.window.is_some_and(|w| last.window != Some(w))
         || next.measures.iter().any(|m| !last.measures.contains(m))
-        || next.sparklines.iter().any(|s| !last.sparklines.contains(s))
+        || next
+            .sparklines
+            .iter()
+            .any(|(m, d)| !last.sparklines.iter().any(|(lm, ld)| lm == m && ld >= d))
 }
 
 #[cfg(test)]
@@ -667,6 +672,28 @@ mod tests {
             !needs_requery(&open, &fewer),
             "a narrower ask does not requery"
         );
+    }
+
+    #[test]
+    fn closing_the_band_does_not_requery() {
+        let tenors = order_tenors(None);
+        let closed = ask(View::Levels, &tenors, Lookback::D1, false);
+        let open = ask(View::Levels, &tenors, Lookback::D1, true);
+        assert!(!needs_requery(&open, &closed));
+    }
+
+    #[test]
+    fn a_shorter_sparkline_of_the_same_measure_does_not_requery() {
+        let long = Ask {
+            sparklines: vec![(Measure::atfm("3M"), WINDOW_1Y)],
+            ..Ask::default()
+        };
+        let short = Ask {
+            sparklines: vec![(Measure::atfm("3M"), SPARK_30D)],
+            ..Ask::default()
+        };
+        assert!(!needs_requery(&long, &short));
+        assert!(needs_requery(&short, &long));
     }
 
     #[test]
