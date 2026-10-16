@@ -105,11 +105,12 @@ fn read_sort(v: &Value) -> Result<(String, SortOrder), String> {
         .as_array()
         .and_then(|a| a.iter().map(Value::as_str).collect());
     match words.as_deref() {
-        Some([id, order]) if !id.trim().is_empty() => parse_order(order)
-            .map(|o| (id.to_string(), o))
-            .ok_or_else(|| format!("unknown order '{order}'")),
-        _ => Err("not [column, order]".into()),
+        Some([id, order]) if !id.trim().is_empty() => {
+            parse_order(order).map(|o| (id.to_string(), o))
+        }
+        _ => None,
     }
+    .ok_or_else(|| "not [column, order]".to_string())
 }
 
 fn read_band(v: &Value) -> Result<bool, String> {
@@ -219,7 +220,7 @@ mod tests {
             ("lookback", "lookback = 1", "not a lookback"),
             ("sort", "sort = [\"c\"]", "not [column, order]"),
             ("sort", "sort = 3", "not [column, order]"),
-            ("sort", "sort = [\"c\", \"up\"]", "unknown order 'up'"),
+            ("sort", "sort = [\"c\", \"up\"]", "not [column, order]"),
             ("cursor", "cursor = true", "not a name"),
             ("band", "band = \"yes\"", "not a bool"),
         ] {
@@ -231,5 +232,27 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn two_unreadable_keys_drop_with_two_notices_and_the_rest_stays() {
+        let s = State {
+            list: Some("l".into()),
+            lookback: Lookback::W1,
+            cursor: Some("SPX".into()),
+            ..State::default()
+        };
+        let mut t = to_table(&s);
+        t.insert("view".into(), Value::Integer(3));
+        t.insert("band".into(), Value::String("yes".into()));
+        let (back, notices) = from_table(&t);
+        assert_eq!(back, s);
+        assert_eq!(
+            notices,
+            [
+                "session: dropped view: not a view name",
+                "session: dropped band: not a bool"
+            ]
+        );
     }
 }

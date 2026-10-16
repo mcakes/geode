@@ -140,4 +140,11 @@ mod tests {
         );
         assert_eq!(completions("", 0, &cols), ["sort"]);
     }
+
+    #[test]
+    fn a_first_word_other_than_sort_completes_to_nothing() {
+        let cols = cols();
+        assert!(completions("filter x", 8, &cols).is_empty());
+        assert!(completions("filter ", 7, &cols).is_empty());
+    }
 }
