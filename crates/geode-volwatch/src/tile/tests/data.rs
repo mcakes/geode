@@ -11,7 +11,7 @@ use geode_shell::watchlist::WatchlistGlobal;
 
 use super::harness::*;
 use crate::content::{MIN_REFRESH, VolwatchSettings};
-use crate::core::views::SPARK_30D;
+use crate::core::views::{ALL_TENORS, SPARK_30D, WINDOW_1Y};
 use crate::tile::{MenuKind, MenuState};
 
 #[gpui::test]
@@ -441,5 +441,142 @@ fn a_refused_shift_r_does_not_arm_a_retry(cx: &mut gpui::TestAppContext) {
     assert!(
         Harness::boards(&h.requests()).is_empty(),
         "a refused key only says so"
+    );
+}
+
+#[gpui::test]
+fn enter_opens_the_band_on_the_cursor_row_grows_the_ask_and_keeps_the_cursor(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "j enter");
+    assert!(h.band_open(&vcx));
+    assert_eq!(h.cursor(&vcx), Some("SX5E".into()));
+    let reqs = h.requests();
+    let b = Harness::boards(&reqs);
+    assert_eq!(b.len(), 1);
+    assert_eq!(b[0].window, Some(WINDOW_1Y));
+    assert_eq!(b[0].sparklines.len(), 3);
+    assert!(b[0].measures.contains(&Measure::Point {
+        tenor: "1M".into(),
+        delta: 0.9
+    }));
+    h.press(&mut vcx, "enter");
+    assert!(!h.band_open(&vcx));
+    assert_eq!(h.cursor(&vcx), Some("SX5E".into()));
+    assert!(
+        Harness::boards(&h.requests()).is_empty(),
+        "closing shrinks the ask without a requery"
+    );
+}
+
+#[gpui::test]
+fn escape_closes_the_band_before_a_selection_and_before_notices(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "enter v escape");
+    assert!(!h.band_open(&vcx), "the band is innermost");
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.grid.selecting()),
+        "the selection survives"
+    );
+    h.press(&mut vcx, "escape");
+    assert!(!h.tile.read_with(&vcx, |t, _| t.grid.selecting()));
+}
+
+#[gpui::test]
+fn the_band_shows_the_fixed_delta_surface_three_sparks_and_the_context(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "j enter");
+    let asked = h.tile.read_with(&vcx, |t, _| t.asked.clone().unwrap());
+    let tag = tag_of(&h, &vcx);
+    h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    let band = h.tile.read_with(&vcx, |t, _| t.band_model.clone());
+    assert_eq!(band.surface.len(), ALL_TENORS.len());
+    assert_eq!(band.surface[0].1.len(), 7, "five deltas, skew, Δ");
+    assert!(band.sparks.iter().all(Option::is_some));
+    assert_eq!(band.context[0].0.as_ref(), "Varswap 3M");
+    assert!(band.context.last().unwrap().1.starts_with("surface "));
+}
+
+#[gpui::test]
+fn enter_on_a_missing_member_is_a_notice(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "shift-g enter");
+    assert!(!h.band_open(&vcx));
+    assert_eq!(h.notices(&vcx), ["NEW is not in the surface"]);
+}
+
+#[gpui::test]
+fn the_band_follows_the_cursor_and_paints_between_the_grid_and_the_footer(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "enter");
+    let asked = h.tile.read_with(&vcx, |t, _| t.asked.clone().unwrap());
+    let tag = tag_of(&h, &vcx);
+    h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    let name =
+        |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.band_model.name.to_string());
+    assert_eq!(name(&vcx), "DAX");
+    let band = vcx
+        .debug_bounds("volwatch-band-7")
+        .expect("the band is painted");
+    let footer = vcx
+        .debug_bounds("volwatch-footer-7")
+        .expect("the footer is painted");
+    assert!(
+        band.bottom() <= footer.top(),
+        "the band docks above the footer"
+    );
+    h.press(&mut vcx, "j");
+    assert_eq!(name(&vcx), "SX5E", "the band follows the cursor");
+    assert!(h.band_open(&vcx));
+    h.press(&mut vcx, "escape");
+    assert_eq!(
+        h.cursor(&vcx),
+        Some("SX5E".into()),
+        "the cursor keeps its row"
+    );
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        vcx.debug_bounds("volwatch-band-7").is_none(),
+        "a closed band paints nothing"
+    );
+}
+
+#[gpui::test]
+fn a_restored_open_band_asks_for_its_measures_and_shows_once_the_row_lands(
+    cx: &mut gpui::TestAppContext,
+) {
+    let record = crate::core::session::to_table(&crate::core::session::State {
+        list: Some(LIST.into()),
+        cursor: Some("SX5E".into()),
+        band: true,
+        ..Default::default()
+    });
+    let (h, mut vcx) = open_with(cx, one_list(), Some(record), VolwatchSettings::default());
+    let reqs = h.requests();
+    let b = Harness::boards(&reqs);
+    assert_eq!(
+        b[0].window,
+        Some(WINDOW_1Y),
+        "the first ask carries the band"
+    );
+    assert_eq!(b[0].sparklines.len(), 3);
+    let asked = h.asked_of(&vcx);
+    let tag = b[0].tag;
+    h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.band_model.name.to_string()),
+        "SX5E"
+    );
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.serialize().get("band").cloned()),
+        Some(toml::Value::Boolean(true))
     );
 }

@@ -17,7 +17,7 @@ use gpui::{Context, SharedString};
 
 use super::{MONO_ADVANCE_PX, RETRIES, VolwatchTile};
 use crate::content::VolwatchSettings;
-use crate::core::model::{Inputs, Prepared, Row, prepare};
+use crate::core::model::{BandModel, Inputs, Prepared, Row, prepare, prepare_band};
 use crate::core::views::{Ask, REALIZED, SURFACE, VARSWAP, ask, needs_requery};
 
 /// The surface key the tenor listing enumerates.
@@ -182,19 +182,7 @@ impl VolwatchTile {
         let stale_after = self.shared.settings.borrow().stale_after;
         let empty = Ask::default();
         let asked = self.board_ask.as_ref().unwrap_or(&empty);
-        let inputs = Inputs {
-            tile: self.tile.0,
-            rows: self.grid.rows(),
-            columns: &self.columns,
-            asked,
-            board_lookback: asked_lookback(self.board_ask.as_ref(), self.state.lookback),
-            shown: self.state.lookback,
-            paint: self.paint,
-            stale_after,
-            now: Utc::now(),
-            mono_advance_px: MONO_ADVANCE_PX,
-        };
-        let mut prepared = prepare(&inputs);
+        let mut prepared = prepare(&self.inputs(asked));
         let failed = self.notices.failure.is_some();
         for (row, p) in self.grid.rows().iter().zip(prepared.rows.iter_mut()) {
             let fired = row
@@ -220,6 +208,47 @@ impl VolwatchTile {
         (self.times, self.times_at) = runs.into_iter().unzip();
         self.prepared = std::rc::Rc::new(prepared);
         self.rebuild_header();
+    }
+
+    /// What the prepared model and the band read, through `asked` (the
+    /// ask the board answered).
+    fn inputs<'a>(&'a self, asked: &'a Ask) -> Inputs<'a> {
+        Inputs {
+            tile: self.tile.0,
+            rows: self.grid.rows(),
+            columns: &self.columns,
+            asked,
+            board_lookback: asked_lookback(self.board_ask.as_ref(), self.state.lookback),
+            shown: self.state.lookback,
+            paint: self.paint,
+            stale_after: self.shared.settings.borrow().stale_after,
+            now: Utc::now(),
+            mono_advance_px: MONO_ADVANCE_PX,
+        }
+    }
+
+    /// The band for the cursor row while it is open; empty while closed or
+    /// with no row under the cursor. Read through the board's ask, so a
+    /// band just opened shows dashes until the grown ask's board lands.
+    pub(crate) fn rebuild_band(&mut self) {
+        let row = self
+            .grid
+            .cursor()
+            .and_then(|at| self.grid.visible().get(at))
+            .map(|&i| self.grid.row(i));
+        self.band_model = match row.filter(|_| self.state.band) {
+            Some(row) => {
+                let empty = Ask::default();
+                let asked = self.board_ask.as_ref().unwrap_or(&empty);
+                prepare_band(
+                    &self.inputs(asked),
+                    row,
+                    &self.ordered_tenors(),
+                    &self.clock,
+                )
+            }
+            None => BandModel::default(),
+        };
     }
 
     fn stale_slot(t: &mut Self) -> &mut StaleTimer {

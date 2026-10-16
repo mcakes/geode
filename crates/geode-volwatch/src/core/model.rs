@@ -17,7 +17,7 @@ use geode_chart::spark::sizes;
 use geode_core::clock::Clock;
 use geode_core::format::{Formatted, Sign, format_number};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
-use geode_core::volboard::{Cell, Change, Lookback, Measure, VolBoard, VolRow};
+use geode_core::volboard::{Cell, Change, Lookback, Measure, Role, VolBoard, VolRow};
 use geode_tile::rows::GridRow;
 use geode_widgets::cell::delta_chip::{Chip, chip};
 use geode_widgets::cell::heat::{heat, range};
@@ -26,7 +26,7 @@ use geode_widgets::cell::zero_bar::{Bar, bar};
 use geode_widgets::cell::{column_scale, widths};
 use gpui::SharedString;
 
-use super::views::{Ask, Column, ColumnKind, PCTL_MIN_COUNT, TITLE};
+use super::views::{Ask, Column, ColumnKind, PCTL_MIN_COUNT, TITLE, WINDOW_1Y};
 
 /// Fill alpha of a change chip at the column's largest move.
 pub const CHIP_CEILING: f32 = 0.55;
@@ -585,6 +585,277 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, clock: &Clock) -> String
         },
     }
     parts.join(" \u{b7} ")
+}
+
+/// The band's surface columns as call deltas, in the desk's reading order
+/// `10p 25p atm 25c 10c`.
+pub const BAND_DELTAS: [f64; 5] = [0.90, 0.75, 0.50, 0.25, 0.10];
+/// The band surface's column ids, parallel to its cells.
+const BAND_IDS: [&str; 7] = ["10p", "25p", "atm", "25c", "10c", "skew", "delta"];
+/// The band's three one-year sparklines: ATFM 3M, 25Δ skew 3M, realized 20D.
+fn band_sparks() -> [Measure; 3] {
+    [
+        Measure::atfm("3M"),
+        Measure::Skew { tenor: "3M".into() },
+        Measure::Realized {
+            window: "20D".into(),
+        },
+    ]
+}
+
+/// The inspection band for the cursor row: built when the row, the board
+/// or the band's open state changes, never in render. Every number reads a
+/// board cell through the ask the board answered; a measure the board
+/// lacks shows a dash.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BandModel {
+    pub name: SharedString,
+    /// Rows = tenors, columns = DELTAS (10p 25p atm 25c 10c as call deltas
+    /// 0.90 0.75 0.50 0.25 0.10), then 25Δ skew and its Δ.
+    pub surface: Vec<(SharedString, Vec<PreparedCell>)>,
+    /// The Δ column's head over the lookback shown: `Δ1d`.
+    pub delta_head: SharedString,
+    /// ATFM 3M · 1Y, 25Δ skew 3M · 1Y, RV 20d · 1Y (spark glyphs with an end dot).
+    pub sparks: [Option<PreparedCell>; 3],
+    /// `1Y pctl 91 of 251 · range 11.2 – 24.6`, `1Y pctl 64 of 251 · range
+    /// 4.9 – 7.1`, `IV−RV +3.4 · pctl 77 of 251`.
+    pub captions: [SharedString; 3],
+    /// `(Varswap 3M, 18.1)`, `(vs ATM, +2.2)`, `(Book vega, -312k)`,
+    /// `(Source, surface 10:58 · realized 10:57 · varswap 10:58)`.
+    pub context: Vec<(SharedString, SharedString)>,
+}
+
+/// A rank as `<label> 91 of 251`.
+fn pctl_text(label: &str, c: Option<&Cell>) -> Option<String> {
+    let (rank, count) = c?.pctl?;
+    finite(rank).map(|r| format!("{label} {:.0} of {count}", rank_percent(r)))
+}
+
+/// A sparkline's own `range 11.2 – 24.6`, over its finite points.
+fn range_text(values: &[f64]) -> Option<String> {
+    let (lo, hi) = range(values.iter().copied().filter(|v| v.is_finite()))?;
+    Some(format!(
+        "range {} \u{2013} {}",
+        format_number(lo, &ONE_DP).text,
+        format_number(hi, &ONE_DP).text
+    ))
+}
+
+/// Parts joined by ` · `; a dash when every part is missing.
+fn caption(parts: impl IntoIterator<Item = Option<String>>) -> SharedString {
+    let parts: Vec<String> = parts.into_iter().flatten().collect();
+    if parts.is_empty() {
+        SharedString::new_static(widths::DASH)
+    } else {
+        parts.join(" \u{b7} ").into()
+    }
+}
+
+/// `surface 10:58 · realized 10:57 · varswap 10:58`: the row's `as_of`,
+/// then the oldest `current_at` among its cells reading each other
+/// dataset; a dataset with no time reads `—`.
+fn source_line(row: &Row, clock: &Clock) -> String {
+    let at = |role: Role| -> Option<DateTime<Utc>> {
+        if role == Role::Surface {
+            return row.as_of;
+        }
+        row.board
+            .as_ref()?
+            .cells
+            .iter()
+            .filter(|c| c.measure.roles().contains(&role))
+            .filter_map(|c| c.current_at)
+            .min()
+    };
+    [Role::Surface, Role::Realized, Role::Varswap]
+        .into_iter()
+        .map(|role| match at(role) {
+            Some(t) => format!("{} {}", role.name(), clock.hm(t)),
+            None => format!("{} {}", role.name(), widths::DASH),
+        })
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ")
+}
+
+/// The cursor row's band: the fixed-delta surface over `tenors` (a tenor
+/// the surface lacks shows dashes), heat-tinted over one range for the
+/// whole table; the three one-year sparks and their captions; the context
+/// pairs. A row the surface lacks is all dashes.
+pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock) -> BandModel {
+    let stale = is_stale(row, i.now, i.stale_after);
+    let read = |m: &Measure| -> Option<&Cell> {
+        if row.present {
+            cell(row, m, i.asked)
+        } else {
+            None
+        }
+    };
+    let current = |m: &Measure| read(m).and_then(|c| c.current).and_then(finite);
+    let skew = |t: &str| Measure::Skew { tenor: t.into() };
+    let blank = |id: SharedString| PreparedCell {
+        id,
+        text: SharedString::new_static(widths::DASH),
+        value: None,
+        sign: Sign::Zero,
+        glyph: Glyph::None,
+        muted: true,
+    };
+    let vols: Vec<[Option<f64>; 5]> = tenors
+        .iter()
+        .map(|t| {
+            BAND_DELTAS.map(|delta| {
+                current(&Measure::Point {
+                    tenor: t.clone(),
+                    delta,
+                })
+            })
+        })
+        .collect();
+    let deltas: Vec<Option<f64>> = tenors
+        .iter()
+        .map(|t| {
+            if row.present {
+                change_of(row, &skew(t), i.asked).and_then(|c| finite(c.value))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let heat_range = range(vols.iter().flatten().flatten().copied());
+    let delta_scale = column_scale(deltas.iter().flatten().copied());
+    let id = |tenor: &str, col: &str| SharedString::from(format!("{}-band-{tenor}-{col}", i.tile));
+    let surface = tenors
+        .iter()
+        .zip(&vols)
+        .zip(&deltas)
+        .map(|((t, vols), delta)| {
+            let mut cells: Vec<PreparedCell> = vols
+                .iter()
+                .zip(BAND_IDS)
+                .map(|(v, col)| match v {
+                    Some(v) => {
+                        let f = format_number(*v, &ONE_DP);
+                        PreparedCell {
+                            id: id(t, col),
+                            text: f.text.into(),
+                            value: Some(*v),
+                            sign: f.sign,
+                            glyph: if i.paint {
+                                Glyph::Heat(
+                                    heat_range.and_then(|(lo, hi)| heat(*v, lo, hi, HEAT_CEILING)),
+                                )
+                            } else {
+                                Glyph::None
+                            },
+                            muted: stale,
+                        }
+                    }
+                    None => blank(id(t, col)),
+                })
+                .collect();
+            cells.push(match current(&skew(t)) {
+                Some(v) => {
+                    let f = format_number(v, &ONE_DP);
+                    PreparedCell {
+                        id: id(t, BAND_IDS[5]),
+                        text: f.text.into(),
+                        value: Some(v),
+                        sign: f.sign,
+                        glyph: Glyph::None,
+                        muted: stale,
+                    }
+                }
+                None => blank(id(t, BAND_IDS[5])),
+            });
+            cells.push(match delta {
+                Some(v) => {
+                    let f = signed(*v, &ONE_DP);
+                    PreparedCell {
+                        id: id(t, BAND_IDS[6]),
+                        text: f.text.into(),
+                        value: Some(*v),
+                        sign: f.sign,
+                        glyph: if i.paint {
+                            Glyph::Chip(chip(*v, f.sign, delta_scale, CHIP_CEILING))
+                        } else {
+                            Glyph::None
+                        },
+                        muted: stale || i.board_lookback != i.shown,
+                    }
+                }
+                None => blank(id(t, BAND_IDS[6])),
+            });
+            (SharedString::from(t.clone()), cells)
+        })
+        .collect();
+
+    let spark_values: [Option<Arc<[f64]>>; 3] = band_sparks().map(|m| {
+        let (Some(series), span) = spark(row, &m, i.asked)? else {
+            return None;
+        };
+        (!series.is_empty()).then(|| Arc::from(spark_tail(series, span, WINDOW_1Y)))
+    });
+    let sparks = [0, 1, 2].map(|k| {
+        spark_values[k].as_ref().map(|values| PreparedCell {
+            id: format!("{}-band-spark-{k}", i.tile).into(),
+            text: SharedString::default(),
+            value: values.last().copied().and_then(finite),
+            sign: Sign::Zero,
+            glyph: Glyph::Spark {
+                values: Arc::clone(values),
+                range: None,
+                mark: None,
+                end_dot: true,
+            },
+            muted: stale,
+        })
+    });
+    let [atfm, skew3m, _] = band_sparks();
+    let ivrv = Measure::IvRv {
+        tenor: "3M".into(),
+        window: "20D".into(),
+    };
+    let spark_range = |k: usize| spark_values[k].as_deref().and_then(range_text);
+    let captions = [
+        caption([pctl_text("1Y pctl", read(&atfm)), spark_range(0)]),
+        caption([pctl_text("1Y pctl", read(&skew3m)), spark_range(1)]),
+        caption([
+            current(&ivrv).map(|v| format!("IV\u{2212}RV {}", signed(v, &ONE_DP).text)),
+            pctl_text("pctl", read(&ivrv)),
+        ]),
+    ];
+
+    let dash = || SharedString::new_static(widths::DASH);
+    let context = vec![
+        (
+            SharedString::new_static("Varswap 3M"),
+            current(&Measure::Varswap { tenor: "3M".into() })
+                .map_or_else(dash, |v| format_number(v, &ONE_DP).text.into()),
+        ),
+        (
+            SharedString::new_static("vs ATM"),
+            current(&Measure::VsSpread { tenor: "3M".into() })
+                .map_or_else(dash, |v| signed(v, &ONE_DP).text.into()),
+        ),
+        (
+            SharedString::new_static("Book vega"),
+            row.vega.and_then(finite).map_or_else(dash, |v| {
+                format!("{}k", format_number(v, &VEGA).text).into()
+            }),
+        ),
+        (
+            SharedString::new_static("Source"),
+            source_line(row, clock).into(),
+        ),
+    ];
+    BandModel {
+        name: row.name.clone().into(),
+        surface,
+        delta_head: format!("\u{394}{}", i.shown.label()).into(),
+        sparks,
+        captions,
+        context,
+    }
 }
 
 /// The header's left side, every string formatted when its inputs change
@@ -1168,6 +1439,116 @@ mod tests {
         assert_eq!(
             sort_value(&rows[0], &col("atfm-3M-pctl"), &ask_of(View::Changes)),
             Some(0.91)
+        );
+    }
+
+    /// SX5E answered for the Changes ask over `listed` tenors, band open
+    /// or not (the board omits 2Y either way):
+    /// every vol point at 10 + its tenor index, skew 3M 5.5 moved +0.4,
+    /// ATFM 3M ranked 0.91 of 251, IV−RV 3.4 ranked 0.77, varswap 18.1,
+    /// vs spread 2.2; sparks rise from 15.0 to 17.9.
+    fn band_row(listed: &[String], band: bool) -> (Ask, Vec<Row>) {
+        let mut asked = ask(View::Changes, listed, Lookback::D1, band);
+        asked
+            .measures
+            .retain(|m| !matches!(m, Measure::Point { tenor, .. } if tenor == "2Y"));
+        let ivrv = Measure::IvRv {
+            tenor: "3M".into(),
+            window: "20D".into(),
+        };
+        let board = VolBoard {
+            rows: vec![row_of(&asked, "SX5E", true, &|m| match m {
+                Measure::Point { tenor, delta } if *delta == 0.5 && tenor == "3M" => {
+                    Some((Some(16.0), None, Some((0.91, 251))))
+                }
+                Measure::Point { tenor, .. } => {
+                    let at = listed.iter().position(|t| t == tenor).unwrap();
+                    Some((Some(10.0 + at as f64), None, None))
+                }
+                Measure::Skew { tenor } if tenor == "3M" => {
+                    Some((Some(5.5), Some(change(0.4, 5.1)), Some((0.64, 251))))
+                }
+                m if *m == ivrv => Some((Some(3.4), None, Some((0.77, 251)))),
+                Measure::Varswap { .. } => Some((Some(18.1), None, None)),
+                Measure::VsSpread { .. } => Some((Some(2.2), None, None)),
+                _ => None,
+            })],
+            ..VolBoard::default()
+        };
+        let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, None);
+        (asked, rows)
+    }
+
+    #[test]
+    fn the_band_reads_the_surface_by_tenor_and_delta_and_captions_its_sparks() {
+        let listed = tenors();
+        let (asked, rows) = band_row(&listed, true);
+        let mut i = inputs(&rows, View::Changes);
+        i.asked = &asked;
+        let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
+        assert_eq!(b.name.as_ref(), "SX5E");
+        assert_eq!(
+            b.surface
+                .iter()
+                .map(|(t, _)| t.as_ref())
+                .collect::<Vec<_>>(),
+            ALL_TENORS
+        );
+        let three_m = &b.surface[2].1;
+        assert_eq!(three_m[2].text.as_ref(), "16.0", "atm is ATFM");
+        assert_eq!(three_m[0].text.as_ref(), "12.0", "10p reads its point");
+        assert_eq!(three_m[5].text.as_ref(), "5.5", "25Δ skew");
+        assert_eq!(three_m[6].text.as_ref(), "+0.4", "its Δ over the lookback");
+        assert_eq!(three_m[6].id.as_ref(), "7-band-3M-delta");
+        assert_eq!(b.delta_head.as_ref(), "Δ1d");
+        let two_y = &b.surface[6].1;
+        assert!(
+            two_y
+                .iter()
+                .all(|c| c.text.as_ref() == widths::DASH && c.muted),
+            "a tenor the board lacks is dashes"
+        );
+        // One heat range over the whole table: 1M's 10.0 is its floor.
+        assert!(matches!(b.surface[0].1[0].glyph, Glyph::Heat(Some(a)) if a == 0.0));
+        assert!(b.sparks.iter().all(Option::is_some));
+        assert_eq!(
+            b.captions[0].as_ref(),
+            "1Y pctl 91 of 251 · range 15.0 – 17.9"
+        );
+        assert_eq!(
+            b.captions[1].as_ref(),
+            "1Y pctl 64 of 251 · range 15.0 – 17.9"
+        );
+        assert_eq!(b.captions[2].as_ref(), "IV−RV +3.4 · pctl 77 of 251");
+        let ctx: Vec<(&str, &str)> = b
+            .context
+            .iter()
+            .map(|(l, v)| (l.as_ref(), v.as_ref()))
+            .collect();
+        assert_eq!(ctx[0], ("Varswap 3M", "18.1"));
+        assert_eq!(ctx[1], ("vs ATM", "+2.2"));
+        assert_eq!(ctx[2], ("Book vega", widths::DASH));
+        assert_eq!(
+            ctx[3],
+            ("Source", "surface 15:00 · realized 15:00 · varswap 15:00")
+        );
+    }
+
+    #[test]
+    fn the_band_of_a_board_asked_without_it_is_dashes() {
+        let listed = tenors();
+        // The board answered the closed ask: no point but ATFM, no 1Y spark.
+        let (asked, rows) = band_row(&listed, false);
+        let mut i = inputs(&rows, View::Changes);
+        i.asked = &asked;
+        let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
+        assert_eq!(b.surface[0].1[0].text.as_ref(), widths::DASH, "10p 1M");
+        assert_eq!(b.surface[0].1[5].text.as_ref(), widths::DASH, "skew 1M");
+        assert!(b.sparks[1].is_none() && b.sparks[2].is_none());
+        assert_eq!(
+            b.captions[1].as_ref(),
+            "1Y pctl 64 of 251",
+            "no spark, no range"
         );
     }
 

@@ -95,7 +95,11 @@ pub(crate) fn render(tile: &VolwatchTile, cx: &mut Context<VolwatchTile>) -> Div
         .child(header)
         .child(strip)
         .child(body)
-        // The inspection band docks here, between the grid and the footer.
+        // The inspection band docks between the grid and the footer.
+        .when(tile.state.band && tile.empty.is_none(), |el| {
+            let paints = tile.table.read(cx).delegate().paints;
+            el.child(super::band::render(&tile.band_model, &paints, &theme, id))
+        })
         .child(footer)
 }
 

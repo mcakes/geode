@@ -9,6 +9,7 @@
 //! state) is rebuilt when the snapshot, the board, the view, the lookback
 //! or the reference tables change, never in render.
 
+mod band;
 mod chrome;
 mod data;
 mod header;
@@ -56,7 +57,7 @@ use table::{GridDelegate, GridEvent, Paints, sortable};
 
 use crate::content::Shared;
 use crate::core::commands::{self, Command};
-use crate::core::model::{HeaderModel, Prepared, Row, sort_value};
+use crate::core::model::{BandModel, HeaderModel, Prepared, Row, sort_value};
 use crate::core::session::{self, State};
 use crate::core::views::{
     Ask, Column, KIND, REALIZED, SURFACE, VARSWAP, View, columns, order_tenors,
@@ -79,6 +80,7 @@ const PAINT_ACTION: &str = "volwatch::paint";
 const SORT_ACTION: &str = "volwatch::sort";
 const YANK_ACTION: &str = "volwatch::yank";
 const VISUAL_ACTION: &str = "volwatch::visual_rows";
+const INSPECT_ACTION: &str = "volwatch::inspect";
 
 /// The tile's motion actions and the shared grid motions they name.
 const MOTIONS: [(&str, &str); 6] = [
@@ -192,6 +194,9 @@ pub struct VolwatchTile {
     /// The footer's cursor readout, rebuilt whenever the cursor, its
     /// column, the board or the view changes.
     pub(crate) readout: SharedString,
+    /// The inspection band for the cursor row while `state.band` is open,
+    /// rebuilt with the readout.
+    pub(crate) band_model: BandModel,
     /// The cluster's source times, one run per dataset the board read,
     /// rebuilt with the prepared model; `times_at` holds each run's source
     /// time for the stale wake-ups.
@@ -338,6 +343,7 @@ impl VolwatchTile {
             paint: true,
             header: HeaderModel::default(),
             readout: SharedString::default(),
+            band_model: BandModel::default(),
             times: Vec::new(),
             times_at: Vec::new(),
             strip_keys: None,
@@ -503,7 +509,7 @@ impl VolwatchTile {
     /// Hand the table what it paints: the prepared model, the columns, the
     /// shown rows, the cursor, the selection and the sort mark. Every
     /// cursor, board and view change passes through here, so the footer's
-    /// readout is rebuilt here too. The
+    /// readout and the band are rebuilt here too. The
     /// table's selected row is the cursor row (its highlight, and its
     /// scroll-to); its columns are re-read only when their layout changed.
     pub(crate) fn sync_table(&mut self, cx: &mut Context<Self>) {
@@ -516,6 +522,7 @@ impl VolwatchTile {
                 .map(|i| (i, o.descending()))
         });
         self.rebuild_readout();
+        self.rebuild_band();
         let visible = self.grid.visible().to_vec();
         let cursor = self.grid.cursor().map(|r| (r, self.cursor_col));
         let selection = self.grid.selected();
@@ -688,6 +695,8 @@ impl VolwatchTile {
                 self.menu = None;
                 cx.notify();
             }
+            ESCAPE_ACTION if self.state.band => self.close_band(cx),
+            INSPECT_ACTION => self.inspect(cx),
             ESCAPE_ACTION if self.grid.selecting() => {
                 self.grid.clear_selection();
                 self.sync_table(cx);
@@ -733,6 +742,41 @@ impl VolwatchTile {
             _ => return false,
         }
         true
+    }
+
+    /// `enter`: open the band on the cursor row, or close it. Opening
+    /// grows the ask (a requery) and scrolls the cursor row into view above
+    /// the band; a member the landed board lacks refuses with a notice.
+    fn inspect(&mut self, cx: &mut Context<Self>) {
+        if self.state.band {
+            self.close_band(cx);
+            return;
+        }
+        let Some(at) = self.grid.cursor() else {
+            return;
+        };
+        let Some(row) = self.grid.visible().get(at).map(|&i| self.grid.row(i)) else {
+            return;
+        };
+        if self.board.is_some() && !row.present {
+            self.notices.refused = Some(format!("{} is not in the surface", row.name));
+            self.rebuild_chrome(cx);
+            cx.notify();
+            return;
+        }
+        self.state.band = true;
+        self.resubmit(false, cx);
+        self.sync_table(cx);
+        self.table.update(cx, |t, cx| t.scroll_to_row(at, cx));
+        cx.notify();
+    }
+
+    /// Close the band; the cursor keeps its row. The ask shrinks without a
+    /// requery: the next ask simply leaves the band's measures out.
+    fn close_band(&mut self, cx: &mut Context<Self>) {
+        self.state.band = false;
+        self.sync_table(cx);
+        cx.notify();
     }
 
     /// A row motion moves the cursor (extending a live selection); a
