@@ -394,7 +394,11 @@ pub fn read_board(
     };
     let mut obs = Observations {
         window_from_day: params.window.and_then(days_back),
-        spark_from_day: params.sparkline.as_ref().and_then(|(_, s)| days_back(*s)),
+        spark_from_days: params
+            .sparklines
+            .iter()
+            .map(|(_, s)| days_back(*s).unwrap_or(i64::MAX))
+            .collect(),
         instants: plan.instants.clone(),
         ..Default::default()
     };
@@ -575,8 +579,10 @@ mod tests {
                 measures,
                 lookbacks: vec![Lookback::D1, Lookback::M1],
                 window: window_days.map(|d| Duration::from_secs(d * 86_400)),
-                sparkline: spark_days
-                    .map(|d| (Measure::atfm("3M"), Duration::from_secs(d * 86_400))),
+                sparklines: spark_days
+                    .map(|d| (Measure::atfm("3M"), Duration::from_secs(d * 86_400)))
+                    .into_iter()
+                    .collect(),
             },
             // Instants fixed by hand (the rule deriving them is in core):
             // the end of Friday the 9th and of Dec 11. `now` is Sunday the
@@ -640,7 +646,7 @@ mod tests {
             "a stale point still has its current"
         );
         assert_eq!(atfm_1m.pctl, None, "nothing inside the window");
-        assert_eq!(spx.spark, Some(vec![0.18, 0.19, 0.20]));
+        assert_eq!(spx.sparks, vec![Some(vec![0.18, 0.19, 0.20])]);
         // The 3M tuples fail M1 and start on the 8th; the 1M tuple answers
         // both lookbacks, so its 2025 row does not set the note.
         assert_eq!(board.notes, vec!["vol_surface: history starts 2026-01-08"]);
@@ -655,7 +661,7 @@ mod tests {
         let p = plan(vec![Measure::atfm("3M")], None, Some(1));
         let board = read_board(store.writer(), &schema, &p).unwrap();
         // The sparkline's one day is the 10th: the 21:00 close, not the 15:00 mark.
-        assert_eq!(board.rows[0].spark, Some(vec![0.20]));
+        assert_eq!(board.rows[0].sparks, vec![Some(vec![0.20])]);
     }
 
     #[test]
@@ -825,7 +831,7 @@ role = "value"
             board
                 .rows
                 .iter()
-                .all(|r| r.spark == Some(vec![0.18, 0.19, 0.20]))
+                .all(|r| r.sparks == vec![Some(vec![0.18, 0.19, 0.20])])
         );
     }
 

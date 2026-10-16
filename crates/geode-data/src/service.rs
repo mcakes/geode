@@ -5983,7 +5983,7 @@ mod tests {
             measures,
             lookbacks,
             window: window_days.map(|d| std::time::Duration::from_secs(d * 86_400)),
-            sparkline: None,
+            sparklines: Vec::new(),
         }
     }
 

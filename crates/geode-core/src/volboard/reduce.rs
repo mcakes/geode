@@ -33,8 +33,9 @@ pub struct Observations {
     /// The first day index that counts toward the percentile window;
     /// `None` when no window was asked.
     pub window_from_day: Option<i64>,
-    /// The first day index the sparkline shows; `None` without a sparkline.
-    pub spark_from_day: Option<i64>,
+    /// The first day index each sparkline shows, parallel to the request's
+    /// `sparklines`; an entry that cannot be computed is `i64::MAX` (empty).
+    pub spark_from_days: Vec<i64>,
     /// The lookback instants, parallel to the request's lookbacks, for the
     /// "no observation at or before" note.
     pub instants: Vec<DateTime<Utc>>,
@@ -161,7 +162,7 @@ pub fn reduce(params: &VolBoardParams, obs: &Observations, clock: &Clock) -> Red
     let all_inputs: Vec<Input> = params
         .measures
         .iter()
-        .chain(params.sparkline.iter().map(|(m, _)| m))
+        .chain(params.sparklines.iter().map(|(m, _)| m))
         .flat_map(|m| m.inputs())
         .collect();
     let reads_surface = all_inputs.iter().any(|i| i.role == Role::Surface);
@@ -194,17 +195,22 @@ pub fn reduce(params: &VolBoardParams, obs: &Observations, clock: &Clock) -> Red
             .iter()
             .map(|m| cell(params, obs, member, m))
             .collect();
-        let spark = match (&params.sparkline, obs.spark_from_day) {
-            (Some((measure, _)), Some(from_day)) => gather(obs, member, &measure.inputs())
-                .map(|found| daily(measure, &found, from_day))
-                .filter(|s| !s.is_empty()),
-            _ => None,
-        };
+        let sparks = params
+            .sparklines
+            .iter()
+            .enumerate()
+            .map(|(i, (measure, _))| {
+                let from_day = *obs.spark_from_days.get(i)?;
+                gather(obs, member, &measure.inputs())
+                    .map(|found| daily(measure, &found, from_day))
+                    .filter(|s| !s.is_empty())
+            })
+            .collect();
         out.rows.push(VolRow {
             underlying: member.clone(),
             as_of,
             cells,
-            spark,
+            sparks,
         });
     }
     // One note per dataset whose lookbacks found nothing for some tuple.
@@ -278,7 +284,7 @@ mod tests {
             measures,
             lookbacks: vec![Lookback::D1, Lookback::M1],
             window: Some(Duration::from_secs(365 * 86_400)),
-            sparkline: Some((Measure::atfm("3M"), Duration::from_secs(3 * 86_400))),
+            sparklines: vec![(Measure::atfm("3M"), Duration::from_secs(3 * 86_400))],
         }
     }
 
@@ -314,7 +320,7 @@ mod tests {
         let p = params(vec![Measure::atfm("3M")]);
         let mut obs = Observations {
             window_from_day: Some(20_000),
-            spark_from_day: Some(20_462),
+            spark_from_days: vec![20_462],
             instants: instants(),
             ..Default::default()
         };
@@ -345,16 +351,44 @@ mod tests {
         assert!((pctl - 2.0 / 3.0).abs() < 1e-12);
         assert_eq!(n, 3);
         assert_eq!(
-            spx.spark,
-            Some(vec![0.19, 0.20]),
+            spx.sparks,
+            vec![Some(vec![0.19, 0.20])],
             "the sparkline starts at its own day"
         );
         assert_eq!(r.missing, vec!["ZZZ"]);
         let zzz = &r.rows[1];
         assert_eq!(zzz.as_of, None);
         assert_eq!(zzz.cells[0].current, None);
-        assert_eq!(zzz.spark, None);
+        assert_eq!(zzz.sparks, vec![None]);
         assert_eq!(r.notes, vec!["vol_surface: history starts 2026-01-08"]);
+    }
+
+    #[test]
+    fn each_sparkline_reduces_over_its_own_span() {
+        // 40 daily points; sparklines of 3 and 30 days end at day 20_500.
+        let mut p = params(vec![Measure::atfm("3M")]);
+        p.sparklines = vec![
+            (Measure::atfm("3M"), Duration::from_secs(3 * 86_400)),
+            (Measure::atfm("3M"), Duration::from_secs(30 * 86_400)),
+        ];
+        let mut observed = observed_atfm();
+        observed.daily = (20_461..20_501).map(|d| (d, d as f64 / 1e5)).collect();
+        let mut obs = Observations {
+            window_from_day: Some(20_000),
+            spark_from_days: vec![20_498, 20_471],
+            instants: instants(),
+            ..Default::default()
+        };
+        obs.by_input
+            .insert(("SPX".into(), point("3M", "0.5", "vol")), observed);
+        let r = reduce(&p, &obs, &Clock::utc());
+        let sparks = &r.rows[0].sparks;
+        assert_eq!(sparks.len(), 2);
+        let short = sparks[0].as_ref().unwrap();
+        let long = sparks[1].as_ref().unwrap();
+        assert_eq!(short, &vec![0.20498, 0.20499, 0.20500]);
+        assert_eq!(long.len(), 30);
+        assert_eq!(long[0], 0.20471);
     }
 
     #[test]
@@ -366,7 +400,7 @@ mod tests {
         }]);
         let mut obs = Observations {
             window_from_day: Some(20_000),
-            spark_from_day: None,
+            spark_from_days: vec![],
             instants: instants(),
             ..Default::default()
         };
@@ -421,7 +455,7 @@ mod tests {
         ]);
         let mut obs = Observations {
             window_from_day: None,
-            spark_from_day: None,
+            spark_from_days: vec![],
             instants: instants(),
             ..Default::default()
         };
@@ -449,7 +483,7 @@ mod tests {
         let p = params(vec![Measure::atfm("3M")]);
         let mut obs = Observations {
             window_from_day: Some(20_462),
-            spark_from_day: None,
+            spark_from_days: vec![],
             instants: instants(),
             ..Default::default()
         };
@@ -486,7 +520,7 @@ mod tests {
         ]);
         let mut obs = Observations {
             window_from_day: None,
-            spark_from_day: None,
+            spark_from_days: vec![],
             instants: instants(),
             ..Default::default()
         };
@@ -514,10 +548,10 @@ mod tests {
         let mut p = params(vec![Measure::Realized {
             window: "20D".into(),
         }]);
-        p.sparkline = None;
+        p.sparklines.clear();
         let mut obs = Observations {
             window_from_day: None,
-            spark_from_day: None,
+            spark_from_days: vec![],
             instants: instants(),
             ..Default::default()
         };
@@ -548,7 +582,7 @@ mod tests {
         ]);
         let mut obs = Observations {
             window_from_day: None,
-            spark_from_day: None,
+            spark_from_days: vec![],
             instants: instants(),
             ..Default::default()
         };
@@ -598,7 +632,7 @@ mod tests {
         ];
         let mut obs = Observations {
             window_from_day: None,
-            spark_from_day: None,
+            spark_from_days: vec![],
             instants: ny_instants,
             ..Default::default()
         };

@@ -1589,23 +1589,24 @@ at debug level and drop it. The vol watchlist tile consumes them in Part 4.
 `DataHandle::vol_board(VolBoardParams)` asks for one vol board: a row per
 watchlist member, a cell per measure, each cell with its current value, a
 change per lookback (`D1`, `W1`, `M1`: one, five and twenty-one business
-days), an optional rank percentile over a window, and an optional daily
-sparkline for one measure. The measures and their arithmetic are
+days), an optional rank percentile over a window, and optional daily
+sparklines (`sparklines`, each a measure and a span, no measure twice;
+`VolRow::sparks` is parallel to them). The measures and their arithmetic are
 `geode_core::volboard::Measure`: points, forwards and realized and varswap
 levels read one tuple; skew, wing skew, slope, IV−RV and the varswap
 spread are first input minus second (`Skew` is the 25Δ put minus the 25Δ
 call, call deltas 0.75 and 0.25).
 
 The service fixes `now` and the lookback instants once at submission, then
-plans these asks per dataset the measures (and the sparkline) touch:
+plans these asks per dataset the measures (and the sparklines) touch:
 
 - One `Latest` over `Prefix(members)`. It always fetches; one call per
   dataset per refresh.
 - One exact-key `At` at each lookback instant, over the members times the
   key suffixes the measures read. Exact, so coverage answers it after the
   first fetch and only uncovered tuples go to the source.
-- With a window or a sparkline, one exact-key `Between` over the longer of
-  the two spans, ending now, with `step: None`: a stepped `Between` records
+- With a window or sparklines, one exact-key `Between` over the longest of
+  the window and every sparkline span, ending now, with `step: None`: a stepped `Between` records
   no coverage, so a stepped ask would refetch the whole window on every
   refresh. The board SQL thins to one observation per day instead.
 
@@ -1619,7 +1620,7 @@ close and reads zero until Monday's first mark.
 The service refuses, as the request's `DataEvent::VolBoard` error, before
 any call: what `VolBoardParams::validate` refuses (no member, a blank
 member, no measure, a measure whose dataset the request does not name, a
-zero window or sparkline span, a window shorter than a lookback's calendar
+zero window or sparkline span, a repeated sparkline measure, a window shorter than a lookback's calendar
 reach of 4, 8 or 31 days); a dataset not declared as history
 (`'<name>' is not a declared history dataset`); a dataset of the wrong shape (the surface needs a
 three-column key and value columns `vol` and `forward`, realized a

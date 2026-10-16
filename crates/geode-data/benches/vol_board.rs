@@ -423,12 +423,14 @@ fn params(
         measures,
         lookbacks,
         window: window_days.map(|d| std::time::Duration::from_secs(d * 86_400)),
-        sparkline: spark.then(|| {
-            (
+        sparklines: if spark {
+            vec![(
                 Measure::atfm("3M"),
                 std::time::Duration::from_secs(30 * 86_400),
-            )
-        }),
+            )]
+        } else {
+            Vec::new()
+        },
     }
 }
 

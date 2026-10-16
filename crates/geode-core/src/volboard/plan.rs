@@ -25,13 +25,13 @@ pub fn lookback_instant(
 }
 
 /// Every input the request reads: the measures' in order, then the
-/// sparkline's, repeats removed.
+/// sparklines', repeats removed.
 pub fn inputs(params: &VolBoardParams) -> Vec<Input> {
     let mut out: Vec<Input> = Vec::new();
     let measures = params
         .measures
         .iter()
-        .chain(params.sparkline.iter().map(|(m, _)| m));
+        .chain(params.sparklines.iter().map(|(m, _)| m));
     for measure in measures {
         for input in measure.inputs() {
             if !out.contains(&input) {
@@ -56,13 +56,15 @@ pub fn suffixes(params: &VolBoardParams) -> BTreeMap<Role, Vec<Vec<String>>> {
 }
 
 /// How far back the daily series reaches: the longer of the percentile
-/// window and the sparkline span, one `Between` per dataset serving both.
+/// window and every sparkline span, one `Between` per dataset serving all;
+/// `None` when neither is asked.
 pub fn daily_span(params: &VolBoardParams) -> Option<Duration> {
-    let spark = params.sparkline.as_ref().map(|(_, d)| *d);
-    match (params.window, spark) {
-        (Some(w), Some(s)) => Some(w.max(s)),
-        (w, s) => w.or(s),
-    }
+    params
+        .sparklines
+        .iter()
+        .map(|(_, d)| *d)
+        .chain(params.window)
+        .max()
 }
 
 /// Days since 1970-01-01 UTC, floored: the day bucket the board SQL uses
@@ -152,7 +154,7 @@ mod tests {
             ],
             lookbacks: vec![Lookback::D1],
             window: Some(Duration::from_secs(365 * 86_400)),
-            sparkline: Some((Measure::atfm("1M"), Duration::from_secs(30 * 86_400))),
+            sparklines: vec![(Measure::atfm("1M"), Duration::from_secs(30 * 86_400))],
         }
     }
 
@@ -195,7 +197,7 @@ mod tests {
         assert_eq!(s[&Role::Varswap], vec![vec!["3M".to_string()]]);
         let mut p = params();
         p.measures = vec![Measure::atfm("3M"), Measure::Forward { tenor: "3M".into() }];
-        p.sparkline = None;
+        p.sparklines.clear();
         assert_eq!(
             suffixes(&p)[&Role::Surface].len(),
             1,
@@ -213,8 +215,20 @@ mod tests {
         let mut p = params();
         p.window = None;
         assert_eq!(daily_span(&p), Some(Duration::from_secs(30 * 86_400)));
-        p.sparkline = None;
+        p.sparklines.clear();
         assert_eq!(daily_span(&p), None);
+    }
+
+    #[test]
+    fn the_daily_span_is_the_longest_of_window_and_every_sparkline() {
+        let day = |n: u64| Duration::from_secs(n * 86_400);
+        let mut p = params();
+        p.window = Some(day(100));
+        p.sparklines = vec![
+            (Measure::atfm("3M"), day(30)),
+            (Measure::Skew { tenor: "3M".into() }, day(365)),
+        ];
+        assert_eq!(daily_span(&p), Some(day(365)));
     }
 
     #[test]

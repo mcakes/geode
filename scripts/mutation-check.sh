@@ -41812,6 +41812,15 @@ run_mutation "volboard: a derived measure ranks over any input's days" \
   geode-core \
   a_derived_cell_combines_inputs_pointwise_and_ranks_over_the_days_both_hold
 
+# Each sparkline starts at its own day. Mutated to the first sparkline's
+# day for every entry, the 30-day spark holds only the 3-day spark's days.
+run_mutation "volboard: every sparkline starts at the first one's day" \
+  crates/geode-core/src/volboard/reduce.rs \
+  '                let from_day = *obs.spark_from_days.get(i)?;' \
+  '                let from_day = *obs.spark_from_days.first()?;' \
+  geode-core \
+  each_sparkline_reduces_over_its_own_span
+
 # The lookback instant is the end of the calendar day, not the clock's
 # display eod: a 21:00 close falls after 18:00.
 run_mutation "volboard: the lookback instant is the clock's eod" \

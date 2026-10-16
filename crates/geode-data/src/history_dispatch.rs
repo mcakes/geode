@@ -781,7 +781,7 @@ mod tests {
                 measures: vec![geode_core::volboard::Measure::atfm("3M")],
                 lookbacks: vec![],
                 window: None,
-                sparkline: None,
+                sparklines: Vec::new(),
             },
             now: settled(),
             instants: vec![],

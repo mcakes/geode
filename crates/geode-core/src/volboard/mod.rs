@@ -54,8 +54,9 @@ impl Lookback {
 }
 
 /// One board ask. `window` is the rank-percentile window (`None`: no
-/// percentiles); `sparkline` names one measure and the span of daily
-/// values to return for it.
+/// percentiles); each `sparklines` entry names a measure and the span of
+/// daily values to return for it. A measure may appear once; `VolRow::sparks`
+/// is parallel to this list.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VolBoardParams {
     pub key: QueryKey,
@@ -68,7 +69,7 @@ pub struct VolBoardParams {
     pub measures: Vec<Measure>,
     pub lookbacks: Vec<Lookback>,
     pub window: Option<Duration>,
-    pub sparkline: Option<(Measure, Duration)>,
+    pub sparklines: Vec<(Measure, Duration)>,
 }
 
 const DAY: u64 = 86_400;
@@ -111,7 +112,7 @@ impl VolBoardParams {
         let asked = self
             .measures
             .iter()
-            .chain(self.sparkline.iter().map(|(m, _)| m));
+            .chain(self.sparklines.iter().map(|(m, _)| m));
         for measure in asked {
             for role in measure.roles() {
                 if self.dataset(role).is_none() {
@@ -140,10 +141,13 @@ impl VolBoardParams {
                 ));
             }
         }
-        if let Some((_, span)) = &self.sparkline
-            && span.is_zero()
-        {
+        if self.sparklines.iter().any(|(_, span)| span.is_zero()) {
             return Err("a sparkline span is longer than zero".to_string());
+        }
+        for (i, (measure, _)) in self.sparklines.iter().enumerate() {
+            if self.sparklines[..i].iter().any(|(m, _)| m == measure) {
+                return Err("a sparkline measure repeats".to_string());
+            }
         }
         Ok(())
     }
@@ -188,8 +192,9 @@ pub struct VolRow {
     pub as_of: Option<DateTime<Utc>>,
     /// Parallel to the request's `measures`.
     pub cells: Vec<Cell>,
-    /// The sparkline measure's daily values, oldest first.
-    pub spark: Option<Vec<f64>>,
+    /// Parallel to the request's `sparklines`: each measure's daily values,
+    /// oldest first; `None` when it has none in its span.
+    pub sparks: Vec<Option<Vec<f64>>>,
 }
 
 /// One answered board: a row per member in request order (a member the
@@ -230,7 +235,7 @@ mod tests {
             measures: vec![Measure::atfm("3M"), Measure::Skew { tenor: "3M".into() }],
             lookbacks: vec![Lookback::D1, Lookback::M1],
             window: Some(Duration::from_secs(365 * 86_400)),
-            sparkline: Some((Measure::atfm("3M"), Duration::from_secs(30 * 86_400))),
+            sparklines: vec![(Measure::atfm("3M"), Duration::from_secs(30 * 86_400))],
         }
     }
 
@@ -306,17 +311,17 @@ mod tests {
             ),
             (
                 "zero sparkline",
-                Box::new(|p| p.sparkline = Some((Measure::atfm("3M"), Duration::ZERO))),
+                Box::new(|p| p.sparklines = vec![(Measure::atfm("3M"), Duration::ZERO)]),
                 "a sparkline span is longer than zero",
             ),
             (
                 "sparkline needs a missing dataset",
                 Box::new(|p| {
                     p.varswap = None;
-                    p.sparkline = Some((
+                    p.sparklines = vec![(
                         Measure::Varswap { tenor: "3M".into() },
                         Duration::from_secs(86_400),
-                    ));
+                    )];
                 }),
                 "varswap 3M needs a varswap dataset",
             ),
@@ -326,6 +331,27 @@ mod tests {
             mutate(&mut p);
             assert_eq!(p.validate(), Err(message.to_string()), "{name}");
         }
+    }
+
+    #[test]
+    fn a_board_refuses_a_zero_or_repeated_sparkline() {
+        let day = |n: u64| Duration::from_secs(n * 86_400);
+        let mut p = params();
+        p.sparklines = vec![(Measure::atfm("3M"), Duration::ZERO)];
+        assert_eq!(
+            p.validate().unwrap_err(),
+            "a sparkline span is longer than zero"
+        );
+        p.sparklines = vec![
+            (Measure::atfm("3M"), day(30)),
+            (Measure::atfm("3M"), day(365)),
+        ];
+        assert_eq!(p.validate().unwrap_err(), "a sparkline measure repeats");
+        p.sparklines = vec![
+            (Measure::atfm("3M"), day(30)),
+            (Measure::Skew { tenor: "3M".into() }, day(365)),
+        ];
+        assert_eq!(p.validate(), Ok(()));
     }
 
     #[test]
