@@ -717,6 +717,10 @@ mod tests {
     fn a_view_switch_requeries_only_when_the_ask_changes() {
         let tenors = order_tenors(None);
         let changes = ask(View::Changes, &tenors, Lookback::D1, false);
+        assert!(
+            !needs_requery(&changes, &changes.clone()),
+            "the same ask asks nothing"
+        );
         let levels = ask(View::Levels, &tenors, Lookback::D1, false);
         assert!(
             needs_requery(&changes, &levels),
@@ -726,6 +730,39 @@ mod tests {
         assert!(
             needs_requery(&changes, &w1),
             "a lookback is part of the ask (L5)"
+        );
+    }
+
+    /// The column tables carry the desk's conventions: a 25Δ put is the
+    /// 0.75 call delta and a 25Δ call the 0.25, and IV − RV pairs the 3M
+    /// surface with the 20-day realized window.
+    #[test]
+    fn the_skew_points_and_the_ivrv_window_are_pinned() {
+        let tenors = order_tenors(None);
+        let kind_of = |view: View, id: &str| {
+            columns(view, &tenors)
+                .into_iter()
+                .find(|c| c.id == id)
+                .map(|c| c.kind)
+                .unwrap()
+        };
+        let point = |delta: f64| ColumnKind::Level {
+            measure: Measure::Point {
+                tenor: "3M".into(),
+                delta,
+            },
+            heat: false,
+        };
+        assert_eq!(kind_of(View::Skew, "put-3M-level"), point(0.75));
+        assert_eq!(kind_of(View::Skew, "call-3M-level"), point(0.25));
+        assert_eq!(
+            kind_of(View::RichCheap, "ivrv-3M-20D-bar"),
+            ColumnKind::Bar {
+                measure: Measure::IvRv {
+                    tenor: "3M".into(),
+                    window: "20D".into(),
+                },
+            }
         );
     }
 }

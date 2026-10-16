@@ -345,9 +345,6 @@ mod demo_config_integration {
         .unwrap();
     }
 
-    /// The default timeseries source must name a declared fetch source.
-    /// The shell uses this validation at startup; an invalid default would
-    /// warn and require an explicit `@source` for added series.
     /// The vol watchlist's demo member: `europe_risk` lists `EU50X`, which
     /// is not a demo underlying, so neither the vol surface nor the risk
     /// carries it and the tile shows `not in surface`. Asserted at the
@@ -372,6 +369,9 @@ mod demo_config_integration {
         );
     }
 
+    /// The default timeseries source must name a declared fetch source.
+    /// The shell uses this validation at startup; an invalid default would
+    /// warn and require an explicit `@source` for added series.
     #[test]
     fn the_demo_layers_default_timeseries_source_names_one_of_its_own() {
         let src = std::path::Path::new("/tmp/geode-demo/100000-42/src");

@@ -25555,10 +25555,12 @@ run_mutation "pricer undo: a refused redo clears the whole history" \
 # factory: every tile would re-resolve and restart its refresh timer.
 run_mutation "pricer bridge: an unchanged pricer config key skips the reload" \
   crates/geode-app/src/bridge.rs \
-  '                if last_key.borrow().as_ref() == Some(&key) {
+  '                let key = pricer_config_key(config);
+                if last_key.borrow().as_ref() == Some(&key) {
                     return;
                 }' \
-  '                if last_key.borrow().as_ref() == Some(&key) {}' \
+  '                let key = pricer_config_key(config);
+                if last_key.borrow().as_ref() == Some(&key) {}' \
   geode-app a_reload_that_changes_no_pricer_setting_leaves_the_factory_alone
 
 # The observer starts from the key the factory was built from, so even
@@ -42085,6 +42087,250 @@ run_mutation "history: a deeper coverage row in the batch covers a prefix ask" \
   '                        .all(|(k, v)| k.is_none() || v.is_none() || k == v)' \
   geode-data \
   missing_by_key_batches_a_prefix_ask_like_covered_spans
+
+# ---- Vol watchlist Part 4: the tile ----
+#
+# The tile asks one board for the union of its view's columns (and the
+# band's measures while open), drops a superseded answer, keeps the last
+# board on a failure, and prepares every glyph from the displayed number.
+# Entry names start "volwatch:" so one substring selects exactly this set.
+
+# The same ask asks nothing: a requery on every view or band change would
+# put a board request on the queue for nothing.
+run_mutation "volwatch: a view switch requeries only when the ask grows" \
+  crates/geode-volwatch/src/core/views.rs \
+  '    next.lookback != last.lookback' \
+  '    true || next.lookback != last.lookback' \
+  geode-volwatch \
+  a_view_switch_requeries_only_when_the_ask_changes
+
+# A narrower ask is answered by the board already held: closing the band
+# or switching to a view that reads less never requeries.
+run_mutation "volwatch: a narrower ask does not requery" \
+  crates/geode-volwatch/src/core/views.rs \
+  '        || next.measures.iter().any(|m| !last.measures.contains(m))' \
+  '        || next.measures.iter().any(|m| !last.measures.contains(m))
+        || next.measures.len() != last.measures.len()' \
+  geode-volwatch \
+  the_band_joins_the_ask_only_while_open
+
+# A measure the last ask lacks requeries: without it a view switch paints
+# columns the board was never asked for, as blanks.
+run_mutation "volwatch: a measure the last ask lacks requeries" \
+  crates/geode-volwatch/src/core/views.rs \
+  '        || next.measures.iter().any(|m| !last.measures.contains(m))' \
+  '        || next.measures.iter().any(|m| false && !last.measures.contains(m))' \
+  geode-volwatch \
+  digits_switch_views_and_requery_only_when_the_ask_grows
+
+# The band's measures (every surface point, the year window, three
+# one-year sparks) join the ask only while it is open.
+run_mutation "volwatch: the band's measures join the ask only while open" \
+  crates/geode-volwatch/src/core/views.rs \
+  '    if band {' \
+  '    if false {' \
+  geode-volwatch \
+  the_band_joins_the_ask_only_while_open
+
+# A 25-delta put is the 0.75 call delta. Swapped, the Skew view's put and
+# call columns read each other's wing.
+run_mutation "volwatch: the skew view's put column reads the 0.75 call delta" \
+  crates/geode-volwatch/src/core/views.rs \
+  '                    delta: 0.75,' \
+  '                    delta: 0.25,' \
+  geode-volwatch \
+  the_skew_points_and_the_ivrv_window_are_pinned
+
+# IV - RV pairs the 3M surface with the 20-day realized window.
+run_mutation "volwatch: the rich/cheap IV-RV bar reads the 20-day window" \
+  crates/geode-volwatch/src/core/views.rs \
+  '                tenor: "3M".into(),
+                window: "20D".into(),' \
+  '                tenor: "3M".into(),
+                window: "5D".into(),' \
+  geode-volwatch \
+  the_skew_points_and_the_ivrv_window_are_pinned
+
+# Only the latest admitted tag's board lands: a board for a superseded ask
+# (`d` pressed twice fast) would paint the old lookback over the new one.
+run_mutation "volwatch: a stale tag's board is dropped" \
+  crates/geode-volwatch/src/tile/data.rs \
+  '        if outcome.key != self.key() || !self.in_flight || outcome.tag != self.tag {' \
+  '        if outcome.key != self.key() || !self.in_flight || outcome.tag > self.tag {' \
+  geode-volwatch \
+  a_stale_tag_board_is_dropped
+
+# A surface failure keeps the last board, paints it stale and stands a
+# warning; it never blanks the grid.
+run_mutation "volwatch: a surface failure keeps the last board" \
+  crates/geode-volwatch/src/tile/data.rs \
+  '            Err(e) => self.notices.failure = Some(format!("surface: {e} {RETRIES}")),' \
+  '            Err(e) => {
+                self.board = None;
+                self.notices.failure = Some(format!("surface: {e} {RETRIES}"))
+            }' \
+  geode-volwatch \
+  a_surface_failure_keeps_the_last_board_and_stands_a_warning
+
+# A listed member the board has no row for keeps a muted blank row at the
+# foot; dropping it would hide that the surface lacks it.
+run_mutation "volwatch: a missing member keeps its row at the foot" \
+  crates/geode-volwatch/src/core/model.rs \
+  '            out.push(make(name, board_row, false));' \
+  '            let _ = (name, board_row);' \
+  geode-volwatch \
+  a_member_the_surface_lacks_lands_at_the_foot_muted_and_blank
+
+# The chip takes the sign of the displayed text: 0.04 shows `0.0` and must
+# not paint a bullish fill under a zero.
+run_mutation "volwatch: the chip takes the displayed sign" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                Glyph::Chip(chip(v, sign, scale, CHIP_CEILING))' \
+  '                Glyph::Chip(chip(
+                    v,
+                    if v > 0.0 { Sign::Positive } else if v < 0.0 { Sign::Negative } else { Sign::Zero },
+                    scale,
+                    CHIP_CEILING,
+                ))' \
+  geode-volwatch \
+  the_chip_takes_the_displayed_sign_and_the_columns_scale
+
+# The slider reads the rank at display precision: 0.8951 shows `90` and
+# must take the warning tone the text implies.
+run_mutation "volwatch: the slider rank is rounded to display precision" \
+  crates/geode-volwatch/src/core/model.rs \
+  '            ColumnKind::Pctl { .. } => Glyph::Slider(slider(rank_percent(v) / 100.0)),' \
+  '            ColumnKind::Pctl { .. } => Glyph::Slider(slider(v)),' \
+  geode-volwatch \
+  the_slider_gets_the_rank_at_display_precision
+
+# A rank over fewer than PCTL_MIN_COUNT observations paints muted.
+run_mutation "volwatch: a short window paints muted" \
+  crates/geode-volwatch/src/core/model.rs \
+  '            .is_some_and(|(_, count)| count < PCTL_MIN_COUNT),' \
+  '            .is_some_and(|(_, count)| count < 1),' \
+  geode-volwatch \
+  a_short_window_paints_muted_with_its_count_in_the_readout
+
+# A change over a lookback other than the one shown (the new board not yet
+# landed) paints muted.
+run_mutation "volwatch: a change from another lookback than the one shown paints muted" \
+  crates/geode-volwatch/src/core/model.rs \
+  '        ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } => i.board_lookback != i.shown,' \
+  '        ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } => false,' \
+  geode-volwatch \
+  a_change_from_another_lookback_than_the_one_shown_paints_muted
+
+# `p` off keeps the numbers and drops every tint, slider and bar.
+run_mutation "volwatch: paint off drops the glyphs" \
+  crates/geode-volwatch/src/core/model.rs \
+  '    let glyph = if !i.paint {' \
+  '    let glyph = if false {' \
+  geode-volwatch \
+  paint_off_keeps_the_numbers_and_drops_tints_sliders_and_bars
+
+# The band's surface columns read 10p 25p atm 25c 10c as call deltas
+# 0.90 0.75 0.50 0.25 0.10; reversed, puts paint under the call heads.
+run_mutation "volwatch: the band's delta order" \
+  crates/geode-volwatch/src/core/model.rs \
+  'pub const BAND_DELTAS: [f64; 5] = [0.90, 0.75, 0.50, 0.25, 0.10];' \
+  'pub const BAND_DELTAS: [f64; 5] = [0.10, 0.25, 0.50, 0.75, 0.90];' \
+  geode-volwatch \
+  the_band_reads_the_surface_by_tenor_and_delta_and_captions_its_sparks
+
+# The lit lookback chip is the lookback in force.
+run_mutation "volwatch: the lookback chip lit is the one in force" \
+  crates/geode-volwatch/src/core/model.rs \
+  '    let lookbacks = Lookback::ALL.map(|l| (l, l == shown));' \
+  '    let lookbacks = Lookback::ALL.map(|l| (l, false && l == shown));' \
+  geode-volwatch \
+  the_header_names_the_list_count_lookback_sort_and_the_missing
+
+# Blanks sort last in both directions: a member the surface lacks must not
+# head an ascending sort.
+run_mutation "volwatch: blanks sort last" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '            (Some(_), None) => std::cmp::Ordering::Less,' \
+  '            (Some(_), None) => std::cmp::Ordering::Greater,' \
+  geode-volwatch \
+  s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last
+
+# Book vega joins the depth-1 rows only; the depth-0 total would overwrite
+# a member's vega with the book's.
+run_mutation "volwatch: vega joins rows at depth 1 only" \
+  crates/geode-volwatch/src/tile/vega.rs \
+  '        if snapshot.depth_of_row(row) != Some(1) {' \
+  '        if snapshot.depth_of_row(row).is_none() {' \
+  geode-volwatch \
+  vega_joins_by_name_into_the_column
+
+# The refresh interval never runs below ten seconds, so a mistyped
+# setting cannot hammer the data service.
+run_mutation "volwatch: the refresh floor" \
+  crates/geode-volwatch/src/content.rs \
+  '        refresh.map(|d| d.max(MIN_REFRESH))' \
+  '        refresh' \
+  geode-volwatch \
+  the_refresh_timer_asks_again_at_its_interval_and_never_below_ten_seconds
+
+# A watchlist snapshot with the same members asks nothing: every snapshot
+# would otherwise put a board on the queue.
+run_mutation "volwatch: an unchanged snapshot asks nothing" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '        let changed = members != self.members;' \
+  '        let changed = true || members != self.members;' \
+  geode-volwatch \
+  an_unchanged_snapshot_asks_nothing
+
+# The cursor row is emitted as a one-value underlying path for followers.
+run_mutation "volwatch: emission names the cursor row" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '                Some(name) => CursorScope::Path(underlying_scope(name)),' \
+  '                Some(_) => CursorScope::Nothing,' \
+  geode-volwatch \
+  the_cursor_row_is_emitted_as_a_one_value_underlying_path
+
+# A restored cursor waits for its row instead of resting on the first.
+run_mutation "volwatch: the restored cursor waits for its row" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '            grid.seed_cursor(name.clone());' \
+  '            let _ = name;' \
+  geode-volwatch \
+  the_cursor_waits_for_its_restored_row
+
+# `t` is refused with a notice naming the history series it cannot open;
+# a silent key reads as broken.
+run_mutation "volwatch: t is refused with a notice" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '        self.notices.refused = Some(text);' \
+  '        let _ = text;' \
+  geode-volwatch \
+  t_is_refused_with_a_notice_naming_the_gap
+
+# Each asked tuple's row carries its own index; a constant index would
+# attribute every row to the first tuple.
+run_mutation "volwatch: the asked tuple's index is its position" \
+  crates/geode-data/src/query/volboard.rs \
+  '        .map(|i| format!("({cells}, {i}::INTEGER)"))' \
+  '        .map(|i| format!("({cells}, {}::INTEGER)", i * 0))' \
+  geode-data \
+  the_board_reads_current_changes_rank_spark_and_lists_the_missing_member
+
+# A key listing takes the keyed route to its tile, as a board does.
+run_mutation "volwatch: a key listing reaches its tile" \
+  crates/geode-app/src/bridge.rs \
+  '                            s.deliver(Delivery::HistoryKeys(outcome), window, cx)' \
+  '                            let _ = outcome;' \
+  geode-app a_board_answer_reaches_its_tile
+
+# A put cursor follows its row by name across a rebuild (the shared row
+# model of the watchlist and the vol watchlist).
+run_mutation "tile: the row model keeps a put cursor on its row across a rebuild" \
+  crates/geode-tile/src/rows.rs \
+  '        let put = self.cursor_name.as_deref().filter(|_| self.put);' \
+  '        let put = self.cursor_name.as_deref().filter(|_| false);' \
+  geode-tile \
+  the_cursor_follows_its_name_across_a_row_rebuild
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

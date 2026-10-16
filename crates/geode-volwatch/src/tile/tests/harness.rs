@@ -623,7 +623,9 @@ pub(super) fn vega_snapshot(rows: &[(&'static str, f64)]) -> geode_core::snapsho
     let mut names: Vec<Option<&'static str>> = rows.iter().map(|(n, _)| Some(*n)).collect();
     let mut values: Vec<Option<f64>> = rows.iter().map(|(_, v)| Some(*v)).collect();
     let mut depth = vec![1; rows.len()];
-    names.push(None);
+    // The depth-0 total carries the first member's label: a join that
+    // read past depth 1 would overwrite that member's vega with the total.
+    names.push(rows.first().map(|(n, _)| *n));
     values.push(Some(9_999_999.0));
     depth.push(0);
     Snapshot::for_tests(
