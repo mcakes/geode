@@ -199,6 +199,9 @@ pub(crate) struct GridDelegate {
     /// One run of equal `Column::group`s per entry; empty when no column
     /// is grouped.
     groups: Vec<ColumnGroup>,
+    /// Each column's head, shared so a frame's heads allocate nothing.
+    heads: Vec<SharedString>,
+    ids: Vec<SharedString>,
     empty: SharedString,
 }
 
@@ -215,6 +218,8 @@ impl GridDelegate {
             rem_px: scale::DESIGN_REM,
             widths: Vec::new(),
             groups: Vec::new(),
+            heads: Vec::new(),
+            ids: Vec::new(),
             empty: SharedString::default(),
         }
     }
@@ -235,6 +240,14 @@ impl GridDelegate {
         self.sorted = sorted;
         if !Rc::ptr_eq(&self.columns, &columns) {
             self.groups = groups(&columns);
+            self.heads = columns
+                .iter()
+                .map(|c| SharedString::from(c.head.clone()))
+                .collect();
+            self.ids = columns
+                .iter()
+                .map(|c| SharedString::from(c.id.clone()))
+                .collect();
             self.columns = columns;
         }
         if relayout {
@@ -424,7 +437,7 @@ impl TableDelegate for GridDelegate {
         let Some(c) = self.columns.get(col_ix) else {
             return div();
         };
-        let id = c.id.clone();
+        let id = self.ids.get(col_ix).cloned().unwrap_or_default();
         let underlying = c.kind == ColumnKind::Underlying;
         div()
             .size_full()
@@ -445,7 +458,7 @@ impl TableDelegate for GridDelegate {
                     }),
                 )
             })
-            .child(SharedString::from(c.head.clone()))
+            .children(self.heads.get(col_ix).cloned())
     }
 
     /// Each row is identified by its member's name. A press with a
