@@ -824,6 +824,13 @@ asked tuple, rather than a row per ask that a refreshing board would grow
 without bound and every lookup would scan. Lookups merge a tuple's spans
 with its prefixes' anyway, so they answer the same.
 
+A window or sparkline `Between` plans its calls from `missing_by_key`: one
+statement, whatever the number of asked tuples, joins the coverage table on
+a `VALUES` list of them, and each tuple's rows are then picked in Rust by
+the same rule `covered_spans` applies (rows equal to it or a prefix of it,
+never a row deeper than a prefix ask). At 250 tuples the plan takes about
+5 ms of the service thread, where one statement per tuple took 62 ms.
+
 Rows, coverage and the retention sweep commit in one writer transaction, so
 a span read as covered is a span whose rows are readable. Calls into
 `append_history` share the fixed `staging_history` table, so only the ingest
@@ -1650,7 +1657,8 @@ once. With no call needed the board is read at once.
 The read runs on the query pool under `board_pool_key(key)`, the
 requester's key with bit 63 flipped, and the answer is addressed to `key`:
 the pool coalesces and cancels per key, and the tile's own view queries
-(Part 4's vega query) under its key must not replace the board read.
+(the vol watchlist's vega query) under its key must not replace the board
+read.
 `DataHandle::cancel(key)` cancels both. A board and a history request under
 one key supersede each other's pending tickets, but at the pool they run
 under different keys, so a read of the other kind already submitted still
@@ -1666,7 +1674,13 @@ or appending, before the read, keeps the history request's text.
 The read is one SQL statement per dataset that projects the cached live
 rows of the asked tuples to observations: the latest, the last at or before
 each lookback instant, the last of each UTC day inside the daily span, and
-the earliest cached. Pure `geode_core::volboard::reduce` computes every
+the earliest cached. The asked tuples join as a `VALUES` list whose rows
+close with each tuple's position in the asked list, and every projected
+row carries that index (`asked_ix`) instead of the key text: the row loop
+maps an integer to observation slots built before it, and reads back, hashes
+and allocates no key per row. The index is the only link from a row to
+its tuple: a wrong one would file the row's values under another member's
+cell, a plausible wrong number rather than an error. Pure `geode_core::volboard::reduce` computes every
 cell from those: a change is current minus the last observation at or
 before the instant; a rank is the share of the window's daily values
 strictly below the current, carried with their count (fewer than 60 still

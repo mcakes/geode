@@ -1144,6 +1144,13 @@ The app bridge supplies these deliveries from a coalescing mailbox. See
 [requests and UI delivery](request-delivery.md) for admission/refusal,
 stale-result handling, publication routing, and window lifetime.
 
+A delivery that rebuilds a list tile's rows (a watchlist snapshot, a vol
+board) goes through `geode_tile::rows::RowModel`, which the watchlist and
+the vol watchlist run over their own row types. The cursor, a selection's
+anchor and a restored cursor are held by name: a cursor the trader put on a
+row follows it across the rebuild, a cursor nobody moved keeps its index,
+and a restored cursor waits for the rows that hold its name.
+
 ### Pages
 
 `PageContent` and `PageFactory`, beside the tile seam in

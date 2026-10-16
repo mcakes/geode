@@ -1081,8 +1081,8 @@ slice answers with that reason. Changing `model` marks restart required, as `[pr
 
 ## Vol watchlist
 
-`[volwatch]` in `app.toml` configures the vol watchlist tile. Both keys are
-hot: a reload that changes either (or `[blotter] stale_after`, which the tile
+`[volwatch]` in `app.toml` configures the vol watchlist tile (see
+[Vol watchlist](features.md#vol-watchlist)). Both keys are hot: a reload that changes either (or `[blotter] stale_after`, which the tile
 shares) pushes the new settings to the factory and the open tiles.
 
 - `refresh` is a duration or `"off"`; the default is `"60s"`. Below the 10s

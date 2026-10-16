@@ -681,13 +681,12 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   on `append/between_400d_prefix_answer_deduped`. A prefix ask still fans
   out to one adapter call per distinct gap list, uncapped; that half is off
   the board's path (its prefix ask is a `Latest`). Measure before acting.
-- Vol board: the Rich/cheap board read is inside its 50 ms budget at
-  35.0 ms (`board_read/rich_cheap_view_25`; `docs/perf.md`, "Rich/cheap
-  read levers"). Its statement is 18.8 ms of that: `live` groups every
-  version of the asked tuples on every read. A latest-version table
-  maintained on append (a DDL change and a `STORE_FORMAT` bump) is what
-  could still cut it, worth doing if a desk's cache grows past the
-  bench's 400 days of closes.
+- Vol board: a latest-version table maintained on append (a DDL change and
+  a `STORE_FORMAT` bump) is what could still cut the board read's
+  statement (18.8 of the Rich/cheap read's 35.0 ms in the instrumented
+  run; the read is 33.5 ms at head, inside its 50 ms budget): `live` groups
+  every version of the asked tuples on every read. Worth doing if a desk's
+  cache grows past the bench's 400 days of closes.
 - History family: `HISTORY_SETTLE` (30 minutes) is a guess at the vendors'
   publication lag. Tune it against the real Hanweck and KDB sources once they
   are reachable: too short and a late-published observation is lost behind
@@ -744,9 +743,6 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
-- The vol watchlist spec's `europe_risk` member the demo surface lacks (so the
-  tile can show a muted missing member) is not in `watchlists.toml` yet; it
-  lands with the vol watchlist tile in Part 4.
 - A release-profile median for the publish-triggered watchlist resolution:
   the recorded 44.8 ms is one dev-profile sample on a loaded machine
   (`docs/perf.md`, 2026-10-10).
@@ -813,6 +809,70 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   `r` → `o` → a dataset → whole dataset, `u` twice, Clone… as `eu_copy`,
   Rename… and Delete… the copy, reading the `geode::watchlist` log line
   for each re-resolution.
+
+## Vol watchlist
+
+### Open work
+
+- The inspection band is a region docked under the grid, not a taller row
+  in place (spec §5.2): `DataTable` lays rows out at one height, so a band
+  in place needs a custom non-uniform list element replacing it in this
+  tile. Owner may overturn the docked form after the display check.
+- The band's vega bucket is omitted: `[volwatch] vega` groups by
+  `underlying_ref` only, and a bucket needs a second grouping dimension
+  (a `vega.bucket` key and a two-dimension query).
+- `t` is refused with a notice: opening a history series needs a
+  timeseries slot kind for a history dataset key (`vol_surface [SX5E, 3M,
+  0.5] vol`). A spark column refuses as `has no series` although it has a
+  measure.
+- Rows are prepared whole; past about 256 members switch the grid to
+  `geode_tile::grid::WindowCache`.
+- A hovered row's spark ring is the row's resting fill, not `DataTable`'s
+  hover fill.
+- The realized and varswap header times' stale path (per-dataset time
+  runs armed on the shared stale timer) has no test.
+- In a narrow tile the band's three blocks clip rather than wrap (display
+  check below).
+- Fitted widths do not rescale with the rem until the next `:autosize`.
+- Request: a same-members reorder of the list requeries (comparing sets
+  would not); the refresh timer re-arms after a resubmit that had nothing
+  to ask and wakes for nothing.
+- Vega: a standing `effective_scope` error re-enters `submit_vega` on every
+  frame notify (remember the error); a flat answer (no `row_depth`) maps
+  silently to dashes; the scope-error, flat-result and query-refusal
+  branches have no tests.
+- Model minors: the `Spark` ask hard-codes ATFM 3M; `term_values` does not
+  drop ∞ before the shared range; `column_scale` runs for columns that
+  never use it; `selection_tint` is computed per row per frame; two
+  columns sharing a one-word head resolve `:sort` to the first silently;
+  `Open timeseries` and `Yank cell` are never disabled with no row; `spell`
+  is copied from the watchlist (a `geode-tile` lift candidate);
+  `inspect` before a board lands opens on dashes.
+- Schema minors carried from the history merge: a measures axis column
+  carries `ColumnSpec.order = Lexical` beside `AxisOrder::Tenor` (nothing
+  reads it for an axis today); `sort_axis_text` and `sort_text` are the
+  same body over two enums; the stamp test
+  `the_format_counts_the_history_tables` now covers axes too.
+- Board minors: a short `spark_from_days` yields `None` silently (a
+  length `debug_assert` would be tighter); duplicate `Input`s fill
+  separate slots, last copy wins (undocumented); the duplicate-day refusal
+  indexes `tuples[asked_ix]` on an implicit bound.
+
+### Display checks
+
+- The view strip and its lit chip, and the lit lookback chip, on light and
+  dark themes.
+- The change chip's tint ceiling against its text.
+- The percent slider's marker in the warning tone.
+- The heat tint in Term (and Levels).
+- The band at narrow tile widths, and whether docking under the grid
+  reads as "in place".
+- The sparkline end dot and its ring over the cursor row's tint, and the
+  hovered row's ring.
+- The stale tone per row, and the header's dataset times turning stale.
+- The `not in surface` rows at the foot, muted.
+- `Vol: Split` in the tile picker and the palette.
+- The demo's `EU50X` row in `europe_risk` (`--demo 1000`).
 
 ## Scenario tiles
 

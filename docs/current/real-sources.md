@@ -382,8 +382,8 @@ no `topics`); `datasets.toml` `family = "series"` with `retention`;
 variance-swap strikes per underlying, asked per key on demand and cached in
 `history` datasets (`vol_surface`, `realized_vol`, `varswap` in the demo).
 The vol board request reads them (see
-[board requests](data-path.md#board-requests)); no UI consumer shows the
-board until the vol watchlist tile lands in Part 4.
+[board requests](data-path.md#board-requests)), and the vol watchlist tile
+paints the board (see [Vol watchlist](features.md#vol-watchlist)).
 
 **Simulator:** `DemoHanweck` in
 [`demo_hanweck.rs`](../../crates/geode-compose/src/demo_hanweck.rs)

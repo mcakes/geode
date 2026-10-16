@@ -3337,3 +3337,39 @@ The row loop fell from 18.6 to 4.2 ms, and the statement from 22.4 to
 18.8 ms (it no longer returns key columns). The statement is now over half
 of the read; a latest-version table maintained on append (a DDL change) is
 what could still cut it (`open-items.md`).
+
+
+## Vol watchlist tile prepare and the final board read (2026-10-16)
+
+Head `6ec3aa1b` (the vol watchlist tile wired into the app). Load averages
+(1 / 5 / 15 min, 18 cores) 17.5 / 29.6 / 36.9 at the start and 13.8 /
+27.5 / 35.9 at the end; other sessions were active. Criterion medians.
+
+**Tile prepare** (`cargo bench -p geode-volwatch`, 100 samples):
+`prepare_25x24` is `core::model::prepare` for 25 members under the Changes
+view (18 columns: Underlying, the forward's Δ%, five ATFM tenors with
+their Δ, skew and slope with their Δ, the 30-day spark and vega) over a
+board answering the Changes ask: every cell's text, glyph core, id and
+muted flag, the column scales, the heat range and the widths.
+
+| Benchmark | Median |
+|---|---|
+| `prepare_25x24` | 114.8 µs (interval 114.2–115.4) |
+
+It is rebuilt per board, view, lookback, paint, theme or stale change,
+never per frame: 1.4% of the 8 ms pure-UI target. The 76.5 µs recorded
+when the model first landed (load about 25) predates the per-cell ids and
+the band's lookups; nothing in the tile is near its budget, so it is not
+chased.
+
+**Board read** (`cargo bench -p geode-data --bench vol_board --
+--warm-up-time 2 --measurement-time 5 'board_read/'`, 20 samples), beside
+the Lever C runs above:
+
+| Benchmark | Lever C (load 19.8 → 18.6) | This head (load 15.2 → 13.8) |
+|---|---|---|
+| `board_read/changes_view_25` | 15.8 ms | 15.6 ms (15.5–15.6) |
+| `board_read/rich_cheap_view_25` | 35.0 ms | 33.5 ms (33.4–33.7) |
+
+Both views stay inside the 50 ms board-read budget; the tile adds nothing
+to the read.

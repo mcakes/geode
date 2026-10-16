@@ -134,8 +134,9 @@ may still use separately configured `CC`/`CXX` wrappers.
 - A tile mechanism two modules would otherwise each write lives in
   `geode-tile` — interaction behavior (keys, focus, open and close,
   precedence) as well as paint: popups (`popover`), `.` action menus
-  (`menu`), the in-tile y/n confirm (`confirm`), notices (`notice`) and the
-  flip-barrier state machine (`following`).
+  (`menu`), the in-tile y/n confirm (`confirm`), notices (`notice`), the
+  flip-barrier state machine (`following`) and the named-row grid model a
+  list tile runs over its own rows (`rows`).
 - In object, settings, and keybinding dialog filters, Escape restores the entry
   query and bare Enter keeps the typed query; neither opens a row or commits.
   Use `dialogmode::{filter_exit, enter_filter, exit_filter}` for keyboard and

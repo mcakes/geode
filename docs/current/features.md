@@ -1207,8 +1207,9 @@ Paths and chrome are cached by the values that affect them; cursor movement
 does not rebuild the data model. The timeseries tile hosts the time chart and
 the vol slice viewer the xy element. `spark::Spark` is the grid-cell glyph: a
 sparkline or term glyph with an optional end dot and marked point, on its own
-or a column's shared y-range, with no axes, grid or tooltip; the vol
-watchlist tile (Part 4) is its first consumer.
+or a column's shared y-range, with no axes, grid or tooltip; the
+[vol watchlist](#vol-watchlist) paints its spark and term columns and
+the band's sparklines with it.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
@@ -1327,7 +1328,8 @@ paints the number alone. The chip and the bar take the sign the host displays,
 which follows the rounded value, so a change shown as `0.0` is neither tinted
 nor barred; the host passes the slider's rank at display precision. Slider
 tracks and bar axes start at the cell's leading edge, so they line up down a
-column whatever the width of each number. The vol watchlist tile is the first consumer.
+column whatever the width of each number. The [vol watchlist](#vol-watchlist)
+tile paints its cells with them.
 
 ## Vol slice
 
@@ -3485,7 +3487,7 @@ writes the whole object back through the shell's
 `geode_core::watchlist`. It opens from the add-tile picker; a new tile
 opens its switcher at once. The demo defines `us_core` (three names by
 hand) and `europe_risk` (every underlying the risk snapshot puts in the
-`region` classification's Europe, plus SMI, minus UKX) in
+`region` classification's Europe, plus SMI and EU50X, minus UKX) in
 `examples/demo-config/watchlists.toml`; each resolution logs one
 `geode::watchlist` debug line with the list's name, its time and its live
 member count.
@@ -3652,6 +3654,187 @@ Known limitations:
 - `geode::watchlist` is not a `[log]` target: its lines follow `default`.
 
 See the [crate guide](../../crates/geode-watchlist/README.md) for the
+module map.
+
+## Vol watchlist
+
+`geode-volwatch` shows one watchlist's members as rows of a vol board:
+surface levels and their changes, ranks, realized and varswap levels, the
+term structure and the skew, with book vega beside them. It computes no
+number of its own. Every level, change, rank and sparkline is a cell of the
+[board request](data-path.md#board-requests); the only arithmetic in the
+tile is display (the forward's change as a percent of its `from`, a rank
+times a hundred, the scales and ranges the glyphs are measured against).
+
+**Kinds.** One kind, `volwatch`, titled `Vol` (`Vol: Split` in the palette
+and the tile picker). It opens from the add-tile picker and never from a
+dimension: a new tile opens the watchlist switcher at once and asks
+nothing until a list is picked. The header reads `Vol · <list>`, the list's
+name before its members arrive. The members come from `WatchlistGlobal`
+(see [Watchlists](#watchlists)); a snapshot that leaves the shown list's
+members unchanged asks nothing. A list that fails to resolve keeps its last
+members with the warning `<list> not resolved: <error>`; a list removed
+from `watchlists.toml` drops the board, abandons anything in flight, shows
+`<list> no longer exists — g w switches` and opens the switcher. The demo
+lists `EU50X` in `europe_risk`, a name the demo surface does not carry, so
+the tile shows a member `not in surface`.
+
+**Request.** One board request per ask, under the tile's key, covering
+every member: the union of the measures the view's columns read, the
+lookback in force, a one-year window when a column ranks, and each spark
+column's measure (the longest span wins when the band also asks it). While
+the band is open its measures join the ask. An ask is
+sent only when it asks something the board answering it lacks: a
+different lookback, a window it did not have, a measure or a longer
+sparkline. A narrower ask (closing the band, switching to a view that reads
+less) never requeries; the board already held answers it. `shift+r`, the
+refresh timer and a membership change always ask again. Only the latest
+admitted tag's board lands: a board for a superseded ask (`d` pressed
+twice) is dropped, never painted over the newer ask's lookback. The tag
+advances only when the service admits the request, so a refused ask does
+not orphan the one already out. Before the first board, the tile asks the
+history key listing for the surface's tenor column once per list; Term and
+Skew lay out the tenors it lists (ordered by `tenor_days`, unparsable
+labels last), and a tenor the last ask lacked asks again. A source that
+cannot enumerate leaves the conventional tenors `1M 2M 3M 6M 1Y 18M 2Y 3Y`.
+
+**Views.** Five, on `1`–`5`, `tab` stepping and wrapping, and the view
+strip under the header (a press switches):
+
+1. **Changes**: the 1M forward's change in percent, ATFM vol and its Δ at
+   `1M 3M 6M 1Y 2Y`, the 3M 25Δ skew and the 1Y−1M slope with their Δ, a
+   30-day ATFM 3M sparkline and book vega.
+2. **Levels**: ATFM at the same tenors with a shared heat tint, the 3M
+   forward, the 3M skew, the 1Y−1M slope, realized `5D` and `20D`, the 3M
+   varswap strike and book vega.
+3. **Rich / cheap**: ATFM 3M with its one-year rank, realized `5D` and
+   `20D`, IV 3M − RV 20d as a zero bar, the 3M varswap strike and its
+   spread to ATM as a bar, the 3M skew and the 1Y−1M slope with their
+   ranks.
+4. **Term**: a term-shape glyph on one y range across the list, then ATFM
+   and its Δ at every listed tenor (heat-tinted), and the 1Y−1M and 3Y−1Y
+   slopes with their Δ.
+5. **Skew**: the 25Δ skew and its Δ at every listed tenor, the 3M 10Δ wing
+   skew, the 3M skew's rank, and the 3M 25Δ put and call points (call
+   deltas 0.75 and 0.25).
+
+Changes and Levels name tenors by convention, so a tenor the surface lacks
+keeps a blank column rather than shifting the grid.
+
+**Grid.** Rows are the members in the list's order, members the board
+answered first and those it lacks at the foot, muted and blank (`not in
+surface` in the readout). The Underlying column is pinned left; the
+reference name is in the readout. Column heads group under a shared header row (`ATFM 3M`
+over `vol` and `Δ`); Levels has no groups. A column's width is its glyph's
+minimum plus the widest text, head included; `:autosize` (the shell's
+verb, also in the palette) fits the shown cells in the real mono metrics and persists the
+widths in the session, and refuses before a board lands. `j k` move rows,
+`h l` columns, `g g`/`shift+g` the ends, `v`/`shift+v` start a row
+selection, `y` yanks the cursor cell (or the cursor column over a
+selection, one row per line). `/` narrows by name and reference, keeping
+order. `s` cycles the cursor column's sort ascending → descending → member
+order, and a head press walks the shared click cycle; `:sort <column>
+[asc|desc|abs [asc|desc]]` names a column by id or one-word head, and bare
+`:sort` clears. Blanks sort last in both directions. The Underlying,
+spark and term columns refuse a sort with `<head> is not sortable`. The
+cursor row is emitted into the link group as a one-value
+`underlying_ref` path; the tile never follows a group.
+
+**Glyphs.** The cells paint through the shared
+[cell glyphs](#cell-glyphs): a Δ is a delta chip scaled to the column's
+largest magnitude, a rank a percent slider, IV−RV and the varswap spread
+zero bars, Levels and Term levels a heat tint on one range across the
+grid, the spark column a 30-day sparkline with an end dot. Every host
+passes the sign of the displayed text, so a change shown as `0.0` takes no
+fill, and the rank at display precision, so a rank shown as `90` takes the
+slider's warning tone. Sign colors are the theme's bullish and bearish
+chart tokens. A Δ from a board asked under another lookback than the one
+shown paints muted (after `d`, until the new board lands); a rank over
+fewer than 60 observations paints muted with its count in the readout; a
+row older than `stale_after` paints muted in the stale tone. `p` drops
+every tint, slider and bar and keeps the numbers, without a requery. A
+theme change rebuilds the paints.
+
+**Band.** `enter` opens the inspection band for the cursor row, docked
+between the grid and the footer; `enter` again or `escape` closes it. It
+follows the cursor and shows the row's surface at fixed deltas
+(`10p 25p atm 25c 10c` as call deltas `0.90 0.75 0.50 0.25 0.10`, every
+listed tenor, the 25Δ skew and its Δ, one heat range over the table), three
+one-year sparklines (ATFM 3M, 25Δ skew 3M, realized 20D) captioned with
+their rank and range and IV−RV's rank, and context pairs (the 3M varswap
+strike, its spread to ATM, book vega, and the surface, realized and varswap
+times). Opening grows the ask; closing never requeries. A member the board
+lacks refuses with `<name> is not in the surface`. Before a board lands
+the band opens on dashes.
+
+**Vega.** With `[volwatch] vega` set (see
+[configuration](configuration.md#vol-watchlist)), book vega is one
+ordinary grouped query over the named view, scoped to the frame scope
+narrowed to the members, under the tile's key but never with the board.
+Its depth-1 rows join by `underlying_ref` into the `vega k` column
+(thousands); the depth-0 total is never read. A frame scope or as-of change
+asks vega alone. A query that is refused, or a view that fails or lacks the
+column, drops the column with a standing warning `[volwatch] vega: <reason>`
+and the board keeps painting; the next answer restores it.
+
+**Keys.** Normal mode: `1`–`5` and `tab` views, `d` the lookback
+(`1d → 1w → 1m`), `p` paint, `s` sort, `enter` the band, `t` the
+timeseries refusal (below), `y` yank, `shift+r` refresh now, `g w` the
+switcher, `.` the action menu, `v`/`shift+v` a row selection, motions and
+`escape`. A right press on a row moves the cursor there (unless inside a
+selection) and opens the action menu at the pointer; `⋯` opens it under
+the header. The menu lists every verb with its chord, the view and paint
+ticks, and a disabled row's reason. `escape` peels one layer at a time:
+the menu, the band, a selection, a `/` narrowing, then the notices.
+
+**Header and footer.** The header carries the switch control
+(`Vol · <list> ▾`), the member count, the three lookback chips (the one in
+force lit as `Δ 1d`; a press sets it), the sort chip, `<n> not in surface`
+in the warning tone, a danger chip per failed dataset, then the shared
+cluster: `…` while a board is in flight, one time per dataset (`surface`
+from the stalest present row, `realized` and `varswap` when the view reads
+them), each in the stale tone once past `stale_after`, link chips, the
+health of the three history datasets, `⋯` and ×. The footer shows the
+first notice and the cursor readout
+(`SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · 1Y pctl 91 of 251`).
+
+**Session.** The table saves the list, the view, the lookback, the sort,
+the cursor's name, whether the band is open and fitted widths. An
+unreadable key is dropped with its own notice and the rest kept. A restored
+cursor rests on its row at once (the members are blank rows before any
+board); a restored open band puts its measures into the first ask.
+
+**Failures.** A refused submission is a warning (`the data service is busy
+— shift+r retries`) and nothing retries by itself, except that a refused
+timer refresh asks again at the next interval. A surface failure keeps the
+last board, marks every present row stale and stands
+`surface: <error> — shift+r retries`; the next good board clears it. A
+failed realized or varswap dataset blanks its columns and shows its danger
+chip while the rest of the board paints. The refresh timer
+(`[volwatch] refresh`, never below 10 s) runs only while the tile is shown,
+and a timer that fires while a board is in flight asks nothing.
+
+Known limitations:
+
+- The band is a region docked under the grid, not a taller row in place:
+  gpui-component's `DataTable` lays rows out at one row height.
+- The band's book vega is the column's; a vega bucket (by expiry) needs a
+  second grouping dimension `[volwatch] vega` does not name.
+- `t` is refused with a notice naming the series
+  (`timeseries cannot open a history series yet: vol_surface [SX5E, 3M, 0.5] vol`):
+  the timeseries tile has no history-series slot.
+- The request carries only the lookback in force, so `d` requeries; the
+  changes paint muted from the last board until the new one lands.
+- Rows are prepared whole, not windowed: a list of tens of members
+  prepares in well under a millisecond. Past about 256 members the grid
+  should move to `WindowCache`.
+- A hovered row's sparkline ring is the row's resting fill, not
+  `DataTable`'s hover fill.
+- Fitted widths do not rescale with the rem until the next `:autosize`.
+- In a narrow tile the band's three blocks clip rather than wrap.
+- A same-members reorder of the list requeries.
+
+See the [crate guide](../../crates/geode-volwatch/README.md) for the
 module map.
 
 ## Demo and application composition
