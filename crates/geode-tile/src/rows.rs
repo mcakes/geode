@@ -38,12 +38,15 @@ pub trait GridRow {
     }
 }
 
+/// An order's comparator over two rows.
+pub type Compare<R> = Rc<dyn Fn(&R, &R) -> Ordering>;
+
 /// A sort the model keeps across rebuilds: a key the session saves and the
 /// chip shows, and the comparator. Two orders are equal when their keys
 /// are: the comparator is the key's meaning.
 pub struct Order<R> {
     pub key: String,
-    pub cmp: Rc<dyn Fn(&R, &R) -> Ordering>,
+    pub cmp: Compare<R>,
 }
 
 impl<R> Clone for Order<R> {

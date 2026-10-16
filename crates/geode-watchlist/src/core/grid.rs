@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use geode_core::watchlist::members::Origin;
 
-pub use geode_tile::rows::{GridRow, Order, RowModel};
+pub use geode_tile::rows::{Compare, GridRow, Order, RowModel};
 
 use crate::core::rows::{WatchRow, origin_text};
 pub use crate::core::session::SortCol;
@@ -111,7 +111,7 @@ fn origin_hash(origin: &Origin, pending: bool) -> u64 {
 /// `<column> <asc|desc>`; the session keeps the `(SortCol, bool)` itself.
 pub fn order((col, desc): (SortCol, bool)) -> Order<WatchRow> {
     let key = format!("{} {}", col.name(), if desc { "desc" } else { "asc" });
-    let cmp: Rc<dyn Fn(&WatchRow, &WatchRow) -> Ordering> = match col {
+    let cmp: Compare<WatchRow> = match col {
         SortCol::Name => Rc::new(move |a: &WatchRow, b: &WatchRow| {
             absent_last(Some(&a.name), Some(&b.name), desc)
         }),
