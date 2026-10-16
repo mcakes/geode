@@ -3298,5 +3298,42 @@ The statement is under half of the read. The row loop is 36%: 52,600 rows,
 nearly all of them daily (263 days per tuple), and per row it allocates the
 key's strings and, for every input asking that tuple, clones the input
 into a `HashMap` key. A latest-version table on append could save part of
-the 22.4 ms of statement time, not the loop's 18.6 ms. Both are recorded as
-open levers (`open-items.md`).
+the 22.4 ms of statement time, not the loop's 18.6 ms.
+
+### Lever C: rows name their asked tuple by index
+
+The VALUES list closes each asked tuple with its index in the asked list;
+`live` groups by `(asked_ix, ts)`; every projection emits
+`(kind, idx, asked_ix, epoch_us(ts), values…)` with no key columns (the
+window partitions are `asked_ix`, and `asked_ix, day` for daily), ordered
+by `kind, idx, asked_ix`. `read_role` builds each tuple's feed (value
+column, observation slot) before the row loop, so a row costs an index
+lookup: no key text read back, no hash, no clone. Baseline is `a01513f2`
+(the head's SQL); interleaved as above.
+
+| Interleaved | Load | `changes_view_25` | `rich_cheap_view_25` |
+|---|---|---|---|
+| Baseline | 6.9 → 14.3 | 18.9 ms | 52.8 ms |
+| Lever C | 14.3 → 19.4 | 15.7 ms | 37.8 ms (interval 35.7–39.5) |
+| Baseline | 19.4 → 39.2 | 58.5 ms | 153.4 ms (other sessions' load; discarded) |
+| Lever C | 39.2 → 43.2 | 42.9 ms | 90.9 ms (the same; discarded) |
+| Baseline | 40.0 → 28.4 | 19.2 ms | 55.2 ms |
+| Lever C | 28.4 → 22.7 | 16.8 ms | 34.1 ms |
+| Baseline | 22.7 → 19.8 | 18.1 ms | 52.5 ms |
+| Lever C | 19.8 → 18.6 | 15.8 ms | 35.0 ms |
+
+**Lever C lands and stays:** Rich/cheap 52.5 → 35.0 ms, a third off and
+15 ms inside the budget; Changes 18.1 → 15.8 ms. The same instrumented
+split (load about 17):
+
+| Part | Surface | Realized | Varswap | Total |
+|---|---|---|---|---|
+| `prepare` | 1.6 ms | 0.7 ms | 0.5 ms | 2.8 ms |
+| `query` (statement executes) | 9.9 ms | 4.7 ms | 4.3 ms | 18.8 ms |
+| row loop in `read_role` | 2.6 ms | 1.0 ms | 0.6 ms | 4.2 ms |
+| `reduce` | | | | 8.4 ms |
+
+The row loop fell from 18.6 to 4.2 ms, and the statement from 22.4 to
+18.8 ms (it no longer returns key columns). The statement is now over half
+of the read; a latest-version table maintained on append (a DDL change) is
+what could still cut it (`open-items.md`).
