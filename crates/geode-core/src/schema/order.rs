@@ -1,6 +1,7 @@
 //! Text ordering for a dimension column: lexical, or by tenor length so
-//! `18M` lands between `1Y` and `2Y`. Used by history datasets (and later
-//! by measure axes) to sort key values the way a desk reads them.
+//! `18M` lands between `1Y` and `2Y`. Used by history datasets to sort key
+//! values the way a desk reads them; measures-family axes order by
+//! `axis::AxisOrder`, and both parse tenors with `axis::tenor_days`.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TextOrder {
@@ -26,24 +27,9 @@ impl TextOrder {
     }
 }
 
-/// `<n>D|W|M|Y` in any case -> days (1, 7, 30, 365 multiples). Anything
-/// else, an empty label included, is `None` and sorts after the tenors.
-pub fn tenor_days(label: &str) -> Option<u32> {
-    let label = label.trim();
-    let (digits, unit) = label.split_at(label.char_indices().next_back()?.0);
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let n: u32 = digits.parse().ok()?;
-    let per = match unit.to_ascii_uppercase().as_str() {
-        "D" => 1,
-        "W" => 7,
-        "M" => 30,
-        "Y" => 365,
-        _ => return None,
-    };
-    n.checked_mul(per)
-}
+/// The one tenor parser, shared with measures-family axes: `<n>D|W|M|Y`
+/// in any case -> days; anything else is `None` and sorts last.
+pub use crate::schema::axis::tenor_days;
 
 /// Sorts in place per `order`. Tenor: parsable tenors first by length,
 /// ties and the rest lexically.
@@ -62,23 +48,6 @@ pub fn sort_text(values: &mut [String], order: TextOrder) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tenor_days_reads_day_week_month_and_year_labels() {
-        assert_eq!(tenor_days("1D"), Some(1));
-        assert_eq!(tenor_days("2W"), Some(14));
-        assert_eq!(tenor_days("3M"), Some(90));
-        assert_eq!(tenor_days("18M"), Some(540));
-        assert_eq!(tenor_days("2Y"), Some(730));
-        assert_eq!(tenor_days("ON"), None);
-        assert_eq!(tenor_days(""), None);
-        assert_eq!(tenor_days("M3"), None);
-        assert_eq!(
-            tenor_days("4294967295Y"),
-            None,
-            "overflow is None, not a wrap"
-        );
-    }
 
     #[test]
     fn tenor_order_ignores_case_and_puts_unparsable_values_last() {

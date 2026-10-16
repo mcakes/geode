@@ -41525,6 +41525,16 @@ run_mutation "order: a dimension's order is read as lexical" \
   geode-core \
   order_is_read_on_a_dimension_and_refused_elsewhere
 
+# A measures-family axis reads `order` as its `AxisOrder`; the dimension
+# `TextOrder` reader must not refuse the same key on it. Mutated, a tenor
+# axis drops its column and the dataset with it.
+run_mutation "order: a measures axis with order is refused by the dimension reader" \
+  crates/geode-core/src/schema/mod.rs \
+  '        Some(_) if matches!(role, ColumnRole::Axis { kind: Some(_), .. }) => TextOrder::Lexical,' \
+  '        Some(_) if false => TextOrder::Lexical,' \
+  geode-core \
+  a_measures_dataset_keeps_its_axes_with_kind_and_order
+
 # A parsable tenor sorts ahead of an unparsable label. Mutated, `ON` and
 # `spot` interleave with the tenors.
 run_mutation "order: an unparsable label sorts among the tenors" \
@@ -41537,7 +41547,7 @@ run_mutation "order: an unparsable label sorts among the tenors" \
 # An overflowing tenor is unparsable, not a wrapped small number that
 # sorts as a short tenor.
 run_mutation "order: an overflowing tenor wraps" \
-  crates/geode-core/src/schema/order.rs \
+  crates/geode-core/src/schema/axis.rs \
   '    n.checked_mul(per)' \
   '    Some(n.wrapping_mul(per))' \
   geode-core \

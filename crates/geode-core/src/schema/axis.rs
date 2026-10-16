@@ -101,6 +101,11 @@ mod tests {
         assert_eq!(tenor_days("ON"), None);
         assert_eq!(tenor_days(""), None);
         assert_eq!(tenor_days("M3"), None);
+        assert_eq!(
+            tenor_days("4294967295Y"),
+            None,
+            "overflow is None, not a wrap"
+        );
     }
 
     #[test]

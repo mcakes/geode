@@ -477,6 +477,11 @@ dataset's configuration rather than the build. Staging tables are exempt:
 each is created or replaced before every use, so a leftover from another
 build is never read. A mutation entry checks that a mismatch refuses.
 
+The current format is 3: axis columns after the grain key on measures
+datasets with axes, and the history family's payload and coverage tables.
+Each change alone was format 2 on its own line of work, so the combined
+layout takes 3 and neither single-change store is read as it.
+
 ### Store ownership limits
 
 - Only a collector is protected by the stamp. `StoreRole::Direct` and `App`
@@ -533,6 +538,12 @@ build is never read. A mutation entry checks that a mismatch refuses.
 - A logout's SIGTERM, like a `launchctl bootout`, ends the collector with
   no release drain; recovery on subscribe restores each key's latest
   document in the next owner.
+- An existing demo store at format 2 (from either the axes or the history
+  change alone) is refused by a collector (`FormatMismatch`). The app never
+  checks the stamp: it restamps the store to 3 after its DDL, and only the
+  payload drift check stands between it and the older layout. Delete
+  `$TMPDIR/geode-demo/<rows>-42/` by hand, after uninstalling a demo
+  collector for those rows (`geode-collector uninstall --demo <rows>`).
 - Boot out or uninstall a demo collector before deleting
   `$TMPDIR/geode-demo/<rows>-42/`: a running one holds the store, and
   launchd restarts it into a freshly emitted demo directory.
