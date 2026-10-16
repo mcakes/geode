@@ -1444,7 +1444,8 @@ mod tests {
 
     /// SX5E answered for the Changes ask over `listed` tenors, band open
     /// or not (the board omits 2Y either way):
-    /// every vol point at 10 + its tenor index, skew 3M 5.5 moved +0.4,
+    /// every vol point at 10 + its tenor index + 10 × its delta (ATFM 3M
+    /// at 16.0), skew 3M 5.5 moved +0.4,
     /// ATFM 3M ranked 0.91 of 251, IV−RV 3.4 ranked 0.77, varswap 18.1,
     /// vs spread 2.2; sparks rise from 15.0 to 17.9.
     fn band_row(listed: &[String], band: bool) -> (Ask, Vec<Row>) {
@@ -1461,9 +1462,9 @@ mod tests {
                 Measure::Point { tenor, delta } if *delta == 0.5 && tenor == "3M" => {
                     Some((Some(16.0), None, Some((0.91, 251))))
                 }
-                Measure::Point { tenor, .. } => {
+                Measure::Point { tenor, delta } => {
                     let at = listed.iter().position(|t| t == tenor).unwrap();
-                    Some((Some(10.0 + at as f64), None, None))
+                    Some((Some(10.0 + at as f64 + 10.0 * delta), None, None))
                 }
                 Measure::Skew { tenor } if tenor == "3M" => {
                     Some((Some(5.5), Some(change(0.4, 5.1)), Some((0.64, 251))))
@@ -1496,7 +1497,11 @@ mod tests {
         );
         let three_m = &b.surface[2].1;
         assert_eq!(three_m[2].text.as_ref(), "16.0", "atm is ATFM");
-        assert_eq!(three_m[0].text.as_ref(), "12.0", "10p reads its point");
+        // 3M is tenor 2: each column reads its own call delta's point.
+        assert_eq!(three_m[0].text.as_ref(), "21.0", "10p reads 0.90");
+        assert_eq!(three_m[1].text.as_ref(), "19.5", "25p reads 0.75");
+        assert_eq!(three_m[3].text.as_ref(), "14.5", "25c reads 0.25");
+        assert_eq!(three_m[4].text.as_ref(), "13.0", "10c reads 0.10");
         assert_eq!(three_m[5].text.as_ref(), "5.5", "25Δ skew");
         assert_eq!(three_m[6].text.as_ref(), "+0.4", "its Δ over the lookback");
         assert_eq!(three_m[6].id.as_ref(), "7-band-3M-delta");
@@ -1508,8 +1513,8 @@ mod tests {
                 .all(|c| c.text.as_ref() == widths::DASH && c.muted),
             "a tenor the board lacks is dashes"
         );
-        // One heat range over the whole table: 1M's 10.0 is its floor.
-        assert!(matches!(b.surface[0].1[0].glyph, Glyph::Heat(Some(a)) if a == 0.0));
+        // One heat range over the whole table: 1M 10c's 11.0 is its floor.
+        assert!(matches!(b.surface[0].1[4].glyph, Glyph::Heat(Some(a)) if a == 0.0));
         assert!(b.sparks.iter().all(Option::is_some));
         assert_eq!(
             b.captions[0].as_ref(),
@@ -1532,6 +1537,11 @@ mod tests {
             ctx[3],
             ("Source", "surface 15:00 · realized 15:00 · varswap 15:00")
         );
+        // With a book vega the pair reads the column's thousands and a `k`.
+        let mut with_vega = rows[0].clone();
+        with_vega.vega = Some(-312_000.0);
+        let b = prepare_band(&i, &with_vega, &listed, &clock_utc());
+        assert_eq!(b.context[2].1.as_ref(), "-312k");
     }
 
     #[test]
