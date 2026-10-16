@@ -3740,7 +3740,9 @@ order, and a head press walks the shared click cycle; `:sort <column>
 `:sort` clears. Blanks sort last in both directions. The Underlying,
 spark and term columns refuse a sort with `<head> is not sortable`. The
 cursor row is emitted into the link group as a one-value
-`underlying_ref` path; the tile never follows a group.
+`underlying_ref` path; the tile never follows a group. The header's sort
+chip names the column and the direction (`vol 3M ↑`, `|Δ 3M| ↓`), and
+`:sort` refuses a column `s` refuses with the same text.
 
 **Glyphs.** The cells paint through the shared
 [cell glyphs](#cell-glyphs): a Δ is a delta chip scaled to the column's
@@ -3799,6 +3801,10 @@ them), each in the stale tone once past `stale_after`, link chips, the
 health of the three history datasets, `⋯` and ×. The footer shows the
 first notice and the cursor readout
 (`SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · 1Y pctl 91 of 251`).
+A cell with a level but no change reads `Δ1d —` followed, when the board
+carries one, by its note for the measure's dataset
+(`SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01`, or
+`no observation at or before <date>`).
 
 **Session.** The table saves the list, the view, the lookback, the sort,
 the cursor's name, whether the band is open and fitted widths. An
@@ -3814,7 +3820,17 @@ last board, marks every present row stale and stands
 failed realized or varswap dataset blanks its columns and shows its danger
 chip while the rest of the board paints. The refresh timer
 (`[volwatch] refresh`, never below 10 s) runs only while the tile is shown,
-and a timer that fires while a board is in flight asks nothing.
+and a timer that fires while a board is in flight asks nothing. A
+`[blotter] stale_after` reload re-arms the rows' stale wake-ups at the new
+threshold.
+
+The tile asks for the history datasets `vol_surface`, `realized_vol` and
+`varswap` by name. Each must be declared as a history dataset of the
+right shape: if any of the three is undeclared or misshaped, the data
+service refuses every board (a configuration gap, not a runtime one) and
+the tile stands `surface: <error> — shift+r retries`. Only a declared
+realized or varswap dataset that has drifted or has no source blanks its
+own columns while the rest paints.
 
 Known limitations:
 
@@ -3835,6 +3851,12 @@ Known limitations:
 - Fitted widths do not rescale with the rem until the next `:autosize`.
 - In a narrow tile the band's three blocks clip rather than wrap.
 - A same-members reorder of the list requeries.
+- A spark column cuts its tail from the board's sparkline by proportion of
+  the board's span, assuming one value a day across it. Under the band's
+  1Y ask a member with about 40 days of history draws about 4 in the
+  30-day column until the next ask narrows the span.
+- The dataset names are fixed (`vol_surface`, `realized_vol`, `varswap`);
+  no setting renames them.
 
 See the [crate guide](../../crates/geode-volwatch/README.md) for the
 module map.

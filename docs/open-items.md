@@ -837,13 +837,13 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Request: a same-members reorder of the list requeries (comparing sets
   would not); the refresh timer re-arms after a resubmit that had nothing
   to ask and wakes for nothing.
-- Vega: a standing `effective_scope` error re-enters `submit_vega` on every
-  frame notify (remember the error); a flat answer (no `row_depth`) maps
+- Vega: a standing `effective_scope` error re-enters `submit_vega` and
+  re-submits on every frame notify (remember the error); the vega column is
+  blank for a member the surface lacks even when the risk carries vega for
+  it; a flat answer (no `row_depth`) maps
   silently to dashes; the scope-error, flat-result and query-refusal
   branches have no tests.
-- Model minors: the `Spark` ask hard-codes ATFM 3M; `term_values` does not
-  drop ∞ before the shared range; `column_scale` runs for columns that
-  never use it; `selection_tint` is computed per row per frame; two
+- Model minors: `column_scale` runs for columns that never use it; `selection_tint` is computed per row per frame; two
   columns sharing a one-word head resolve `:sort` to the first silently;
   `Open timeseries` and `Yank cell` are never disabled with no row; `spell`
   is copied from the watchlist (a `geode-tile` lift candidate);
@@ -853,6 +853,18 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   reads it for an axis today); `sort_axis_text` and `sort_text` are the
   same body over two enums; the stamp test
   `the_format_counts_the_history_tables` now covers axes too.
+- Spark tails are cut by proportion of the board's span (`spark_tail`),
+  which assumes the values fill it: under the band's 1Y ask a member with
+  ~40 days of history draws ~4 in the `ATFM 3M · 30d` column until the
+  next refresh narrows the ask. Recorded as a known limit; the spark shape
+  is unchanged.
+- Every board error is labelled `surface:` in the notice, including the
+  data service's own refusals, which name no dataset.
+- A member added to the list reads `not in surface` while its first board
+  is in flight: the reconciled row has no cells yet and the old board
+  lacks it.
+- The prepare bench rose from 76.5 to 114.8 µs between Task 4 and the app
+  wiring (`docs/perf.md`); the cause is unverified and not chased.
 - Board minors: a short `spark_from_days` yields `None` silently (a
   length `debug_assert` would be tighter); duplicate `Input`s fill
   separate slots, last copy wins (undocumented); the duplicate-day refusal

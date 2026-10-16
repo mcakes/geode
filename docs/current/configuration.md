@@ -1083,7 +1083,14 @@ slice answers with that reason. Changing `model` marks restart required, as `[pr
 
 `[volwatch]` in `app.toml` configures the vol watchlist tile (see
 [Vol watchlist](features.md#vol-watchlist)). Both keys are hot: a reload that changes either (or `[blotter] stale_after`, which the tile
-shares) pushes the new settings to the factory and the open tiles.
+shares) pushes the new settings to the factory and the open tiles; a
+`stale_after` change re-arms each tile's stale wake-ups.
+
+The tile reads three history datasets by fixed name: `vol_surface`,
+`realized_vol` and `varswap`. A deployment that shows the tile declares
+all three as history datasets of the shapes the board reads; while any
+one is undeclared or misshaped, the data service refuses every board and
+the tile shows `surface: <error>`. There is no setting to rename them.
 
 - `refresh` is a duration or `"off"`; the default is `"60s"`. Below the 10s
   minimum it is raised to 10s with a warning; a value that is neither a

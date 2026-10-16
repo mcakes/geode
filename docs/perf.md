@@ -3186,8 +3186,7 @@ A 25-row column of sparklines lays out in under 5 µs, three orders of
 magnitude inside the 8 ms pure-UI target; the per-glyph cost of a one-year
 band sparkline is about a microsecond.
 
-
-## missing_by_key batched (Task 1) (2026-10-15)
+## missing_by_key batched (2026-10-15)
 
 Fixture: `crates/geode-data/benches/vol_board.rs`, as in "Vol board request
 and the history family's costs" above, plus `history/plan_between_250`:
@@ -3224,8 +3223,7 @@ The Before round trips are well under the 655 ms and 978 ms recorded on
 2026-10-11; those ran on a different head and load, so only this table's
 two columns compare.
 
-
-## Rich/cheap read levers (Task 2) (2026-10-15)
+## Board read levers (2026-10-15)
 
 Fixture: `crates/geode-data/benches/vol_board.rs`, the `board_read/` cases
 (the read alone: `read_board`, SQL projection plus `reduce`, on one
@@ -3338,12 +3336,13 @@ The row loop fell from 18.6 to 4.2 ms, and the statement from 22.4 to
 of the read; a latest-version table maintained on append (a DDL change) is
 what could still cut it (`open-items.md`).
 
-
 ## Vol watchlist tile prepare and the final board read (2026-10-16)
 
-Head `6ec3aa1b` (the vol watchlist tile wired into the app). Load averages
-(1 / 5 / 15 min, 18 cores) 17.5 / 29.6 / 36.9 at the start and 13.8 /
-27.5 / 35.9 at the end; other sessions were active. Criterion medians.
+Head `6ec3aa1b`: the vol watchlist tile as wired into the app at
+`439ea984`; the commits between add tests and mutation entries only. Load
+averages (1 / 5 / 15 min, 18 cores) 17.5 / 29.6 / 36.9 at the start and
+13.8 / 27.5 / 35.9 at the end; other sessions were active. Criterion
+medians.
 
 **Tile prepare** (`cargo bench -p geode-volwatch`, 100 samples):
 `prepare_25x24` is `core::model::prepare` for 25 members under the Changes
@@ -3358,9 +3357,10 @@ muted flag, the column scales, the heat range and the widths.
 
 It is rebuilt per board, view, lookback, paint, theme or stale change,
 never per frame: 1.4% of the 8 ms pure-UI target. The 76.5 µs recorded
-when the model first landed (load about 25) predates the per-cell ids and
-the band's lookups; nothing in the tile is near its budget, so it is not
-chased.
+when the model first landed (load about 25) rose to this figure; the cause
+is unverified and not chased (the per-cell ids and the band's lookups
+landed between, but no run isolated them). Nothing in the tile is near its
+budget; the rise is listed in `open-items.md`.
 
 **Board read** (`cargo bench -p geode-data --bench vol_board --
 --warm-up-time 2 --measurement-time 5 'board_read/'`, 20 samples), beside
