@@ -113,12 +113,13 @@ fn fmt_y(v: f64, format: YFormat) -> String {
 }
 
 /// Whether a point's range paints a bar on its own: both ends finite and
-/// apart, as `core::marks::point_marks` asks of them.
+/// apart, as `core::marks::point_bars` asks of them.
 fn has_range(lo: f64, hi: f64) -> bool {
     lo.is_finite() && hi.is_finite() && lo != hi
 }
 
-/// Whether a point has a mark, as `core::marks::point_marks` draws it: a
+/// Whether a point has a mark, as `core::marks::point_diamonds` and
+/// `point_bars` draw it: a
 /// diamond at a finite mid, with or without a bar, or a bar over a range
 /// with no mid. One finite end with no mid has nothing to run to and
 /// paints nothing.
@@ -226,6 +227,15 @@ pub(crate) enum Layer {
 /// so the keys never collide: the under-layer (a fill or bars), a points
 /// slot's diamond interiors, and the stroke.
 const PATHS_PER_SLOT: usize = 3;
+
+/// Whether `marks` diamonds of half-diagonal `r` can sit side by side
+/// across a plot `w` pixels wide without overlapping: the bound under
+/// which marks are painted hollow. Past it the interiors would merge, and
+/// a fill of that many overlapping subpaths can exceed what one path
+/// holds.
+pub(crate) fn hollow_fits(marks: usize, w: f32, r: f32) -> bool {
+    marks as f32 * 2.0 * r <= w
+}
 
 /// Element state kept across frames: the reused buffers and the chrome of
 /// the last chrome key.
@@ -584,7 +594,12 @@ impl XyElement {
     /// A points slot's diamond interiors at a zero origin: one fill path
     /// closing each diamond, painted in the plot's ground under the edges
     /// so the mark is hollow. `None` for a slot that is not a points slot,
-    /// or when no point in view has a mid.
+    /// when no point in view has a mid, or when the marks are too dense
+    /// to be hollow: more painted marks than fit side by side across the
+    /// plot's width ([`hollow_fits`]). Denser than that the interiors
+    /// would merge into a band, and their fill, overlapping subpaths,
+    /// can exceed what one path holds and vanish whole; the edges alone
+    /// paint instead, which at that density reads the same.
     fn marks_fill_shape(
         &self,
         slot: &XySlot,
@@ -596,13 +611,12 @@ impl XyElement {
             return None;
         }
         self.point_pixels(slot, plot, y, b);
+        let r = design_px(MARKER_R, self.rem_px);
+        if !hollow_fits(b.px[0].len(), plot.w, r) {
+            return None;
+        }
         let [px_x, px_mid, _, _] = &b.px;
-        diamond_outlines(
-            px_x,
-            px_mid,
-            design_px(MARKER_R, self.rem_px),
-            &mut b.outlines,
-        );
+        diamond_outlines(px_x, px_mid, r, &mut b.outlines);
         fill_points(&b.outlines)
     }
 
@@ -669,7 +683,17 @@ impl XyElement {
         let bounds = ctx.bounds;
         let left = &ctx.sides[Axis::of(pane, Side::Left).index()];
         let right = &ctx.sides[Axis::of(pane, Side::Right).index()];
-        if !paint_pane_frame(rects, ctx.x_ticks, left, right, bounds, ctx.ink, window, cx) {
+        if !paint_pane_frame(
+            rects,
+            ctx.x_ticks,
+            left,
+            right,
+            true,
+            bounds,
+            ctx.ink,
+            window,
+            cx,
+        ) {
             return;
         }
 
@@ -1652,6 +1676,10 @@ mod tests {
             "one closed diamond: the quote with a mid"
         );
         assert!(e.shape(&m.slots[0], plot, &y, &mut b).is_some());
+        // Hollow while the marks fit side by side: a 400 px plot holds
+        // 66 diamonds of half-diagonal 3 abreast, not 67.
+        assert!(hollow_fits(66, 400.0, 3.0));
+        assert!(!hollow_fits(67, 400.0, 3.0));
         assert_eq!(b.segments.len(), 4, "its four edges");
         assert!(
             e.bars_shape(&m.slots[1], plot, &y, &mut b).is_none()
@@ -1859,6 +1887,15 @@ mod tests {
             "{}",
             b.segments.len()
         );
+        // Thousands of marks across 400 px overlap many times over: too
+        // dense to be hollow, so no interior path is built (one of that
+        // many overlapping quads would fail to build and vanish whole);
+        // the edges alone paint.
+        assert!(
+            e.marks_fill_shape(&m.slots[0], plot, &y, &mut b).is_none(),
+            "too dense for hollow marks"
+        );
+        assert!(!hollow_fits(b.px[0].len(), plot.w, MARKER_R));
         assert!(e.shape(&m.slots[0], plot, &y, &mut b).is_some());
         // The first and the last point are both among those kept: their
         // diamonds' outer tips sit a marker radius past the plot's edges.

@@ -16,7 +16,7 @@ xy element's in the vol slice viewer:
 | Module | Holds |
 |---|---|
 | `core` | Window-free geometry and labels: y scales and 1-2-5 ticks, axes and panes, layout and the plot under a point, the view window, the time x scale with its ticks and crosshair, the linear x scale with its formats, ticks and zoom and pan orientation (`linear`), dash and point-mark stroke geometry and the outline under a filled line (`marks`), hit testing, decimation, and theme-derived palette values. |
-| `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid, zero rule and y axes), the x-axis painter, stroke builders, the fill builder, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
+| `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid, the zero rule when an element asks for it, and y axes), the x-axis painter, stroke builders, the fill builder, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
 | `timeseries` | `ChartModel` and `ChartSlot`, the immutable prepared input, and `ChartElement`: polylines over a session or continuous time axis, with percentile rules and density bars. |
 | `xy` | `XyModel` and `XySlot`, the immutable prepared input, and `XyElement`: lines, solid or dashed and optionally shaded down to zero, and point marks with a range bar, over a linear x axis that can run reversed. Re-exports the axis's `XFormat` and `LinearX`. |
 
@@ -185,7 +185,10 @@ need readback or a fork of gpui; none is used.
   window, axis domain, readout and crosshair are a line's.
 - A point paints a hollow diamond at its mid when the mid is finite (its
   interior in the plot's ground, its edges `MARK_WIDTH` wide in the slot's
-  color, so a curve the point sits on stops at the mark), and a vertical bar
+  color, so a curve the point sits on stops at the mark; the interiors are
+  painted only while the marks in view could sit side by side across the
+  plot's width, since denser marks merge into a band whose overlapping
+  fill can exceed what one path holds, and the edges alone paint), and a vertical bar
   over its range when the range's two ends are finite and apart. The bars
   are painted in the under-layer with the fills, `BAR_WIDTH` wide at
   `BAR_OPACITY` of the slot's color, so a spread reads as a faint tail
@@ -198,7 +201,9 @@ need readback or a fork of gpui; none is used.
 - A pane whose grid side's domain crosses zero (strictly inside, not on an
   edge: a difference, not a density) rules zero as a solid hairline in the
   label ink, over the dashed grid and under every slot, so the sign of
-  what it shows reads at a glance.
+  what it shows reads at a glance. The xy element asks the shared pane
+  frame for the rule; the timeseries element does not, so a series pane
+  is unchanged.
 - Each visible line is one cached stroke path, and a filled line a second,
   cached fill path beside it; a points slot is three (its bars, its
   diamond interiors, its edges), each at its own cache index under the

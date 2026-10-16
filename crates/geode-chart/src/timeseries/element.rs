@@ -231,7 +231,18 @@ impl ChartElement {
         let bounds = ctx.bounds;
         let left = &ctx.sides[Axis::of(pane, Side::Left).index()];
         let right = &ctx.sides[Axis::of(pane, Side::Right).index()];
-        if !paint_pane_frame(rects, ctx.x_ticks, left, right, bounds, ctx.ink, window, cx) {
+        // No zero rule: a series pane is read by level, not by sign.
+        if !paint_pane_frame(
+            rects,
+            ctx.x_ticks,
+            left,
+            right,
+            false,
+            bounds,
+            ctx.ink,
+            window,
+            cx,
+        ) {
             return;
         }
 

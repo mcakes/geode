@@ -248,10 +248,12 @@ pub(crate) fn grid_side(left: &SideAxis) -> Side {
 }
 
 /// A pane's frame, under whatever the element paints in it: the grid, the
-/// zero rule when the grid side's domain crosses zero, and the y axis of
-/// each side that has both a column and a scale. Returns whether the pane
-/// has area; with none, nothing is painted and the caller paints nothing
-/// either.
+/// zero rule when `zero_rule` is asked for and the grid side's domain
+/// crosses zero, and the y axis of each side that has both a column and a
+/// scale. Returns whether the pane has area; with none, nothing is painted
+/// and the caller paints nothing either. The zero rule is the element's
+/// choice: the xy element asks for it (a difference pane reads by sign),
+/// the timeseries element does not.
 ///
 /// The grid takes the x ticks of the shared axis and the y ticks of the
 /// side [`grid_side`] names. A left axis line sits at the right edge of
@@ -263,6 +265,7 @@ pub(crate) fn paint_pane_frame(
     x_ticks: &[Tick],
     left: &SideAxis,
     right: &SideAxis,
+    zero_rule: bool,
     bounds: Bounds<Pixels>,
     ink: Ink,
     window: &mut Window,
@@ -277,7 +280,9 @@ pub(crate) fn paint_pane_frame(
         Side::Right => right,
     };
     paint_grid(plot, x_ticks, grid, bounds, ink, window);
-    paint_zero_rule(plot, grid, bounds, ink, window);
+    if zero_rule {
+        paint_zero_rule(plot, grid, bounds, ink, window);
+    }
     if let (Some(r), Some(s)) = (rects.left_axis, left.scale) {
         paint_y_axis(r, &s, left, Side::Left, bounds, ink, window, cx);
     }
@@ -364,11 +369,14 @@ pub(crate) fn stroke_points(pts: &[Point], width: f32) -> Option<Path<Pixels>> {
     builder.build().ok()
 }
 
-/// One fill path over the outlines `core::marks::fill_outlines` leaves,
-/// each closed on itself, a new one after every break. An outline of
-/// fewer than three points encloses nothing and is skipped; `None` when
-/// none is left. The outlines come from a decimated polyline, so their
-/// points are bounded by the plot's pixel columns as a stroke's are.
+/// One fill path over outlines parted by breaks (a filled line's from
+/// `core::marks::fill_outlines`, a points slot's diamond interiors from
+/// `core::marks::diamond_outlines`), each closed on itself, a new one
+/// after every break. An outline of fewer than three points encloses
+/// nothing and is skipped; `None` when none is left. A line's outlines
+/// come from a decimated polyline, so their points are bounded by the
+/// plot's pixel columns as a stroke's are; a diamond is four points per
+/// painted mark, under the stride that bounds the marks.
 pub(crate) fn fill_points(outlines: &[Point]) -> Option<Path<Pixels>> {
     let mut builder = PathBuilder::fill();
     let mut any = false;

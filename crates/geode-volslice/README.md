@@ -164,7 +164,9 @@ one ticked and no key lane (`x` cycles); a pick sets that coordinate as
 `:x <name>` does, and the same coordinate picked again changes nothing.
 The two menus hold the keys the same way (`mode == menu`, `popup ==
 actions`), so one set of bindings steps, picks and closes either; a
-closer tells them apart by `Popup::kind`. Each action-menu row names the key that reaches its action in normal
+closer tells them apart by `Popup::kind`. `.` and `⋯` on the coordinate
+menu swap it for the action menu, as they do on the diff chooser;
+`escape` and a press outside close it. Each action-menu row names the key that reaches its action in normal
 mode; while the menu is up those keys are inert (the menu holds the keys
 in `menu` mode), so a row is picked from the menu or its key is pressed
 once the menu is closed. The shared `j`/`k` or arrows step its enabled

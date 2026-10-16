@@ -779,6 +779,68 @@ fn the_header_triggers_open_the_coordinate_menu_and_the_picker(cx: &mut gpui::Te
     assert_eq!(h.mode(&vcx), "normal");
 }
 
+/// The coordinate menu closes and swaps by the action menu's routes: `.`
+/// and the `⋯` button swap it for the action menu (as from the diff
+/// chooser), `escape` closes it, and so does a press outside it.
+#[gpui::test]
+fn the_coordinate_menu_swaps_and_closes_by_the_action_menus_routes(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    h.focus(&mut vcx);
+    let trigger = format!("volslice-coordinate-{TILE}");
+    let menu_rows = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile
+            .read_with(vcx, |t, _| t.menu_open().map(|(rows, _)| rows))
+    };
+    // `.`: the coordinate menu becomes the action menu.
+    click(&mut vcx, &trigger, Modifiers::default());
+    h.draw(&mut vcx);
+    assert_eq!(
+        menu_rows(&h, &vcx).map(|r| r[0].clone()),
+        Some("coordinate-strike".to_string())
+    );
+    vcx.simulate_keystrokes(".");
+    h.draw(&mut vcx);
+    assert_eq!(
+        menu_rows(&h, &vcx).map(|r| r[0].clone()),
+        Some("volslice::underlying".to_string()),
+        "`.` swaps in the action menu"
+    );
+    vcx.simulate_keystrokes(".");
+    assert_eq!(h.mode(&vcx), "normal", "`.` on the action menu closes it");
+    // `escape` closes the coordinate menu.
+    click(&mut vcx, &trigger, Modifiers::default());
+    h.draw(&mut vcx);
+    assert_eq!(h.mode(&vcx), "menu");
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.mode(&vcx), "normal");
+    // The `⋯` button swaps too.
+    click(&mut vcx, &trigger, Modifiers::default());
+    h.draw(&mut vcx);
+    click(
+        &mut vcx,
+        &format!("volslice-menu-button-{TILE}"),
+        Modifiers::default(),
+    );
+    h.draw(&mut vcx);
+    assert_eq!(
+        menu_rows(&h, &vcx).map(|r| r[0].clone()),
+        Some("volslice::underlying".to_string()),
+        "`⋯` swaps in the action menu"
+    );
+    vcx.simulate_keystrokes("escape");
+    // A press outside the coordinate menu closes it: on the header's
+    // badge, which is no control of the tile's.
+    click(&mut vcx, &trigger, Modifiers::default());
+    h.draw(&mut vcx);
+    assert_eq!(h.mode(&vcx), "menu");
+    let header = bounds(&mut vcx, &format!("volslice-header-{TILE}"));
+    let at = point(header.origin.x + px(12.), header.origin.y + px(6.));
+    press(&mut vcx, at, Modifiers::default());
+    release(&mut vcx, at);
+    vcx.run_until_parked();
+    assert_eq!(h.mode(&vcx), "normal", "an outside press closes it");
+}
+
 /// The density chip shows while densities are on and its click turns
 /// them off; off, there is no chip.
 #[gpui::test]

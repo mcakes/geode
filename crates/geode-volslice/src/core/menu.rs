@@ -166,7 +166,22 @@ mod tests {
             find(&rows, "delta").pick(),
             &Pick::Coordinate(Coordinate::Delta)
         );
-        let menu = geode_tile::menu::Menu::new(rows, &[]);
+        // With `x` bound to the cycling action, a row that carried its
+        // chord would show it; none does.
+        let x = geode_shell::keymap::Binding {
+            keystrokes: geode_shell::keymap::parse_binding(
+                "x",
+                geode_shell::keymap::Modifiers::NONE,
+            )
+            .unwrap(),
+            predicate: None,
+            action: ActionId("volslice::coordinate".into()),
+            layer: geode_core::config::Layer::Builtin,
+            index: 0,
+            context_source: None,
+            key_source: "x".into(),
+        };
+        let menu = geode_tile::menu::Menu::new(rows, &[x]);
         assert!(
             menu.rows()
                 .iter()

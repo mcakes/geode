@@ -166,6 +166,8 @@ pub struct VolsliceTile {
 #[derive(Clone, Debug, PartialEq)]
 struct HeaderKey {
     underlying: Option<String>,
+    /// The group followed: the empty state names it and offers no picker.
+    following: Option<Group>,
     coordinate: geode_core::vol::Coordinate,
     kinds: Vec<Kind>,
     mark: Option<DraftMark>,
@@ -352,8 +354,10 @@ impl VolsliceTile {
     /// closed it costs nothing.
     pub(crate) fn refresh_chrome(&mut self, cx: &App) {
         let underlying = self.painted_underlying(cx);
+        let following = self.frame.read(cx).following();
         let header_stale = self.chrome.header_key.as_ref().is_none_or(|k| {
             k.underlying.as_deref() != underlying
+                || k.following != following
                 || k.coordinate != self.state.coordinate
                 || !k
                     .kinds
@@ -369,6 +373,7 @@ impl VolsliceTile {
         if header_stale {
             let key = HeaderKey {
                 underlying: underlying.map(str::to_string),
+                following,
                 coordinate: self.state.coordinate,
                 kinds: self.loaded.kinds(),
                 mark: self.loaded.draft.as_ref().map(|(_, m)| *m),
@@ -379,6 +384,7 @@ impl VolsliceTile {
             };
             self.chrome.header = Some(HeaderModel::prepare(
                 key.underlying.as_deref(),
+                following,
                 &self.state,
                 &self.loaded,
             ));
@@ -1062,8 +1068,11 @@ impl Render for VolsliceTile {
                 ))
                 .into_any_element()
         } else {
-            header::render_empty(self.frame.read(cx).following(), theme, &tile, id)
-                .into_any_element()
+            match self.chrome.header.as_ref() {
+                Some(h) => header::render_empty(h, theme, &tile, id).into_any_element(),
+                // Never before the first chrome build; nothing to paint if so.
+                None => div().flex_1().into_any_element(),
+            }
         };
         v_flex()
             .size_full()

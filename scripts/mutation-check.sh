@@ -15242,9 +15242,13 @@ run_mutation "mdmenu: a greyed row is a notice, not a dispatch" \
 # click counter detects it.
 run_mutation "mdmenu: the ⋯ click does not stop propagation" \
   crates/geode-tile/src/header.rs \
-  '            on_press(window, cx);' \
+  '            on_press(window, cx);
+        })
+        .tooltip(tips::tip_with(' \
   '            cx.stop_propagation();
-            on_press(window, cx);' \
+            on_press(window, cx);
+        })
+        .tooltip(tips::tip_with(' \
   geode-marketdata a_menu_button_click_still_reaches_the_tiles_own_listeners
 
 # Find closes the popup before handling any variant. This shell-owned action
@@ -21898,6 +21902,15 @@ run_mutation "chart: diamond interiors are parted by breaks" \
         out.extend_from_slice(&diamond(x, m, r));' \
   '        out.extend_from_slice(&diamond(x, m, r));' \
   geode-chart each_point_gets_a_bar_and_a_diamond_on_separate_paths
+
+# Marks are hollow only while they fit side by side: past that bound a
+# fill of overlapping interiors can exceed what one path holds and vanish
+# whole, so the interiors are skipped rather than attempted.
+run_mutation "chart: interiors are skipped past the overlap bound" \
+  crates/geode-chart/src/xy/element.rs \
+  '    marks as f32 * 2.0 * r <= w' \
+  '    marks as f32 * 2.0 * r <= w || true' \
+  geode-chart a_points_slot_past_the_stroke_cap_is_thinned_not_dropped
 
 # Min-max decimation preserves peaks between pixel columns. Dropping the
 # maximum can flatten peaks while preserving the point count.
@@ -36121,7 +36134,7 @@ run_mutation "volslice: a waiting pair notice is status, not danger" \
 
 # A footer hint prefers its shipped key while that key still reaches the
 # verb, so a j/k pair never reads j / up because one arrow was shadowed.
-run_mutation "volslice: the footer hint prefers the shipped key" \
+run_mutation "tips: a footer hint prefers the shipped key" \
   crates/geode-shell/src/tips.rs \
   '        Some(b) => Some(b.keystrokes.clone()),' \
   '        Some(_) => effective_binding(bindings, &id).map(|b| b.keystrokes.clone()),' \

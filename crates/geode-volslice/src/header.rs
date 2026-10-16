@@ -86,6 +86,12 @@ pub(crate) struct HeaderModel {
     /// Densities are shown: a set chip names them, and its click turns
     /// them off, so the right axis they add has a name and a pointer route.
     pub density: bool,
+    /// The empty state's line (`no underlying`, or `no underlying in A`
+    /// for a follower), prepared here so the body formats nothing.
+    pub empty: SharedString,
+    /// The empty state offers the underlying picker: the tile reads its
+    /// own underlying. A follower's comes from its group.
+    pub offers_picker: bool,
     /// `diff: <minuend> \u{2212} <subtrahend>`, one or two shown pairs in
     /// their order and parted by commas; `diff \u{00b7} N pairs` past two,
     /// so the chip stays short; `diff` with none shown.
@@ -182,7 +188,12 @@ pub(crate) fn draft_label(mark: DraftMark) -> String {
 }
 
 impl HeaderModel {
-    pub(crate) fn prepare(underlying: Option<&str>, state: &State, loaded: &Loaded) -> Self {
+    pub(crate) fn prepare(
+        underlying: Option<&str>,
+        following: Option<Group>,
+        state: &State,
+        loaded: &Loaded,
+    ) -> Self {
         let chips = loaded
             .kinds()
             .into_iter()
@@ -213,6 +224,8 @@ impl HeaderModel {
             coordinate: SharedString::new_static(state.coordinate.name()),
             chips,
             density: state.density,
+            empty: no_underlying(following).into(),
+            offers_picker: following.is_none(),
             diff,
             diff_set,
         }
@@ -369,6 +382,7 @@ pub(crate) fn render_header(
     // it. The underlying's press takes `u`'s own path, so following
     // refuses it the same way; the coordinate's opens a menu of the four,
     // where `x` cycles.
+    let underlying_open = popups.underlying_open;
     left = left
         .child(
             trigger(
@@ -377,7 +391,7 @@ pub(crate) fn render_header(
                 "volslice-underlying-trigger",
                 move || format!("volslice-underlying-{tile_id}"),
                 h.underlying.clone(),
-                popups.underlying_open,
+                underlying_open,
                 (
                     "tip-volslice-underlying",
                     "Underlying",
@@ -391,7 +405,10 @@ pub(crate) fn render_header(
                 },
                 popups.under_underlying,
             )
-            .text_color(theme.foreground),
+            // The underlying is the tile's identity: foreground at rest,
+            // where the other triggers are muted; open, the trigger's own
+            // open paint stands.
+            .when(!underlying_open, |d| d.text_color(theme.foreground)),
         )
         .child(trigger(
             theme,
@@ -496,7 +513,6 @@ pub(crate) fn render_header(
             .child("density"),
         );
     }
-    let diff_paint = set_paint;
     // The fixed differences axis: a set chip whose click frees it, as the
     // action menu's `Fix diff y-axis` row and `:ylim off` do.
     if let Some(ylim) = &h.ylim {
@@ -505,13 +521,13 @@ pub(crate) fn render_header(
             chip_control(
                 ElementId::Name(SharedString::new_static("volslice-ylim-chip")),
                 theme,
-                control::for_chip(theme, &diff_paint, theme.background),
+                control::for_chip(theme, &set_paint, theme.background),
                 tile,
                 FIX_DIFF_Y,
             )
             .debug_selector(move || format!("volslice-ylim-chip-{tile_id}-{label}"))
-            .text_color(diff_paint.text)
-            .when_some(diff_paint.fill, |d, fill| d.bg(fill))
+            .text_color(set_paint.text)
+            .when_some(set_paint.fill, |d, fill| d.bg(fill))
             .tooltip(tips::tip(
                 "tip-volslice-ylim",
                 "Free the difference y-axis",
@@ -549,9 +565,11 @@ pub(crate) fn render_header(
 /// The empty state in the tile's body: what is missing, and, for a tile
 /// that reads its own underlying, the one action that fills it, a quiet
 /// button on `u`'s own path. A follower names the group the underlying
-/// comes from and offers no button: the group's emitter sets it.
+/// comes from and offers no button: the group's emitter sets it. The
+/// line is the header model's, prepared when following changes; paint
+/// clones it.
 pub(crate) fn render_empty(
-    following: Option<Group>,
+    h: &HeaderModel,
     theme: &Theme,
     tile: &Entity<VolsliceTile>,
     tile_id: u64,
@@ -566,9 +584,9 @@ pub(crate) fn render_empty(
         .child(
             div()
                 .debug_selector(move || format!("volslice-empty-{tile_id}"))
-                .child(SharedString::from(no_underlying(following))),
+                .child(h.empty.clone()),
         )
-        .when(following.is_none(), |el| {
+        .when(h.offers_picker, |el| {
             let tile = tile.clone();
             el.child(
                 div()
@@ -673,7 +691,7 @@ mod tests {
             Pair::new(Kind::Draft, Kind::Cvi).unwrap(),
             Pair::new(Kind::Cvi, Kind::Chain).unwrap(),
         ];
-        let h = HeaderModel::prepare(Some("SPX.Z"), &state, &loaded);
+        let h = HeaderModel::prepare(Some("SPX.Z"), None, &state, &loaded);
         assert_eq!(h.underlying.as_ref(), "SPX.Z");
         assert_eq!(h.coordinate.as_ref(), "moneyness");
         let labels: Vec<_> = h.chips.iter().map(|c| c.label.to_string()).collect();
@@ -682,7 +700,7 @@ mod tests {
         assert!(h.chips[2].hidden && !h.chips[0].hidden);
         assert!(!h.density);
         state.density = true;
-        assert!(HeaderModel::prepare(Some("SPX.Z"), &state, &loaded).density);
+        assert!(HeaderModel::prepare(Some("SPX.Z"), None, &state, &loaded).density);
         state.density = false;
         assert_eq!(
             h.diff.as_ref(),
@@ -692,7 +710,7 @@ mod tests {
         state
             .diffs
             .push(Pair::new(Kind::Draft, Kind::Chain).unwrap());
-        let h3 = HeaderModel::prepare(Some("SPX.Z"), &state, &fixture());
+        let h3 = HeaderModel::prepare(Some("SPX.Z"), None, &state, &fixture());
         assert_eq!(
             (h3.diff.as_ref(), h3.diff_set),
             ("diff \u{00b7} 3 pairs", true),
@@ -700,16 +718,21 @@ mod tests {
         );
         assert_eq!(h3.ylim, None, "autoscaled: no chip");
         state.diff_ylim = Some((-0.02, 0.02));
-        let h = HeaderModel::prepare(Some("SPX.Z"), &state, &fixture());
+        let h = HeaderModel::prepare(Some("SPX.Z"), None, &state, &fixture());
         assert_eq!(
             h.ylim.as_ref().map(|s| s.as_ref()),
             Some("y \u{2212}2%\u{2026}2%")
         );
         loaded.draft = None;
-        let h = HeaderModel::prepare(None, &State::default(), &loaded);
+        let h = HeaderModel::prepare(None, Some(Group::B), &State::default(), &loaded);
         assert_eq!(h.underlying.as_ref(), NO_UNDERLYING);
         assert_eq!(h.chips.len(), 2, "only loaded kinds");
         assert_eq!((h.diff.as_ref(), h.diff_set), ("diff", false));
+        assert_eq!(h.empty.as_ref(), "no underlying in B");
+        assert!(!h.offers_picker, "a follower's underlying is its group's");
+        let own = HeaderModel::prepare(None, None, &State::default(), &loaded);
+        assert_eq!(own.empty.as_ref(), NO_UNDERLYING);
+        assert!(own.offers_picker);
     }
 
     /// The chip reads at the step its range needs, with the labels' minus
