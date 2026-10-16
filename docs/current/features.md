@@ -3692,8 +3692,9 @@ refresh timer and a membership change always ask again. Only the latest
 admitted tag's board lands: a board for a superseded ask (`d` pressed
 twice) is dropped, never painted over the newer ask's lookback. The tag
 advances only when the service admits the request, so a refused ask does
-not orphan the one already out. Before the first board, the tile asks the
-history key listing for the surface's tenor column once per list; Term and
+not orphan the one already out. On opening a list the tile asks the
+history key listing for the surface's tenor column, once per list, beside
+the first board (which does not wait for it); Term and
 Skew lay out the tenors it lists (ordered by `tenor_days`, unparsable
 labels last), and a tenor the last ask lacked asks again. A source that
 cannot enumerate leaves the conventional tenors `1M 2M 3M 6M 1Y 18M 2Y 3Y`.
@@ -3724,11 +3725,12 @@ keeps a blank column rather than shifting the grid.
 **Grid.** Rows are the members in the list's order, members the board
 answered first and those it lacks at the foot, muted and blank (`not in
 surface` in the readout). The Underlying column is pinned left; the
-reference name is in the readout. Column heads group under a shared header row (`ATFM 3M`
-over `vol` and `Δ`); Levels has no groups. A column's width is its glyph's
-minimum plus the widest text, head included; `:autosize` (the shell's
-verb, also in the palette) fits the shown cells in the real mono metrics and persists the
-widths in the session, and refuses before a board lands. `j k` move rows,
+reference name is in the readout. Column heads group under a shared header
+row (`ATFM 3M` over `vol` and `Δ`); Levels has no groups. A column's width
+is its glyph's minimum plus the widest text, head included; `:autosize`
+(the shell's verb, also in the palette) fits the shown cells in the real
+mono metrics and persists the widths in the session, and refuses before a
+board lands. `j k` move rows,
 `h l` columns, `g g`/`shift+g` the ends, `v`/`shift+v` start a row
 selection, `y` yanks the cursor cell (or the cursor column over a
 selection, one row per line). `/` narrows by name and reference, keeping
