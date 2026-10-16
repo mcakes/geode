@@ -37057,11 +37057,14 @@ run_mutation "volslice menu: a chart right press opens only on a focused tile" \
   geode-volslice the_menu_opens_from_dot_the_button_and_a_chart_right_press
 
 # `.` and `escape` close the action menu: its own bindings, since the
-# normal layer's keys do not reach a `menu`-mode tile.
+# normal layer's keys do not reach a `menu`-mode tile (`.` is the menu's
+# own toggle there, so it also swaps the coordinate menu for it).
 run_mutation "volslice menu: dot closes the action menu" \
   crates/geode-volslice/src/content.rs \
-  '"." = "volslice::cancel"' \
-  '# dot unbound' \
+  '"." = "volslice::menu"
+"#;' \
+  '# dot unbound
+"#;' \
   geode-volslice the_menu_opens_from_dot_the_button_and_a_chart_right_press
 
 run_mutation "volslice menu: escape closes the action menu" \
