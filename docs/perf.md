@@ -3186,3 +3186,40 @@ A 25-row column of sparklines lays out in under 5 µs, three orders of
 magnitude inside the 8 ms pure-UI target; the per-glyph cost of a one-year
 band sparkline is about a microsecond.
 
+
+## missing_by_key batched (Task 1) (2026-10-15)
+
+Fixture: `crates/geode-data/benches/vol_board.rs`, as in "Vol board request
+and the history family's costs" above, plus `history/plan_between_250`:
+`history_dispatch::plan_calls` alone for the exact 30-day `Between` over the
+250 Changes tuples, on the bench's own writer over the covered store (no
+fetch, no append, no read). That is the part of a window `Between` the
+service thread runs before it hands calls to the history worker.
+
+Before is the head with `plan_calls` made public and the case added, the old
+per-tuple `missing_by_key` (one `covered_spans` statement per tuple). After
+is `missing_by_key` reading every tuple's coverage in one statement: a join
+on a `VALUES` list of the asked tuples, rows then picked per tuple in Rust.
+The two runs were back to back, each `--warm-up-time 2 --measurement-time 5`,
+20 samples, Criterion medians. Load averages (1 / 5 / 15 min, 18 cores):
+18.2 / 53.5 / 57.5 at the start of Before and 14.1 / 48.5 / 55.5 at its
+end; 16.3 / 38.0 / 50.5 at the start of After and 11.9 / 34.5 / 48.8 at its
+end. Other sessions were building; the round trips are noisier than the
+plan.
+
+| Benchmark | Before | After |
+|---|---|---|
+| `history/plan_between_250` (the plan alone: coverage read and gap grouping) | 62.5 ms | 5.14 ms |
+| `history/exact_between_30d_250_from_coverage` (plan, the recent-tail fetch and append, the read) | 295 ms | 251 ms |
+| `vol_board/rich_cheap_view_25` (three prefix `Latest`, a 365-day window `Between` per dataset, the read) | 310 ms | 284 ms |
+
+**The service thread's share.** The plan was 21% of the exact `Between`
+round trip (62.5 of 295 ms) and is 2.0% after (5.14 of 251 ms): 12× less
+time holding the service thread per window `Between`, and the round trip
+fell by about the plan's saving (44 of 57 ms). What remains of the round
+trip is the tail fetch and append on the history worker and the read on
+the pool.
+
+The Before round trips are well under the 655 ms and 978 ms recorded on
+2026-10-11; those ran on a different head and load, so only this table's
+two columns compare.

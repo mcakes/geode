@@ -238,20 +238,109 @@ pub fn covered_spans(
 pub type KeyGaps = (Vec<String>, Vec<CoverSpan>);
 
 /// For each asked tuple, the parts of `requested` its coverage lacks
-/// (`series::missing_spans`), keyed by tuple in input order.
+/// (`series::missing_spans`), keyed by tuple as asked, in input order. A
+/// tuple's coverage is what `covered_spans` reads for it: rows equal to it
+/// or a prefix of it, never a row deeper than a prefix ask. Refuses a tuple
+/// longer than the key, or a value its column cannot read, before any SQL.
+///
+/// One statement whatever the tuple count (`coverage_batch_sql`); each
+/// tuple's rows are then picked from its result.
 pub fn missing_by_key(
     conn: &Connection,
     ds: &DatasetSpec,
     asked: &[Vec<String>],
     requested: CoverSpan,
 ) -> Result<Vec<KeyGaps>, StoreError> {
-    asked
+    let keys = ds.history_key();
+    let tuples: Vec<Vec<Option<String>>> = asked
         .iter()
-        .map(|tuple| {
-            let held = covered_spans(conn, ds, tuple)?;
-            Ok((tuple.clone(), missing_spans(requested, &held)))
+        .map(|tuple| normalized_tuple(&keys, tuple, "asked"))
+        .collect::<Result<_, _>>()?;
+    if tuples.is_empty() {
+        return Ok(Vec::new());
+    }
+    let n = keys.len();
+    let select = coverage_batch_sql(&ds.name, &keys, tuples.len());
+    // A cell past a short tuple's end binds NULL, which the join reads as
+    // "this column must be NULL in the row", as `covered_spans` does.
+    let params: Vec<Value> = tuples
+        .iter()
+        .flatten()
+        .map(|v| v.clone().map_or(Value::Null, Value::Text))
+        .collect();
+    // Key columns read back in the spelling `normalized_tuple` produces, so
+    // a stored key compares equal to the asked one.
+    let read_key = |r: &duckdb::Row, i: usize| -> duckdb::Result<Option<String>> {
+        match keys[i].ty {
+            ColumnType::F64 => r
+                .get::<_, Option<f64>>(i)
+                .map(|f| f.map(|f| format!("{f}"))),
+            _ => r.get::<_, Option<String>>(i),
+        }
+    };
+    let mut stmt = conn.prepare(&select).map_err(sql_err(&select))?;
+    let rows: Vec<(Vec<Option<String>>, i64, i64)> = stmt
+        .query_map(duckdb::params_from_iter(params), |r| {
+            let key = (0..n)
+                .map(|i| read_key(r, i))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((key, r.get(n)?, r.get(n + 1)?))
         })
-        .collect()
+        .map_err(sql_err(&select))?
+        .collect::<Result<_, _>>()
+        .map_err(sql_err(&select))?;
+    // Per asked tuple: the rows that apply to it — each column NULL in the
+    // row or equal to the tuple's value there — merged, then the parts of
+    // `requested` they leave uncovered.
+    Ok(asked
+        .iter()
+        .zip(&tuples)
+        .map(|(tuple, normalized)| {
+            let mut held: Vec<CoverSpan> = rows
+                .iter()
+                .filter(|(key, _, _)| {
+                    key.iter()
+                        .zip(normalized)
+                        .all(|(k, v)| k.is_none() || k == v)
+                })
+                .map(|&(_, from, to)| (from_micros(from), from_micros(to)))
+                .collect();
+            merge_spans(&mut held);
+            (tuple.clone(), missing_spans(requested, &held))
+        })
+        .collect())
+}
+
+/// The statement `missing_by_key` runs: every coverage row of `dataset`
+/// that applies to any of `n_tuples` asked tuples, joined on a VALUES list
+/// of them (one text cell per key column, NULL past a short tuple's end) so
+/// the predicate's depth does not grow with the tuple count. A row applies
+/// when each key column is NULL in it or equal to the asked value; a NULL
+/// asked value compares unknown, leaving only the NULL column, which is
+/// `covered_spans`' predicate for a prefix ask. Distinct, since one row
+/// can apply to many tuples.
+fn coverage_batch_sql(dataset: &str, keys: &[&ColumnSpec], n_tuples: usize) -> String {
+    let key_list = joined(keys, |c| format!("c.{}", quote(&c.name)), ", ");
+    let row = format!("({})", vec!["CAST(? AS VARCHAR)"; keys.len()].join(", "));
+    let asked_rows = vec![row.as_str(); n_tuples].join(", ");
+    let asked_cols = (0..keys.len())
+        .map(|i| format!("a{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let on = keys
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let (col, ty) = (quote(&c.name), c.ty.sql());
+            format!("(c.{col} IS NULL OR c.{col} = CAST(asked.a{i} AS {ty}))")
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!(
+        "select distinct {key_list}, epoch_us(c.from_ts), epoch_us(c.to_ts) from {} c \
+         join (values {asked_rows}) as asked({asked_cols}) on {on}",
+        history_coverage_table(dataset)
+    )
 }
 
 /// The asked tuples the cache cannot answer `At(t)` for. A tuple is
@@ -1602,6 +1691,156 @@ mod tests {
                 vec!["SX5E".to_string()],
                 vec![(ts("2026-01-05T00:00:00Z"), ts("2026-01-10T00:00:00Z"))]
             )
+        );
+    }
+
+    /// The answer the per-tuple read gives: `covered_spans` for each tuple,
+    /// subtracted from `requested`.
+    fn per_tuple(
+        store: &Store,
+        ds: &DatasetSpec,
+        asked: &[Vec<String>],
+        requested: CoverSpan,
+    ) -> Vec<KeyGaps> {
+        asked
+            .iter()
+            .map(|tuple| {
+                let held = covered_spans(store.writer(), ds, tuple).unwrap();
+                (tuple.clone(), missing_spans(requested, &held))
+            })
+            .collect()
+    }
+
+    /// The batched read answers exactly what the per-tuple read did: a prefix
+    /// coverage row applies to every tuple it prefixes, an exact row only to
+    /// its tuple, and a tuple with no rows lacks the whole span.
+    #[test]
+    fn missing_by_key_batches_without_changing_its_answer() {
+        let (_d, store, ds) = fixture();
+        let (t0, t1, t2) = (
+            "2026-01-01T00:00:00Z",
+            "2026-01-11T00:00:00Z",
+            "2026-01-21T00:00:00Z",
+        );
+        cover(&store, &ds, &["SPX"], (t0, t1), "2026-01-21T09:00:00Z");
+        cover(
+            &store,
+            &ds,
+            &["SPX", "3M", "0.5"],
+            (t1, t2),
+            "2026-01-21T09:00:00Z",
+        );
+        let asked = vec![
+            exact("SPX"),
+            vec!["SPX".to_string(), "1M".to_string(), "0.50".to_string()],
+            exact("NDX"),
+        ];
+        let requested = (ts(t0), ts(t2));
+        let got = missing_by_key(store.writer(), &ds, &asked, requested).unwrap();
+        assert_eq!(got, per_tuple(&store, &ds, &asked, requested));
+        assert_eq!(got[0].0, exact("SPX"), "tuples come back as asked");
+        assert_eq!(
+            got[1].0[2], "0.50",
+            "an f64 key keeps the asked spelling in the answer"
+        );
+        assert!(
+            got[0].1.is_empty(),
+            "3M: prefix + exact cover the whole span"
+        );
+        assert_eq!(
+            got[1].1,
+            vec![(ts(t1), ts(t2))],
+            "1M: only the prefix applies"
+        );
+        assert_eq!(got[2].1, vec![(ts(t0), ts(t2))], "NDX: nothing applies");
+    }
+
+    /// A tuple shorter than the key is covered only by rows at its own depth
+    /// or shallower, as `covered_spans` reads it: the exact row under it
+    /// does not cover the prefix.
+    #[test]
+    fn missing_by_key_batches_a_prefix_ask_like_covered_spans() {
+        let (_d, store, ds) = fixture();
+        let (t0, t1, t2) = (
+            "2026-01-01T00:00:00Z",
+            "2026-01-11T00:00:00Z",
+            "2026-01-21T00:00:00Z",
+        );
+        cover(&store, &ds, &["SPX"], (t0, t1), "2026-01-21T09:00:00Z");
+        cover(
+            &store,
+            &ds,
+            &["SPX", "3M"],
+            (t1, t2),
+            "2026-01-21T09:00:00Z",
+        );
+        cover(
+            &store,
+            &ds,
+            &["SPX", "1M", "0.5"],
+            (t0, t2),
+            "2026-01-21T09:00:00Z",
+        );
+        let asked = vec![
+            vec!["SPX".to_string(), "3M".to_string()],
+            vec!["SPX".to_string(), "1M".to_string()],
+            vec!["SPX".to_string()],
+            exact("SPX"),
+            // Brings the SPX/1M/0.5 row into the batch's result, so the
+            // per-tuple pick, not the statement, must keep it off SPX/1M.
+            vec!["SPX".to_string(), "1M".to_string(), "0.5".to_string()],
+        ];
+        let requested = (ts(t0), ts(t2));
+        let got = missing_by_key(store.writer(), &ds, &asked, requested).unwrap();
+        assert_eq!(got, per_tuple(&store, &ds, &asked, requested));
+        assert!(
+            got[0].1.is_empty(),
+            "SPX/3M: its own row and the SPX prefix"
+        );
+        assert_eq!(
+            got[1].1,
+            vec![(ts(t1), ts(t2))],
+            "SPX/1M: the exact row under it does not cover it"
+        );
+        assert_eq!(got[2].1, vec![(ts(t1), ts(t2))], "SPX: only its own row");
+        assert!(got[3].1.is_empty(), "SPX/3M/0.5: both shallower rows");
+        assert!(got[4].1.is_empty(), "SPX/1M/0.5: its own row");
+    }
+
+    /// The batched read is one statement whatever the tuple count: one
+    /// select over a VALUES list with a row per asked tuple, each row a
+    /// text cell per key column.
+    #[test]
+    fn coverage_batch_sql_is_one_select_with_a_values_row_per_tuple() {
+        let ds = history_dataset();
+        let keys = ds.history_key();
+        let sql = coverage_batch_sql(&ds.name, &keys, 250);
+        assert_eq!(sql.to_lowercase().matches("select").count(), 1, "{sql}");
+        assert_eq!(
+            sql.matches("(CAST(? AS VARCHAR)").count(),
+            250,
+            "one VALUES row per tuple"
+        );
+        assert_eq!(sql.matches("CAST(? AS VARCHAR)").count(), 250 * keys.len());
+        assert_eq!(sql.matches('?').count(), 250 * keys.len());
+    }
+
+    #[test]
+    fn missing_by_key_refuses_a_tuple_longer_than_the_key_before_any_sql() {
+        let (_d, store, ds) = fixture();
+        let asked = vec![
+            exact("SPX"),
+            vec!["SPX".into(), "3M".into(), "0.5".into(), "x".into()],
+        ];
+        let requested = (ts("2026-01-01T00:00:00Z"), ts("2026-01-02T00:00:00Z"));
+        assert!(matches!(
+            missing_by_key(store.writer(), &ds, &asked, requested),
+            Err(StoreError::History(_))
+        ));
+        assert!(
+            missing_by_key(store.writer(), &ds, &[], requested)
+                .unwrap()
+                .is_empty()
         );
     }
 

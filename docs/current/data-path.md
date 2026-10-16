@@ -2084,10 +2084,6 @@ Open skips rebuilding a drifted dataset's generation summary. See
   underlyings costs less than ten single-member calls (see
   [performance.md](performance.md)), so a prefix is not split; a real
   adapter with a size limit splits inside its shim.
-- `missing_by_key` on the `Between` path reads coverage one statement per
-  asked tuple, on the service thread. A board's window `Between` over 250
-  exact tuples pays it on every refresh (the measured cost is in
-  [performance.md](performance.md)).
 - `uncovered_at` builds one `OR` term per asked tuple in each of its two
   statements. It is tested to 250 tuples; far above that (about 1,000) the
   expression depth may reach DuckDB's limit, and a `VALUES` join is the

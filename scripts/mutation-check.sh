@@ -42003,6 +42003,27 @@ run_mutation "history: the dedupe's staged-key filter matches nothing" \
   geode-data \
   an_overlapping_refetch_with_equal_values_appends_nothing_but_records_coverage
 
+# ---- Vol watchlist Part 4: missing_by_key batch ----
+
+# A prefix coverage row must apply to every tuple it prefixes in the batched
+# read, not only to an exact match.
+run_mutation "history: a prefix coverage row covers the tuples it prefixes in the batched read" \
+  crates/geode-data/src/store/history.rs \
+  '                        .all(|(k, v)| k.is_none() || k == v)' \
+  '                        .all(|(k, v)| k == v)' \
+  geode-data \
+  missing_by_key_batches_without_changing_its_answer
+
+# One statement serves every asked tuple, so a row deeper than a prefix ask
+# comes back when another asked tuple matches it; the per-tuple pick must
+# keep it off the prefix, as `covered_spans` does.
+run_mutation "history: a deeper coverage row in the batch covers a prefix ask" \
+  crates/geode-data/src/store/history.rs \
+  '                        .all(|(k, v)| k.is_none() || k == v)' \
+  '                        .all(|(k, v)| k.is_none() || v.is_none() || k == v)' \
+  geode-data \
+  missing_by_key_batches_a_prefix_ask_like_covered_spans
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

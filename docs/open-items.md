@@ -669,11 +669,6 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   (the board read runs under `board_pool_key`, so they do not coalesce).
 - Vol board: daily buckets are UTC days (a session straddling UTC midnight
   would split into two buckets).
-- History family: `missing_by_key` reads coverage one statement per asked
-  tuple on the service thread (`store/history.rs`); a board's window
-  `Between` over 250 exact tuples measured 655 ms per refresh
-  (`history/exact_between_30d_250_from_coverage`); batch it as `uncovered_at`
-  is batched.
 - History family: an exact tuple the source never answers refetches on every
   `At` (one small call per lookback per dataset per refresh); recording an
   exact `At` absence distinctly from a `Between` span would let the cache

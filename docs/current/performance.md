@@ -199,7 +199,8 @@ the measurement log for fixture and hardware details.
 | History prefix `Latest` (`history/prefix_latest_25`) | 25 members: fetch, append (all deduped), read | 113 ms |
 | History prefix `At` (`history/prefix_at_25_always_fetches`) | 25 members; a prefix `At` never reads from coverage: fetch, append, read | 120 ms |
 | History exact `At` from coverage (`history/exact_at_250_from_coverage`) | 250 exact tuples: `uncovered_at` and the read, no fetch | 195 ms |
-| History exact `Between` from coverage (`history/exact_between_30d_250_from_coverage`) | 250 exact tuples, 30 days to now: `missing_by_key`, the recent-tail fetch and append, the read | 655 ms |
+| History exact `Between` from coverage (`history/exact_between_30d_250_from_coverage`) | 250 exact tuples, 30 days to now: `missing_by_key` (one statement), the recent-tail fetch and append, the read (load 12 to 16) | 251 ms |
+| History `Between` plan (`history/plan_between_250`) | the same ask's `plan_calls` alone: the service thread's share of the round trip (2%) | 5.14 ms |
 | History append (`append/between_400d_prefix_answer_deduped`) | one member's 400-day surface answer (about 11,400 rows, all equal to live) into the full table: dedupe, coverage coalescing, retention sweep | 18 to 23 ms |
 | History answer validation (`validate/286k_rows_vs_25_prefix`) | `validate_against`, 285,000 rows against a 25-member prefix; in the history worker, not the UI | 59 to 79 ms |
 | Demo Hanweck prefix `Latest` (`demo_hanweck/prefix_latest_10` / `single_latest_x10`) | the demo adapter alone: one call over ten underlyings / ten single-member calls; excludes the store and service | 785 µs / 1.32 ms |
@@ -345,11 +346,9 @@ joined on the unique source value, if the idle figure stays over budget.
 
 ## Known gaps
 
-- The vol board's history path pays per-tuple costs on the service thread:
-  `missing_by_key` reads coverage one statement per asked tuple, so a
-  board's window `Between` over 250 exact tuples is the largest part of a
-  refresh (the Rich/cheap round trip measured 978 ms), and
-  `validate_against` still allocates a key per row (`key_at`).
+- The vol board's history path still allocates a key per answered row in
+  `validate_against` (`key_at`), and a window `Between` refetches its
+  recent tail on every refresh.
 - The vol board read for the Rich/cheap view (365-day percentile window
   over three datasets) measured 51.9 ms on a quiet machine, about 4% over
   the 50 ms budget; the Changes view reads in 17.7 ms. The read's `live`

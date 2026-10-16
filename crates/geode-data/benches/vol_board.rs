@@ -11,7 +11,8 @@
 //! coverage check and recent-tail fetch, then the read); the
 //! history request shapes the ledger owes (a prefix `Latest`, a prefix
 //! `At` that always fetches, an exact `At` over 250 tuples served from
-//! coverage, an exact 30-day `Between` from coverage); an append of a
+//! coverage, an exact 30-day `Between` from coverage, and that `Between`'s
+//! plan alone, the service thread's share); an append of a
 //! 400-day single-member prefix answer into the full table (dedupe scan
 //! and coverage coalescing); and `validate_against` over a prefix and an
 //! exact ask.
@@ -27,6 +28,7 @@ use geode_data::adapter::{
     Adapter, AdapterError, AdapterRegistry, Egress, HistoryQuery, HistoryRequest, HistoryRows,
     Subscription,
 };
+use geode_data::history_dispatch::plan_calls;
 use geode_data::pricing::PricerConfig;
 use geode_data::query::volboard::{BoardPlan, read_board};
 use geode_data::service::{DataEvent, DataService, DataServiceConfig};
@@ -572,6 +574,25 @@ fn bench(c: &mut Criterion) {
     let exact_ask = KeySet::Exact(exact_tuples.clone());
     c.bench_function("validate/71k_rows_vs_250_exact", |b| {
         b.iter(|| black_box(exact_rows.validate_against(3, 2, &exact_ask)).unwrap())
+    });
+
+    // The service-thread share of a window Between: planning alone, no
+    // fetch, no append, no read, over the same covered store and the same
+    // 250 exact tuples as `history/exact_between_30d_250_from_coverage`.
+    let surface = schema.dataset("vol_surface").unwrap();
+    c.bench_function("history/plan_between_250", |b| {
+        b.iter(|| {
+            let span = Span::Between {
+                from: now - Duration::days(30),
+                to: now,
+                step: None,
+            };
+            black_box(
+                plan_calls(store.writer(), surface, "surface", &exact_ask, span, now)
+                    .unwrap()
+                    .len(),
+            )
+        })
     });
     drop(store);
 

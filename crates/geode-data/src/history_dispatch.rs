@@ -342,7 +342,7 @@ fn same_kind(like: &KeySet, tuples: Vec<Vec<String>>) -> KeySet {
 ///   it again forever; a wholly expired span asks nothing) and its end to
 ///   `now`, then one call per distinct gap for the tuples sharing that gap
 ///   list. The read still answers the span as asked.
-pub(crate) fn plan_calls(
+pub fn plan_calls(
     conn: &duckdb::Connection,
     ds: &DatasetSpec,
     table: &str,
