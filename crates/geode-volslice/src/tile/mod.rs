@@ -64,8 +64,6 @@ pub const PAN_STEP: f64 = 0.1;
 /// One `[`/`]` step of the split.
 pub const SPLIT_STEP: f32 = 0.05;
 
-/// What the tile paints while it reads no underlying.
-const EMPTY: &str = "no underlying";
 const TITLE: &str = "vol slice";
 
 pub struct VolsliceTile {
@@ -172,6 +170,7 @@ struct HeaderKey {
     kinds: Vec<Kind>,
     mark: Option<DraftMark>,
     hidden: BTreeSet<Kind>,
+    density: bool,
     diffs: Vec<Pair>,
     diff_ylim: Option<(f64, f64)>,
 }
@@ -363,6 +362,7 @@ impl VolsliceTile {
                     .eq(Kind::ALL.into_iter().filter(|kind| self.loaded.has(*kind)))
                 || k.mark != self.loaded.draft.as_ref().map(|(_, m)| *m)
                 || k.hidden != self.state.hidden
+                || k.density != self.state.density
                 || k.diffs != self.state.diffs
                 || k.diff_ylim != self.state.diff_ylim
         });
@@ -373,6 +373,7 @@ impl VolsliceTile {
                 kinds: self.loaded.kinds(),
                 mark: self.loaded.draft.as_ref().map(|(_, m)| *m),
                 hidden: self.state.hidden.clone(),
+                density: self.state.density,
                 diffs: self.state.diffs.clone(),
                 diff_ylim: self.state.diff_ylim,
             };
@@ -437,6 +438,22 @@ impl VolsliceTile {
         self.refresh_menu(cx);
     }
 
+    /// Show the curves over `c`: `x`'s cycle, `:x <name>` and the
+    /// coordinate menu all land here. A change resets the view to the new
+    /// coordinate's extent; the same coordinate again changes nothing.
+    pub(super) fn set_coordinate(
+        &mut self,
+        c: geode_core::vol::Coordinate,
+        cx: &mut Context<Self>,
+    ) {
+        if c == self.state.coordinate {
+            return;
+        }
+        self.state.coordinate = c;
+        self.reset_view = true;
+        self.resubmit(cx);
+    }
+
     /// The underlying the header names: the one whose documents are on
     /// screen, so a name never stands over another underlying's strip and
     /// curves while a change is in flight or after it failed; with nothing
@@ -488,7 +505,7 @@ impl VolsliceTile {
         let ctx = KeyContext::new(crate::KIND).pair("mode", self.mode());
         match &self.popup {
             Some(p @ (Popup::Diff(_) | Popup::Actions(_))) => {
-                ctx.pair("popup", p.kind()).tilelist()
+                ctx.pair("popup", p.context_kind()).tilelist()
             }
             _ => ctx,
         }
@@ -545,9 +562,9 @@ impl VolsliceTile {
                 }
             }
             "coordinate" => {
-                self.state.cycle_coordinate();
-                self.reset_view = true;
-                self.resubmit(cx);
+                let mut next = self.state.clone();
+                next.cycle_coordinate();
+                self.set_coordinate(next.coordinate, cx);
             }
             "density" => {
                 self.state.density = !self.state.density;
@@ -624,13 +641,7 @@ impl VolsliceTile {
                 self.close_popup(window, cx);
                 self.set_underlying(u, cx);
             }
-            Command::X(c) => {
-                if c != self.state.coordinate {
-                    self.state.coordinate = c;
-                    self.reset_view = true;
-                    self.resubmit(cx);
-                }
-            }
+            Command::X(c) => self.set_coordinate(c, cx),
             Command::Diff(Diff::Off) => {
                 self.close_popup(window, cx);
                 if !self.state.diffs.is_empty() {
@@ -876,7 +887,7 @@ impl VolsliceTile {
 
     #[cfg(test)]
     pub(crate) fn empty_text(&self) -> SharedString {
-        SharedString::new_static(EMPTY)
+        SharedString::new_static(header::NO_UNDERLYING)
     }
 }
 
@@ -989,10 +1000,29 @@ impl Render for VolsliceTile {
         let id = self.id.0;
         let tile = cx.entity();
         let theme = cx.theme();
-        let popup = self
+        // The picker hangs under the underlying trigger and the coordinate
+        // menu under its trigger; the diff chooser and the action menu
+        // hang from the header's right edge.
+        let popup_el = self
             .popup
             .as_ref()
-            .map(|p| picker::render_popup(p, &tile, id, cx));
+            .map(|p| picker::render_popup(p, &tile, id, cx).into_any_element());
+        let open_kind = self.open_kind();
+        let mut popups = header::HeaderPopups {
+            underlying_open: matches!(self.popup, Some(Popup::Picker(_))),
+            coordinate_open: open_kind == Some(picker::MenuKind::Coordinate),
+            under_underlying: None,
+            under_coordinate: None,
+        };
+        let mut popup = None;
+        match &self.popup {
+            Some(Popup::Picker(_)) => popups.under_underlying = popup_el,
+            Some(Popup::Actions(a)) if a.kind == picker::MenuKind::Coordinate => {
+                popups.under_coordinate = popup_el
+            }
+            Some(Popup::Diff(_) | Popup::Actions(_)) => popup = popup_el,
+            None => {}
+        }
         let header = self.chrome.header.as_ref().map(|h| {
             header::render_header(
                 h,
@@ -1006,8 +1036,9 @@ impl Render for VolsliceTile {
                 link_chips(&self.frame, cx),
                 header::MenuButton {
                     selector: self.chrome.menu_selector.clone(),
-                    open: matches!(self.popup, Some(Popup::Actions(_))),
+                    open: open_kind == Some(picker::MenuKind::Actions),
                 },
+                popups,
             )
         });
         let reads_one = self
@@ -1031,17 +1062,7 @@ impl Render for VolsliceTile {
                 ))
                 .into_any_element()
         } else {
-            v_flex()
-                .flex_1()
-                .min_h_0()
-                .items_center()
-                .justify_center()
-                .text_color(theme.muted_foreground)
-                .child(
-                    div()
-                        .debug_selector(move || format!("volslice-empty-{id}"))
-                        .child(EMPTY),
-                )
+            header::render_empty(self.frame.read(cx).following(), theme, &tile, id)
                 .into_any_element()
         };
         v_flex()

@@ -683,6 +683,160 @@ fn the_done_state_in_one_frame(cx: &mut gpui::TestAppContext) {
     assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
 }
 
+/// Every mark lane of every row is painted inside the strip column: the
+/// column takes the width its rows need, so the third lane is never cut
+/// off at the edge.
+#[gpui::test]
+fn the_strip_lanes_all_sit_inside_the_column(cx: &mut gpui::TestAppContext) {
+    let (_h, mut vcx) = loaded(cx);
+    let column = bounds(&mut vcx, &format!("volslice-strip-{TILE}"));
+    for expiry in ["2026-10-16", "2026-11-20", "2027-06-18"] {
+        let row = bounds(&mut vcx, &row(expiry));
+        assert!(
+            row.right() <= column.right() + px(0.5),
+            "{expiry}: {row:?} in {column:?}"
+        );
+        for lane in 0..3 {
+            let cell = bounds(
+                &mut vcx,
+                &format!("volslice-strip-lane-{TILE}-{expiry}-{lane}"),
+            );
+            assert!(
+                cell.right() <= column.right() + px(0.5),
+                "{expiry} lane {lane}: {cell:?} in {column:?}"
+            );
+            assert!(cell.size.width > px(0.), "{expiry} lane {lane} has width");
+        }
+    }
+}
+
+/// The header's coordinate trigger opens the coordinate menu under it; a
+/// row's click sets that coordinate, as `:x` does, and resubmits. The
+/// underlying trigger opens the picker, and a second press closes it.
+#[gpui::test]
+fn the_header_triggers_open_the_coordinate_menu_and_the_picker(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    h.focus(&mut vcx);
+    click(
+        &mut vcx,
+        &format!("volslice-coordinate-{TILE}"),
+        Modifiers::default(),
+    );
+    h.draw(&mut vcx);
+    let (rows, highlighted) = h
+        .tile
+        .read_with(&vcx, |t, _| t.menu_open())
+        .expect("the coordinate menu is up");
+    assert_eq!(
+        rows,
+        [
+            "coordinate-strike",
+            "coordinate-moneyness",
+            "coordinate-log-moneyness",
+            "coordinate-delta"
+        ]
+    );
+    assert_eq!(highlighted, Some(0));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.menu_tick("coordinate-moneyness")),
+        Some(Some(true)),
+        "the shown coordinate is ticked"
+    );
+    assert_eq!(h.mode(&vcx), "menu");
+    // Rows are named by position: delta is the fourth.
+    let delta_row = format!("volslice-menu-row-{TILE}-3");
+    click(&mut vcx, &delta_row, Modifiers::default());
+    assert_eq!(h.state(&vcx).coordinate, Coordinate::Delta);
+    assert_eq!(h.mode(&vcx), "normal", "a pick closes the menu");
+    let p = h.answer_last(&mut vcx).expect("a new coordinate resubmits");
+    assert!(p.jobs.iter().all(|j| match j {
+        VolJob::Slice { request, .. } => request.coordinate == Coordinate::Delta,
+        _ => true,
+    }));
+    // The same coordinate picked again changes nothing and asks nothing.
+    click(
+        &mut vcx,
+        &format!("volslice-coordinate-{TILE}"),
+        Modifiers::default(),
+    );
+    h.draw(&mut vcx);
+    click(&mut vcx, &delta_row, Modifiers::default());
+    assert!(h.requests().is_empty());
+    // The underlying trigger: the picker, then closed by a second press.
+    click(
+        &mut vcx,
+        &format!("volslice-underlying-{TILE}"),
+        Modifiers::default(),
+    );
+    h.draw(&mut vcx);
+    assert_eq!(h.mode(&vcx), "insert", "the picker is up");
+    click(
+        &mut vcx,
+        &format!("volslice-underlying-{TILE}"),
+        Modifiers::default(),
+    );
+    assert_eq!(h.mode(&vcx), "normal");
+}
+
+/// The density chip shows while densities are on and its click turns
+/// them off; off, there is no chip.
+#[gpui::test]
+fn the_density_chip_names_the_right_axis_and_turns_it_off(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = loaded(cx);
+    h.focus(&mut vcx);
+    let chip = format!("volslice-density-chip-{TILE}");
+    assert!(!painted(&mut vcx, &chip));
+    vcx.simulate_keystrokes("shift-d");
+    h.draw(&mut vcx);
+    assert!(h.state(&vcx).density);
+    assert!(painted(&mut vcx, &chip));
+    click(&mut vcx, &chip, Modifiers::default());
+    h.draw(&mut vcx);
+    assert!(!h.state(&vcx).density);
+    assert!(!painted(&mut vcx, &chip));
+}
+
+/// A tile reading no underlying of its own offers the one action that
+/// fills it; a follower, whose underlying is its group's, offers none.
+#[gpui::test]
+fn the_empty_state_offers_the_underlying_picker(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open(cx);
+    h.show(&mut vcx);
+    h.draw(&mut vcx);
+    let button = format!("volslice-empty-underlying-{TILE}");
+    assert!(painted(&mut vcx, &format!("volslice-empty-{TILE}")));
+    assert!(painted(&mut vcx, &button));
+    click(&mut vcx, &button, Modifiers::default());
+    assert_eq!(h.mode(&vcx), "insert", "the picker is up");
+    let (h2, mut vcx2) = open_bound(cx, None);
+    h2.show(&mut vcx2);
+    h2.follow_a(&mut vcx2);
+    h2.draw(&mut vcx2);
+    assert!(painted(&mut vcx2, &format!("volslice-empty-{TILE}")));
+    assert!(
+        !painted(&mut vcx2, &button),
+        "a follower has nothing to pick"
+    );
+}
+
+/// A restored active set lights its first row: the cursor fronts the
+/// first active expiry once the strip is built, not row zero.
+#[gpui::test]
+fn a_restored_set_puts_the_cursor_on_its_first_expiry(cx: &mut gpui::TestAppContext) {
+    let mut table = launched_on("SPX.Z");
+    table.insert(
+        "expiries".into(),
+        toml::Value::Array(vec![toml::Value::String("2026-12-18".into())]),
+    );
+    let (h, mut vcx) = open_on(cx, table);
+    h.show(&mut vcx);
+    let (doc, chains) = published();
+    h.answer_documents(&mut vcx, &doc, &chains);
+    assert_eq!(h.active(&vcx), ["2026-12-18"]);
+    assert_eq!(h.state(&vcx).cursor, 2, "the third row");
+}
+
 mod menu;
 
 mod notice;

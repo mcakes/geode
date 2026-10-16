@@ -338,10 +338,13 @@ impl VolsliceTile {
         self.submit_batch(cx);
     }
 
-    /// Rebuild the strip from what is loaded and fit the active set to it.
+    /// Rebuild the strip from what is loaded and fit the active set and
+    /// the cursor to it: the cursor follows the expiry it rested on, or
+    /// fronts the first active row when there was none.
     fn restrip(&mut self, cx: &App) {
+        let cursor_on = self.strip.get(self.state.cursor).map(|r| r.expiry);
         self.strip = strip(&self.loaded, self.today(cx));
-        self.state.reconcile(&self.strip);
+        self.state.reconcile(&self.strip, cursor_on);
     }
 
     /// Put the board's draft into `loaded` when it names the underlying

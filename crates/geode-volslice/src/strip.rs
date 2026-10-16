@@ -19,8 +19,10 @@ use gpui_component::{Theme, h_flex, v_flex};
 use crate::core::model::{Kind, State, StripRow};
 use crate::tile::VolsliceTile;
 
-/// The strip column's width, in rems: a date and three mark cells.
-pub(crate) const STRIP_WIDTH_REM: f32 = 7.5;
+/// The strip column's narrowest width, in rems. The column takes the width
+/// its rows need (a dot, a date and three mark lanes) so no lane is ever
+/// cut off at the edge; this floor keeps an empty strip from collapsing.
+pub(crate) const STRIP_MIN_WIDTH_REM: f32 = 7.5;
 /// The color dot's diameter at the design rem.
 const DOT: f32 = 8.0;
 /// One strip row's height at the design rem.
@@ -76,7 +78,7 @@ pub(crate) fn render_strip(
             tile_id,
         ))
         .debug_selector(move || format!("volslice-strip-{tile_id}"))
-        .w(rems(STRIP_WIDTH_REM))
+        .min_w(rems(STRIP_MIN_WIDTH_REM))
         .flex_none()
         .h_full()
         .overflow_y_scroll()
@@ -111,12 +113,17 @@ pub(crate) fn render_strip(
             })
             .child(dot)
             .child(div().flex_1().child(row.date.clone()));
-        for mark in row.marks {
+        // Three fixed lanes, one per kind, so the digits line up down the
+        // column whichever kinds a row has.
+        for (lane, mark) in row.marks.into_iter().enumerate() {
             el = el.child(
                 div()
                     .w(scale::design(DOT))
                     .flex_none()
                     .text_color(theme.muted_foreground)
+                    .debug_selector(move || {
+                        format!("volslice-strip-lane-{tile_id}-{expiry}-{lane}")
+                    })
                     .children(mark),
             );
         }
@@ -150,7 +157,7 @@ mod tests {
     fn rows_carry_their_date_color_activity_and_kind_marks() {
         let s = strip(&fixture(), d(TODAY));
         let mut st = State::default();
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let palette = HuePalette::from_theme(
             [
                 gpui::red(),

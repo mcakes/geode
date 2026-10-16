@@ -31,6 +31,7 @@ use geode_core::clock::Clock;
 use geode_core::link::Group;
 use geode_core::snapshot::Provenance;
 use geode_shell::diagnostics::{Diagnostics, Health, TileHealth};
+use geode_shell::fonts;
 use geode_shell::frame::FrameRef;
 use geode_shell::link::group_color;
 use geode_shell::module::CloseHandle;
@@ -41,8 +42,8 @@ use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, SharedString, Stateful, Window,
-    div, relative,
+    AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString,
+    Stateful, Window, div, relative,
 };
 use gpui_component::{Icon, Sizable as _, Theme, h_flex};
 use gpui_kit_assets::IconName;
@@ -374,6 +375,62 @@ impl HealthChip {
 
 /// What a `⋯` press runs: the module's own open or close of its menu.
 pub type OnPress = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// A header trigger: a value that opens a popup when pressed (a range, a
+/// frequency, an underlying, a coordinate), its label in the mono face
+/// with a `▾` after it, the popup hung from its bottom-left corner. A
+/// closed trigger takes the bare control's hover and pressed states; an
+/// open one keeps a neutral fill with no further pointer feedback, so the
+/// trigger reads as pressed for as long as its popup is up.
+///
+/// The press toggles during capture, before the popup's outside-press
+/// listener can close it: toggled during bubble, the same click would
+/// reopen the popup it just closed. Propagation continues so the shell
+/// can focus the clicked tile. `tip` is the tooltip's selector, title and
+/// the action whose live key it names.
+#[allow(clippy::too_many_arguments)]
+pub fn trigger(
+    theme: &Theme,
+    rest: control::ControlPaint,
+    id: &'static str,
+    selector: impl Fn() -> String + 'static,
+    label: SharedString,
+    open: bool,
+    tip: (&'static str, &'static str, &'static str),
+    on_press: impl Fn(&mut Window, &mut App) + 'static,
+    popup: Option<AnyElement>,
+) -> Stateful<Div> {
+    let open_paint = chip_paint(theme, chip::Tone::Neutral);
+    let (tip_id, tip_text, tip_action) = tip;
+    div()
+        .id(ElementId::Name(SharedString::new_static(id)))
+        .relative()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap_1()
+        .px_1()
+        .rounded(theme.radius)
+        .font_family(fonts::MONO)
+        .when(open, |d| {
+            d.text_color(open_paint.text)
+                .when_some(open_paint.fill, |d, fill| d.bg(fill))
+        })
+        .when(!open, |d| d.pointer_states(rest))
+        .child(label)
+        .child(div().text_xs().child("▾"))
+        .debug_selector(selector)
+        .tooltip(tips::tip(tip_id, tip_text, Some(tip_action), None))
+        .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
+            if event.button != MouseButton::Left {
+                return;
+            }
+            on_press(window, cx);
+        })
+        .when_some(popup, |d, popup| {
+            d.child(div().absolute().left_0().top_full().child(popup))
+        })
+}
 
 /// The `⋯` control: the module's ids and what a press does.
 pub struct MenuTrigger {

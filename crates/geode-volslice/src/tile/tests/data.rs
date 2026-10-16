@@ -310,7 +310,7 @@ impl Harness {
 fn expected_first_batch(loaded: &Loaded) -> Vec<VolJob> {
     let s = strip(loaded, d(TODAY));
     let mut st = State::default();
-    st.reconcile(&s);
+    st.reconcile(&s, None);
     batch(&st, loaded, &s).jobs
 }
 

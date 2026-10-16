@@ -231,6 +231,23 @@ fn chain_diff(
     (mid, lo, hi)
 }
 
+/// The tail of a kept pair's notice while a kind it names has nothing
+/// loaded.
+const NOT_LOADED: &str = "is not loaded";
+
+/// The notice for a pair kept on while `kind`, one of its two, has
+/// nothing loaded: the pair asks no job and paints nothing, and waits for
+/// the kind (a draft that left with its group) to return.
+pub fn unloaded_pair_notice(pair: &Pair, kind: Kind) -> String {
+    format!("diff {}: {} {NOT_LOADED}", pair.label(), kind.label())
+}
+
+/// Whether a notice is one [`unloaded_pair_notice`] wrote: a waiting
+/// state, not a failure, so the footer paints it in the status tone.
+pub fn is_unloaded_pair_notice(text: &str) -> bool {
+    text.starts_with("diff ") && text.ends_with(NOT_LOADED)
+}
+
 /// A density line's opacity against its curve's expiry color, so the pdf
 /// reads as a companion of the smile rather than a second smile. Its fill
 /// is the chart's fill opacity of this.
@@ -632,11 +649,7 @@ pub fn model(
             .into_iter()
             .find(|k| !loaded.has(*k))
         {
-            notices.push(format!(
-                "diff {}: {} is not loaded",
-                pair.label(),
-                k.label()
-            ));
+            notices.push(unloaded_pair_notice(pair, k));
         }
     }
 
@@ -659,7 +672,7 @@ mod tests {
     fn plan(state: &mut State) -> Plan {
         let l = fixture();
         let s = strip(&l, d(TODAY));
-        state.reconcile(&s);
+        state.reconcile(&s, None);
         batch(state, &l, &s)
     }
 
@@ -766,7 +779,7 @@ mod tests {
             density: true,
             ..State::default()
         };
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let p = batch(&st, &l, &s);
         let b = model(&p, &answer(&p), &l, &palette(), st.split, 1).unwrap();
         assert!(b.notices.is_empty(), "{:?}", b.notices);
@@ -1068,7 +1081,7 @@ mod tests {
     fn built(state: &mut State) -> Built {
         let l = fixture();
         let s = strip(&l, d(TODAY));
-        state.reconcile(&s);
+        state.reconcile(&s, None);
         let p = batch(state, &l, &s);
         model(&p, &answer(&p), &l, &palette(), state.split, 7).unwrap()
     }
@@ -1077,7 +1090,7 @@ mod tests {
     fn built_refusing(state: &mut State) -> Built {
         let l = fixture();
         let s = strip(&l, d(TODAY));
-        state.reconcile(&s);
+        state.reconcile(&s, None);
         let p = batch(state, &l, &s);
         let o = answer_by(&p, Arc::new(Refusing));
         model(&p, &o, &l, &palette(), state.split, 7).unwrap()
@@ -1251,7 +1264,7 @@ mod tests {
             diffs: Pair::new(Kind::Cvi, Kind::Chain).into_iter().collect(),
             ..State::default()
         };
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let p = batch(&st, &l, &s);
         let o = answer(&p);
         let b = model(&p, &o, &l, &palette(), st.split, 1).unwrap();
@@ -1298,7 +1311,7 @@ mod tests {
             diffs: vec![Pair::new(Kind::Cvi, Kind::Chain).unwrap()],
             ..State::default()
         };
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let p = batch(&st, &l, &s);
         let b = model(&p, &answer(&p), &l, &palette(), st.split, 1).unwrap();
         let diff = b.model.slots.iter().find(|s| s.axis == Axis::BottomLeft);
@@ -1491,7 +1504,7 @@ mod tests {
             active: Some([d("2026-11-20")].into()),
             ..State::default()
         };
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let p = batch(&st, &l, &s);
         let mut o = answer(&p);
         let at = p
@@ -1525,7 +1538,7 @@ mod tests {
             diffs: Pair::new(Kind::Draft, Kind::Cvi).into_iter().collect(),
             ..State::default()
         };
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let p = batch(&st, &l, &s);
         let b = model(&p, &answer(&p), &l, &palette(), st.split, 1).unwrap();
         assert_eq!(
@@ -1553,7 +1566,7 @@ mod tests {
         let l = fixture();
         let s = strip(&l, d(TODAY));
         let mut st = State::default();
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let p = batch(&st, &l, &s);
         let params = p.params(QueryKey(1), 1, Instant::now());
         let o = VolSliceOutcome {
@@ -1574,7 +1587,7 @@ mod tests {
         let l = fixture();
         let s = strip(&l, d(TODAY));
         let mut st = State::default();
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let p = batch(&st, &l, &s);
         let mut o = answer(&p);
         o.results.pop();

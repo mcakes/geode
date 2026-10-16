@@ -6,11 +6,30 @@
 //! palette take one path.
 
 use geode_core::link::Group;
+use geode_core::vol::Coordinate;
 use geode_shell::actions::ActionId;
-use geode_tile::menu::{ActionRow, Hint, Row};
+use geode_tile::menu::{ActionRow, Hint, MenuPick, Row};
 use gpui::SharedString;
 
 use super::model::{Kind, State};
+
+/// What a menu row does when picked: the action menu's rows re-enter the
+/// tile's dispatch on an action id; the coordinate menu's rows set one
+/// coordinate outright, which no single action names (`x` cycles).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Pick {
+    Action(ActionId),
+    Coordinate(Coordinate),
+}
+
+impl MenuPick for Pick {
+    fn element_name(&self) -> SharedString {
+        match self {
+            Pick::Action(id) => SharedString::from(id.0.clone()),
+            Pick::Coordinate(c) => format!("coordinate-{}", c.name()).into(),
+        }
+    }
+}
 
 /// The action that fixes the differences axis's y domain, or frees it.
 pub const FIX_DIFF_Y: &str = "volslice::fix_diff_y";
@@ -33,18 +52,29 @@ pub struct MenuInputs<'a> {
     pub diff_domain: bool,
 }
 
-fn row(id: &'static str, title: impl Into<SharedString>) -> ActionRow<ActionId> {
-    ActionRow::new(ActionId(id.to_string()), title).hint(Hint::chord(id))
+fn row(id: &'static str, title: impl Into<SharedString>) -> ActionRow<Pick> {
+    ActionRow::new(Pick::Action(ActionId(id.to_string())), title).hint(Hint::chord(id))
 }
 
-fn action(id: &'static str, title: impl Into<SharedString>) -> Row<ActionId> {
+fn action(id: &'static str, title: impl Into<SharedString>) -> Row<Pick> {
     Row::Action(row(id, title))
+}
+
+/// The coordinate menu's rows, one per coordinate in `x`'s cycling
+/// order, the shown one ticked. Opened from the header's coordinate
+/// trigger; a pick sets that coordinate as `:x <name>` does. No key lane:
+/// the keyboard's route is `x`, which cycles through every row.
+pub fn coordinate_rows(current: Coordinate) -> Vec<Row<Pick>> {
+    Coordinate::ALL
+        .into_iter()
+        .map(|c| Row::Action(ActionRow::new(Pick::Coordinate(c), c.name()).checked(c == current)))
+        .collect()
 }
 
 /// The rows, in fixed order: the underlying and the coordinate, the kinds
 /// and densities as ticked toggles, the difference chooser and the fixed
 /// y-axis toggle, and the view reset.
-pub fn rows(i: &MenuInputs) -> Vec<Row<ActionId>> {
+pub fn rows(i: &MenuInputs) -> Vec<Row<Pick>> {
     let st = i.state;
     let mut out = vec![
         Row::Action(
@@ -98,18 +128,52 @@ pub fn rows(i: &MenuInputs) -> Vec<Row<ActionId>> {
 mod tests {
     use super::*;
 
-    fn ids(rows: &[Row<ActionId>]) -> Vec<&str> {
+    fn id_of(pick: &Pick) -> &str {
+        match pick {
+            Pick::Action(id) => id.0.as_str(),
+            Pick::Coordinate(c) => c.name(),
+        }
+    }
+
+    fn ids(rows: &[Row<Pick>]) -> Vec<&str> {
         rows.iter()
             .filter_map(Row::action)
-            .map(|a| a.pick().0.as_str())
+            .map(|a| id_of(a.pick()))
             .collect()
     }
 
-    fn find<'a>(rows: &'a [Row<ActionId>], id: &str) -> &'a ActionRow<ActionId> {
+    fn find<'a>(rows: &'a [Row<Pick>], id: &str) -> &'a ActionRow<Pick> {
         rows.iter()
             .filter_map(Row::action)
-            .find(|a| a.pick().0 == id)
+            .find(|a| id_of(a.pick()) == id)
             .unwrap_or_else(|| panic!("{id} has a row"))
+    }
+
+    /// One row per coordinate in `x`'s order, the current one ticked and
+    /// none with a key lane.
+    #[test]
+    fn the_coordinate_rows_tick_the_shown_coordinate() {
+        let rows = coordinate_rows(Coordinate::Delta);
+        assert_eq!(
+            ids(&rows),
+            ["strike", "moneyness", "log-moneyness", "delta"],
+            "`Coordinate::ALL`, the order `x` cycles in"
+        );
+        assert_eq!(find(&rows, "delta").tick(), Some(true));
+        assert_eq!(find(&rows, "strike").tick(), Some(false));
+        assert!(rows.iter().filter_map(Row::action).all(|a| a.is_enabled()));
+        assert_eq!(
+            find(&rows, "delta").pick(),
+            &Pick::Coordinate(Coordinate::Delta)
+        );
+        let menu = geode_tile::menu::Menu::new(rows, &[]);
+        assert!(
+            menu.rows()
+                .iter()
+                .filter_map(Row::action)
+                .all(|a| *a.lane() == geode_tile::menu::Lane::Empty),
+            "no key lane: `x` cycles"
+        );
     }
 
     #[test]
@@ -163,7 +227,7 @@ mod tests {
             .rows()
             .iter()
             .filter_map(Row::action)
-            .find(|a| a.pick().0 == FIX_DIFF_Y)
+            .find(|a| id_of(a.pick()) == FIX_DIFF_Y)
             .map(|a| a.lane().clone());
         assert_eq!(lane, Some(geode_tile::menu::Lane::Text(":ylim".into())));
         assert!(find(&rows, "volslice::underlying").is_enabled());

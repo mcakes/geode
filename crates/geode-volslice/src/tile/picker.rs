@@ -104,9 +104,21 @@ impl DiffState {
     }
 }
 
-/// The open `.` action menu and its element names.
+/// Which menu the shared menu door is painting: the `.` action menu from
+/// the header's right edge, or the coordinate menu under its trigger.
+/// Both hold the keys the same way (`mode == menu`, `popup == actions`),
+/// so one set of bindings steps, picks and closes either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MenuKind {
+    Actions,
+    Coordinate,
+}
+
+/// An open menu (the `.` action menu or the coordinate menu) and its
+/// element names.
 pub(crate) struct ActionsState {
-    pub(crate) menu: geode_tile::menu::Menu<geode_shell::actions::ActionId>,
+    pub(crate) kind: MenuKind,
+    pub(crate) menu: geode_tile::menu::Menu<crate::core::menu::Pick>,
     pub(crate) ids: geode_tile::menu::MenuIds,
 }
 
@@ -117,14 +129,27 @@ pub(crate) enum Popup {
 }
 
 impl Popup {
-    /// Which popup this is, as the key context's `popup` pair names it;
-    /// an outside-press closer compares it so it closes only the popup it
-    /// was painted for.
+    /// Which popup this is, for an outside-press closer, which compares
+    /// it so it closes only the popup it was painted for. The two menus
+    /// are told apart here, since a trigger's capture-phase press may
+    /// have swapped one for the other under the closer.
     pub(crate) fn kind(&self) -> &'static str {
         match self {
             Popup::Picker(_) => "picker",
             Popup::Diff(_) => "diff",
+            Popup::Actions(a) => match a.kind {
+                MenuKind::Actions => "actions",
+                MenuKind::Coordinate => "coordinate",
+            },
+        }
+    }
+
+    /// What the key context's `popup` pair names: the two menus share
+    /// one name, since one set of bindings serves both.
+    pub(crate) fn context_kind(&self) -> &'static str {
+        match self {
             Popup::Actions(_) => "actions",
+            other => other.kind(),
         }
     }
 }
@@ -432,12 +457,18 @@ pub(crate) fn render_popup(
     cx: &App,
 ) -> gpui::Deferred {
     if let Popup::Actions(a) = popup {
+        // The action menu hangs from the header's right edge, the
+        // coordinate menu from its trigger's bottom-left corner.
+        let (anchor, painted) = match a.kind {
+            MenuKind::Actions => (Anchor::TopRight, "actions"),
+            MenuKind::Coordinate => (Anchor::TopLeft, "coordinate"),
+        };
         return geode_tile::menu::render_menu(
             &a.menu,
             &a.ids,
-            Anchor::TopRight,
+            anchor,
             tile,
-            |t: &mut VolsliceTile, window, cx| t.outside_press("actions", window, cx),
+            move |t: &mut VolsliceTile, window, cx| t.outside_press(painted, window, cx),
             cx,
         );
     }

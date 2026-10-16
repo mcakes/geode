@@ -20,14 +20,17 @@ use geode_shell::shell::chip::{Tone, chip_paint};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::{kbd, scale};
 use geode_shell::tiling::TileId;
-use geode_shell::tips::{self, Chords, chord_for};
-use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks};
+use geode_shell::tips::{self, Chords, chord_for_preferring};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks, trigger};
 use geode_tile::notice::{Notice, OnDismiss, Tone as NoticeTone};
 use gpui::prelude::*;
-use gpui::{App, Div, ElementId, Entity, MouseButton, MouseDownEvent, SharedString, div};
-use gpui_component::{Theme, h_flex, v_flex};
+use gpui::{
+    AnyElement, App, Div, ElementId, Entity, MouseButton, MouseDownEvent, SharedString, div,
+};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{Sizable as _, Theme, h_flex, v_flex};
 
-use crate::core::build::{DIFF_AXIS, Y_FORMAT};
+use crate::core::build::{DIFF_AXIS, Y_FORMAT, is_unloaded_pair_notice};
 use crate::core::menu::FIX_DIFF_Y;
 use crate::core::model::{Kind, Loaded, Pair, State};
 use crate::tile::VolsliceTile;
@@ -54,12 +57,19 @@ fn is_empty_state(text: &str) -> bool {
             .any(|g| text == no_underlying(Some(g)))
 }
 
-/// One loaded kind's chip.
+/// A notice that reports nothing wrong: an empty state, or a kept
+/// difference pair waiting for a kind that has nothing loaded. Alone,
+/// these take the status tone; any other notice is a failure or a refusal.
+fn is_waiting(text: &str) -> bool {
+    is_empty_state(text) || is_unloaded_pair_notice(text)
+}
+
+/// One loaded kind's chip. Its digit is not painted in the header: the
+/// tooltip names it, as the action menu's row does, and the strip's mark
+/// lanes show which kinds have each expiry by digit.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct KindChip {
     pub kind: Kind,
-    /// The digit that toggles it, painted as a key.
-    pub digit: Keystroke,
     /// `cvi`, `chain`, or the draft's label with its mark's word.
     pub label: SharedString,
     pub hidden: bool,
@@ -73,6 +83,9 @@ pub(crate) struct HeaderModel {
     pub underlying: SharedString,
     pub coordinate: SharedString,
     pub chips: Vec<KindChip>,
+    /// Densities are shown: a set chip names them, and its click turns
+    /// them off, so the right axis they add has a name and a pointer route.
+    pub density: bool,
     /// `diff: <minuend> \u{2212} <subtrahend>`, one or two shown pairs in
     /// their order and parted by commas; `diff \u{00b7} N pairs` past two,
     /// so the chip stays short; `diff` with none shown.
@@ -145,7 +158,18 @@ pub(crate) fn ylim_text((lo, hi): (f64, f64)) -> String {
 
 const KIND_ACTIONS: [&str; 3] = ["volslice::kind_1", "volslice::kind_2", "volslice::kind_3"];
 
-const DIGITS: [&str; 3] = ["1", "2", "3"];
+/// What the header draws beside its prepared text: which trigger owns the
+/// popup that is up (each paints its open state while it does) and the
+/// popup elements that hang off them.
+#[derive(Default)]
+pub(crate) struct HeaderPopups {
+    /// The underlying picker is up, under the underlying trigger.
+    pub underlying_open: bool,
+    /// The coordinate menu is up, under the coordinate trigger.
+    pub coordinate_open: bool,
+    pub under_underlying: Option<AnyElement>,
+    pub under_coordinate: Option<AnyElement>,
+}
 
 /// The draft chip's label: `cvi draft`, with the mark's word unless it is
 /// a live edit.
@@ -170,10 +194,6 @@ impl HeaderModel {
                 };
                 KindChip {
                     kind,
-                    digit: Keystroke {
-                        mods: Modifiers::NONE,
-                        key: DIGITS[i].to_string(),
-                    },
                     label,
                     hidden: state.hidden.contains(&kind),
                     action: KIND_ACTIONS[i],
@@ -192,6 +212,7 @@ impl HeaderModel {
                 .unwrap_or(SharedString::new_static(NO_UNDERLYING)),
             coordinate: SharedString::new_static(state.coordinate.name()),
             chips,
+            density: state.density,
             diff,
             diff_set,
         }
@@ -210,13 +231,14 @@ fn diff_text(pairs: &[Pair]) -> String {
 }
 
 /// The footer's notice: the first notice, and how many more stand behind
-/// it. `None` with no notice. An empty state alone is said in the muted
-/// status tone the sibling modules paint an empty state in; anything else
-/// is a failure or a refusal, in the danger tone.
+/// it. `None` with no notice. Notices that report nothing wrong (an empty
+/// state, a pair waiting for a kind to load) are said in the muted status
+/// tone the sibling modules paint an empty state in; a failure or a
+/// refusal among them puts the line in the danger tone.
 pub(crate) fn footer_notice<'a>(
     notices: impl Iterator<Item = &'a String> + Clone,
 ) -> Option<Notice> {
-    let tone = if notices.clone().all(|n| is_empty_state(n)) {
+    let tone = if notices.clone().all(|n| is_waiting(n)) {
         NoticeTone::Status
     } else {
         NoticeTone::Danger
@@ -250,8 +272,11 @@ const FOOTER_HINTS: &[(&[(&str, &str)], &str)] = &[
 /// One footer hint: its bindings, then its word.
 pub(crate) type FooterHint = (Vec<Vec<Keystroke>>, SharedString);
 
-/// The hints with each verb's live chord, or its shipped key where the
-/// keymap has none. Resolved on a `Chords` change, never per frame.
+/// The hints with each verb's chord: its shipped key while that still
+/// reaches the verb (so the `j`/`k` pair reads as letters even where an
+/// arrow bound to the same verb is the last live binding), else the live
+/// chord, else the shipped key where the keymap has none. Resolved on a
+/// `Chords` change, never per frame.
 pub(crate) fn footer_hints(cx: &App) -> Vec<FooterHint> {
     let empty = Vec::new();
     let bindings = cx
@@ -266,10 +291,9 @@ pub(crate) fn footer_hints(cx: &App) -> Vec<FooterHint> {
             let keys = actions
                 .iter()
                 .map(|(action, shipped)| {
-                    chord_for(bindings, action).unwrap_or_else(|| {
-                        parse_binding(shipped, Modifiers::NONE)
-                            .expect("shipped footer keys are valid")
-                    })
+                    let shipped = parse_binding(shipped, Modifiers::NONE)
+                        .expect("shipped footer keys are valid");
+                    chord_for_preferring(bindings, action, &shipped).unwrap_or(shipped)
                 })
                 .collect();
             let word = if i == last {
@@ -323,6 +347,7 @@ pub(crate) fn render_header(
     mode: Mode,
     links: TileLinks,
     menu: MenuButton,
+    popups: HeaderPopups,
 ) -> Div {
     let bare = control::paint(
         theme,
@@ -339,14 +364,53 @@ pub(crate) fn render_header(
             .text_xs()
             .child("Vol slice"),
     );
+    // The underlying and the coordinate are triggers, as the timeseries
+    // range and frequency are: a value with a `▾`, its popup hung under
+    // it. The underlying's press takes `u`'s own path, so following
+    // refuses it the same way; the coordinate's opens a menu of the four,
+    // where `x` cycles.
     left = left
         .child(
-            div()
-                .text_color(theme.foreground)
-                .debug_selector(move || format!("volslice-underlying-{tile_id}"))
-                .child(h.underlying.clone()),
+            trigger(
+                theme,
+                bare,
+                "volslice-underlying-trigger",
+                move || format!("volslice-underlying-{tile_id}"),
+                h.underlying.clone(),
+                popups.underlying_open,
+                (
+                    "tip-volslice-underlying",
+                    "Underlying",
+                    "volslice::underlying",
+                ),
+                {
+                    let tile = tile.clone();
+                    move |window, cx| {
+                        tile.update(cx, |t, cx| t.underlying_trigger_clicked(window, cx))
+                    }
+                },
+                popups.under_underlying,
+            )
+            .text_color(theme.foreground),
         )
-        .child(div().child(h.coordinate.clone()));
+        .child(trigger(
+            theme,
+            bare,
+            "volslice-coordinate-trigger",
+            move || format!("volslice-coordinate-{tile_id}"),
+            h.coordinate.clone(),
+            popups.coordinate_open,
+            (
+                "tip-volslice-coordinate",
+                "Coordinate",
+                "volslice::coordinate",
+            ),
+            {
+                let tile = tile.clone();
+                move |window, cx| tile.update(cx, |t, cx| t.toggle_coordinate_menu(window, cx))
+            },
+            popups.under_coordinate,
+        ));
     for chip in &h.chips {
         let label = chip.label.clone();
         let kind = chip.kind.label();
@@ -367,24 +431,25 @@ pub(crate) fn render_header(
         // A hidden kind stays in the header: its digit is a toggle, and a
         // chip that vanished would leave nothing to press again.
         .when(hidden, |d| d.opacity(0.5).line_through())
+        // The tooltip names the digit with the verb; the chip itself
+        // paints no key, so the header reads as values, not a cheat sheet.
         .tooltip(tips::tip(
             "tip-volslice-kind",
             if hidden { "Show" } else { "Hide" },
             Some(chip.action),
             None,
         ))
-        .child(kbd::chip(&chip.digit))
         .child(chip.label.clone());
         left = left.child(el);
     }
-    let diff_paint = chip_paint(theme, Tone::Neutral);
+    let set_paint = chip_paint(theme, Tone::Neutral);
     let diff_label = h.diff.clone();
     left = left.child(
         chip_control(
             ElementId::Name(SharedString::new_static("volslice-diff-chip")),
             theme,
             if h.diff_set {
-                control::for_chip(theme, &diff_paint, theme.background)
+                control::for_chip(theme, &set_paint, theme.background)
             } else {
                 bare
             },
@@ -393,8 +458,8 @@ pub(crate) fn render_header(
         )
         .debug_selector(move || format!("volslice-diff-chip-{tile_id}-{diff_label}"))
         .when(h.diff_set, |d| {
-            d.text_color(diff_paint.text)
-                .when_some(diff_paint.fill, |d, fill| d.bg(fill))
+            d.text_color(set_paint.text)
+                .when_some(set_paint.fill, |d, fill| d.bg(fill))
         })
         .tooltip(tips::tip(
             "tip-volslice-diff",
@@ -402,8 +467,36 @@ pub(crate) fn render_header(
             Some("volslice::diff"),
             None,
         ))
+        // Unset, the chip offers rather than reports: a `+` before the
+        // word, the affordance the expression chips use to add one.
+        .when(!h.diff_set, |d| d.child("+"))
         .child(h.diff.clone()),
     );
+    // Densities shown: a set chip, as the diff and fixed-axis chips are,
+    // whose click turns them off, so the right axis they add is named and
+    // reachable by pointer.
+    if h.density {
+        left = left.child(
+            chip_control(
+                ElementId::Name(SharedString::new_static("volslice-density-chip")),
+                theme,
+                control::for_chip(theme, &set_paint, theme.background),
+                tile,
+                "volslice::density",
+            )
+            .debug_selector(move || format!("volslice-density-chip-{tile_id}"))
+            .text_color(set_paint.text)
+            .when_some(set_paint.fill, |d, fill| d.bg(fill))
+            .tooltip(tips::tip(
+                "tip-volslice-density",
+                "Densities off",
+                Some("volslice::density"),
+                None,
+            ))
+            .child("density"),
+        );
+    }
+    let diff_paint = set_paint;
     // The fixed differences axis: a set chip whose click frees it, as the
     // action menu's `Fix diff y-axis` row and `:ylim off` do.
     if let Some(ylim) = &h.ylim {
@@ -451,6 +544,56 @@ pub(crate) fn render_header(
         theme,
     )
     .debug_selector(move || format!("volslice-header-{tile_id}"))
+}
+
+/// The empty state in the tile's body: what is missing, and, for a tile
+/// that reads its own underlying, the one action that fills it, a quiet
+/// button on `u`'s own path. A follower names the group the underlying
+/// comes from and offers no button: the group's emitter sets it.
+pub(crate) fn render_empty(
+    following: Option<Group>,
+    theme: &Theme,
+    tile: &Entity<VolsliceTile>,
+    tile_id: u64,
+) -> Div {
+    v_flex()
+        .flex_1()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .text_color(theme.muted_foreground)
+        .child(
+            div()
+                .debug_selector(move || format!("volslice-empty-{tile_id}"))
+                .child(SharedString::from(no_underlying(following))),
+        )
+        .when(following.is_none(), |el| {
+            let tile = tile.clone();
+            el.child(
+                div()
+                    .debug_selector(move || format!("volslice-empty-underlying-{tile_id}"))
+                    .child(
+                        Button::new(ElementId::NamedInteger(
+                            SharedString::new_static("volslice-empty-underlying"),
+                            tile_id,
+                        ))
+                        .small()
+                        .ghost()
+                        .label("Underlying\u{2026}")
+                        .on_click(move |_event, window, cx| {
+                            tile.update(cx, |t, cx| {
+                                t.dispatch(
+                                    &ActionId("volslice::underlying".to_string()),
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                    ),
+            )
+        })
 }
 
 /// The footer: the notice line when there is one, then the hint row. The
@@ -535,8 +678,12 @@ mod tests {
         assert_eq!(h.coordinate.as_ref(), "moneyness");
         let labels: Vec<_> = h.chips.iter().map(|c| c.label.to_string()).collect();
         assert_eq!(labels, ["cvi", "cvi draft \u{00b7} sent", "chain"]);
-        assert_eq!(h.chips[2].digit.key, "3");
+        assert_eq!(h.chips[2].action, "volslice::kind_3");
         assert!(h.chips[2].hidden && !h.chips[0].hidden);
+        assert!(!h.density);
+        state.density = true;
+        assert!(HeaderModel::prepare(Some("SPX.Z"), &state, &loaded).density);
+        state.density = false;
         assert_eq!(
             h.diff.as_ref(),
             "diff: cvi draft \u{2212} cvi, cvi \u{2212} chain",
@@ -620,6 +767,29 @@ mod tests {
         assert_eq!(
             tone(&["no cvi curve at 2026-10-16: x".to_string()]),
             Some(NoticeTone::Danger)
+        );
+        // A kept pair waiting for its kind reports nothing wrong.
+        let waiting = crate::core::build::unloaded_pair_notice(
+            &Pair::new(Kind::Chain, Kind::Draft).unwrap(),
+            Kind::Draft,
+        );
+        assert_eq!(
+            waiting,
+            "diff chain \u{2212} cvi draft: cvi draft is not loaded"
+        );
+        assert_eq!(tone(&[waiting.clone()]), Some(NoticeTone::Status));
+        assert_eq!(
+            tone(&[no_underlying(None), waiting.clone()]),
+            Some(NoticeTone::Status)
+        );
+        assert_eq!(
+            tone(&[waiting, "vol request refused: full".to_string()]),
+            Some(NoticeTone::Danger)
+        );
+        assert_eq!(
+            tone(&["cvi draft is not loaded".to_string()]),
+            Some(NoticeTone::Danger),
+            "a `:diff` refusal is worded the same way and is not a pair notice"
         );
     }
 
