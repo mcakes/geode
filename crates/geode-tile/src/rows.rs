@@ -10,8 +10,9 @@
 //!
 //! The row type is the module's own behind [`GridRow`]: a name (unique
 //! within the rows: the cursor, the anchor and a seed find their row by
-//! it), the columns `/` searches, and whether the row is excluded (counted
-//! apart and sorted last by default).
+//! it), the columns `/` searches, whether the row is excluded (counted
+//! apart and sorted last by default), and the order rows take with no sort
+//! (`default_cmp`, by default the order they were given in).
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -30,11 +31,15 @@ pub trait GridRow {
     fn name(&self) -> &str;
     /// The columns `/` searches, indexed by `ColumnMarks`.
     fn narrow_fields(&self) -> Vec<&str>;
-    /// Counted, never shown as a cursor target (the watchlist's excluded
-    /// members): counted apart by [`RowModel::counts`] and sorted last by
-    /// the default order.
+    /// Counted apart and sorted last by default; still shown and still a
+    /// cursor target. [`RowModel::counts`] reports it apart.
     fn excluded(&self) -> bool {
         false
+    }
+    /// The order rows take with no sort, and the tie-break under one:
+    /// `Equal` keeps the rows' given order (a stable sort).
+    fn default_cmp(_a: &Self, _b: &Self) -> Ordering {
+        Ordering::Equal
     }
 }
 
@@ -70,6 +75,7 @@ impl<R> fmt::Debug for Order<R> {
     }
 }
 
+/// Rows held by name: their order, the `/` filter's kept rows, a cursor and a row selection.
 #[derive(Debug)]
 pub struct RowModel<R: GridRow> {
     rows: Vec<R>,
@@ -166,11 +172,10 @@ impl<R: GridRow> RowModel<R> {
         self.refilter();
     }
 
-    /// Replace the rows after a member verb (a remove, an undo or a redo)
-    /// changed them. The cursor keeps its shown index rather than follow
-    /// its row: the row a verb removed is gone or moved to the foot, and
-    /// the trader working down the list wants the next one under the
-    /// cursor. The cursor is put on whatever row now holds that index. A
+    /// Replace the rows after a verb that changed them: the row it removed
+    /// is gone or now sorts last. The cursor keeps its shown index rather
+    /// than follow its row, so the trader working down the list finds the
+    /// next one under the cursor. The cursor is put on whatever row now holds that index. A
     /// selection ends, as the verb consumed it, and a seed still waiting
     /// is dropped: the trader has acted where the cursor is.
     pub fn after_verb(&mut self, rows: Vec<R>) {
@@ -202,9 +207,11 @@ impl<R: GridRow> RowModel<R> {
         &self.query
     }
 
-    /// Order by `sort`'s comparator, or `None` for the default order: by
-    /// name, excluded rows last. The sort is stable over the default
-    /// order, so ties keep it. A selection ends, as for a filter.
+    /// Order by `sort`'s comparator, or `None` for the default order:
+    /// excluded rows last, then [`GridRow::default_cmp`]. The sort is
+    /// stable over the default order, so its ties fall to `default_cmp`
+    /// (and, where that ties too, to the rows' given order). A selection
+    /// ends, as for a filter.
     pub fn set_sort(&mut self, sort: Option<Order<R>>) {
         self.sort = sort;
         self.anchor = None;
@@ -349,11 +356,13 @@ impl<R: GridRow> RowModel<R> {
         self.cursor_name = Some(self.rows[self.visible[to]].name().to_string());
     }
 
-    /// The default order: by name, excluded rows last.
+    /// The default order: excluded rows last, then the row type's
+    /// [`GridRow::default_cmp`]; a stable sort keeps the given order
+    /// where both tie.
     fn default_order(a: &R, b: &R) -> Ordering {
         a.excluded()
             .cmp(&b.excluded())
-            .then_with(|| a.name().cmp(b.name()))
+            .then_with(|| R::default_cmp(a, b))
     }
 
     fn reorder(&mut self) {
@@ -504,29 +513,31 @@ mod tests {
         g.visible().iter().map(|&i| g.row(i).name).collect()
     }
 
+    /// With no `default_cmp` override and no sort, rows keep the order
+    /// they were given in.
     #[test]
-    fn the_default_order_is_by_name_and_rows_keeps_the_set_order() {
+    fn the_default_order_keeps_the_given_order() {
         let mut g = RowModel::new();
         g.set_rows(rows(&["SPX", "DAX", "NDX"]));
-        assert_eq!(names(&g), ["DAX", "NDX", "SPX"]);
+        assert_eq!(names(&g), ["SPX", "DAX", "NDX"]);
         let set: Vec<&str> = g.rows().iter().map(|r| r.name).collect();
         assert_eq!(set, ["SPX", "DAX", "NDX"]);
         assert_eq!(g.counts(), (3, 0), "no row is excluded by default");
     }
 
-    /// A sort is stable over the default order: rows its comparator ties
-    /// keep their default (name) order.
+    /// A sort is stable over the default order: with the default hook,
+    /// rows its comparator ties keep their given order.
     #[test]
-    fn a_sort_breaks_its_ties_by_the_default_order() {
+    fn a_sorts_ties_keep_the_given_order_under_the_default_hook() {
         let mut g = RowModel::new();
         g.set_rows(vec![row("C"), named("B", "b"), row("A"), named("D", "d")]);
         g.set_sort(Some(by_reference_present()));
-        assert_eq!(names(&g), ["B", "D", "A", "C"]);
+        assert_eq!(names(&g), ["B", "D", "C", "A"]);
         assert_eq!(g.sort().map(|o| o.key.as_str()), Some("reference"));
         g.set_sort(Some(by_name(true)));
         assert_eq!(names(&g), ["D", "C", "B", "A"]);
         g.set_sort(None);
-        assert_eq!(names(&g), ["A", "B", "C", "D"]);
+        assert_eq!(names(&g), ["C", "B", "A", "D"]);
         assert!(g.sort().is_none());
     }
 
@@ -591,7 +602,7 @@ mod tests {
             Some(vec![Range { start: 0, end: 2 }])
         );
         g.set_filter("");
-        assert_eq!(names(&g), ["DAX", "NKY", "SPX"]);
+        assert_eq!(names(&g), ["SPX", "DAX", "NKY"]);
     }
 
     #[test]

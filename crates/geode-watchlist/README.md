@@ -78,7 +78,7 @@ request and never depends on `geode-data`.
   by name so a rebuild keeps them on their rows; `after_verb(rows)` keeps
   the cursor's shown index instead (the next row lands under it) and ends
   the selection; `counts()` is `(live, excluded)` over every row whatever
-  the filter shows. The default order is by name with excluded rows last.
+  the filter shows. The default order is by name (`WatchRow`'s `default_cmp`) with excluded rows last.
   `order((SortCol, desc))` turns the session's sort into the model's
   `Order` (key `<column> <asc|desc>`): `Origin` sorts by its text (each
   distinct origin formatted once per order, not per comparison),

@@ -42,7 +42,8 @@ impl WatchRow {
 
 /// The shared grid model's view of a row: `/` searches the name and the
 /// reference name (`grid::NAME_COL`, `grid::REFERENCE_COL`), never the
-/// origin; an excluded member is counted apart and sorts last by default.
+/// origin; an excluded member is counted apart and sorts last by default,
+/// and rows with no sort (and a sort's ties) go by name.
 impl geode_tile::rows::GridRow for WatchRow {
     fn name(&self) -> &str {
         &self.name
@@ -52,6 +53,9 @@ impl geode_tile::rows::GridRow for WatchRow {
     }
     fn excluded(&self) -> bool {
         self.is_excluded()
+    }
+    fn default_cmp(a: &Self, b: &Self) -> std::cmp::Ordering {
+        a.name.cmp(&b.name)
     }
 }
 
