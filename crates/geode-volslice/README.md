@@ -30,14 +30,19 @@ data tier's vol door; the crate computes none of them.
   chart's right press) and the differences axis's fixed domain
   (`fix_diff_y`, `set_diff_ylim`). `tile/pointer.rs` holds the chart's
   wheel, drag and divider gestures and the strip's presses.
-- `header.rs`: the header (underlying, coordinate, a chip per loaded kind
-  with its digit, the diff chip, the fixed-domain chip while one is set,
-  link chips, the two datasets' health, the action menu's `⋯`, the shell's
-  × last) and the footer (the first notice with a count of the rest,
-  the key hints).
+- `header.rs`: the header (the underlying and the coordinate as triggers
+  with a `▾`, the picker and the coordinate menu hung under them; a chip
+  per loaded kind, its digit named in the tooltip rather than painted; the
+  diff chip, `+ diff` while none is set; the fixed-domain chip while one
+  is set; a `density` chip while densities show; link chips, the two
+  datasets' health, the action menu's `⋯`, the shell's × last), the empty
+  state (`no underlying` with an `Underlying…` button, or `no underlying
+  in A` for a follower) and the footer (the first notice with a count of
+  the rest, the key hints).
 - `strip.rs`: the expiry strip beside the chart: a dot in the expiry's
-  color (filled when active), the date and a digit per kind that has the
-  expiry.
+  color (filled when active), the date and three fixed mark lanes, one per
+  kind, with the kind's digit where it has the expiry. The column takes
+  the width its rows need, above a floor, so no lane is cut off.
 
 ## Commands
 
@@ -63,8 +68,12 @@ chain's lowest and highest listed strike wherever a chain is loaded at that
 expiry (`Grid::Dense { cover }`, from `core::build::cover`). The cover is
 asked whether or not the chain is shown, so toggling the chain does not move
 a curve's x extent; an expiry with no chain covers nothing. The chain is its
-mid vols as points with the bid-ask range as a bar, a one-sided quote as a
-half bar.
+mid vols as hollow diamonds (edges in the chain's color, the plot's ground
+inside, so the curve a quote sits on stops at the mark) over the bid-ask
+range as a thin bar at half the color's alpha, painted under every curve
+(`geode_chart::xy::{BAR_WIDTH, BAR_OPACITY, MARK_WIDTH}`); a one-sided
+quote has a half bar. The solid curve stays the only solid thing in its
+hue.
 
 Each expiry takes the `HuePalette` color of its strip position: the theme's
 first chart color's hue plus one golden angle (about 137.5°) per position,
@@ -77,9 +86,11 @@ the first 24 can stay readable that way, otherwise toward the foreground).
 once per build.
 `shift+d`
 adds each visible curve's density on the right axis at `DENSITY_ALPHA` of
-the expiry color, shaded down to zero (a filled xy line, so a negative lobe
+the expiry color, shaded down to zero at the chart's `FILL_OPACITY` of
+that (a faint tint behind the smiles; a filled xy line, so a negative lobe
 shades up to zero), per unit of the shown coordinate (a gap where delta
-saturates, in line and shading alike). The model spaces a dense grid; the
+saturates, in line and shading alike). While densities show, a `density`
+chip in the header names the axis they add; its click turns them off. The model spaces a dense grid; the
 demo model packs it toward the forward on the scale of σ√t, so a
 short-dated density keeps 25 or more points per σ√t·F however wide the
 chain and reads as a smooth hump.
@@ -116,7 +127,11 @@ A curve paints at every strip expiry, not only at its document's terms: the
 vol model interpolates between terms and extrapolates past them.
 The first strip fronts its first row; a restored set that names no listed
 expiry fronts the first row too, and an empty strip keeps the set for when
-data returns.
+data returns. The cursor rests on the first active row of a first or
+restored strip, so the lit row and the filled dots agree; a strip rebuilt
+under the cursor (a chain refresh adding a term) keeps the cursor on its
+expiry wherever that row moved to, and falls back to the first active row
+only when the expiry left.
 
 ## Keys
 
@@ -143,7 +158,13 @@ of a focused tile, or `.` in the diff chooser, which it replaces) lists
 ticked toggles (a kind with nothing loaded reads `(not loaded)` and still
 toggles, as its digit does), `Difference…`, `Fix difference y-axis`
 (`volslice::fix_diff_y`, no default key: its lane names `:ylim`) and
-`Reset view`. Each row names the key that reaches its action in normal
+`Reset view`. The header's coordinate trigger opens a second, smaller
+menu under itself: the four coordinates in `x`'s cycling order, the shown
+one ticked and no key lane (`x` cycles); a pick sets that coordinate as
+`:x <name>` does, and the same coordinate picked again changes nothing.
+The two menus hold the keys the same way (`mode == menu`, `popup ==
+actions`), so one set of bindings steps, picks and closes either; a
+closer tells them apart by `Popup::kind`. Each action-menu row names the key that reaches its action in normal
 mode; while the menu is up those keys are inert (the menu holds the keys
 in `menu` mode), so a row is picked from the menu or its key is pressed
 once the menu is closed. The shared `j`/`k` or arrows step its enabled
@@ -164,7 +185,10 @@ ctrl+click, shift+click or right press adds or removes it, on a focused
 tile (macOS delivers ctrl+click as a right press with control cleared; the
 tile answers no `press_context`, so the shell's right-press route only
 focuses; a left press holding alt or cmd is the shell's); a kind chip click is its digit and the
-diff chip `d`, the fixed-domain chip `volslice::fix_diff_y` (freeing it)
+diff chip `d`, the fixed-domain chip `volslice::fix_diff_y` (freeing it),
+the density chip `shift+d`, the underlying trigger and the empty state's
+`Underlying…` button `u` (so following refuses them the same way; a second
+press on the trigger closes the picker), the coordinate trigger its menu
 and `⋯` is `.`; the wheel zooms about the pointer or pans, a plot drag pans,
 a right press on a plot opens the action menu on a focused tile, and a
 divider drag sets the split.
@@ -203,10 +227,11 @@ refusal of the last verb comes first: it holds one slot, replaced by the
 next refusal and cleared by the next verb that acts on the tile (a key, a
 `:` line, a menu pick, a strip press), so it never outlives the next try.
 The data-side notices follow, cleared when documents next install, then
-the model's. An empty state alone (the first item below) is painted in the
-muted status tone the sibling modules use for an empty state; every other
-notice is a failure or a refusal, painted in the danger tone, and so is an
-empty state with another notice behind it:
+the model's. A notice that reports nothing wrong (an empty state, the first
+item below, or a kept pair waiting for a kind that is not loaded) is
+painted in the muted status tone the sibling modules use for an empty
+state; every other notice is a failure or a refusal, painted in the danger
+tone, and so is a waiting notice with such a notice behind it:
 
 A danger footer notice can be dismissed: a click on it, or `escape` in
 normal mode once no popup is left to close; both do the same
@@ -241,7 +266,8 @@ render. An empty state alone (status) is never dismissed.
 - `diff <pair>: <kind> is not loaded`, once per pair, when a restored or
   kept pair names a kind with nothing loaded (a draft that left with its
   group): that pair asks no difference, the others paint, and the pair
-  stays on for when the kind returns.
+  stays on for when the kind returns. Nothing failed, so it is a status
+  notice (`core::build::is_unloaded_pair_notice`), not a danger one.
 - `vol request refused: …`: the painted model stays only when it was
   built from exactly the documents on screen (same underlying, CVI
   document, chain and draft with its mark), and the next change retries.
@@ -348,9 +374,11 @@ render. An empty state alone (status) is never dismissed.
   child of the shell's.
 - Every pointer action has its key: a strip press is `space` (ctrl or
   shift: `ctrl+space`/`shift+space`), a kind chip its digit, the diff chip
-  `d`, a chooser row `space` and its Apply row `enter`, a strip right press
-  `ctrl+space`, a chart plot right press and `⋯` `.`, an action menu row
-  `enter`, the fixed-domain chip `:ylim off`, the wheel `=`/`-`
+  `d`, the density chip `shift+d`, the underlying trigger and the empty
+  state's button `u`, the coordinate trigger's menu rows `x` (which cycles
+  through every row), a chooser row `space` and its Apply row `enter`, a
+  strip right press `ctrl+space`, a chart plot right press and `⋯` `.`, a
+  menu row `enter`, the fixed-domain chip `:ylim off`, the wheel `=`/`-`
   and `h`/`l`, a drag `h`/`l`, the divider `[`/`]`. A strip press acts only on a tile the
   shell had already told it is focused (`TileContent::set_focused`), so the
   press that focuses a tile changes nothing else; so does a chart right

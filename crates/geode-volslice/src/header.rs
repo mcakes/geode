@@ -777,7 +777,10 @@ mod tests {
             waiting,
             "diff chain \u{2212} cvi draft: cvi draft is not loaded"
         );
-        assert_eq!(tone(&[waiting.clone()]), Some(NoticeTone::Status));
+        assert_eq!(
+            tone(std::slice::from_ref(&waiting)),
+            Some(NoticeTone::Status)
+        );
         assert_eq!(
             tone(&[no_underlying(None), waiting.clone()]),
             Some(NoticeTone::Status)

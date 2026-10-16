@@ -1321,12 +1321,15 @@ only arithmetic the module does.
 **Kinds.** Three, fixed, in header order with the digit that toggles each:
 `cvi` (`1`), the published CVI document as of the frame; `cvi draft` (`2`),
 the followed group's board draft for the underlying, read now whatever the
-as-of; and `chain` (`3`), the option chain's mid vols as points with the
-bid-ask range as a bar. A one-sided quote (an absent side is NaN) paints as
-a half bar. The published curve is solid and the draft dashed, both in the
-expiry's color; the chain takes the expiry's companion, a lighter-weight
-shade of the same hue (less chroma, a step of lightness away), so the
-published curve and the quotes are told apart at a glance. The step goes
+as-of; and `chain` (`3`), the option chain's mid vols as hollow diamonds,
+the plot's ground inside them, over the bid-ask range as a thin bar at
+half the color's alpha painted under every curve, so the quotes read as
+beads on the smile rather than a picket beside it. A one-sided quote (an
+absent side is NaN) paints as a half bar. The published curve is solid and
+the draft dashed, both in the expiry's color; the chain takes the expiry's
+companion, a lighter-weight shade of the same hue (less chroma, a step of
+lightness away), so the published curve and the quotes are told apart at a
+glance. The step goes
 toward the background (paler) on a theme where every one of the first 24
 expiries can keep its contrast that way, and toward the foreground for
 every expiry otherwise (darker on most light themes, lighter on dark
@@ -1335,8 +1338,15 @@ slices at the expiry, whether or not the document has params there: the
 model interpolates between terms and extrapolates past them, so every
 strip expiry has a curve (the strip's kind digits still mark where each
 document has its own terms). A chip per
-loaded kind sits in the header; a hidden kind's chip is muted and its own
-jobs leave the batch. Source identity is absent from the chain's rows, so
+loaded kind sits in the header, its digit named in the tooltip rather than
+painted beside it; a hidden kind's chip is muted and its own jobs leave
+the batch. The underlying and the coordinate before the chips are
+triggers with a `▾`: the first opens the underlying picker under itself
+(a second press closes it; following refuses it as `u` is refused), the
+second a menu of the four coordinates under itself, the shown one ticked,
+where a pick sets that coordinate as `:x` does. An unset diff chip reads
+`+ diff`; while densities show, a `density` chip names the right axis and
+its click turns them off. Source identity is absent from the chain's rows, so
 there is one chain kind however many sources publish chains.
 
 **Strip.** A column beside the chart lists the sorted union of every loaded
@@ -1352,7 +1362,14 @@ ctrl+click work there; the tile offers no row menu, so the shell's
 right-press route only focuses. A left press holding alt or cmd is left to
 the shell (its `mod` drags tiles), and the click that merely focuses the
 tile changes nothing else (`TileContent::set_focused`). The first strip, and a restored set
-naming no listed expiry, front the first row.
+naming no listed expiry, front the first row. The cursor rests on the first
+active row of a first or restored strip, so the lit row and the filled dots
+agree; a strip rebuilt under it keeps the cursor on its expiry wherever that
+row moved, and falls back to the first active row only when the expiry
+left. The column takes the width its rows need, so the three mark lanes
+are never cut off. A tile reading no underlying of its own shows `no
+underlying` with an `Underlying…` button on `u`'s path; a follower shows
+`no underlying in A` and no button.
 
 **Expiry colors.** An expiry's color comes from its strip position, so it
 keeps its color as others are toggled. Neighbouring expiries, the ones that
@@ -1382,7 +1399,8 @@ reaches the floor kinks there, and its density shows the kink.
 **Densities.** `shift+d` (the tile's binding beats the workspace's
 duplicate) asks each visible curve's density, painted on the right axis in
 the curve's color at a fixed lower opacity, with the region between it and
-zero shaded at a fraction of that. A negative lobe (a butterfly violation)
+zero shaded at a small fraction of that (the chart's fill opacity, a tint
+the smiles stay legible over). A negative lobe (a butterfly violation)
 shades up to zero from beneath. The density is per unit of the shown
 coordinate, so its area is about one in each; where delta saturates the
 point is NaN and paints as a gap in both line and shading. The demo model
@@ -1406,7 +1424,9 @@ tooltip, expiry by expiry in the order they were turned on, each labelled
 `<pair> <expiry>`.
 
 The differences axis autoscales to what the view shows, so a pan or a zoom
-rescales it. Fixed, it keeps one y domain whatever the view: `:ylim <lo>
+rescales it. Its zero is ruled as a solid line in the label ink, apart from
+the dashed grid, whenever the domain crosses zero, so a difference's sign
+reads at a glance. Fixed, it keeps one y domain whatever the view: `:ylim <lo>
 <hi>` sets it in the axis's own units (`-0.02 0.02` is ±2 vol points) or
 with a `%` suffix per value (`-2% 2%`), refusing a range whose lower end is
 not below its upper or a value that is not a finite number, and `:ylim off`

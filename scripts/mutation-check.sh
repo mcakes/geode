@@ -21872,6 +21872,33 @@ run_mutation "clock: the blotter's as-of chip cache is keyed on the clock" \
 # Cache tests observe rebuild counters because stale geometry can persist
 # while assertions about the current model still pass.
 
+# A points slot's bars go in the under-layer with the fills, so a quote's
+# spread never crosses a later curve's stroke.
+run_mutation "chart: a points slot's bars are painted under every stroke" \
+  crates/geode-chart/src/xy/element.rs \
+  '                                    SlotKind::Line { fill: true, .. } | SlotKind::Points { .. }' \
+  '                                    SlotKind::Line { fill: true, .. }' \
+  geode-chart a_points_slots_bars_are_painted_under_every_stroke
+
+# Zero is ruled only strictly inside a domain: a density or a magnitude
+# whose domain starts at zero would otherwise rule its own edge.
+run_mutation "chart: zero is ruled only strictly inside the domain" \
+  crates/geode-chart/src/core/scale.rs \
+  '        self.lo < 0.0 && 0.0 < self.hi' \
+  '        self.lo <= 0.0 && 0.0 <= self.hi' \
+  geode-chart a_domain_crosses_zero_only_strictly_inside
+
+# A hollow mark's interior is one closed diamond per point: without the
+# break between them the fill joins every diamond into one shape.
+run_mutation "chart: diamond interiors are parted by breaks" \
+  crates/geode-chart/src/core/marks.rs \
+  '        if !out.is_empty() {
+            out.push(Point::BREAK);
+        }
+        out.extend_from_slice(&diamond(x, m, r));' \
+  '        out.extend_from_slice(&diamond(x, m, r));' \
+  geode-chart each_point_gets_a_bar_and_a_diamond_on_separate_paths
+
 # Min-max decimation preserves peaks between pixel columns. Dropping the
 # maximum can flatten peaks while preserving the point count.
 run_mutation "chart: decimation drops the column maximum" \
@@ -22387,10 +22414,14 @@ run_mutation "chart kit: a lone end with no mid has no bar" \
 # Unguarded, its four edges carry a NaN into the stroke path.
 run_mutation "chart kit: a NaN mark is skipped" \
   crates/geode-chart/src/core/marks.rs \
-  '        if m.is_finite() {
-            let tips = [' \
-  '        if true {
-            let tips = [' \
+  '        if !x.is_finite() || !m.is_finite() {
+            continue;
+        }
+        let tips = diamond(x, m, r);' \
+  '        if !x.is_finite() {
+            continue;
+        }
+        let tips = diamond(x, m, r);' \
   geode-chart \
   a_nan_or_short_array_skips_the_mark_not_the_slot
 
@@ -22616,8 +22647,8 @@ run_mutation "chart xy: the domain reads the view only" \
 # axis or not. A marker mapped unreversed sits mirrored from its curve.
 run_mutation "chart xy: a marker sits at the line's x" \
   crates/geode-chart/src/xy/element.rs \
-  '                    px_x.push(scale.x_of(xs[i], self.view, plot));' \
-  '                    px_x.push(LinearX::default().x_of(xs[i], self.view, plot));' \
+  '            px_x.push(scale.x_of(xs[i], self.view, plot));' \
+  '            px_x.push(LinearX::default().x_of(xs[i], self.view, plot));' \
   geode-chart \
   a_marker_sits_at_the_pixel_x_the_line_gives_the_same_value
 
@@ -22640,8 +22671,8 @@ run_mutation "chart xy: the dash clip is the plot in layout coordinates" \
 # release build the path fails to build and the slot is absent.
 run_mutation "chart xy: a huge points slot still paints" \
   crates/geode-chart/src/xy/element.rs \
-  '                let stride = mark_stride(end - start, SEGMENTS_PER_MARK, MAX_STROKE_SEGMENTS);' \
-  '                let stride = mark_stride(end - start, SEGMENTS_PER_MARK, usize::MAX);' \
+  '        let stride = mark_stride(end - start, SEGMENTS_PER_MARK, MAX_STROKE_SEGMENTS);' \
+  '        let stride = mark_stride(end - start, SEGMENTS_PER_MARK, usize::MAX);' \
   geode-chart \
   a_points_slot_past_the_stroke_cap_is_thinned_not_dropped
 
@@ -22666,8 +22697,11 @@ run_mutation "chart xy: a fill's zero is held to the plot" \
 # A filled line paints a cached fill beside its stroke.
 run_mutation "chart xy: a filled line paints its fill" \
   crates/geode-chart/src/xy/element.rs \
-  '                            || matches!(s.kind, SlotKind::Line { fill: true, .. }))' \
-  '                            || false)' \
+  '                            || matches!(
+                                    s.kind,
+                                    SlotKind::Line { fill: true, .. } | SlotKind::Points { .. }
+                                ))' \
+  '                            || matches!(s.kind, SlotKind::Points { .. }))' \
   geode-chart \
   a_filled_line_caches_its_fill_beside_its_stroke
 
@@ -24851,7 +24885,7 @@ run_mutation "timeseries mouse: the actions button toggles in capture" \
 # reason: in the bubble phase the open menu's `on_mouse_down_out` closes
 # it first and the click meant to close reopens it.
 run_mutation "timeseries triggers: a trigger toggles in capture" \
-  crates/geode-timeseries/src/header.rs \
+  crates/geode-tile/src/header.rs \
   '        .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {' \
   '        .on_any_mouse_down(move |event: &MouseDownEvent, window, cx| {' \
   geode-timeseries a_range_trigger_click_opens_the_menu_for_the_keys_after_it_and_a_second_click_closes
@@ -36059,6 +36093,40 @@ run_mutation "volslice: an emptied active set fronts the first row" \
   '        self.active = Some(if false {' \
   geode-volslice a_restored_set_naming_no_listed_expiry_fronts_the_first
 
+# The lit row and the filled dots agree: a first or restored strip puts
+# the cursor on the first active expiry, not on row zero.
+run_mutation "volslice: a restored strip fronts the first active expiry" \
+  crates/geode-volslice/src/core/model.rs \
+  '            .or_else(|| self.active_in(strip).first().map(|(i, _)| *i))' \
+  '            .or_else(|| None)' \
+  geode-volslice a_first_strip_puts_the_cursor_on_the_first_active_expiry
+
+# A strip rebuilt under the cursor keeps the cursor on its expiry: a chain
+# refresh adding a term must not move a row out from under the trader.
+run_mutation "volslice: the cursor keeps its expiry across a strip rebuild" \
+  crates/geode-volslice/src/core/model.rs \
+  '        self.cursor = cursor_on
+            .and_then(row_of)' \
+  '        self.cursor = None
+            .and_then(row_of)' \
+  geode-volslice a_rebuilt_strip_keeps_the_cursor_on_its_expiry_or_fronts_the_active
+
+# A kept pair waiting for a kind to load reports nothing wrong: the footer
+# paints it in the status tone, not as a failure.
+run_mutation "volslice: a waiting pair notice is status, not danger" \
+  crates/geode-volslice/src/header.rs \
+  '    is_empty_state(text) || is_unloaded_pair_notice(text)' \
+  '    is_empty_state(text)' \
+  geode-volslice an_empty_state_is_muted_and_a_failure_is_danger
+
+# A footer hint prefers its shipped key while that key still reaches the
+# verb, so a j/k pair never reads j / up because one arrow was shadowed.
+run_mutation "volslice: the footer hint prefers the shipped key" \
+  crates/geode-shell/src/tips.rs \
+  '        Some(b) => Some(b.keystrokes.clone()),' \
+  '        Some(_) => effective_binding(bindings, &id).map(|b| b.keystrokes.clone()),' \
+  geode-shell chord_for_preferring_shows_the_shipped_key_while_it_is_live
+
 # The last active expiry cannot be toggled off: an emptied set paints blank.
 run_mutation "volslice: the last active expiry stays" \
   crates/geode-volslice/src/core/model.rs \
@@ -36213,8 +36281,8 @@ run_mutation "volslice: a pair naming an unloaded kind says so" \
 
 run_mutation "volslice: a restored pair naming an unloaded kind is a notice" \
   crates/geode-volslice/src/core/build.rs \
-  '            "diff {}: {} is not loaded",' \
-  '            "diff {}: {} is loaded",' \
+  '    format!("diff {}: {} {NOT_LOADED}", pair.label(), kind.label())' \
+  '    format!("diff {}: {} is loaded", pair.label(), kind.label())' \
   geode-volslice a_restored_pair_naming_an_unloaded_kind_is_a_notice
 
 run_mutation "volslice: the draft curve is dashed" \
@@ -36307,9 +36375,9 @@ run_mutation "volslice: :diff refuses a kind not loaded" \
 
 run_mutation "volslice: a coordinate change resets the view" \
   crates/geode-volslice/src/tile/mod.rs \
-  '                self.state.cycle_coordinate();
-                self.reset_view = true;' \
-  '                self.state.cycle_coordinate();' \
+  '        self.state.coordinate = c;
+        self.reset_view = true;' \
+  '        self.state.coordinate = c;' \
   geode-volslice x_resets_the_view_to_the_new_extent
 
 # Keyboard zoom anchors at the view's centre: the host cannot read the
@@ -36887,14 +36955,14 @@ run_mutation "deferred arrival: a market-data refused show from the draw is hear
 # An empty state is the muted status tone; a failure or refusal is danger.
 run_mutation "volslice: an empty state is not painted as a failure" \
   crates/geode-volslice/src/header.rs \
-  '    let tone = if notices.clone().all(|n| is_empty_state(n)) {' \
+  '    let tone = if notices.clone().all(|n| is_waiting(n)) {' \
   '    let tone = if false {' \
   geode-volslice the_footer_paints_the_first_notice_and_counts_the_rest
 
 run_mutation "volslice: a refusal beside an empty state is danger" \
   crates/geode-volslice/src/header.rs \
-  '    let tone = if notices.clone().all(|n| is_empty_state(n)) {' \
-  '    let tone = if notices.clone().any(|n| is_empty_state(n)) {' \
+  '    let tone = if notices.clone().all(|n| is_waiting(n)) {' \
+  '    let tone = if notices.clone().any(|n| is_waiting(n)) {' \
   geode-volslice the_footer_paints_the_first_notice_and_counts_the_rest
 
 # A draft joining or leaving moves the documents' generation, so a refused

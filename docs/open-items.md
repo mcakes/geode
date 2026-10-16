@@ -573,11 +573,24 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   emitter had when it last posted; a lane scope edit or a pin/unpin since then
   is not reflected. Only the emitter's header warns. Consider a follower-side
   stale cue.
-- Decision: rulings not yet confirmed by the owner: density fill opacity 0.3, the
-  demo's switch to a Hart double-precision normal CDF, the floor kink in the wide
-  call wing. Expiry hues 21 positions apart sit about 8° apart.
+- Decision: rulings not yet confirmed by the owner: the demo's switch to a Hart
+  double-precision normal CDF, the floor kink in the wide call wing. Expiry hues
+  21 positions apart sit about 8° apart. (The density fill opacity is 0.12, chosen
+  with the owner in the 2026-10-16 polish.)
+- The density axis is named only by the header's `density` chip; the right axis
+  column itself carries no title. Consider axis titles in the chart kit if a
+  second right-axis quantity arrives.
 
 ### Display checks
+
+- The 2026-10-16 polish: hollow chain diamonds over half-alpha bars at the
+  default view and zoomed in, on light and dark themes; the solid zero rule in
+  the difference pane; the density tint at 0.12; the underlying and coordinate
+  triggers and their popups (the picker under the underlying, the coordinate
+  menu under its trigger, the `⋯` menu still at the right); `+ diff` and the
+  `density` chip; the strip's third lane visible on every row; the cursor on the
+  first active row after a restart; the `Underlying…` button in the empty state;
+  `j / k` in the footer hints.
 
 - Link chooser rows; solid group chips including on Alduin and Solarized Light,
   letter polarity differing between chips on 15 themes; the `following A · SPX.Z`
