@@ -55,8 +55,8 @@ use crate::core::axis::{Axis, Pane, Side};
 use crate::core::layout::{Layout, PaneRects};
 use crate::core::linear::{LinearX, XFormat, delta_label_with, step_decimals, x_ticks};
 use crate::core::marks::{
-    Clip, MARKER_R, SEGMENTS_PER_MARK, Segment, dash_polyline, fill_base, fill_outlines,
-    mark_stride, point_marks, strided,
+    Clip, MARKER_R, SEGMENTS_PER_MARK, Segment, dash_polyline, diamond_outlines, fill_base,
+    fill_outlines, mark_stride, point_bars, point_diamonds, strided,
 };
 use crate::core::scale::{LinearScale, fmt_percent, fmt_tick, fmt_value, unsigned_zero};
 use crate::core::view::View;
@@ -85,9 +85,23 @@ const _: () = assert!(usize::BITS >= u64::BITS);
 const NONE: &str = "—";
 
 /// A filled line's fill opacity, against the slot's own color (its alpha
-/// included): the region reads as shading under the stroke, and the grid
-/// and any other slot show through it.
-pub const FILL_OPACITY: f32 = 0.3;
+/// included): the region reads as a faint tint under the stroke, so a
+/// density's hump never competes with the curves it sits behind, and the
+/// grid and any other slot show through it.
+pub const FILL_OPACITY: f32 = 0.12;
+
+/// A points slot's bars (a quote's bid-ask range) are painted under every
+/// stroke, this wide at the design rem and at [`BAR_OPACITY`] of the
+/// slot's color: the spread reads as a faint tail behind the mark, never
+/// as a picket beside the curve.
+pub const BAR_WIDTH: f32 = 1.0;
+pub const BAR_OPACITY: f32 = 0.5;
+
+/// A points slot's diamond is hollow: its interior in the plot's ground,
+/// its edges stroked this wide at the design rem in the slot's color, so
+/// the curve a quote sits on stops at the mark and the solid line stays
+/// the only solid thing in the hue.
+pub const MARK_WIDTH: f32 = 1.0;
 
 /// A y value as its axis reads it in a readout: finer than a tick label,
 /// and never a signed zero.
@@ -200,11 +214,18 @@ pub(crate) fn title(u: f64, format: XFormat, tol: f64) -> String {
 /// One pass of a pane's slot painting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Layer {
-    /// A filled line's translucent region down to zero.
+    /// What sits under every stroke: a filled line's translucent region
+    /// down to zero, or a points slot's faint bars.
     Fill,
-    /// A line's stroke or a points slot's marks.
+    /// A line's stroke, or a points slot's hollow diamonds (their ground
+    /// interior, then their edges).
     Stroke,
 }
+
+/// The three cached paths one slot may own, each at its own cache index
+/// so the keys never collide: the under-layer (a fill or bars), a points
+/// slot's diamond interiors, and the stroke.
+const PATHS_PER_SLOT: usize = 3;
 
 /// Element state kept across frames: the reused buffers and the chrome of
 /// the last chrome key.
@@ -499,34 +520,90 @@ impl XyElement {
                     }
                 }
             }
-            SlotKind::Points { xs, mid, lo, hi } => {
-                let (start, end) = slot.window(self.view);
-                let scale = self.scale();
-                let [px_x, px_mid, px_lo, px_hi] = &mut b.px;
-                px_x.clear();
-                px_mid.clear();
-                px_lo.clear();
-                px_hi.clear();
-                // More marks than one path holds are thinned evenly, the
-                // last point kept, rather than the slot going unpainted.
-                let stride = mark_stride(end - start, SEGMENTS_PER_MARK, MAX_STROKE_SEGMENTS);
-                for i in strided(start, end, stride) {
-                    px_x.push(scale.x_of(xs[i], self.view, plot));
-                    px_mid.push(y.y(mid[i]));
-                    px_lo.push(y.y(lo[i]));
-                    px_hi.push(y.y(hi[i]));
-                }
-                point_marks(
+            SlotKind::Points { .. } => {
+                self.point_pixels(slot, plot, y, b);
+                let [px_x, px_mid, _, _] = &b.px;
+                point_diamonds(
                     px_x,
                     px_mid,
-                    px_lo,
-                    px_hi,
                     design_px(MARKER_R, self.rem_px),
                     &mut b.segments,
                 );
-                stroke_segments(&b.segments, LINE_WIDTH)
+                stroke_segments(&b.segments, design_px(MARK_WIDTH, self.rem_px))
             }
         }
+    }
+
+    /// A points slot's pixel columns (x, mid, low, high) for the points in
+    /// view, into `b.px`. More marks than one path holds are thinned
+    /// evenly, the last point kept, rather than the slot going unpainted;
+    /// the stride counts every segment a point can cost across its paths,
+    /// so each path stays under the cap.
+    fn point_pixels(&self, slot: &XySlot, plot: Rect, y: &LinearScale, b: &mut Buffers) {
+        let SlotKind::Points { xs, mid, lo, hi } = &slot.kind else {
+            for column in &mut b.px {
+                column.clear();
+            }
+            return;
+        };
+        let (start, end) = slot.window(self.view);
+        let scale = self.scale();
+        let [px_x, px_mid, px_lo, px_hi] = &mut b.px;
+        px_x.clear();
+        px_mid.clear();
+        px_lo.clear();
+        px_hi.clear();
+        let stride = mark_stride(end - start, SEGMENTS_PER_MARK, MAX_STROKE_SEGMENTS);
+        for i in strided(start, end, stride) {
+            px_x.push(scale.x_of(xs[i], self.view, plot));
+            px_mid.push(y.y(mid[i]));
+            px_lo.push(y.y(lo[i]));
+            px_hi.push(y.y(hi[i]));
+        }
+    }
+
+    /// A points slot's bars at a zero origin: one stroke path of its
+    /// range bars, [`BAR_WIDTH`] wide. `None` for a slot that is not a
+    /// points slot, or when no point in view has a bar.
+    fn bars_shape(
+        &self,
+        slot: &XySlot,
+        plot: Rect,
+        y: &LinearScale,
+        b: &mut Buffers,
+    ) -> Option<Path<Pixels>> {
+        if !matches!(slot.kind, SlotKind::Points { .. }) {
+            return None;
+        }
+        self.point_pixels(slot, plot, y, b);
+        let [px_x, px_mid, px_lo, px_hi] = &b.px;
+        point_bars(px_x, px_mid, px_lo, px_hi, &mut b.segments);
+        stroke_segments(&b.segments, design_px(BAR_WIDTH, self.rem_px))
+    }
+
+    /// A points slot's diamond interiors at a zero origin: one fill path
+    /// closing each diamond, painted in the plot's ground under the edges
+    /// so the mark is hollow. `None` for a slot that is not a points slot,
+    /// or when no point in view has a mid.
+    fn marks_fill_shape(
+        &self,
+        slot: &XySlot,
+        plot: Rect,
+        y: &LinearScale,
+        b: &mut Buffers,
+    ) -> Option<Path<Pixels>> {
+        if !matches!(slot.kind, SlotKind::Points { .. }) {
+            return None;
+        }
+        self.point_pixels(slot, plot, y, b);
+        let [px_x, px_mid, _, _] = &b.px;
+        diamond_outlines(
+            px_x,
+            px_mid,
+            design_px(MARKER_R, self.rem_px),
+            &mut b.outlines,
+        );
+        fill_points(&b.outlines)
     }
 
     /// A filled line's fill at a zero origin: its decimated polyline closed
@@ -550,11 +627,12 @@ impl XyElement {
         fill_points(&b.outlines)
     }
 
-    /// What a pane paints, in order: every visible filled line's fill, in
-    /// slot order, then every visible slot's stroke or marks, in slot
-    /// order. All fills come first so a fill never tints another slot's
-    /// stroke, whichever slot comes first. Indices are into the model's
-    /// slots; no allocation, as it runs on every paint.
+    /// What a pane paints, in order: every visible filled line's fill and
+    /// every visible points slot's bars, in slot order, then every visible
+    /// slot's stroke or marks, in slot order. All of the under-layer comes
+    /// first so a fill or a bar never tints another slot's stroke,
+    /// whichever slot comes first. Indices are into the model's slots; no
+    /// allocation, as it runs on every paint.
     pub(crate) fn layers(&self, pane: Pane) -> impl Iterator<Item = (usize, Layer)> + '_ {
         [Layer::Fill, Layer::Stroke]
             .into_iter()
@@ -567,7 +645,10 @@ impl XyElement {
                         s.visible
                             && s.axis.pane() == pane
                             && (layer == Layer::Stroke
-                                || matches!(s.kind, SlotKind::Line { fill: true, .. }))
+                                || matches!(
+                                    s.kind,
+                                    SlotKind::Line { fill: true, .. } | SlotKind::Points { .. }
+                                ))
                     })
                     .map(move |(k, _)| (k, layer))
             })
@@ -625,25 +706,48 @@ impl XyElement {
                         .f32(plot.h)
                         .f32(self.rem_px)
                         .finish();
-                    let (stroke, fill) = caches.slot_pair(k);
-                    let (path, color) = match layer {
-                        Layer::Fill => (
-                            fill.get(key, bounds.origin, || {
+                    let is_points = matches!(slot.kind, SlotKind::Points { .. });
+                    let base = PATHS_PER_SLOT * k;
+                    match layer {
+                        Layer::Fill if is_points => {
+                            let path = caches.slot(base).get(key, bounds.origin, || {
+                                note_rebuild();
+                                self.bars_shape(slot, plot, &y, buffers)
+                            });
+                            if let Some(path) = path {
+                                window.paint_path(path, slot.color.opacity(BAR_OPACITY));
+                            }
+                        }
+                        Layer::Fill => {
+                            let path = caches.slot(base).get(key, bounds.origin, || {
                                 note_rebuild();
                                 self.fill_shape(slot, plot, &y, buffers)
-                            }),
-                            slot.color.opacity(FILL_OPACITY),
-                        ),
-                        Layer::Stroke => (
-                            stroke.get(key, bounds.origin, || {
+                            });
+                            if let Some(path) = path {
+                                window.paint_path(path, slot.color.opacity(FILL_OPACITY));
+                            }
+                        }
+                        Layer::Stroke => {
+                            // A hollow mark: its ground interior first, so
+                            // the curve under it stops at its edges.
+                            if is_points {
+                                let interior =
+                                    caches.slot(base + 1).get(key, bounds.origin, || {
+                                        note_rebuild();
+                                        self.marks_fill_shape(slot, plot, &y, buffers)
+                                    });
+                                if let Some(path) = interior {
+                                    window.paint_path(path, ctx.ink.strip);
+                                }
+                            }
+                            let path = caches.slot(base + 2).get(key, bounds.origin, || {
                                 note_rebuild();
                                 self.shape(slot, plot, &y, buffers)
-                            }),
-                            slot.color,
-                        ),
-                    };
-                    if let Some(path) = path {
-                        window.paint_path(path, color);
+                            });
+                            if let Some(path) = path {
+                                window.paint_path(path, slot.color);
+                            }
+                        }
                     }
                 }
             });
@@ -909,7 +1013,10 @@ mod tests {
         let before_chrome = chrome_rebuilds();
         let (host, mut vcx) = open(cx, fixture(false));
         let first = rebuilds() - before;
-        assert_eq!(first, 5, "one path per slot on the first frame");
+        assert_eq!(
+            first, 9,
+            "one path per line and three per points slot on the first frame"
+        );
         assert_eq!(chrome_rebuilds() - before_chrome, 1);
         draw(&mut vcx);
         draw(&mut vcx);
@@ -958,19 +1065,20 @@ mod tests {
             cx.notify();
         });
         draw(&mut vcx);
-        assert_eq!(since(mark), (5, 1), "a new version at an unchanged view");
+        // Each line is one path, each points slot three (bars, interiors, edges).
+        assert_eq!(since(mark), (9, 1), "a new version at an unchanged view");
         // The same model in a window of another width, then another height.
         let viewport = vcx.update(|window, _| window.viewport_size());
         let wider = size(viewport.width + px(120.), viewport.height);
         vcx.simulate_resize(wider);
         draw(&mut vcx);
-        assert_eq!(since(mark), (10, 2), "an unchanged model, a wider window");
+        assert_eq!(since(mark), (18, 2), "an unchanged model, a wider window");
         vcx.simulate_resize(size(wider.width, wider.height + px(90.)));
         draw(&mut vcx);
-        assert_eq!(since(mark), (15, 3), "an unchanged model, a taller window");
+        assert_eq!(since(mark), (27, 3), "an unchanged model, a taller window");
         draw(&mut vcx);
         draw(&mut vcx);
-        assert_eq!(since(mark), (15, 3), "a further unchanged frame");
+        assert_eq!(since(mark), (27, 3), "a further unchanged frame");
     }
 
     #[gpui::test]
@@ -1018,7 +1126,8 @@ mod tests {
             cx.notify();
         });
         draw(&mut vcx);
-        assert_eq!(since(mark), (5, 1), "the axes are derived for the slots");
+        // Three paths for each of the two points slots, one for each line.
+        assert_eq!(since(mark), (9, 1), "the axes are derived for the slots");
     }
 
     #[gpui::test]
@@ -1167,8 +1276,8 @@ mod tests {
         draw(&mut vcx);
         assert_eq!(
             rebuilds() - mark,
-            1,
-            "the chain; the curve's one knot past the edge is no path"
+            3,
+            "the chain's three paths; the curve's one knot past the edge is no path"
         );
     }
 
@@ -1324,11 +1433,14 @@ mod tests {
             assert_eq!(b.scratch.pts.len(), 3, "reversed={reversed}");
             let knot = b.scratch.pts[1];
             assert!(near(knot.x, want_x), "reversed={reversed}: {knot:?}");
-            assert!(e.shape(&m.slots[1], plot, &y, &mut b).is_some());
-            // The bar, then the diamond's four edges from its left tip.
-            assert_eq!(b.segments.len(), 5, "reversed={reversed}");
+            // The bar on its own path, the diamond's four edges from its
+            // left tip on another.
+            assert!(e.bars_shape(&m.slots[1], plot, &y, &mut b).is_some());
+            assert_eq!(b.segments.len(), 1, "reversed={reversed}");
             let (bar_from, bar_to) = b.segments[0];
-            let (left_tip, top_tip) = b.segments[1];
+            assert!(e.shape(&m.slots[1], plot, &y, &mut b).is_some());
+            assert_eq!(b.segments.len(), 4, "reversed={reversed}");
+            let (left_tip, top_tip) = b.segments[0];
             let case = format!("reversed={reversed}: {:?}", b.segments);
             assert!(near(bar_from.x, knot.x) && near(bar_to.x, knot.x), "{case}");
             assert!(
@@ -1479,6 +1591,72 @@ mod tests {
         assert_eq!(
             e.layers(Pane::Lower).collect::<Vec<_>>(),
             [(3, Layer::Fill), (3, Layer::Stroke)]
+        );
+    }
+
+    /// A points slot's bars go in the under-layer with the fills, so a
+    /// quote's spread never crosses a later curve's stroke; its marks go
+    /// in the stroke pass, and a hollow mark's interior is built from the
+    /// same columns.
+    #[test]
+    fn a_points_slots_bars_are_painted_under_every_stroke() {
+        let m = XyModel::new(
+            1,
+            XAxis::default(),
+            [YFormat::Plain; 4],
+            0.7,
+            vec![
+                XySlot {
+                    number: 1,
+                    label: "chain".into(),
+                    color: gpui::red(),
+                    axis: Axis::Left,
+                    visible: true,
+                    style: Style::Solid,
+                    kind: SlotKind::Points {
+                        xs: vec![1.0, 2.0],
+                        mid: vec![1.0, f64::NAN],
+                        lo: vec![0.5, 0.5],
+                        hi: vec![1.5, 1.5],
+                    },
+                },
+                XySlot {
+                    number: 2,
+                    label: "curve".into(),
+                    color: gpui::blue(),
+                    axis: Axis::Left,
+                    visible: true,
+                    style: Style::Solid,
+                    kind: SlotKind::Line {
+                        xs: vec![1.0, 2.0],
+                        ys: vec![1.0, 1.0],
+                        fill: false,
+                    },
+                },
+            ],
+        );
+        let e = XyElement::new(m.clone(), View::with_min_span(m.full(), 0.01), 12.0, "u");
+        assert_eq!(
+            e.layers(Pane::Upper).collect::<Vec<_>>(),
+            [(0, Layer::Fill), (0, Layer::Stroke), (1, Layer::Stroke)]
+        );
+        let plot = Rect::new(44.0, 0.0, 400.0, 200.0);
+        let y = LinearScale::new((0.0, 2.0), plot.y, plot.bottom());
+        let mut b = Buffers::default();
+        assert!(e.bars_shape(&m.slots[0], plot, &y, &mut b).is_some());
+        assert_eq!(b.segments.len(), 2, "both quotes have a bar");
+        assert!(e.marks_fill_shape(&m.slots[0], plot, &y, &mut b).is_some());
+        assert_eq!(
+            b.outlines.len(),
+            4,
+            "one closed diamond: the quote with a mid"
+        );
+        assert!(e.shape(&m.slots[0], plot, &y, &mut b).is_some());
+        assert_eq!(b.segments.len(), 4, "its four edges");
+        assert!(
+            e.bars_shape(&m.slots[1], plot, &y, &mut b).is_none()
+                && e.marks_fill_shape(&m.slots[1], plot, &y, &mut b).is_none(),
+            "a line has neither"
         );
     }
 
@@ -1666,12 +1844,22 @@ mod tests {
             e.shape(&m.slots[0], plot, &y, &mut b).is_some(),
             "the slot paints"
         );
+        // The diamond edges alone, four of the five segments a point is
+        // budgeted: the stride that fits five per point keeps the bars
+        // path under the cap too.
         let segments = b.segments.len();
         assert!(segments <= MAX_STROKE_SEGMENTS, "{segments}");
         assert!(
             segments > MAX_STROKE_SEGMENTS / 2,
             "thinned no further than the cap asks: {segments}"
         );
+        assert!(e.bars_shape(&m.slots[0], plot, &y, &mut b).is_some());
+        assert!(
+            b.segments.len() <= MAX_STROKE_SEGMENTS,
+            "{}",
+            b.segments.len()
+        );
+        assert!(e.shape(&m.slots[0], plot, &y, &mut b).is_some());
         // The first and the last point are both among those kept: their
         // diamonds' outer tips sit a marker radius past the plot's edges.
         let left = b.segments.iter().map(|(a, _)| a.x).fold(f32::MAX, f32::min);
@@ -2286,13 +2474,16 @@ mod tests {
         let e = XyElement::new(m.clone(), HOLES_VIEW, 12.0, "u");
         let y = LinearScale::new((0.18, 0.22), WIDE.y, WIDE.bottom());
         let mut b = Buffers::default();
-        assert!(e.shape(&m.slots[0], WIDE, &y, &mut b).is_some());
-        // A half bar and a diamond at 0.95 and at 1.00, nothing at 1.05,
-        // and a diamond alone at 1.08 and at 1.10.
-        assert_eq!(b.segments.len(), 5 + 5 + 4 + 4, "{:?}", b.segments);
+        // A half bar at 0.95 and at 1.00 on the bars path; a diamond at
+        // each of those, nothing at 1.05, and a diamond alone at 1.08 and
+        // at 1.10 on the marks path.
+        assert!(e.bars_shape(&m.slots[0], WIDE, &y, &mut b).is_some());
+        assert_eq!(b.segments.len(), 2, "{:?}", b.segments);
         let at = |u: f64, v: f64| Point::new(e.scale().x_of(u, HOLES_VIEW, WIDE), y.y(v));
         assert_eq!(b.segments[0], (at(0.95, 0.2), at(0.95, 0.19)), "down");
-        assert_eq!(b.segments[5], (at(1.00, 0.2), at(1.00, 0.21)), "up");
+        assert_eq!(b.segments[1], (at(1.00, 0.2), at(1.00, 0.21)), "up");
+        assert!(e.shape(&m.slots[0], WIDE, &y, &mut b).is_some());
+        assert_eq!(b.segments.len(), 4 * 4, "{:?}", b.segments);
     }
 
     #[test]

@@ -125,9 +125,11 @@ pub(crate) struct Scratch {
 pub(crate) struct Ink {
     /// Grid rules and axis lines.
     pub(crate) line: Hsla,
-    /// Tick labels.
+    /// Tick labels, and the solid zero rule of a pane whose domain
+    /// crosses zero.
     pub(crate) text: Hsla,
-    /// The fill behind a strip an element paints beside its plot.
+    /// The plot's ground: the fill behind a strip an element paints beside
+    /// its plot, and the interior of a hollow mark.
     pub(crate) strip: Hsla,
 }
 
@@ -140,6 +142,34 @@ impl Ink {
             text: theme.muted_foreground,
             strip: theme.background,
         }
+    }
+}
+
+/// The zero rule's stroke width: a hairline, one logical pixel like the
+/// grid's rules, fixed rather than on the rem scale.
+const ZERO_RULE_WIDTH: f32 = 1.0;
+
+/// A pane's zero rule: one solid horizontal line at the grid side's zero,
+/// in the label ink, when that side's domain crosses zero
+/// ([`LinearScale::crosses_zero`]). Painted over the dashed grid and under
+/// every slot, so a difference's sign reads at a glance where the grid's
+/// own dashed rule at zero would not. Nothing is painted otherwise.
+pub(crate) fn paint_zero_rule(
+    plot: Rect,
+    grid: &SideAxis,
+    bounds: Bounds<Pixels>,
+    ink: Ink,
+    window: &mut Window,
+) {
+    let Some(s) = grid.scale.filter(LinearScale::crosses_zero) else {
+        return;
+    };
+    let y = bounds.origin.y + px(s.y(0.0));
+    let mut builder = PathBuilder::stroke(px(ZERO_RULE_WIDTH));
+    builder.move_to(point(bounds.origin.x + px(plot.x), y));
+    builder.line_to(point(bounds.origin.x + px(plot.right()), y));
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, ink.text);
     }
 }
 
@@ -217,10 +247,11 @@ pub(crate) fn grid_side(left: &SideAxis) -> Side {
     }
 }
 
-/// A pane's frame, under whatever the element paints in it: the grid and
-/// the y axis of each side that has both a column and a scale. Returns
-/// whether the pane has area; with none, nothing is painted and the caller
-/// paints nothing either.
+/// A pane's frame, under whatever the element paints in it: the grid, the
+/// zero rule when the grid side's domain crosses zero, and the y axis of
+/// each side that has both a column and a scale. Returns whether the pane
+/// has area; with none, nothing is painted and the caller paints nothing
+/// either.
 ///
 /// The grid takes the x ticks of the shared axis and the y ticks of the
 /// side [`grid_side`] names. A left axis line sits at the right edge of
@@ -246,6 +277,7 @@ pub(crate) fn paint_pane_frame(
         Side::Right => right,
     };
     paint_grid(plot, x_ticks, grid, bounds, ink, window);
+    paint_zero_rule(plot, grid, bounds, ink, window);
     if let (Some(r), Some(s)) = (rects.left_axis, left.scale) {
         paint_y_axis(r, &s, left, Side::Left, bounds, ink, window, cx);
     }

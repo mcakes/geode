@@ -43,6 +43,15 @@ impl LinearScale {
         self.bottom - t * (self.bottom - self.top)
     }
 
+    /// Whether zero lies strictly inside the domain: the pane then rules
+    /// it as a solid line apart from the grid, since values on either
+    /// side of it mean opposite things (a difference's sign). A domain
+    /// that starts or ends at zero (a density, a magnitude) has its zero
+    /// on the plot's edge and gets no rule.
+    pub fn crosses_zero(&self) -> bool {
+        self.lo < 0.0 && 0.0 < self.hi
+    }
+
     pub fn value(&self, y: f32) -> f64 {
         let t = ((self.bottom - y) / (self.bottom - self.top)) as f64;
         self.lo + t * (self.hi - self.lo)
@@ -200,6 +209,18 @@ pub fn axis_domain(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A difference's domain has zero inside it and is ruled; a density
+    /// or a vol domain starting at or above zero is not.
+    #[test]
+    fn a_domain_crosses_zero_only_strictly_inside() {
+        let s = |lo, hi| LinearScale::new((lo, hi), 0.0, 100.0);
+        assert!(s(-0.02, 0.02).crosses_zero());
+        assert!(s(-1e-9, 0.5).crosses_zero());
+        assert!(!s(0.0, 1.6).crosses_zero(), "zero on the edge");
+        assert!(!s(0.1, 0.47).crosses_zero());
+        assert!(!s(-0.3, 0.0).crosses_zero());
+    }
 
     #[test]
     fn nice_outward_widens_to_tick_values_and_never_narrows() {
