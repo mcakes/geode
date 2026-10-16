@@ -30,6 +30,8 @@ Current documentation is authoritative:
   values, and known gaps.
 - `docs/current/real-sources.md` — where vendor clients plug in, what each
   simulator stands in for, and which feed shapes are guessed.
+- `docs/current/packaging.md` — Windows installer builds, staged DLLs, and
+  the current limits of Velopack integration.
 - `docs/agent-practices.md` — how work is run, reviewed, verified, and merged,
   and hazards that have cost time.
 - `docs/open-items.md` — open follow-ups and owed display checks; remove an
@@ -105,9 +107,10 @@ may still use separately configured `CC`/`CXX` wrappers.
   The owner runs it himself: an agent never runs `install`, `launchctl` or
   `schtasks`, and uses `install --dry-run` and the pure plan builders.
 - `geode-app` is the only composition root that adds UI: it builds on
-  `geode-compose`, registers pricers, vol models, module factories and
-  panels, and opens the window. The app and the collector must build equal
-  schemas and sources; a test in `geode-app` holds them to it.
+  `geode-compose`, registers pricers, vol models, module factories, panels
+  and scenario shapes, and opens the window. The app and the collector
+  must build equal schemas and sources; a test in `geode-app` holds them
+  to it.
 - Only `geode-data` owns source I/O and DuckDB connections. Only the ingest
   runner owns the writer.
 - Calculation crates remain leaves behind request/outcome traits. UI modules
@@ -164,6 +167,8 @@ may still use separately configured `CC`/`CXX` wrappers.
   schema change, delete `$TMPDIR/geode-demo/<rows>-42/` before running it.
   Uninstall a demo collector for those rows first
   (`geode-collector uninstall --demo <rows>`); a running one holds the store.
+- Axis columns on a measures dataset extend the key of its measure grains;
+  a grouping that omits a scenario axis is non-attributable.
 - Any change to the store's DDL — its own tables (catalog, generations
   summary, provenance, `subscription_topics`, `geode_meta`) or the payload
   table builders in `store/ddl.rs`, `store/series.rs` (series payload and

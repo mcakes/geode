@@ -261,11 +261,45 @@ impl Scope {
     }
 }
 
+/// A tile filter's tooltip summary: dimensions (`book ∈ A, B`), the text
+/// filter (`text "abc"`), then the expression, joined by ` · `; empty for
+/// an empty scope. The `filtered` chip's tip in every tile that has one.
+pub fn filter_summary(scope: &Scope) -> String {
+    let mut parts: Vec<String> = scope
+        .dimensions
+        .iter()
+        .map(|d| format!("{} \u{2208} {}", d.column, d.values.join(", ")))
+        .collect();
+    if let Some(t) = &scope.text {
+        parts.push(format!("text \"{t}\""));
+    }
+    if let Some(e) = &scope.expression {
+        parts.push(e.to_string());
+    }
+    parts.join(" \u{b7} ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{LayerDoc, merge_docs};
     use crate::schema::{ColumnRole, ColumnSpec, ColumnType, DatasetSpec, Family, SchemaSpec};
+
+    #[test]
+    fn filter_summary_lists_dimensions_text_and_expression_in_order() {
+        let mut scope = Scope::default();
+        scope.dimensions.push(DimensionSelection {
+            column: "book".into(),
+            values: vec!["A".into(), "B".into()],
+        });
+        scope.text = Some("abc".into());
+        scope.expression = Some(parse_expr("npv > 0").unwrap());
+        assert_eq!(
+            filter_summary(&scope),
+            "book \u{2208} A, B \u{b7} text \"abc\" \u{b7} npv > 0"
+        );
+        assert_eq!(filter_summary(&Scope::default()), "");
+    }
 
     fn dataset() -> crate::schema::DatasetSpec {
         let text = r#"

@@ -651,32 +651,6 @@ fn a_refused_or_failed_read_shows_the_map_alone_with_a_notice_and_shift_r_retrie
 }
 
 #[gpui::test]
-fn slash_filters_the_rows_and_escape_restores(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = region_with_values(cx);
-    h.find(&mut vcx, FindEvent::Changed("nk".into()));
-    assert_eq!(h.shown(&vcx), ["NKY"]);
-    h.find(&mut vcx, FindEvent::Cancelled);
-    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"], "escape restores");
-    // The label column is searched too.
-    h.find(&mut vcx, FindEvent::Changed("eur".into()));
-    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
-    h.find(&mut vcx, FindEvent::Committed("eur".into()));
-    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"], "enter keeps it");
-    // A later cancelled search restores the committed filter, not none.
-    h.find(&mut vcx, FindEvent::Changed("dax".into()));
-    assert_eq!(h.shown(&vcx), ["DAX"]);
-    h.find(&mut vcx, FindEvent::Cancelled);
-    assert_eq!(h.shown(&vcx), ["DAX", "SX5E"]);
-    // Painted highlights follow the filter.
-    let marks = h.tile.read_with(&vcx, |t, cx| {
-        t.table.read(cx).delegate().prepared().rows[0]
-            .label_marks
-            .clone()
-    });
-    assert_eq!(marks, [std::ops::Range { start: 0, end: 3 }]);
-}
-
-#[gpui::test]
 fn j_moves_the_cursor_and_v_selects_rows(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = region_with_values(cx);
     assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
@@ -819,12 +793,12 @@ fn a_selection_made_before_the_values_keeps_its_rows(cx: &mut gpui::TestAppConte
 
 /// A dragged column width survives what rebuilds the table: the drag is
 /// recorded in the delegate (the table's `ColumnWidthsChanged`, emitted
-/// as its resize handle does), and a filter keystroke or a values answer
-/// does not refresh the columns at all. The table's own laid-out widths
+/// as its resize handle does), and a values answer does not refresh the
+/// columns at all. The table's own laid-out widths
 /// are private, so the test reads what `column()` reports, which is what a
 /// refresh lays out, and counts the tile's refreshes.
 #[gpui::test]
-fn a_dragged_column_width_survives_filter_values_and_sort(cx: &mut gpui::TestAppContext) {
+fn a_dragged_column_width_survives_values_and_sort(cx: &mut gpui::TestAppContext) {
     use gpui_component::table::TableDelegate as _;
     let (h, mut vcx) = region_with_values(cx);
     h.draw(&mut vcx);
@@ -849,12 +823,10 @@ fn a_dragged_column_width_survives_filter_values_and_sort(cx: &mut gpui::TestApp
     assert_eq!(widths(&mut vcx)[1], before[1] + 40.0);
     let refreshes = |vcx: &gpui::VisualTestContext| h.tile.read_with(vcx, |t, _| t.refreshes);
     let at = refreshes(&vcx);
-    h.find(&mut vcx, FindEvent::Changed("e".into()));
-    h.find(&mut vcx, FindEvent::Cancelled);
     vcx.simulate_keystrokes("shift-r");
     let tag = h.distinct_requests()[0].tag;
     h.deliver(&mut vcx, tag, "underlying_ref", Ok(REGION_VALUES.to_vec()));
-    assert_eq!(refreshes(&vcx), at, "no refresh for a filter or values");
+    assert_eq!(refreshes(&vcx), at, "no refresh for values");
     // A sort does refresh (its header marks), and the drag survives it.
     h.command(&mut vcx, "sort rows").unwrap();
     assert_eq!(refreshes(&vcx), at + 1);
@@ -1040,6 +1012,20 @@ impl Harness {
     ) -> Option<(String, Vec<String>, Option<String>)> {
         self.tile.read_with(vcx, |t, cx| t.editor_state(cx))
     }
+    /// The prompt list's rows as painted; `None` while the prompt hangs no
+    /// list (or is closed).
+    fn prompt_choices(&self, vcx: &gpui::VisualTestContext) -> Option<Vec<String>> {
+        self.tile.read_with(vcx, |t, _| {
+            let c = t.prompt.as_ref()?.choice.as_ref()?;
+            Some(c.rows.iter().map(|r| r.to_string()).collect())
+        })
+    }
+    /// The refusal under the prompt's field.
+    fn prompt_error(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| {
+            t.prompt.as_ref()?.error.as_ref().map(|e| e.to_string())
+        })
+    }
     /// Put the cursor on `source` with the grid's own motions.
     fn goto(&self, vcx: &mut gpui::VisualTestContext, source: &str) {
         let at = self
@@ -1082,7 +1068,9 @@ fn enter_opens_the_editor_prefilled_and_enter_writes_the_whole_object(
         vcx.debug_bounds("classifications-editor-row-Europe")
             .is_some()
     );
-    // The prefill is selected: typing replaces it.
+    // `shift+i` reopens it with the prefill selected: typing replaces it.
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "shift-i");
     vcx.simulate_input("Europe");
     h.press(&mut vcx, "enter");
     assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
@@ -1104,6 +1092,84 @@ fn enter_opens_the_editor_prefilled_and_enter_writes_the_whole_object(
 }
 
 #[gpui::test]
+fn i_puts_the_caret_at_the_end_and_shift_i_selects_the_label(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.goto(&mut vcx, "SPX");
+    h.press(&mut vcx, "i");
+    vcx.simulate_input("X");
+    assert_eq!(h.editor(&vcx).unwrap().0, "AmericasX");
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "enter");
+    vcx.simulate_input("X");
+    assert_eq!(h.editor(&vcx).unwrap().0, "AmericasX", "enter is i");
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "shift-i");
+    vcx.simulate_input("X");
+    assert_eq!(h.editor(&vcx).unwrap().0, "X");
+    h.press(&mut vcx, "escape");
+    assert!(h.edits(&mut vcx).is_empty());
+}
+
+#[gpui::test]
+fn c_no_longer_edits(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = editing(cx);
+    h.press(&mut vcx, "c");
+    assert_eq!(h.editor(&vcx), None);
+}
+
+#[gpui::test]
+fn d_d_removes_a_map_only_value_and_clears_one_in_the_data(cx: &mut gpui::TestAppContext) {
+    // `region` maps GHOST, which the data does not hold.
+    let dims =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\", \"GHOST\"]\n";
+    let (h, mut vcx) = shown_with(cx, dims, "region", &[("DAX", 5), ("NKY", 7)]);
+    h.goto(&mut vcx, "GHOST");
+    h.press(&mut vcx, "d d");
+    assert_eq!(h.edits(&mut vcx), [edit_of(&region(&[("DAX", "Europe")]))]);
+    assert!(!h.shown(&vcx).contains(&"GHOST".to_string()));
+    assert_eq!(h.notices(&vcx), ["removed GHOST"]);
+    h.press(&mut vcx, "u");
+    assert!(
+        h.shown(&vcx).contains(&"GHOST".to_string()),
+        "undo puts it back"
+    );
+}
+
+#[gpui::test]
+fn a_mixed_selection_reports_both_parts_in_one_write(cx: &mut gpui::TestAppContext) {
+    let dims =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\", \"GHOST\"]\n";
+    let (h, mut vcx) = shown_with(cx, dims, "region", &[("DAX", 5), ("NKY", 7)]);
+    h.goto(&mut vcx, "DAX");
+    let at = h.shown(&vcx).iter().position(|s| s == "GHOST").unwrap();
+    let here = h.shown(&vcx).iter().position(|s| s == "DAX").unwrap();
+    assert_eq!(at, here + 1, "fixture: GHOST sorts right after DAX");
+    h.press(&mut vcx, "shift-v j d");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+    assert_eq!(h.notices(&vcx), ["cleared 1 label, removed 1 value"]);
+    h.press(&mut vcx, "u");
+    assert_eq!(h.label(&vcx, "DAX").as_deref(), Some("Europe"));
+    assert_eq!(h.label(&vcx, "GHOST").as_deref(), Some("Europe"));
+}
+
+#[gpui::test]
+fn s_cycles_the_label_sort(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.press(&mut vcx, "s");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.grid.sort()),
+        Some((SortCol::Label, true))
+    );
+    h.press(&mut vcx, "s");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.grid.sort()),
+        Some((SortCol::Label, false))
+    );
+    h.press(&mut vcx, "s");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.grid.sort()), None);
+}
+
+#[gpui::test]
 fn typing_a_case_variant_of_an_existing_label_takes_the_existing_one_only_when_highlighted(
     cx: &mut gpui::TestAppContext,
 ) {
@@ -1119,7 +1185,7 @@ fn typing_a_case_variant_of_an_existing_label_takes_the_existing_one_only_when_h
     assert!(written.contains("Tech = [\"AAPL\", \"MSFT\"]"), "{written}");
     // Typed past every label: written as typed, never re-cased.
     h.goto(&mut vcx, "AAPL");
-    h.press(&mut vcx, "enter");
+    h.press(&mut vcx, "shift-i");
     vcx.simulate_input("techx");
     h.press(&mut vcx, "enter");
     let edits = h.edits(&mut vcx);
@@ -1132,7 +1198,7 @@ fn typing_a_case_variant_of_an_existing_label_takes_the_existing_one_only_when_h
 fn an_empty_entry_clears_and_escape_cancels(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = editing(cx);
     h.goto(&mut vcx, "SPX");
-    h.press(&mut vcx, "enter backspace enter");
+    h.press(&mut vcx, "shift-i backspace enter");
     assert_eq!(
         h.edits(&mut vcx),
         [edit_of(&region(&[("SX5E", "Europe"), ("DAX", "Europe")]))]
@@ -1858,6 +1924,7 @@ fn the_dot_menu_lists_actions_with_disabled_reasons(cx: &mut gpui::TestAppContex
             s("Clear label"),
             s("Copy label"),
             ("Paste label".into(), Some("nothing copied".into())),
+            s("Add value\u{2026}"),
             s("---"),
             s("New\u{2026}"),
             (
@@ -1880,14 +1947,14 @@ fn the_dot_menu_lists_actions_with_disabled_reasons(cx: &mut gpui::TestAppContex
         vcx.update(|window, cx| h.tile.update(cx, |t, cx| t.menu_pick(row, window, cx)));
         h.draw(vcx);
     };
-    pick(7, &mut vcx);
+    pick(8, &mut vcx);
     assert!(h.action_menu(&vcx).is_some());
     assert_eq!(
         h.notices(&vcx),
         ["desk is defined in desk config; Geode cannot remove it from there"]
     );
     // An enabled row runs the palette's action.
-    pick(5, &mut vcx);
+    pick(6, &mut vcx);
     assert_eq!(h.action_menu(&vcx), None);
     assert!(h.prompt(&vcx).is_some(), "New\u{2026} opened the prompt");
 }
@@ -2967,6 +3034,97 @@ fn a_plan_landing_during_a_search_is_held(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.confirm(&vcx).as_deref(), Some(QUESTION));
 }
 
+/// `/` moves the cursor to the first match at or after where the search
+/// began, over source and label, and narrows nothing; escape returns.
+#[gpui::test]
+fn slash_moves_the_cursor_to_a_match_and_keeps_every_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.find(&mut vcx, FindEvent::Changed("sx".into()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    assert_eq!(h.shown(&vcx), ["NKY", "DAX", "SX5E"], "nothing narrows");
+    // The label is searched too; each keystroke searches from the origin.
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(
+        h.cursor(&vcx).as_deref(),
+        Some("NKY"),
+        "escape returns to the origin"
+    );
+}
+
+/// `n` and `shift+n` step the committed query from the cursor, wrapping.
+#[gpui::test]
+fn n_and_shift_n_repeat_the_committed_find_and_wrap(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    // Nothing committed: n does nothing.
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    h.find(&mut vcx, FindEvent::Committed("eur".into()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"), "wraps");
+    vcx.simulate_keystrokes("shift-n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"), "wraps back");
+    // A query nothing matches moves nothing.
+    h.find(&mut vcx, FindEvent::Changed("zzz".into()));
+    h.find(&mut vcx, FindEvent::Committed("zzz".into()));
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+}
+
+/// A `/` closed with nothing typed (escape, or blur with empty text) after
+/// a finished search moves nothing: the old search's origin is spent.
+#[gpui::test]
+fn cancelling_an_empty_search_after_a_committed_one_moves_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    // Begin on DAX, not row 0, so a restore to the origin and the row-0
+    // fallback both differ from where the cursor ends up.
+    vcx.simulate_keystrokes("j");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    h.find(&mut vcx, FindEvent::Changed("sx".into()));
+    h.find(&mut vcx, FindEvent::Committed("sx".into()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    vcx.simulate_keystrokes("k");
+    vcx.simulate_keystrokes("k");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    h.find(&mut vcx, FindEvent::Cancelled);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("NKY"));
+    // The committed query survives for `n`.
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+}
+
+/// `/` closes an open menu first, as it does every tile's popups.
+#[gpui::test]
+fn a_search_closes_an_open_menu(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    vcx.simulate_keystrokes(".");
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_some()));
+    h.find(&mut vcx, FindEvent::Changed("sx".into()));
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_none()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+}
+
+/// Escape ends a row selection first, then the committed find.
+#[gpui::test]
+fn escape_ends_a_selection_then_the_find_then_the_notices(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    h.find(&mut vcx, FindEvent::Committed("eur".into()));
+    vcx.simulate_keystrokes("shift-v");
+    vcx.simulate_keystrokes("escape");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"));
+    vcx.simulate_keystrokes("escape");
+    // The find is gone: n no longer moves.
+    vcx.simulate_keystrokes("n");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+}
+
 /// A plan landing while another tile is focused is held until this one is
 /// focused again; only then does it take the keyboard.
 #[gpui::test]
@@ -3297,4 +3455,292 @@ fn escape_ends_a_selection_before_it_dismisses_a_notice(cx: &mut gpui::TestAppCo
     assert!(painted(&h, &mut vcx, NOTICE), "the notice waits");
     h.press(&mut vcx, "escape");
     assert!(!painted(&h, &mut vcx, NOTICE));
+}
+
+#[gpui::test]
+fn fzf_find_lists_every_row_and_reveal_moves_the_cursor(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = region_with_values(cx);
+    let results = vcx.new(|_| FuzzyFind::default());
+    assert!(vcx.update(|window, cx| h.content.start_fuzzy_find(results.downgrade(), window, cx)));
+    results.update(&mut vcx, |r, cx| r.set_query("eur".into(), cx));
+    vcx.run_until_parked();
+    assert_eq!(
+        results.read_with(&vcx, |r, _| r.result_count()),
+        2,
+        "matched by label"
+    );
+    let item = results.read_with(&vcx, |r, _| r.selected_item().unwrap());
+    vcx.update(|window, cx| item.reveal("eur", window, cx))
+        .unwrap();
+    assert!(matches!(
+        h.cursor(&vcx).as_deref(),
+        Some("DAX") | Some("SX5E")
+    ));
+    // The committed query is what n repeats.
+    let before = h.cursor(&vcx);
+    h.press(&mut vcx, "n");
+    assert_ne!(h.cursor(&vcx), before);
+}
+
+/// A fzf pick with nothing typed keeps the query an earlier find
+/// committed, as an empty vim commit does.
+#[gpui::test]
+fn an_empty_fzf_pick_keeps_the_committed_query(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    let (h, mut vcx) = region_with_values(cx);
+    h.find(&mut vcx, FindEvent::Changed("eur".into()));
+    h.find(&mut vcx, FindEvent::Committed("eur".into()));
+    let results = vcx.new(|_| FuzzyFind::default());
+    assert!(vcx.update(|window, cx| h.content.start_fuzzy_find(results.downgrade(), window, cx)));
+    vcx.run_until_parked();
+    // Empty query: every shown row, the first (unclassified NKY) selected.
+    let nky = results.read_with(&vcx, |r, _| {
+        assert_eq!(r.result_count(), 3);
+        r.selected_item().unwrap()
+    });
+    vcx.update(|window, cx| nky.reveal("", window, cx)).unwrap();
+    let at = h.cursor(&vcx);
+    h.press(&mut vcx, "n");
+    assert!(
+        matches!(h.cursor(&vcx).as_deref(), Some("DAX") | Some("SX5E")),
+        "n repeats eur from {at:?}"
+    );
+}
+
+/// The fzf results paint in the grid's place while the session is open,
+/// and the grid comes back once the session ends.
+#[gpui::test]
+fn fzf_results_replace_the_grid_until_the_session_ends(cx: &mut gpui::TestAppContext) {
+    use geode_shell::fuzzyfind::FuzzyFind;
+    const TABLE: &str = "classifications-table-7";
+    let (h, mut vcx) = region_with_values(cx);
+    assert!(painted(&h, &mut vcx, TABLE));
+    let results = vcx.new(|_| FuzzyFind::default());
+    assert!(vcx.update(|window, cx| h.content.start_fuzzy_find(results.downgrade(), window, cx)));
+    results.update(&mut vcx, |r, cx| r.set_query("sx".into(), cx));
+    assert!(painted(&h, &mut vcx, "find-result-0"), "the results paint");
+    assert!(!painted(&h, &mut vcx, TABLE), "in the grid's place");
+    results.update(&mut vcx, |r, cx| r.close(cx));
+    assert!(painted(&h, &mut vcx, TABLE), "the grid returns");
+    assert!(!painted(&h, &mut vcx, "find-result-0"));
+}
+
+/// `region` over `underlying_ref`, with a reference table of underlyings.
+fn adding(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = region_with_values(cx);
+    vcx.update(|_, cx| {
+        let table = geode_core::query::ReferenceTable {
+            columns: vec!["underlying_ref".into()],
+            rows: vec![vec![Some("KOSPI2".into())], vec![Some("DAX".into())]],
+            gen_id: 1,
+            source_time: Default::default(),
+        };
+        let data = geode_core::reference::ReferenceData::default()
+            .with_table("underlyings", &table, 1)
+            .unwrap();
+        cx.set_global(geode_shell::reference::ReferenceGlobal(
+            std::sync::Arc::new(data),
+        ));
+    });
+    (h, vcx)
+}
+
+#[gpui::test]
+fn o_adds_a_value_and_its_label_writes_one_entry(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = adding(cx);
+    h.press(&mut vcx, "o");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("insert"));
+    // Reference keys not already rows are offered.
+    assert_eq!(h.prompt_choices(&vcx), Some(vec!["KOSPI2".to_string()]));
+    vcx.simulate_input("KOSPI2");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("KOSPI2"));
+    assert!(
+        h.editor(&vcx).is_some(),
+        "the label editor opens on the draft"
+    );
+    assert!(
+        h.header(&vcx).contains("3 values"),
+        "the draft is not counted: {}",
+        h.header(&vcx)
+    );
+    vcx.simulate_input("Asia");
+    h.press(&mut vcx, "enter");
+    let next = region(&[("SX5E", "Europe"), ("DAX", "Europe"), ("KOSPI2", "Asia")]);
+    assert_eq!(h.edits(&mut vcx), [edit_of(&next)]);
+    assert_eq!(h.label(&vcx, "KOSPI2").as_deref(), Some("Asia"));
+    h.press(&mut vcx, "u");
+    assert!(
+        !h.shown(&vcx).contains(&"KOSPI2".to_string()),
+        "one undo step removes it"
+    );
+}
+
+#[gpui::test]
+fn escape_at_the_label_step_leaves_no_trace(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = adding(cx);
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("NEW");
+    h.press(&mut vcx, "enter");
+    assert!(h.shown(&vcx).contains(&"NEW".to_string()));
+    h.press(&mut vcx, "escape");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert!(!h.shown(&vcx).contains(&"NEW".to_string()));
+    assert!(h.cursor(&vcx).is_some_and(|c| c != "NEW"));
+    // A blank label drops it too.
+    h.press(&mut vcx, "shift-o");
+    vcx.simulate_input("NEW");
+    h.press(&mut vcx, "enter enter");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert!(!h.shown(&vcx).contains(&"NEW".to_string()));
+}
+
+#[gpui::test]
+fn o_on_an_existing_value_edits_its_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = adding(cx);
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("DAX");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    assert_eq!(
+        h.editor(&vcx).unwrap().0,
+        "Europe",
+        "prefilled from its row"
+    );
+    assert_eq!(h.shown(&vcx).len(), 3, "no new row");
+}
+
+#[gpui::test]
+fn a_blank_value_is_refused_under_the_field(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = adding(cx);
+    h.press(&mut vcx, "o enter");
+    assert_eq!(
+        h.mode(&vcx).as_deref(),
+        Some("insert"),
+        "the field stays open"
+    );
+    assert_eq!(h.prompt_error(&vcx).as_deref(), Some("type a value"));
+}
+
+/// No key reaches a values answer while the label editor is open (any
+/// verb closes it first), so the read is asked from inside the tile, as a
+/// reload changing the source column would ask it.
+#[gpui::test]
+fn values_carrying_the_draft_merge_it_into_the_real_row(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = adding(cx);
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("KOSPI2");
+    h.press(&mut vcx, "enter");
+    assert!(h.editor(&vcx).is_some());
+    h.tile.update(&mut vcx, |t, _| t.ask_values(true));
+    let last = h.distinct_requests().last().cloned().unwrap();
+    h.deliver(
+        &mut vcx,
+        last.tag,
+        "underlying_ref",
+        Ok(vec![("DAX", 5), ("NKY", 7), ("SX5E", 3), ("KOSPI2", 2)]),
+    );
+    assert_eq!(h.shown(&vcx).iter().filter(|s| *s == "KOSPI2").count(), 1);
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("KOSPI2"));
+    assert!(h.editor(&vcx).is_some(), "the editor stays on the row");
+    vcx.simulate_input("Asia");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.edits(&mut vcx).len(), 1);
+}
+
+#[gpui::test]
+fn add_is_refused_while_reverting(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = adding(cx);
+    h.tile
+        .update(&mut vcx, |t, _| t.reverting = Some("region".into()));
+    h.press(&mut vcx, "o");
+    assert_eq!(h.mode(&vcx).as_deref(), Some("normal"), "no field opens");
+    assert_eq!(h.notices(&vcx), ["reverting region\u{2026}"]);
+    // The menu says so in its lane.
+    h.press(&mut vcx, ".");
+    let rows = h.action_menu(&vcx).expect("the menu");
+    let add = rows.iter().find(|(t, _)| t == "Add value\u{2026}");
+    assert_eq!(
+        add.and_then(|(_, why)| why.as_deref()),
+        Some("reverting\u{2026}")
+    );
+}
+
+/// A press below the draft row drops the draft, which moves every row under
+/// it up one: the press still lands on the row that was pressed.
+#[gpui::test]
+fn a_press_below_the_draft_lands_on_the_row_pressed(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = adding(cx);
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("NEW");
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.shown(&vcx), ["NKY", "NEW", "DAX", "SX5E"]);
+    h.draw(&mut vcx);
+    let dax = vcx
+        .debug_bounds("classifications-row-DAX")
+        .expect("the row is painted");
+    vcx.simulate_click(dax.center(), gpui::Modifiers::none());
+    assert!(h.editor(&vcx).is_none());
+    assert!(!h.shown(&vcx).contains(&"NEW".to_string()));
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("DAX"));
+    // A right press likewise.
+    h.press(&mut vcx, "o");
+    vcx.simulate_input("NEW");
+    h.press(&mut vcx, "enter");
+    h.draw(&mut vcx);
+    let sx5e = vcx.debug_bounds("classifications-row-SX5E").unwrap();
+    let at = sx5e.center();
+    vcx.simulate_mouse_down(at, gpui::MouseButton::Right, gpui::Modifiers::none());
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("SX5E"));
+    release_the_table_menu(&mut vcx, at);
+}
+
+/// An empty commit over no earlier query keeps nothing, so the next
+/// `escape` goes past the find to the notices.
+#[gpui::test]
+fn an_empty_find_commit_leaves_escape_to_the_notices(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        config_layered(TWO, &["region"], &[]),
+        restored("region"),
+    );
+    let tag = h.distinct_requests()[0].tag;
+    h.deliver(&mut vcx, tag, "underlying_ref", Err("no such column"));
+    assert_eq!(h.notices(&vcx), [NO_SUCH_COLUMN], "fixture");
+    h.find(&mut vcx, FindEvent::Changed(String::new()));
+    h.find(&mut vcx, FindEvent::Committed(String::new()));
+    assert!(h.tile.read_with(&vcx, |t, _| t.find.is_none()));
+    let shows = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        h.tile.read_with(vcx, |t, _| {
+            t.dismissed
+                .visible(t.chrome.notices.iter().cloned())
+                .iter()
+                .any(|n| n.text().as_ref() == NO_SUCH_COLUMN)
+        })
+    };
+    assert!(shows(&h, &vcx), "fixture: the values notice");
+    h.press(&mut vcx, "escape");
+    assert!(!shows(&h, &vcx), "one escape dismisses it");
+}
+
+/// A clear the tile refuses (a revert is on its way) wrote nothing, so it
+/// announces no removal: only the refusal shows.
+#[gpui::test]
+fn a_refused_clear_announces_no_removal(cx: &mut gpui::TestAppContext) {
+    let dims =
+        "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\", \"GHOST\"]\n";
+    let (h, mut vcx) = shown_with(cx, dims, "region", &[("DAX", 5), ("NKY", 7)]);
+    h.goto(&mut vcx, "GHOST");
+    h.tile
+        .update(&mut vcx, |t, _| t.reverting = Some("region".into()));
+    h.press(&mut vcx, "d d");
+    assert!(h.edits(&mut vcx).is_empty());
+    assert!(h.shown(&vcx).contains(&"GHOST".to_string()));
+    let notices = h.notices(&vcx);
+    assert!(
+        !notices.iter().any(|n| n.contains("removed")),
+        "{notices:?}"
+    );
+    assert_eq!(notices, ["reverting region\u{2026}"]);
 }

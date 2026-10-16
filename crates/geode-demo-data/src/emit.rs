@@ -7,7 +7,7 @@
 use crate::model::RiskBatch;
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Canonical name -> the spelling the source file uses.
 const SOURCE_NAMES: &[(&str, &str)] = &[
@@ -47,7 +47,10 @@ const SOURCE_NAMES: &[(&str, &str)] = &[
     ("sc", "SC"),
 ];
 
-/// Measures emitted with a `_USD` twin using the fixed conversion factor 1.08.
+/// Deterministic FX factor for every `_USD` twin, so twins are reproducible.
+pub const USD_FACTOR: f64 = 1.08;
+
+/// Measures emitted with a `_USD` twin using the fixed `USD_FACTOR`.
 const USD_TWINS: &[&str] = &[
     "delta01",
     "delta02",
@@ -71,7 +74,7 @@ const USD_TWINS: &[&str] = &[
 /// to exercise missing-column ingestion and health reporting.
 const OMITTED_FROM_SOME_FILES: &[&str] = &["skew01", "rho_ois010"];
 
-fn source_name(canonical: &str) -> &'static str {
+pub(crate) fn source_name(canonical: &str) -> &'static str {
     SOURCE_NAMES
         .iter()
         .find(|(c, _)| *c == canonical)
@@ -277,8 +280,7 @@ fn header_columns(omit: &[&str]) -> Vec<String> {
 
 fn field_value(batch: &RiskBatch, i: usize, canonical: &str, plant_conflict: bool) -> String {
     if let Some(base) = canonical.strip_suffix("__usd") {
-        // Deterministic FX factor, so the twin is reproducible.
-        return format!("{:.6}", batch.measure(base)[i] * 1.08);
+        return format!("{:.6}", batch.measure(base)[i] * USD_FACTOR);
     }
     match canonical {
         "strike" => format!("{:.2}", batch.strike[i]),
@@ -286,4 +288,107 @@ fn field_value(batch: &RiskBatch, i: usize, canonical: &str, plant_conflict: boo
         name if RiskBatch::IDENTITY.contains(&name) => batch.identity(name)[i].clone(),
         name => format!("{:.6}", batch.measure(name)[i]),
     }
+}
+
+/// Header spellings for scenario axis and measure columns; identity columns
+/// reuse `SOURCE_NAMES`.
+const SCENARIO_SOURCE_NAMES: &[(&str, &str)] = &[
+    ("tenor", "Tenor"),
+    ("moneyness", "Moneyness"),
+    ("spot_shift", "SpotShift"),
+    ("curve_ccy", "CurveCcy"),
+    ("curve_type", "CurveType"),
+    ("vega", "Vega"),
+    ("npv", "NPV"),
+    ("delta", "Delta"),
+    ("gamma", "Gamma"),
+    ("theta", "Theta"),
+    ("repo", "Repo"),
+    ("atm_vol", "ATMVol"),
+    ("skew", "Skew"),
+    ("curvature", "Curvature"),
+    ("diva", "Diva"),
+    ("rho", "Rho"),
+];
+
+fn scenario_header(canonical: &str) -> &'static str {
+    SCENARIO_SOURCE_NAMES
+        .iter()
+        .find(|(c, _)| *c == canonical)
+        .map(|(_, s)| *s)
+        .unwrap_or_else(|| source_name(canonical))
+}
+
+/// One CSV and sentinel per (table, business date, book) under `root`:
+/// `<dataset>_<date>_<book>.csv` for a dataset fed by one report, and
+/// `<report>_<book>_<date>.csv` for each of several reports into one
+/// dataset, so a batch pattern can capture `<report>_<book>` whole: a
+/// partition is (dataset, batch, book), and two reports sharing a batch
+/// would replace each other's rows on every load. Every measure is followed by its `_USD`
+/// twin at the risk emitter's fixed factor. Source times are staggered per
+/// file as the risk emitter does.
+pub fn emit_scenario_directory(
+    set: &crate::ScenarioSet,
+    root: &Path,
+) -> std::io::Result<Vec<EmittedFile>> {
+    std::fs::create_dir_all(root)?;
+    let mut files = Vec::new();
+    let mut idx = 0u32;
+    for table in &set.tables {
+        let n_text = table.text_columns();
+        let mut headers: Vec<String> = table.columns[..n_text]
+            .iter()
+            .map(|c| scenario_header(c).to_string())
+            .collect();
+        for m in &table.columns[n_text..] {
+            headers.push(scenario_header(m).to_string());
+            headers.push(format!("{}_USD", scenario_header(m)));
+        }
+        // Group rows by (date, book); the text layout is identity first, so
+        // business_date is column 0 and book column 1.
+        let mut by_file: BTreeMap<String, Vec<&crate::ScenarioRow>> = BTreeMap::new();
+        for r in &table.rows {
+            let stem = match table.report {
+                None => format!("{}_{}_{}", table.dataset, r.text[0], r.text[1]),
+                Some(report) => format!("{report}_{}_{}", r.text[1], r.text[0]),
+            };
+            by_file.entry(stem).or_default().push(r);
+        }
+        for (stem, rows) in &by_file {
+            let csv_path = root.join(format!("{stem}.csv"));
+            let mut out = std::io::BufWriter::new(std::fs::File::create(&csv_path)?);
+            writeln!(out, "{}", headers.join(","))?;
+            for r in rows {
+                let mut fields: Vec<String> = r.text.clone();
+                for v in &r.measures {
+                    fields.push(format!("{v:.6}"));
+                    fields.push(format!("{:.6}", v * USD_FACTOR));
+                }
+                writeln!(out, "{}", fields.join(","))?;
+            }
+            out.flush()?;
+            let as_of = format!("2026-08-30T{:02}:{:02}:00Z", 9 + (idx % 6), (idx * 11) % 60);
+            let book = rows[0].text[1].clone();
+            let sentinel_path = root.join(format!("{stem}.csv.done"));
+            let doc = serde_json::json!({
+                "dataset": table.dataset,
+                "as_of": as_of,
+                "business_date": rows[0].text[0],
+                "books": [book],
+                "row_count": rows.len(),
+                "columns": headers,
+            });
+            std::fs::write(&sentinel_path, serde_json::to_string_pretty(&doc)?)?;
+            files.push(EmittedFile {
+                csv_path,
+                sentinel_path: Some(sentinel_path),
+                books: vec![book],
+                rows: rows.len(),
+                columns: headers.clone(),
+                as_of,
+            });
+            idx += 1;
+        }
+    }
+    Ok(files)
 }

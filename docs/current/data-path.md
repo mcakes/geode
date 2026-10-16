@@ -591,6 +591,16 @@ See [`publish.rs`](../../crates/geode-data/src/store/publish.rs),
 [`split.rs`](../../crates/geode-data/src/ingest/split.rs), and
 [`series.rs`](../../crates/geode-data/src/store/series.rs).
 
+A measures dataset's axes extend the key of each grain that holds a measure:
+the DDL places the axis columns after the grain key, and the split groups by
+key and axes, so one stored row holds one key at one set of axis values. A
+grain holding only attributes keeps the plain key. A file whose axis column
+is NULL in any row, including a file that lacks the axis column so that it
+reads as NULL, is refused before a generation is reserved (`axis 'tenor' is
+NULL in N rows`), and the source reports it as a failed load; an axis is a
+key, and a NULL one would merge buckets under one row. The refusal spends no
+generation ID and leaves live data untouched.
+
 Source columns the dataset does not declare are ignored and declared
 optional columns the file lacks read as NULL; the load stays `Ok`. Each
 distinct (source, dataset, extra set, missing set) combination emits one
@@ -1211,6 +1221,13 @@ old book. Moves persist: the demo reuses its `$TMPDIR/geode-demo/<rows>-42`
 directory across `--demo` launches, so delete it to restore the generated
 LHUs.
 
+A move rewrites the risk files only. Scenario data is a run made at a point
+in time, not a view of the positions, and the scenario data's source time
+says how old that run is. The demo never re-drops its scenario files, so
+after a demo move the scenario datasets keep the old LHU until the demo
+directory is deleted. A real deployment has the same lag, which ends at its
+next scenario run.
+
 ## Text files
 
 A tile that imports or exports a file asks the data service through
@@ -1294,6 +1311,20 @@ suggestions, action values, diagnostics) stay with the shell, and
 only the picker's key feeds the picker; any other key is a tile's, delivered
 to that tile as `Delivery::Distinct`. A tile's tag counter can equal the
 picker's, so routing by tag alone could fill the picker with a tile's values.
+
+A scenario tile asks a chain of reads under one key and one following tag:
+the axis domains (one distinct per axis, unscoped and restricted to the
+shape's dataset, read again only when the data counter or the effective
+as-of moved since the last read), the main query on the derived view
+`scenario:<kind>` at full depth so the subtotal and total rows ride along,
+and, for a matrix with a Σ row, the totals query. The pool keeps one request
+per key and the flip barrier one entry per key, so the reads run in
+sequence and the trio reaches the barrier as one arrival; concurrent reads
+would supersede one another. A step refused at submission mid-chain answers
+the barrier and forgets the versions it asked under, so the next frame
+notification asks again rather than leaving the refusal standing. A
+snapshot that does not fit the shape keeps the last picture. Hiding the
+tile keeps the chain in flight; closing it cancels by key.
 
 A scope reaching compilation still carrying a named-expression reference
 (`Scope.named` nonempty) is refused outright, with `StoreError::Scope("scope
@@ -1460,6 +1491,13 @@ and grouping columns are not summable. Document-query and catalog snapshot
 builders mark their columns false; custom builders must supply the flag
 explicitly. Selection totals require this flag and additive contributing
 values. Attribution alone cannot justify a total of maxima or ratios.
+
+Grouping by an axis is grouping by a key column of the measure grain, so an
+axis needs no unanimity rule and no join. Attribution along axes follows the
+bucket/scenario rule: omitting a bucket axis sums its partition and stays
+attributable, while a level whose grouping omits a scenario axis is
+non-attributable and shows NULL (see
+[axes on measures datasets](typed-documents.md#dataset-families-and-validation)).
 
 ### History requests
 
@@ -1933,9 +1971,15 @@ future-stamped source data. Unknown health labels and generations without a
 file-catalog record do not establish a health report.
 
 The catalog does not record which configured source owns a file generation.
-Sources sharing a dataset therefore receive the same persisted degradation
-at startup, which can conservatively over-report a source's load health.
-Seeds use publication's batch key so a corrected load can clear them.
+A persisted condition is seeded onto the directory sources of its dataset
+whose globs match the condition's file path; a file no source's globs
+match, a generation with no recorded path, or a dataset with no directory
+source falls back to every source of the dataset, a conservative
+over-report. Seeding by path keeps one report's condition off another
+report's source, which never reports that batch and so could never clear
+it. Seeds use publication's batch key so a corrected load on the owning
+source can clear them; a fallback seed on a source that never loads that
+batch stands until a restart seeds by path again.
 
 Health reaches a tile through the shell's `Diagnostics` entity, never the
 data handle. The app bridge describes each source with its dataset at attach;

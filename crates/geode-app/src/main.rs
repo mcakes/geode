@@ -38,6 +38,13 @@ use gpui::prelude::*;
 use gpui_component::{Root, TitleBar};
 
 fn main() {
+    // Installer callbacks must exit before logging, argument parsing or opening
+    // a store/window. Applying updates needs collector coordination first.
+    #[cfg(windows)]
+    velopack::VelopackApp::build()
+        .set_auto_apply_on_startup(false)
+        .run();
+
     // Install logging before configuration loading so startup failures reach the
     // ring, stderr, and any available file sink. Apply configured levels once
     // configuration is loaded. Keep `_log_guard` bound until application exit;
@@ -103,6 +110,8 @@ fn main() {
             geode_classifications::init(cx);
             // The watchlist grid likewise.
             geode_watchlist::init(cx);
+            // The scenario grid likewise.
+            geode_scenario::init(cx);
             // Keep table bindings from consuming the pricer's editing keys.
             geode_pricer::init(cx);
 
@@ -297,6 +306,11 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     for panel in &bridge.panels {
         roster.add(Box::new(panel.clone()));
     }
+    // One tile kind per accepted scenario shape, in `scenarios` order; only
+    // the first ships the shared scenario keymap fragment.
+    for shape in &bridge.scenarios {
+        roster.add(Box::new(shape.clone()));
+    }
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.volslice.clone()));
     roster.add(Box::new(bridge.classifications.clone()));
@@ -330,7 +344,8 @@ fn add_dimension_actions(
 
 /// Every builtin config doc: the shell's keymap, the pricer's two bundled
 /// views and seven package templates (a desk or user layer overrides a
-/// view or a template by name), the builtin market-data panels, and
+/// view or a template by name), the builtin market-data panels and
+/// scenario shapes, and
 /// `geode_compose::builtin_data_layer` (the pricer's two datasets and the
 /// `--demo` layer), which the collector builds alone.
 fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
@@ -354,6 +369,14 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_marketdata::core::BUILTIN_PANELS,
         )
         .expect("BUILTIN_PANELS is well-formed TOML"),
+        // The builtin scenario shapes. `scenarios` replaces per shape name,
+        // so a desk or user scenarios doc adds shapes beside these or
+        // replaces one whole; a refused override takes the builtin down too.
+        LayerDoc::builtin(
+            geode_core::scenario::SCENARIOS_DOC,
+            geode_scenario::core::spec::BUILTIN_SCENARIOS,
+        )
+        .expect("BUILTIN_SCENARIOS is well-formed TOML"),
     ];
     builtin.extend(geode_compose::builtin_data_layer(demo_root));
     builtin
@@ -444,11 +467,13 @@ fn build_shell_services(
     // those kinds have no add-tile actions and restored tiles remain placeholders.
     // The builtin pricer dataset and views normally supply the required documents.
     let db = geode_compose::store_path(&config, demo_root);
-    // Refused panels: printed here and carried into the shell's config
-    // section, where they stay until a restart can change which panels exist.
+    // Refused panels and scenario shapes: printed here and carried into the
+    // shell's config section, where they stay until a restart can change
+    // which kinds exist.
     let mut composition_diagnostics = Vec::new();
     let bridge = bridge::data_setup(&config, db, adapters, pricers, vol_models).map(|setup| {
         composition_diagnostics = setup.panel_diagnostics.clone();
+        composition_diagnostics.extend(setup.scenario_diagnostics.iter().cloned());
         let find_style = FindStyle::from_config(&config);
         let stale_after = bridge::stale_after_from_config(&config);
         let bridge = bridge::start(setup, find_style, stale_after, cx);
@@ -465,7 +490,7 @@ fn build_shell_services(
     // Register split actions for the complete roster before keymap compilation.
     // A kind whose add-tile ids would collide is refused rather than panicking;
     // its Error joins the refused panels in the config section.
-    let add_diags = register_add_actions(&mut registry, &roster.kinds());
+    let add_diags = register_add_actions(&mut registry, &roster.titled_kinds());
     for diag in &add_diags {
         print_diagnostic(diag);
     }
@@ -950,7 +975,7 @@ label = "skew"
         )));
         assert!(roster.kinds().contains(&"pricer"));
         let mut registry = ActionRegistry::default();
-        register_add_actions(&mut registry, &roster.kinds());
+        register_add_actions(&mut registry, &roster.titled_kinds());
         roster.register_actions(&mut registry);
         assert_eq!(
             registry
@@ -1016,11 +1041,12 @@ label = "skew"
             "one fragment for three panels"
         );
         let mut registry = ActionRegistry::default();
-        register_add_actions(&mut registry, &roster.kinds());
+        register_add_actions(&mut registry, &roster.titled_kinds());
+        // P3-l: each panel's row reads its entry's title.
         for (kind, title) in [
-            ("cvi", "Cvi"),
+            ("cvi", "CVI"),
             ("dividend", "Dividend"),
-            ("cvi_wide", "Cvi_wide"),
+            ("cvi_wide", "CVI (wide)"),
         ] {
             assert_eq!(
                 registry
@@ -1055,7 +1081,12 @@ label = "skew"
         let mut roster = ModuleRoster::new();
         add_bridge_modules(&mut roster, &bridge);
         let panels: Vec<&str> = bridge.panels.iter().map(|f| f.kind()).collect();
-        for kind in roster.kinds().into_iter().filter(|k| !panels.contains(k)) {
+        let scenarios: Vec<&str> = bridge.scenarios.iter().map(|f| f.kind()).collect();
+        for kind in roster
+            .kinds()
+            .into_iter()
+            .filter(|k| !panels.contains(k) && !scenarios.contains(k))
+        {
             assert!(bridge::MODULE_KINDS.contains(&kind), "{kind}");
         }
         bridge.handle.shutdown();
@@ -1086,7 +1117,7 @@ label = "skew"
         add_bridge_modules(&mut roster, &bridge);
         assert!(roster.kinds().contains(&"volslice"));
         let mut registry = ActionRegistry::default();
-        register_add_actions(&mut registry, &roster.kinds());
+        register_add_actions(&mut registry, &roster.titled_kinds());
         roster.register_actions(&mut registry);
         assert_eq!(
             registry
@@ -1109,6 +1140,308 @@ label = "skew"
         bridge.handle.shutdown();
     }
 
+    /// The five builtin shapes become roster kinds in document order,
+    /// right after the panels; each gets an add-tile row titled by the
+    /// shape's title (P3-l), the shared `scenario::` actions are
+    /// registered once, the first factory ships the fragment, and the
+    /// data service holds one derived view per shape.
+    #[gpui::test]
+    fn the_roster_lists_the_five_scenario_kinds_with_their_titles(cx: &mut gpui::TestAppContext) {
+        use geode_shell::actions::ActionId;
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            ..ConfigSources::default()
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .unwrap();
+        assert!(
+            setup.scenario_diagnostics.is_empty(),
+            "{:?}",
+            setup.scenario_diagnostics
+        );
+        let derived: Vec<&str> = setup
+            .config
+            .views
+            .iter()
+            .filter(|v| v.name.starts_with("scenario:"))
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(
+            derived,
+            [
+                "scenario:vega_kt",
+                "scenario:vega_spot",
+                "scenario:spot_ladder",
+                "scenario:by_maturity",
+                "scenario:rho"
+            ]
+        );
+        assert!(
+            !setup.views.iter().any(|v| v.name.starts_with("scenario:")),
+            "the blotter's list never sees them"
+        );
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        add_bridge_modules(&mut roster, &bridge);
+        let kinds = roster.kinds();
+        let i = kinds.iter().position(|k| *k == "vega_kt").unwrap();
+        assert_eq!(
+            &kinds[i..i + 5],
+            &["vega_kt", "vega_spot", "spot_ladder", "by_maturity", "rho"]
+        );
+        assert!(
+            i > kinds.iter().position(|k| *k == "dividend").unwrap(),
+            "after the panels"
+        );
+        let mut registry = ActionRegistry::default();
+        let diags = register_add_actions(&mut registry, &roster.titled_kinds());
+        assert!(diags.is_empty(), "{diags:?}");
+        roster.register_actions(&mut registry);
+        let title = |id: &str| {
+            registry
+                .get(&ActionId(id.into()))
+                .unwrap_or_else(|| panic!("{id} is registered"))
+                .title
+                .clone()
+        };
+        assert_eq!(title("tile::add_vega_kt"), "Vega K/T: Split");
+        assert_eq!(title("tile::add_spot_ladder_stacked"), "Spot ladder: Stack");
+        assert_eq!(title("tile::add_cvi"), "CVI: Split", "a panel's title too");
+        assert!(
+            registry
+                .get(&ActionId("scenario::currency".into()))
+                .is_some()
+        );
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(
+            docs.iter()
+                .filter(|d| d.file.to_string_lossy() == "<module:vega_kt>")
+                .count(),
+            1,
+            "one fragment, from the first scenario factory"
+        );
+        assert!(
+            !docs
+                .iter()
+                .any(|d| d.file.to_string_lossy() == "<module:rho>")
+        );
+        for kind in ["vega_kt", "rho"] {
+            let f = roster.factory(kind).unwrap();
+            assert_eq!(f.accepts(), &["underlying_ref"], "{kind}");
+            let state = f
+                .launch_state(&geode_core::context::DimensionContext::of(&[(
+                    "underlying_ref",
+                    "SPX",
+                )]))
+                .unwrap();
+            assert!(state.get("filter").is_some(), "{kind}: {state:?}");
+        }
+        bridge.handle.shutdown();
+    }
+
+    /// T10-1: without the demo layer the builtin shapes' datasets are
+    /// undeclared; the shapes are withheld with no Error and no kind, while
+    /// a user shape over an undeclared dataset is still refused.
+    #[gpui::test]
+    fn without_the_demo_layer_the_builtin_shapes_are_withheld_quietly(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("scenarios.toml"),
+            "config_version = 1\n\n[mine]\ntitle = \"M\"\ndataset = \"nonesuch\"\nrows = \"tenor\"\ncolumns = { axis = \"moneyness\" }\nvalue = \"vega\"\npaint = \"heat\"\n",
+        )
+        .unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(None),
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+        )
+        .expect("the builtin pricer layer declares datasets and views");
+        let paths: Vec<&str> = setup
+            .scenario_diagnostics
+            .iter()
+            .filter_map(|d| d.path.as_deref())
+            .collect();
+        assert_eq!(paths, ["scenarios.mine.dataset"], "only the user's shape");
+        assert!(setup.scenarios.is_empty());
+        assert!(
+            !setup
+                .config
+                .views
+                .iter()
+                .any(|v| v.name.starts_with("scenario:"))
+        );
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        add_bridge_modules(&mut roster, &bridge);
+        for kind in [
+            "vega_kt",
+            "vega_spot",
+            "spot_ladder",
+            "by_maturity",
+            "rho",
+            "mine",
+        ] {
+            assert!(!roster.kinds().contains(&kind), "{kind}");
+        }
+        bridge.handle.shutdown();
+    }
+
+    /// P3-i: a shape named like another module's kind, or like an accepted
+    /// panel, is refused with one Error and never becomes a kind; the
+    /// panel keeps its kind.
+    #[gpui::test]
+    fn a_shape_named_like_another_kind_is_refused(cx: &mut gpui::TestAppContext) {
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("scenarios.toml"),
+            "config_version = 1\n\n[volslice]\ntitle = \"V\"\ndataset = \"vega_buckets\"\nrows = \"tenor\"\ncolumns = { axis = \"moneyness\" }\nvalue = \"vega\"\npaint = \"heat\"\n\n[cvi]\ntitle = \"C\"\ndataset = \"vega_buckets\"\nrows = \"tenor\"\ncolumns = { axis = \"moneyness\" }\nvalue = \"vega\"\npaint = \"heat\"\n",
+        )
+        .unwrap();
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        let messages: Vec<String> = services
+            .composition_diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("'volslice' is another module's tile kind")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("'cvi' is another module's tile kind")),
+            "{messages:?}"
+        );
+        let kinds = services.roster.kinds();
+        assert_eq!(kinds.iter().filter(|k| **k == "cvi").count(), 1);
+        assert!(
+            services
+                .roster
+                .factory("cvi")
+                .unwrap()
+                .accepts()
+                .contains(&"underlying_ref")
+        );
+        assert_eq!(
+            services.roster.factory("cvi").unwrap().title(),
+            "CVI",
+            "the panel keeps its kind"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// P3-g: a configured view already named `scenario:<kind>` refuses the
+    /// shape at startup rather than letting the service answer the wrong
+    /// view.
+    #[gpui::test]
+    fn a_configured_view_named_like_a_derived_one_refuses_the_shape(cx: &mut gpui::TestAppContext) {
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("views.toml"),
+            "config_version = 1\n\n[\"scenario:rho\"]\ndataset = \"rho_curves\"\ngrouping = [\"tenor\"]\n[[\"scenario:rho\".columns]]\nname = \"rho\"\nkind = \"measure\"\n",
+        )
+        .unwrap();
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        let messages: Vec<String> = services
+            .composition_diagnostics
+            .iter()
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m
+                    .contains("view 'scenario:rho' is already configured; remove it and restart")),
+            "{messages:?}"
+        );
+        assert!(!services.roster.kinds().contains(&"rho"));
+        assert!(
+            services.roster.kinds().contains(&"vega_kt"),
+            "the other shapes stand"
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// P3-j: editing `scenarios` paints `restart required` and changes
+    /// nothing in the running shell.
+    #[gpui::test]
+    fn editing_scenarios_asks_for_a_restart_and_changes_no_open_tile(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use geode_shell::actions::ActionId;
+        use geode_shell::tiling::TileId;
+        let demo = tempfile::tempdir().unwrap();
+        let user = tempfile::tempdir().unwrap();
+        write_session(user.path(), "vega_kt");
+        let (services, bridge) = compose(cx, demo.path(), user.path());
+        let builtin = services.builtin.clone();
+        let (window, mut vcx) = open(cx, services);
+        let shell = shell_of(&window, &mut vcx);
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("vega_kt")
+        );
+        std::fs::write(
+            user.path().join("scenarios.toml"),
+            "config_version = 1\n\n[vega_new]\ntitle = \"New\"\ndataset = \"vega_buckets\"\nrows = \"tenor\"\ncolumns = { axis = \"moneyness\" }\nvalue = \"vega\"\npaint = \"plain\"\n",
+        )
+        .unwrap();
+        let candidate = Config::load(&ConfigSources {
+            builtin,
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        vcx.run_until_parked();
+        let restart = shell.read_with(&vcx, |s, cx| {
+            s.diagnostics().read(cx).restart_required.clone()
+        });
+        assert!(
+            restart.as_deref().is_some_and(|m| m.contains("scenarios")),
+            "{restart:?}"
+        );
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
+            Some("vega_kt")
+        );
+        let (kinds, add_row) = shell.read_with(&vcx, |s, _| {
+            (
+                s.services().roster.kinds(),
+                s.services()
+                    .registry
+                    .get(&ActionId("tile::add_vega_new".into()))
+                    .is_some(),
+            )
+        });
+        assert!(!kinds.contains(&"vega_new") && !add_row, "{kinds:?}");
+        bridge.handle.shutdown();
+    }
+
     /// The timeseries forwarder must expose the factory's kind, registered
     /// actions, and keymap fragment. Check `timeseries::add` explicitly because
     /// the shipped fragment binds it to `a`.
@@ -1125,7 +1458,7 @@ label = "skew"
         assert!(roster.kinds().contains(&"timeseries"));
 
         let mut registry = ActionRegistry::default();
-        register_add_actions(&mut registry, &roster.kinds());
+        register_add_actions(&mut registry, &roster.titled_kinds());
         roster.register_actions(&mut registry);
         assert_eq!(
             registry
@@ -1200,7 +1533,7 @@ label = "skew"
             Arc::new(Ring::new(16)),
             config.clone(),
         ))));
-        register_add_actions(&mut registry, &roster.kinds());
+        register_add_actions(&mut registry, &roster.titled_kinds());
         roster.register_actions(&mut registry);
         let page_titles: Vec<(&str, &str)> = pages.entries().map(|e| (e.kind, e.title)).collect();
         register_page_actions(&mut registry, &page_titles);
@@ -1311,6 +1644,8 @@ label = "skew"
             (tile("classifications", "normal"), "ctrl+c", "y y"),
             (tile("classifications", "normal"), "ctrl+v", "p"),
             (tile("classifications", "visual"), "ctrl+v", "p"),
+            (tile("scenario", "normal"), "ctrl+c", "y"),
+            (tile("scenario", "visual"), "ctrl+c", "y"),
             (tile("guide", "normal"), "ctrl+c", "y"),
             (page("diagnostics"), "ctrl+c", "y"),
         ];
@@ -1379,7 +1714,19 @@ label = "skew"
             .into_iter()
             .filter(|k| roster.factory(k).is_some_and(|f| spx.offers(f.accepts())))
             .collect();
-        assert_eq!(accepting, vec!["cvi", "dividend", "volslice"]);
+        assert_eq!(
+            accepting,
+            vec![
+                "cvi",
+                "dividend",
+                "vega_kt",
+                "vega_spot",
+                "spot_ladder",
+                "by_maturity",
+                "rho",
+                "volslice"
+            ]
+        );
         let ids: Vec<&str> = roster.actions().iter().map(|a| a.id()).collect();
         assert_eq!(
             ids,
@@ -1504,6 +1851,7 @@ label = "skew"
     ) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
         cx.update(gpui_component::init);
         cx.update(geode_marketdata::init);
+        cx.update(geode_scenario::init);
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
@@ -1697,7 +2045,7 @@ label = "skew"
                 .get(&ActionId("tile::add_cvi_stacked".into()))
                 .expect("the CVI panel's stack row")
                 .title,
-            "Cvi: Stack"
+            "CVI: Stack"
         );
         bridge.handle.shutdown();
     }

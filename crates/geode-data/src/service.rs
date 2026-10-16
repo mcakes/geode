@@ -514,6 +514,35 @@ fn polled_event(source: String, ready: usize, at: SystemTime, next_in: Duration)
     }
 }
 
+/// The sources of one dataset a restart seeds a persisted condition onto:
+/// the directory sources whose globs match the condition's file. A file no
+/// source's globs match (none recorded, or the globs changed since), or a
+/// dataset with no directory source, keeps the conservative rule: every
+/// source of the dataset gets it.
+fn seed_owners<'a>(sources: &[&'a SourceSpec], path: Option<&str>) -> Vec<&'a SourceSpec> {
+    let options = glob::MatchOptions {
+        require_literal_separator: true,
+        ..glob::MatchOptions::new()
+    };
+    let owners: Vec<&SourceSpec> = match path {
+        None => Vec::new(),
+        Some(path) => sources
+            .iter()
+            .copied()
+            .filter(|s| {
+                s.paths
+                    .iter()
+                    .any(|g| glob::Pattern::new(g).is_ok_and(|p| p.matches_with(path, options)))
+            })
+            .collect(),
+    };
+    if owners.is_empty() {
+        sources.to_vec()
+    } else {
+        owners
+    }
+}
+
 /// Log an ingest failure with dataset, batch, and reason at error level.
 fn log_ingest_failure(dataset: &str, batch: &str, reason: &str) {
     tracing::error!(target: "geode::ingest", "{dataset}/{batch}: {reason}");
@@ -1446,15 +1475,22 @@ impl DataService {
 
         // Seed load health from persisted live file generations before workers
         // start. Unchanged files may never reload, so their degradation must survive
-        // restart. Query once per dataset and apply the result to each configured
-        // source for it: the catalog does not retain source ownership, so sources
-        // sharing a dataset can receive the same conservative degradation.
+        // restart. Query once per dataset. The catalog does not record source
+        // ownership, so a batch goes to the sources whose globs match its file
+        // (`seed_owners`): a condition on another report's file would sit on a
+        // source that never reports that batch again, and no corrected load
+        // could clear it.
         let datasets: std::collections::BTreeSet<&str> =
             config.sources.iter().map(|s| s.dataset.as_str()).collect();
         for dataset in datasets {
-            let unhealthy = Catalog::new(&conn).live_health(dataset)?;
-            for spec in config.sources.iter().filter(|s| s.dataset == dataset) {
-                for (batch, health) in &unhealthy {
+            let unhealthy = Catalog::new(&conn).live_health_with_paths(dataset)?;
+            let sources: Vec<&SourceSpec> = config
+                .sources
+                .iter()
+                .filter(|s| s.dataset == dataset)
+                .collect();
+            for (batch, health, path) in &unhealthy {
+                for spec in seed_owners(&sources, path.as_deref()) {
                     let (_, reason) = health.to_parts();
                     let detail = format!("{batch}: {}", reason.unwrap_or_default());
                     let source = spec.name.clone();
@@ -3653,6 +3689,7 @@ mod tests {
                     csv_path: &file.csv_path,
                     sentinel: &sentinel,
                     batch: &batch,
+                    measures: None,
                 },
             );
         }
@@ -9614,6 +9651,92 @@ source_name = "NPV"
              the same as a freshly published one"
         );
         svc.shutdown();
+    }
+
+    /// Two reports into one dataset: a restart seeds a persisted condition
+    /// onto the source whose globs match its file, never onto the other
+    /// report's source, which would never report that batch again.
+    #[test]
+    fn a_restart_seeds_a_degraded_batch_onto_its_own_source_only() {
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let db_path = db.path().join("geode.duckdb");
+        write_carried_csv(
+            src.path(),
+            "BK0,L0,P1,C,I1,USD,100\nBK0,L0,P1,C,I1,EUR,100\n",
+        );
+        {
+            let (svc, rx) = DataService::open_channel(carried_config(
+                db_path.clone(),
+                src.path(),
+                Duration::from_secs(3600),
+            ))
+            .unwrap();
+            let worst = await_unhealthy(&rx, Duration::from_secs(30));
+            assert!(
+                matches!(worst, Some(Health::Degraded { .. })),
+                "setup: the file must degrade, got {worst:?}"
+            );
+            svc.shutdown();
+            drop(svc);
+        }
+
+        // The restart, with a second report's source over the same dataset.
+        let mut config = carried_config(db_path, src.path(), Duration::from_secs(3600));
+        config.sources.push(crate::source::SourceSpec {
+            pending_timeout: Duration::from_secs(3600),
+            poll_interval: Duration::from_secs(3600),
+            ..crate::source::SourceSpec::directory(
+                "second_report",
+                "risk_snapshot",
+                vec![format!("{}/*.csv", other.path().display())],
+            )
+        });
+        let (svc, rx) = DataService::open_channel(config).unwrap();
+        let mut owner = false;
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Ok(DataEvent::Health {
+                source,
+                worst,
+                detail,
+            }) = rx.recv_timeout(Duration::from_millis(100))
+            {
+                // The seed's detail names its batch.
+                if worst == Health::Ok || !detail.contains("BK0: ") {
+                    continue;
+                }
+                assert_eq!(
+                    source, "eod_risk",
+                    "the other report's source never owned that file: {worst:?}"
+                );
+                owner = true;
+            }
+        }
+        assert!(owner, "the file's own source is seeded");
+        svc.shutdown();
+    }
+
+    #[test]
+    fn a_seed_goes_to_every_source_when_no_glob_owns_the_file() {
+        let a = crate::source::SourceSpec::directory("a", "d", vec!["/x/a_*.csv".into()]);
+        let b = crate::source::SourceSpec::directory("b", "d", vec!["/x/b_*.csv".into()]);
+        let names = |path: Option<&str>| -> Vec<String> {
+            seed_owners(&[&a, &b], path)
+                .iter()
+                .map(|s| s.name.clone())
+                .collect()
+        };
+        assert_eq!(names(Some("/x/b_1.csv")), ["b"]);
+        assert_eq!(names(Some("/x/a_1.csv")), ["a"]);
+        assert_eq!(names(Some("/y/a_1.csv")), ["a", "b"], "no owner: all");
+        assert_eq!(names(None), ["a", "b"], "no path recorded: all");
+        assert_eq!(
+            names(Some("/x/sub/a_1.csv")),
+            ["a", "b"],
+            "a `*` does not cross a separator"
+        );
     }
 
     #[test]

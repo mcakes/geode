@@ -13,6 +13,7 @@ use geode_core::egress_config;
 use geode_core::named::NamedExpressions;
 use geode_core::panel::{KindActionRegistry, PANELS_DOC, PanelSpec, load_panels, refusal};
 use geode_core::query::{AsOf, CatalogParams, DistinctOutcome, ReferenceOutcome, ReferenceParams};
+use geode_core::scenario::ShapeSpec;
 use geode_core::schema::{ColumnType, SchemaSpec};
 use geode_core::scopes::SavedScopes;
 use geode_core::source_config::{SourceShape, parse_duration};
@@ -29,6 +30,7 @@ use geode_pricer::core::{
     PRICER_SHEETS_DATASET, PRICER_TEMPLATES_DOC, PRICER_VIEWS_DOC, TemplateSet, Views,
 };
 use geode_pricer::store::DuckSheetStore;
+use geode_scenario::ScenarioFactory;
 use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, SourceSummary};
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
@@ -75,6 +77,13 @@ pub struct DataSetup {
     /// Error per refused panel for the shell's config section.
     pub panels: Vec<PanelSpec>,
     pub panel_diagnostics: Vec<Diagnostic>,
+    /// The accepted scenario shapes in `scenarios` document order, an
+    /// Error per refused shape for the shell's config section, and the
+    /// derived view per shape, which the service alone holds (`views`,
+    /// the blotter's list, never carries them).
+    pub scenarios: Vec<Arc<ShapeSpec>>,
+    pub scenario_diagnostics: Vec<Diagnostic>,
+    pub scenario_views: Vec<ViewSpec>,
     /// Each classification's winning layer and, for the ones a user copy
     /// shadows, the layer of the copy beneath it, for the classifications
     /// factory's startup snapshot.
@@ -132,6 +141,73 @@ fn load_panels_from_config(
         )
     }));
     (panels, diags)
+}
+
+/// The accepted shapes, in `scenarios` document order, and an Error per
+/// refused one (a builtin shape over an undeclared dataset is withheld
+/// without one). Loaded after the panels: a shape named like another
+/// module's kind or an accepted panel is refused (the later document
+/// loses), and so is one whose derived view name a configured view
+/// already takes (the service answers the first view of a name).
+/// `scenarios` is restart-required, so this runs once per launch.
+fn load_scenarios_from_config(
+    config: &Config,
+    schema: &SchemaSpec,
+    panel_kinds: &[&str],
+    views: &[ViewSpec],
+) -> (Vec<ShapeSpec>, Vec<Diagnostic>) {
+    use geode_core::scenario::{SCENARIOS_DOC, builtin_without_dataset, load_scenarios, refusal};
+    let Some(doc) = config.doc(SCENARIOS_DOC) else {
+        return (Vec::new(), Vec::new());
+    };
+    // The builtin shapes read demo-layer datasets: without that layer each
+    // would be refused with an Error on every launch. A builtin shape over
+    // an undeclared dataset is withheld instead, said at info level and
+    // counted nowhere; any other refusal, and a desk or user shape over an
+    // undeclared dataset, stays an Error.
+    let withheld = builtin_without_dataset(doc, schema);
+    for (kind, dataset) in &withheld {
+        tracing::info!(
+            target: "geode::config",
+            "builtin scenario shape '{kind}' is withheld: dataset '{dataset}' is not declared"
+        );
+    }
+    let (shapes, mut diags) = load_scenarios(doc, schema);
+    diags.retain(|d| {
+        !withheld.iter().any(|(kind, _)| {
+            d.path.as_deref().is_some_and(|p| {
+                p.strip_prefix(SCENARIOS_DOC)
+                    .and_then(|p| p.strip_prefix('.'))
+                    .and_then(|p| p.strip_prefix(kind.as_str()))
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with('.'))
+            })
+        })
+    });
+    let mut accepted = Vec::with_capacity(shapes.len());
+    for shape in shapes {
+        let kind = shape.kind.as_str();
+        if MODULE_KINDS.contains(&kind) || panel_kinds.contains(&kind) {
+            diags.push(refusal(
+                doc,
+                kind,
+                "",
+                &format!("'{kind}' is another module's tile kind"),
+            ));
+            continue;
+        }
+        let view = shape.view_name();
+        if views.iter().any(|v| v.name == view) {
+            diags.push(refusal(
+                doc,
+                kind,
+                "",
+                &format!("view '{view}' is already configured; remove it and restart"),
+            ));
+            continue;
+        }
+        accepted.push(shape);
+    }
+    (accepted, diags)
 }
 
 /// Build setup when both datasets and views documents are present. Empty
@@ -252,6 +328,22 @@ pub fn data_setup(
     // the kinds the service registers.
     let (panels, panel_diagnostics) =
         load_panels_from_config(config, &service.schema, &document_kinds);
+    let panel_kinds: Vec<&str> = panels.iter().map(|p| p.kind.as_str()).collect();
+    let (shapes, scenario_diagnostics) =
+        load_scenarios_from_config(config, &service.schema, &panel_kinds, &views);
+    // One derived view per shape, for the service alone (the blotter's list
+    // is `views`): the tile queries by view name. `load_scenarios` accepted
+    // only shapes whose dataset the schema declares.
+    let scenario_views: Vec<ViewSpec> = shapes
+        .iter()
+        .filter_map(|s| {
+            service
+                .schema
+                .dataset(&s.dataset)
+                .map(|ds| s.derive_view(ds))
+        })
+        .collect();
+    let scenarios: Vec<Arc<ShapeSpec>> = shapes.into_iter().map(Arc::new).collect();
     let local_datasets: HashSet<String> = service
         .schema
         .datasets
@@ -264,7 +356,11 @@ pub fn data_setup(
         classification_provenance(config, &dimensions);
     let (watchlist_scopes, watchlist_named) =
         scopes_and_named(config, &service.schema, &dimensions);
-    service.views = views.clone();
+    service.views = views
+        .iter()
+        .cloned()
+        .chain(scenario_views.iter().cloned())
+        .collect();
     service.pricer = pricer;
     service.vol = vol;
     service.egress = egress;
@@ -283,6 +379,9 @@ pub fn data_setup(
         pricer_key: pricer_config_key(config),
         panels,
         panel_diagnostics,
+        scenarios,
+        scenario_diagnostics,
+        scenario_views,
         classification_layers,
         classification_shadowed,
         watchlist_scopes,
@@ -581,6 +680,17 @@ pub struct Bridge {
     /// The list behind the pricer's entry-bar underlyings; the reload
     /// observer sets it from `[pricing] underlyings`.
     pub underlyings: Rc<UnderlyingList>,
+    /// One factory per accepted scenario shape, in `scenarios` document
+    /// order. Retained for reload updates to the shared stale threshold.
+    pub scenarios: Vec<Rc<ScenarioFactory>>,
+    /// The derived view per accepted shape, fixed for the run like the
+    /// shapes: every views hand-off on reload carries them after the
+    /// configured views.
+    pub scenario_views: Vec<ViewSpec>,
+    /// The schema, dimensions and named colors every scenario factory and
+    /// tile shares; the reload observer writes the dimensions and colors,
+    /// and the schema stays the startup one.
+    scenario_cells: ScenarioCells,
     events: crate::events::Receiver,
     dropped: Arc<AtomicU64>,
     /// Startup source descriptions paired with their schema-derived pipeline.
@@ -636,6 +746,73 @@ fn panel_factories(
         .collect()
 }
 
+/// What every scenario factory and its tiles share with the reload
+/// observer: `:filter`'s schema (the startup one, fixed for the run) and
+/// dimensions, and the named colors a `format.color` resolves against.
+#[derive(Clone, Default)]
+struct ScenarioCells {
+    schema: Rc<RefCell<SchemaSpec>>,
+    dims: Rc<RefCell<DerivedDimensions>>,
+    colours: Rc<RefCell<Arc<NamedColours>>>,
+}
+
+/// One factory per accepted shape. Only the first ships the shared
+/// `scenario` keymap fragment: every kind declares the same context and
+/// bindings, and a second copy would splice a duplicate layer.
+fn scenario_factories(
+    handle: &DataHandle,
+    shapes: &[Arc<ShapeSpec>],
+    stale_after: Duration,
+    cells: &ScenarioCells,
+) -> Vec<Rc<ScenarioFactory>> {
+    shapes
+        .iter()
+        .enumerate()
+        .map(|(i, shape)| {
+            let factory = ScenarioFactory::new(handle.clone(), shape.clone(), stale_after)
+                .with_schema(cells.schema.clone(), cells.dims.clone())
+                .with_colours(cells.colours.clone());
+            Rc::new(if i == 0 {
+                factory
+            } else {
+                factory.without_keymap()
+            })
+        })
+        .collect()
+}
+
+/// The configured views with any named like an accepted shape's derived
+/// view taken out, and one Warning per view taken. Startup refuses such a
+/// shape instead; a view configured by a later reload meets a shape that
+/// is already running, and the service answers the first view of a name,
+/// so the configured one would otherwise stand in for the tile's.
+fn without_scenario_names(
+    views: Vec<ViewSpec>,
+    scenario_views: &[ViewSpec],
+) -> (Vec<ViewSpec>, Vec<Diagnostic>) {
+    let mut diags = Vec::new();
+    let kept = views
+        .into_iter()
+        .filter(|v| {
+            let taken = scenario_views.iter().any(|s| s.name == v.name);
+            if taken {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: format!(
+                        "view '{}' is a running scenario shape's view; the configured view is ignored until a restart, which refuses the shape instead",
+                        v.name
+                    ),
+                    path: Some(format!("views.{}", v.name)),
+                });
+            }
+            !taken
+        })
+        .collect();
+    (kept, diags)
+}
+
 /// Pair sources with their pipeline using the service's startup schema.
 /// Adapter name alone cannot distinguish subscriptions from fetch sources.
 fn source_shapes(sources: &[SourceSpec], schema: &SchemaSpec) -> Vec<(SourceSpec, SourceShape)> {
@@ -662,6 +839,11 @@ pub fn start(
     let schema = setup.config.schema.clone();
     let dimensions = setup.dimensions.clone();
     let pricer_dims = setup.dimensions.clone();
+    let scenario_cells = ScenarioCells {
+        schema: Rc::new(RefCell::new(schema.clone())),
+        dims: Rc::new(RefCell::new(setup.dimensions.clone())),
+        colours: Rc::new(RefCell::new(Arc::new(setup.colours.clone()))),
+    };
     let sources = source_shapes(&setup.config.sources, &schema);
     let reference_datasets = schema
         .datasets
@@ -770,8 +952,12 @@ pub fn start(
     );
     // Panels and blotters use the same configured stale threshold.
     let panels = panel_factories(&handle, panels, stale_after, &egress_targets);
+    let scenarios = scenario_factories(&handle, &setup.scenarios, stale_after, &scenario_cells);
     Bridge {
         panels,
+        scenarios,
+        scenario_views: setup.scenario_views,
+        scenario_cells,
         timeseries,
         volslice,
         classifications,
@@ -1264,14 +1450,21 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let watchlist_cache = watchlist_cache.clone();
         let startup_schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
+        let scenarios = bridge.scenarios.clone();
+        let scenario_views = bridge.scenario_views.clone();
+        let scenario_cells = bridge.scenario_cells.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
                 let config = shell.read(cx).config();
                 if config.doc("views").is_none() {
                     return;
                 }
-                // Use the same presentation-aware view loader as startup.
-                let (views, presentation_diags) = load_views(config);
+                // Use the same presentation-aware view loader as startup,
+                // with any view named like a running shape's taken out
+                // before any consumer sees it.
+                let (views, mut presentation_diags) = load_views(config);
+                let (views, taken) = without_scenario_names(views, &scenario_views);
+                presentation_diags.extend(taken);
                 // Log presentation diagnostics and append/deduplicate them in the data lane.
                 // Replacing the config lane here would erase the shell's reload diagnostics.
                 // Defer entity mutation until the config borrow is no longer needed.
@@ -1287,6 +1480,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 }
                 // Update both factories from one parsed color definition set.
                 timeseries.set_colours(colours.clone());
+                *scenario_cells.colours.borrow_mut() = Arc::new(colours.clone());
                 factory.set_colours(colours);
                 let (dims, _) = config
                     .doc(DIMENSIONS_DOC)
@@ -1308,6 +1502,11 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     pinned = Some(Rc::new(schema.clone()));
                     factory.set_schema(schema);
                 }
+                // The scenario cell keeps the startup schema: the shapes and
+                // their derived views are fixed for the run, and `:filter`
+                // must compile against the datasets the service serves, not
+                // an edited `datasets` doc awaiting restart.
+                *scenario_cells.dims.borrow_mut() = dims.clone();
                 factory.set_dims(dims.clone());
                 // Watchlist rules fold against the schema the service
                 // serves, not an edited `datasets` doc awaiting restart.
@@ -1337,7 +1536,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 };
                 // A refused hand-off leaves the service on the old views while
                 // the factory builds tiles against the new ones: say so.
-                let handoff = match handle.replace_views(views, dims) {
+                // The service alone holds the scenario shapes' derived
+                // views, after the configured ones.
+                let service_views = views
+                    .into_iter()
+                    .chain(scenario_views.iter().cloned())
+                    .collect();
+                let handoff = match handle.replace_views(service_views, dims) {
                     Ok(()) => None,
                     Err(refusal) => Some(Diagnostic {
                         severity: match refusal {
@@ -1401,6 +1606,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                 // Every panel shares the one stale threshold.
                 for panel in &panels {
                     panel.set_stale_after(stale_after);
+                }
+                for shape in &scenarios {
+                    shape.set_stale_after(stale_after);
                 }
             }
             ShellEvent::RestartRequired(_) => {}
@@ -2278,6 +2486,9 @@ role = "key"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -3523,7 +3734,7 @@ grain = "underlying"
             "fixture: no views handed over yet"
         );
 
-        s.vcx.simulate_keystrokes("c");
+        s.vcx.simulate_keystrokes("i");
         s.draw();
         s.vcx.simulate_input("Alpine");
         s.vcx.simulate_keystrokes("enter");
@@ -7122,6 +7333,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Rc::new(["pricer_sheets".to_string()].into_iter().collect()),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7235,6 +7449,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7340,6 +7557,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7464,6 +7684,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7530,6 +7753,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7596,6 +7822,9 @@ grain = "underlying"
             )),
             pricer: test_pricer(&handle),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7667,6 +7896,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7765,6 +7997,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7788,6 +8023,135 @@ grain = "underlying"
                 .values
                 .clone()
         })
+    }
+
+    /// PF-15: a view configured by a reload under a running shape's
+    /// derived name never reaches the service ahead of the derived one (the
+    /// service answers the first view of a name): the hand-off carries the
+    /// configured views without it, then the derived views, and one
+    /// Warning names it. The same reload writes the scenario factories'
+    /// shared colors and dimensions.
+    #[gpui::test]
+    fn a_reload_drops_a_configured_view_named_like_a_running_shape(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin(
+                    "views",
+                    "[tree]\ndataset = \"risk\"\n[\"scenario:rho\"]\ndataset = \"risk\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("colors", "[delta]\nhue = 240\n").unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let derived = ViewSpec {
+            name: "scenario:rho".into(),
+            dataset: "rho_curves".into(),
+            ..ViewSpec::default()
+        };
+        let bridge = Bridge {
+            scenario_views: vec![derived],
+            ..test_bridge(handle.clone())
+        };
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+
+        let handed: Vec<(String, String)> = handle
+            .pending_views_for_tests()
+            .expect("the reload replaced the service's views")
+            .into_iter()
+            .map(|v| (v.name, v.dataset))
+            .collect();
+        assert_eq!(
+            handed,
+            [
+                ("tree".to_string(), "risk".to_string()),
+                ("scenario:rho".to_string(), "rho_curves".to_string()),
+            ],
+            "the derived view alone answers its name"
+        );
+        let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
+        let warned: Vec<Diagnostic> = diagnostics.read_with(&vcx, |d, _| {
+            d.data_diagnostics
+                .iter()
+                .map(|(_, d)| d.clone())
+                .filter(|d| d.message.contains("view 'scenario:rho'"))
+                .collect()
+        });
+        assert_eq!(warned.len(), 1, "{warned:?}");
+        assert_eq!(warned[0].severity, Severity::Warning);
+        assert_eq!(
+            bridge.factory.view_names(),
+            ["tree"],
+            "the blotter never lists a view the service answers with the derived one"
+        );
+        assert!(
+            bridge
+                .scenario_cells
+                .colours
+                .borrow()
+                .get("delta")
+                .is_some(),
+            "the reload hands the scenario tiles the config's colors"
+        );
+    }
+
+    /// The scenario tiles validate `:filter` against the schema the service
+    /// serves: a reload carrying an edited `datasets` doc, which waits for
+    /// a restart, leaves their schema cell on the startup schema.
+    #[gpui::test]
+    fn a_reload_leaves_the_scenario_schema_cell_on_the_startup_schema(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", "[tree]\ndataset = \"risk\"\n").unwrap(),
+                LayerDoc::builtin(
+                    "datasets",
+                    "[rho_curves.columns.tenor]\ntype = \"utf8\"\nrole = \"dimension\"\n",
+                )
+                .unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        cx.update(|cx| attach(&bridge, window, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        assert!(
+            bridge
+                .scenario_cells
+                .schema
+                .borrow()
+                .dataset("rho_curves")
+                .is_none(),
+            "the edited datasets doc waits for a restart"
+        );
     }
 
     /// Reload presentation diagnostics must reach the retained diagnostics model,
@@ -7842,6 +8206,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -7922,6 +8289,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -8004,6 +8374,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -8109,6 +8482,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -8210,6 +8586,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -8278,6 +8657,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -8431,6 +8813,9 @@ grain = "underlying"
             )],
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -8501,6 +8886,9 @@ grain = "underlying"
             )],
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: Vec::new(),
             schema: Default::default(),
@@ -9173,6 +9561,9 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
             pricer_key: None,
+            scenarios: Vec::new(),
+            scenario_views: Vec::new(),
+            scenario_cells: Default::default(),
             positions_configured: false,
             reference_datasets: reference_datasets.into_iter().map(|n| (n, 1)).collect(),
             schema: Default::default(),

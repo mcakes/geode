@@ -206,7 +206,8 @@ pub(super) fn services_with_recorders(
     register_scope_actions(&mut registry, &crate::shell::saved_scopes(&config, false));
     // Register recorder add actions from the roster before building the keymap,
     // matching application startup.
-    let kinds: Vec<&'static str> = recorders.iter().map(|r| r.kind()).collect();
+    let kinds: Vec<(&'static str, String)> =
+        recorders.iter().map(|r| (r.kind(), r.title())).collect();
     crate::defaults::register_add_actions(&mut registry, &kinds);
     let mut roster = crate::module::ModuleRoster::new();
     for r in recorders {
@@ -287,7 +288,7 @@ pub(super) fn with_pages(
         &mut registry,
         &crate::shell::saved_scopes(&services.config, false),
     );
-    crate::defaults::register_add_actions(&mut registry, &services.roster.kinds());
+    crate::defaults::register_add_actions(&mut registry, &services.roster.titled_kinds());
     services.roster.register_actions(&mut registry);
     let entries: Vec<(&'static str, &'static str)> = page_factories
         .iter()

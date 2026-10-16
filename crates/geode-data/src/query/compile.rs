@@ -4841,4 +4841,282 @@ grain = "underlying"
         let expected = include_str!("testdata/demo_tree_view.sql");
         assert_eq!(format!("{}\n", q.sql), expected);
     }
+
+    /// A measures dataset with a bucket axis (`tenor`) and a scenario axis
+    /// (`spot_shift`) on an underlying-grain measure, and `currency`
+    /// carried from the instrument grain.
+    fn axis_schema() -> SchemaSpec {
+        let text = r#"
+[vega_spot_ladder]
+axes = ["tenor", "spot_shift"]
+[vega_spot_ladder.columns.book]
+type = "utf8"
+role = "dimension"
+[vega_spot_ladder.columns.lhu]
+type = "utf8"
+role = "dimension"
+[vega_spot_ladder.columns.position_ref]
+type = "utf8"
+role = "key"
+[vega_spot_ladder.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[vega_spot_ladder.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[vega_spot_ladder.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[vega_spot_ladder.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[vega_spot_ladder.columns.tenor]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+order = "tenor"
+[vega_spot_ladder.columns.spot_shift]
+type = "f64"
+role = "axis"
+axis = "scenario"
+[vega_spot_ladder.columns.vega]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema
+    }
+
+    /// Two positions, two tenors, shifts -5 and 0. P1 (USD) holds both
+    /// tenors; P2 (EUR) holds only 1M.
+    fn axis_fixture() -> (tempfile::TempDir, crate::store::Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::open(dir.path().join("g.duckdb")).unwrap();
+        store
+            .apply_schema(axis_schema().dataset("vega_spot_ladder").unwrap())
+            .unwrap();
+        crate::store::Catalog::new(store.writer())
+            .ensure_tables()
+            .unwrap();
+        store
+            .writer()
+            .execute_batch(
+                "insert into vega_spot_ladder_underlying_live
+                   (book, lhu, position_ref, counterparty, instrument_ref,
+                    underlying_ref, tenor, spot_shift, vega, currency,
+                    batch, source_file_id, gen_id, source_time)
+                 values
+                   ('BK0','L0','P1','C','I1','SPX','1M', -5.0, 10, 'USD', 'b', 1, 1, now()),
+                   ('BK0','L0','P1','C','I1','SPX','1M',  0.0, 12, 'USD', 'b', 1, 1, now()),
+                   ('BK0','L0','P1','C','I1','SPX','3M', -5.0, 20, 'USD', 'b', 1, 1, now()),
+                   ('BK0','L0','P1','C','I1','SPX','3M',  0.0, 24, 'USD', 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C','I2','SPX','1M', -5.0,  1, 'EUR', 'b', 1, 1, now()),
+                   ('BK0','L0','P2','C','I2','SPX','1M',  0.0,  2, 'EUR', 'b', 1, 1, now());",
+            )
+            .unwrap();
+        (dir, store)
+    }
+
+    /// A view over the ladder grouped by `grouping`, showing `vega` and then
+    /// each of `dimensions` as an ungrouped dimension column.
+    fn ladder_view(grouping: &[&str], dimensions: &[&str]) -> ViewSpec {
+        let grouping = grouping
+            .iter()
+            .map(|g| format!("\"{g}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let mut text = format!(
+            "[ladder]\ndataset = \"vega_spot_ladder\"\ngrouping = [{grouping}]\n\
+             [[ladder.columns]]\nname = \"vega\"\nkind = \"measure\"\n"
+        );
+        for d in dimensions {
+            text.push_str(&format!(
+                "[[ladder.columns]]\nname = \"{d}\"\nkind = \"dimension\"\n"
+            ));
+        }
+        let doc = merge_docs("views", &[LayerDoc::builtin("views", &text).unwrap()]);
+        let view = ViewSpec::from_doc(&doc).0.into_iter().next().unwrap();
+        assert!(
+            view.validate(&axis_schema(), &DerivedDimensions::default())
+                .iter()
+                .all(|d| d.severity != geode_core::config::Severity::Error),
+            "the ladder view must validate"
+        );
+        view
+    }
+
+    fn run_ladder(
+        store: &crate::store::Store,
+        view: &ViewSpec,
+        scope: &Scope,
+    ) -> geode_core::snapshot::Snapshot {
+        let compiled = compile_view(
+            store.writer(),
+            view,
+            &axis_schema(),
+            scope,
+            &DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        crate::query::pool::run_snapshot(
+            store.writer(),
+            &compiled,
+            &compiled.grouping,
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    /// A grouping column reaches the snapshot as text whatever its storage
+    /// type, so the shift level is read as text and parsed.
+    fn shift_of(s: &geode_core::snapshot::Snapshot, r: usize) -> Option<f64> {
+        s.text_value("spot_shift", r)?.parse().ok()
+    }
+
+    /// The leaf row at `(tenor, shift)` under a tenor-then-shift grouping.
+    fn ladder_leaf(s: &geode_core::snapshot::Snapshot, tenor: &str, shift: f64) -> Option<usize> {
+        (0..s.rows()).find(|&r| {
+            s.depth_of_row(r) == Some(2)
+                && s.text_value("tenor", r) == Some(tenor)
+                && shift_of(s, r) == Some(shift)
+        })
+    }
+
+    fn ladder_cell(s: &geode_core::snapshot::Snapshot, tenor: &str, shift: f64) -> Option<f64> {
+        ladder_leaf(s, tenor, shift).and_then(|r| s.f64_value("vega", r))
+    }
+
+    #[test]
+    fn grouping_by_both_axes_sums_positions_per_cell() {
+        let (_d, store) = axis_fixture();
+        let s = run_ladder(
+            &store,
+            &ladder_view(&["tenor", "spot_shift"], &[]),
+            &Scope::default(),
+        );
+        assert_eq!(
+            ladder_cell(&s, "1M", -5.0),
+            Some(11.0),
+            "P1 + P2 at (1M, -5)"
+        );
+        assert_eq!(ladder_cell(&s, "1M", 0.0), Some(14.0));
+        assert_eq!(ladder_cell(&s, "3M", -5.0), Some(20.0));
+        assert_eq!(ladder_cell(&s, "3M", 0.0), Some(24.0));
+        let meta = s.meta("vega").unwrap();
+        assert_eq!(meta.attribution_by_depth[2], Attribution::Additive);
+    }
+
+    #[test]
+    fn a_grouping_above_a_scenario_axis_delivers_null_subtotals() {
+        let (_d, store) = axis_fixture();
+        let s = run_ladder(
+            &store,
+            &ladder_view(&["tenor", "spot_shift"], &[]),
+            &Scope::default(),
+        );
+        let meta = s.meta("vega").unwrap();
+        assert_eq!(
+            meta.attribution_by_depth[0],
+            Attribution::NonAttributable,
+            "the total sums across shifts"
+        );
+        assert_eq!(
+            meta.attribution_by_depth[1],
+            Attribution::NonAttributable,
+            "the tenor subtotal sums across shifts"
+        );
+        let subtotals: Vec<usize> = (0..s.rows())
+            .filter(|&r| s.depth_of_row(r) != Some(2))
+            .collect();
+        assert_eq!(subtotals.len(), 3, "a total and two tenor subtotals");
+        for r in subtotals {
+            assert_eq!(
+                s.f64_value("vega", r),
+                None,
+                "row {r} is a subtotal above the scenario axis and must be NULL"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scenario_axis_first_makes_the_tenor_subtotal_additive() {
+        let (_d, store) = axis_fixture();
+        let s = run_ladder(
+            &store,
+            &ladder_view(&["spot_shift", "tenor"], &[]),
+            &Scope::default(),
+        );
+        let meta = s.meta("vega").unwrap();
+        assert_eq!(
+            meta.attribution_by_depth[1],
+            Attribution::Additive,
+            "per shift, tenor buckets sum to total vega"
+        );
+        assert_eq!(meta.attribution_by_depth[0], Attribution::NonAttributable);
+        let shift0 = (0..s.rows())
+            .find(|&r| s.depth_of_row(r) == Some(1) && shift_of(&s, r) == Some(0.0))
+            .unwrap();
+        assert_eq!(s.f64_value("vega", shift0), Some(38.0), "12 + 24 + 2");
+        let total = (0..s.rows())
+            .find(|&r| s.depth_of_row(r) == Some(0))
+            .unwrap();
+        assert_eq!(
+            s.f64_value("vega", total),
+            None,
+            "the total sums across shifts"
+        );
+    }
+
+    #[test]
+    fn a_scope_on_an_axis_value_narrows_the_measure_grain() {
+        let (_d, store) = axis_fixture();
+        let scope = Scope {
+            dimensions: vec![
+                geode_core::scope::DimensionSelection {
+                    column: "tenor".into(),
+                    values: vec!["3M".into()],
+                },
+                geode_core::scope::DimensionSelection {
+                    column: "position_ref".into(),
+                    values: vec!["P1".into()],
+                },
+            ],
+            ..Scope::default()
+        };
+        let s = run_ladder(&store, &ladder_view(&["tenor", "spot_shift"], &[]), &scope);
+        assert_eq!(ladder_cell(&s, "3M", -5.0), Some(20.0));
+        assert_eq!(ladder_cell(&s, "3M", 0.0), Some(24.0));
+        assert_eq!(
+            ladder_leaf(&s, "1M", -5.0),
+            None,
+            "the 1M bucket is outside the scope"
+        );
+        assert!(
+            s.meta("vega").unwrap().scope_semantics.is_direct(),
+            "both columns live on the measure grain"
+        );
+    }
+
+    #[test]
+    fn currency_rides_along_as_an_ungrouped_dimension_over_axes() {
+        let (_d, store) = axis_fixture();
+        let view = ladder_view(&["tenor", "spot_shift"], &["currency"]);
+        let s = run_ladder(&store, &view, &Scope::default());
+        let idx = s.column_index("currency").unwrap();
+        let r1 = ladder_leaf(&s, "1M", 0.0).unwrap();
+        assert!(
+            s.is_mixed_at(idx, r1),
+            "USD and EUR positions share the (1M, 0) cell"
+        );
+        assert_eq!(s.text_at(idx, r1), None, "a mixed cell carries no value");
+        let r3 = ladder_leaf(&s, "3M", 0.0).unwrap();
+        assert!(!s.is_mixed_at(idx, r3));
+        assert_eq!(s.text_at(idx, r3), Some("USD"));
+    }
 }

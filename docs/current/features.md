@@ -18,7 +18,7 @@ deliveries through `TileContent`.
 A module owns its domain state. It observes the shared `Frame`, requests data
 through `DataHandle`, and prepares the immutable or retained model used by its
 renderer. Hidden tiles may release subscriptions. A hidden following tile
-(blotter, market data, timeseries, vol slice) keeps its in-flight query, whose reply
+(blotter, market data, timeseries, vol slice, scenario tiles) keeps its in-flight query, whose reply
 applies when it lands unless a counter the tile follows moved since it asked;
 such a reply is dropped, not applied. On becoming visible these tiles compare
 followed versions and request anything stale. A closed following tile cancels
@@ -80,7 +80,8 @@ Modules build their popups, `.` action menus, in-tile y/n confirms and
 notice lines from `geode-tile`, so each rule below holds in every tile that
 has the surface. The pricer and market-data use all four, timeseries the
 popups, menus and notice line, the vol slice viewer the popups and notice
-line, and the blotter the notice line. Diagnostics has none of them.
+line, the scenario tiles the menus and notice line, and the blotter the
+notice line. Diagnostics has none of them.
 
 - Grid motions and menu steps are the shared motion vocabulary; see
   [Motion](#motion).
@@ -142,6 +143,7 @@ line, and the blotter the notice line. Diagnostics has none of them.
     - the timeseries notice line: a verb's refusal or advisory, a series
       request refusal and a series query failure;
     - the vol slice's refusal, which leads the footer;
+    - a scenario tile's refusal, which leads the footer;
     - classifications: a verb's outcome, `g c`'s `no classifications to
       switch to`, and the keys the session restore dropped;
     - the blotter: a dropped sort or selection and the restored view's
@@ -339,6 +341,7 @@ pulls:
 | Market data | Yes, by underlying | Its base, then its underlying as a one-value `underlying_ref` path | Its draft document, while the draft is not clean | The panel has no underlying, or it follows the group it emits into (its board still posts) |
 | Timeseries | No | Does not emit | | |
 | Vol slice | Yes | Does not emit | | |
+| Scenario tiles | Yes | Does not emit | | |
 | Watchlist | No | Its base, then the cursor row's name as a one-value `underlying_ref` path | None | No row is under the cursor: nothing shown, an empty list, or a filter keeping nothing |
 
 The shell composes each posting as `base ∧ layer ∧ path`
@@ -358,7 +361,7 @@ the capability does not depend on loaded state, so a restored membership
 survives a tile whose first answer has not arrived.
 
 Following replaces the frame scope a tile reads with the group's. The
-blotter and the pricer query under that scope. The market-data panel and
+blotter, the pricer and the scenario tiles query under that scope. The market-data panel and
 the vol slice viewer take their underlying from it: the scope's one
 `underlying_ref` value (`geode_core::link::underlying_of`), or none when it
 names zero or several. Because the composed scope carries the emitter's
@@ -1567,6 +1570,195 @@ one pair shown.
 See the [crate guide](../../crates/geode-volslice/README.md) for the key
 table, session keys and module map.
 
+## Scenario tiles
+
+`geode-scenario` paints aggregated scenario risk for whatever the frame or a
+followed link group selects: a matrix of one measure over axes, or a ladder
+of measures down one axis. It sums nothing itself. Every cell and every Σ
+comes from the data tier's grouped query.
+
+**Kinds.** One tile kind per accepted shape in `scenarios.toml` (see
+[Scenario shapes](configuration.md#scenario-shapes)). The builtin five are
+`vega_kt` (Vega K/T), `vega_spot` (Vega by maturity), `spot_ladder`,
+`by_maturity` and `rho`. A builtin shape over a dataset the schema does not
+declare (every one, when the demo layer is absent) is withheld with an
+info-level log line, not a configuration error, and its kind does not
+appear. A desk or user shape over an undeclared dataset is an Error. A tile
+keeps its shape for life. The palette rows (`Vega K/T: Split`), the tile
+picker and the row menu (`Open Vega K/T`) use the shape's title. `g m` and
+the row menu open any kind on the cursor row's underlying. The launch writes
+the tile's filter layer as a dimension selection
+(`[filter.dimensions] underlying_ref = ["SPX"]`), the layer `:filter clear`
+removes, and the header shows `filtered`.
+
+**Query.** The tile queries the derived view `scenario:<kind>`, which the
+app registers with the data service for each accepted shape. Each answer is
+a chain of up to three reads under one `FollowingQuery` tag and the tile's
+key, so the flip barrier sees one arrival:
+
+1. The axis domains: one distinct read per axis, unscoped and restricted to
+   the dataset. They are read again only when the dataset's data counter or
+   the effective as-of has moved.
+2. The main query at full depth, with the subtotal and total rows.
+3. For a matrix with a Σ row, the totals query.
+
+A refusal at any step is a danger notice, and the next frame notification
+asks again. Hiding the tile keeps the chain in flight; closing it cancels by
+key. See [the data path](data-path.md#queries-and-time-travel). The tile
+follows:
+
+- the scope, unless `:unscoped`;
+- the as-of, unless pinned by `:asof`;
+- its dataset's publications;
+- the config revision.
+
+It never follows the frame's grouping. A followed-group change drops the
+picture and asks again.
+
+**Grid.** The label column is pinned left. Columns run in axis order (an
+axis `columns`) or measure order (a ladder); rows run in axis order. The
+domain is the dataset's, so the matrix holds still as the scope moves. A
+label the scope lacks shows blank cells. The Σ row and the Σ column exist
+only along bucket axes, never along a scenario axis. They are read from the
+snapshot's subtotal and total rows and from the totals query, never summed
+from cells. While the main and totals generations disagree, the Σ row is
+blank until a delivery where they agree. A diffed column has no Σ. The
+`rho` matrix has two columns axes, which add a group header row (the outer
+axis) above the column heads. A ladder whose measures carry units puts each
+measure's name in a header row above its unit: the table gives every header
+row one row's height, so a name and unit stacked in one head would clip. A
+column's default width holds its widest text, Σ included, so a total longer
+than the cells keeps its sign; a fitted `:autosize` width replaces it.
+
+**Paint.** Heat is a diverging fill by magnitude. The domain is per column
+for a ladder (each column its own unit) and matrix-wide for an axis
+`columns`. The fill runs from a floor of 0.06 to a cap of 0.55 of the
+bullish or bearish token, mixed in OKLCH. The text over a fill is moved
+until it is readable. Zero cells, blank cells, Σ cells and the base row's
+diffed cells take no fill. `p` toggles between heat and plain. Text takes
+the sign colors from the bullish and bearish tokens, or a named color
+through the measure's `format.color`. A reloaded `colors.toml` reaches an
+open tile with its next picture, which the reload's requery brings.
+
+**Currency.** A tile starts in USD when any painted measure has a `_usd`
+twin. `c` toggles between USD and native without a requery. A shape with no
+twin starts native, and `c` refuses with `no USD twin for <measure>`. When
+the last picture lacks the column the other mode reads, `c` (or `m`) is
+refused with that column (`snapshot lacks 'vega'`) and the tile keeps its
+mode and picture, so the chip never names a mode the cells are not in. Native
+over a scope that mixes currencies puts the chip in the warning tone with
+the tooltip `native sums across currencies`. A dataset without a `currency`
+dimension never warns.
+
+**Diff.** On a shape with `diff`, the base row is highlighted and stays
+absolute. Every other row shows value minus base for the configured
+measures. `m` toggles diff. When the scope has no base row, the tile shows
+absolutes and the standing notice
+`diff: no base row (<axis> = <base>) in scope`. A diff measure whose base
+value is NULL also stays absolute and reports the same notice.
+
+**Keys.** These are the default bindings in normal and visual mode:
+
+| Key | Action |
+|---|---|
+| `h` `j` `k` `l`, arrows, `^` `$` `home` `end`, `g g` / `G` | The shared grid motions; counts multiply |
+| `shift+v` / `v` | Row selection / block selection |
+| `y`, `ctrl+c` | Yank the cursor cell or the selection as TSV, header line included, Σ excluded |
+| `c` | USD / native |
+| `p` | Heat / plain |
+| `m` | Diff on / off |
+| `escape` | Clear the selection and a live refusal; with neither, dismiss the standing notices |
+| `.` | Open the action menu (also the header's `⋯`) |
+
+The menu lists the verbs, each with its live chord. Currency, heat and diff
+are ticked while on, and a verb the shape cannot take is disabled with its
+key's refusal. Below the verbs come the parameterless `:` lines
+(`:unscoped`, `:scale k|m|1`, `:filter clear`).
+
+The commands are `:filter <expr>`, `:filter text <words>` and
+`:filter clear`; `:unscoped` (a toggle); `:asof <time>`, `:asof live` and
+`:asof clear`; and `:scale k|m|1`, where `1` restores each column's own
+scale. `:filter <expr>` compiles against the shape's dataset in the schema
+the service started with: an unknown column is refused, and every expression
+is refused while the dataset is undeclared (an edited `datasets` waits for
+a restart). `:filter` completes over the dataset's groupable columns, the
+derived dimensions and the shape's measures. Frame-wide verbs (`:scope`,
+`:live`, `:asof undo`) are refused, and the refusal names the palette entry that
+owns them.
+
+A click on a data cell moves the cursor and focuses the tile, a shift-click
+or a drag extends a block, and a right press only focuses. The currency and
+diff chips are clickable and run `c` and `m`. `:autosize` fits the columns.
+
+**Header and footer.** The header shows the title, `·`, and the scope
+readout. The readout is the selections' values joined with ` / ` with the
+layers appended; `all` is muted, and `nothing` (an impossible scope) is in
+the danger tone. Then come the chips in order: `USD`/`native`, the scale,
+`filtered` (its tooltip spells the filter), `diff`, `unscoped` (warning
+tone), and the as-of pin. The right cluster is the shared one: mode, `…`
+while a chain is out, dataset times (warning tone past `stale_after`), link
+chips, the dataset source's health chip, `⋯` and ×. The footer shows the
+notice line on the left. On the right is the cursor readout (row, column and
+value, e.g. `1Y × 100 · 254.5`) or, while a selection holds, the aggregates
+strip. Its totals are unsummable down a scenario rows axis.
+
+**Several reports.** A dataset fed by several reports is one dataset to
+the tile. By maturity's `term_sensitivities` has five, one per column:
+repo, atm vol, skew, curvature and diva. Each report's partitions are
+separate, so each column sums its own report's rows. The dataset time is
+the oldest of each book's newest time per batch, so the tile shows the
+oldest of the five reports' times and turns stale when any report lags.
+Any report's publish moves the dataset's generation and requeries. The
+health chip is the worst of the dataset's sources. Each source lists the
+measures its files carry, so a report file missing its own measure
+degrades its source while the other reports' measures read as NULL with
+no signal. A book that has never had a file from one report has
+no partition from it: that report's columns leave the book out of every
+sum, Σ included, and nothing turns stale for it.
+
+**Session.** The tile saves:
+
+- `currency`, `paint` and `scale`;
+- `diff`, on shapes that have one;
+- `unscoped` and `as_of`;
+- `[filter]` (`expr`, `text`, `dimensions`);
+- `column_widths`.
+
+An unreadable key is dropped with a notice naming it. A record whose kind
+the configuration no longer accepts restores as a placeholder that keeps
+the record.
+
+**Failures.**
+
+- A query error, or a scope the dataset cannot honour, is a standing danger
+  notice. The last picture stays. The notice can be dismissed and returns
+  as news.
+- A snapshot that does not fit the shape is `picture: …` and keeps the last
+  picture.
+- An impossible scope is an empty grid with the readout `nothing`.
+- No published data for the dataset (no generation and no source time) is
+  the status notice `no <dataset> data yet`. An empty scope over published
+  data, including a historical read, is an empty grid with the domains
+  painted and no notice.
+- A refused shape is an Error in the configuration's diagnostics, and its
+  kind is absent.
+
+**Limitations.**
+
+- No emission: a scenario tile follows a group but posts no scope.
+- The dataset time does not say which report is old: any of the five
+  reports lagging reads the same.
+- When one report lags another by a business date, a position carries two
+  `business_date` values across the live table, and every load of any of
+  the reports records a cross-file attribute conflict (diagnostic only, no
+  health effect).
+- No `/` find and no sort.
+- `:filter <expr>` and `:asof <time>` have no menu rows.
+- The `…` in-flight mark has no delay threshold, unlike the blotter's.
+
+See the [crate guide](../../crates/geode-scenario/README.md) for the module
+map.
+
 ## Classifications
 
 `geode-classifications` edits one classification per tile: a derived
@@ -1594,14 +1786,23 @@ changes its source column, and on `shift+r`; an answer another read has
 overtaken is dropped. A refused or failed read keeps the map's own rows on
 screen with a header notice (`values not loaded: … — shift+r retries`);
 while a read is on its way the header says `loading values…` beside the
-count. The
-default order is unclassified rows first, then by label. A label blank
-after trimming is unclassified everywhere: in the counts, the sort and the
-paint, including a hand-written `''`. `:sort <source|label|rows>
+count. The default order is unclassified rows first, then by label. A label
+blank after trimming is unclassified everywhere: in the counts, the sort and
+the paint, including a hand-written `''`. `:sort <source|label|rows>
 [asc|desc]` orders the grid and bare `:sort` restores the default; a header
-sort control cycles desc → asc → default as every grid tile's does.
-Unclassified labels and values not in the data sort last either way. `/`
-narrows over source and label, keeping the order.
+sort control cycles desc → asc → default as every grid tile's does, and `s`
+cycles the label column's sort as its header control does. Unclassified
+labels and values not in the data sort last either way. `/` finds as the
+pricer's and market data's do, by `[ui] find_style`: under vim style each
+keystroke moves the cursor to the first row at or after where the search
+began whose source or label contains the query (ignoring case, wrapping);
+`enter` keeps the query for `n`/`shift+n` (counted, wrapping), `escape`
+returns the cursor to where it was. Under fzf style a ranked results table
+in the grid's columns opens; only the source cell highlights the matched
+characters (the label cell paints plain), and a pick puts the cursor on its
+row and keeps the query for `n`. Every row stays on screen: nothing narrows.
+`escape` ends a selection first, then a kept find query, then dismisses
+the header's notices.
 
 The shell's grid motions move a cursor held by source value, so a rebuild
 keeps it on its row; `v`/`shift+v` start a row selection, `escape` ends it.
@@ -1612,59 +1813,84 @@ than let its span re-resolve to rows nobody chose. A right press on a row
 moves the cursor there (a row inside a live selection keeps the selection)
 and opens the `⋯` menu at the pointer, as `.` opens it from the header.
 
-**Labels.** The verbs act on the selection, else the cursor's row.
-`enter`/`c` (or a double-click) open the label editor in the label cell,
-prefilled only when every target shares one label; `up`/`down` move the
-typeahead's highlight over the labels in use. Enter writes the highlighted
-label when the highlight was moved or equals the typed text ignoring case
-(Unicode lowercasing), else the typed text trimmed and never re-cased, so
-`tech` typed over an existing `Tech` takes `Tech`; blank clears. `x` clears,
-`y y` copies the cursor row's label, `p` pastes it, `u` undoes and `ctrl+r`
-redoes. Every write first checks the classification's source column: a
-hand-written definition over a column no classification may map is never
-written (`not saved: …`), since the door writes even when the reload then
-rejects the object. A written edit shows at once as a pending object, and
-every verb builds on it, so two edits before the reload compose; a reload
-carrying an earlier write of the tile's own keeps the later ones, and any
-other change to the object is the truth and drops them. Undo and redo
-replay row by row over what is current: a row another surface changed
-since is left as it is, and the notice says how many; a row the tile's own
-refused write touched is reported as not saved rather than changed
-elsewhere. Opening the editor puts the cursor on its row, so a reload or a
-values answer that reorders the rows keeps the field on the row it writes.
-A verb that changes
-nothing (`x` on unclassified rows, `u` with nothing to undo, a replay that
-skips every row) keeps the selection and a waiting cursor.
+**Labels.** The verbs act on the selection, else the cursor's row. `i`,
+`enter` (or a double-click) open the label editor in the label cell with the
+caret at the end of the label, `I` (`shift+i`) with it selected so typing
+replaces it; it is prefilled only when every target shares one label, and
+`up`/`down` move the typeahead's highlight over the labels in use. Enter
+writes the highlighted label when the highlight was moved or equals the
+typed text ignoring case (Unicode lowercasing), else the typed text trimmed
+and never re-cased, so `tech` typed over an existing `Tech` takes `Tech`;
+blank clears. `x` (`d` on a selection, `d d` on the cursor's row) clears — a
+value only the map holds then leaves the grid, and the notice says `removed
+<value>` (`cleared 2 labels, removed 1 value` for a mix). `y y` copies the
+cursor row's label, `p` pastes it, `u` undoes and `ctrl+r` redoes. Every
+write first checks the classification's source column: a hand-written
+definition over a column no classification may map is never written (`not
+saved: …`), since the door writes even when the reload then rejects the
+object. A written edit shows at once as a pending object, and every verb
+builds on it, so two edits before the reload compose; a reload carrying an
+earlier write of the tile's own keeps the later ones, and any other change
+to the object is the truth and drops them. Undo and redo replay row by row
+over what is current: a row another surface changed since is left as it is,
+and the notice says how many; a row the tile's own refused write touched is
+reported as not saved rather than changed elsewhere. Opening the editor puts
+the cursor on its row, so a reload or a values answer that reorders the rows
+keeps the field on the row it writes. A verb that changes nothing (`x` on
+unclassified rows, `u` with nothing to undo, a replay that skips every row)
+keeps the selection and a waiting cursor.
+
+**Adding a value.** `o` (`shift+o` is the same verb: the grid's order is the
+sort's), or `Add value…` in the `⋯` menu and the palette, opens a field
+under the header, `Add <from> value`. It offers the keys of every reference
+table keyed by the source column alone that are not already rows
+(`underlyings` for `underlying_ref`); for another column it takes free text.
+`enter` takes the highlighted key when the highlight was moved or equals the
+typed text ignoring case, else the text trimmed; blank is refused under the
+field (`type a value`). A value that already has a row (exact match: `dax`
+is not `DAX`) moves the cursor there and opens its label editor. Any other
+value becomes a draft row after the unclassified values the data holds, `not
+in data`, with the label editor open on it; it counts in neither `<n>
+values` nor `<k> unclassified`. Committing a label writes it as an ordinary
+map entry, one write and one undo step; as after any label verb the cursor
+keeps the draft's index rather than following the new row to its sorted
+place. `escape`, a blank label or any other verb drops the draft and writes
+nothing, since `dimensions.toml` holds only labelled values; a press
+elsewhere closes the editor and lands on the row pressed, and a right press
+on the draft row itself only closes the editor. A values answer that brings
+the draft's value keeps the editor on the real row. `o` is refused at once
+while a revert is on its way or over a source column no classification may
+map. Once the data carries the value its count shows and `not in data` goes.
 
 **New, rename, delete, revert.** Registered actions, reached from the
-palette and the `⋯` menu, never `:` commands and with no default chord.
-New asks a name, then a source column from a closed choice, and writes an
-empty classification; rename asks the new name. Each answer is validated
-before anything is written, and a refusal stays under the field. Rename,
-delete and revert then ask y/n on the confirm bar, naming how many
-groupings, views, saved scopes and named expressions still name the
-classification; revert's question names the lower layer it restores
-instead, since the name stays defined. A rename writes the new object and
-removes the old in one batch; delete and revert remove the user definition.
-Until the revert's reload lands, the label verbs on that classification
-are refused with `reverting <name>…`: an edit built on the user copy would
-replace the removal in the shell's batch and undo the revert. Rename and delete act only on a
+palette and the `⋯` menu, never `:` commands and with no default chord. New
+asks a name, then a source column from a closed choice, and writes an empty
+classification; rename asks the new name. Each answer is validated before
+anything is written, and a refusal stays under the field. Rename, delete and
+revert then ask y/n on the confirm bar, naming how many groupings, views,
+saved scopes and named expressions still name the classification; revert's
+question names the lower layer it restores instead, since the name stays
+defined. A rename writes the new object and removes the old in one batch;
+delete and revert remove the user definition. Until the revert's reload
+lands, the label verbs on that classification are refused with `reverting
+<name>…`: an edit built on the user copy would replace the removal in the
+shell's batch and undo the revert. Rename and delete act only on a
 classification the user layer owns outright: a desk or builtin one is
 refused (`<name> is defined in desk config; Geode cannot …`), as is a user
-copy over a lower one (Revert… removes that) and one whose layer is
-unknown. The `⋯` menu shows each refusal in its row's lane and in full
-when picked, and lists Revert… only over a shadowed user copy.
+copy over a lower one (Revert… removes that) and one whose layer is unknown.
+The `⋯` menu shows each refusal in its row's lane and in full when picked,
+and lists Revert… only over a shadowed user copy.
 
-**Notices.** The tile hears the door's outcome on its frame
-notification. A fork (`copied '<name>' to your config — Revert… restores
-the <layer> copy`, naming the layer it shadows) shows as status: editing a
-desk or builtin classification copies it whole into the user layer. A refusal shows as danger and drops the
-pending edit, whether the door refused it, the write failed (`config not
-saved — reverted: …`) or the merge rejected it (`saved to disk · rejected
-by the merge — showing the configuration in force`); a create, rename or delete that was refused shows what was
-shown before. A verb's notices last until the next verb or another
-classification is shown; the session restore's until the trader's first key
-or press in the tile.
+**Notices.** The tile hears the door's outcome on its frame notification. A
+fork (`copied '<name>' to your config — Revert… restores the <layer> copy`,
+naming the layer it shadows) shows as status: editing a desk or builtin
+classification copies it whole into the user layer. A refusal shows as
+danger and drops the pending edit, whether the door refused it, the write
+failed (`config not saved — reverted: …`) or the merge rejected it (`saved
+to disk · rejected by the merge — showing the configuration in force`); a
+create, rename or delete that was refused shows what was shown before. A
+verb's notices last until the next verb or another classification is shown;
+the session restore's until the trader's first key or press in the tile.
 
 **Export CSV.** `Classification: Export CSV…` and `Classification: Export
 CSV with unclassified…` are registered actions, in the palette and at the
@@ -1754,6 +1980,7 @@ Known limitations:
   command line closes over the focused tile; focusing the tile again asks.
 - Applying an import at `y` runs on the UI thread (see
   [performance](performance.md#known-gaps)); planning does not.
+- An added value needs a label; there is no unlabelled placeholder row.
 
 See the [crate guide](../../crates/geode-classifications/README.md) for the
 module map.
@@ -3454,7 +3681,8 @@ ready for the first frame.
 engine configuration through `geode-compose` (the store-deciding builtin
 documents, paths, adapters and `engine_setup`), initializes GPUI
 and logging, builds registries, creates the data service and bridge, registers
-module factories and the row menu's actions (Open in Nemo, from
+module factories (one per market-data panel, then one per scenario shape)
+and the row menu's actions (Open in Nemo, from
 `geode-nemo`, then Move LHU, from `geode-positions`), installs globals, and opens the window. Cross-layer policy
 that depends on the assembled binary belongs here; feature behavior does not.
 
@@ -3474,5 +3702,6 @@ data handle, and each feature crate tests delivery into its tiles.
 
 Benchmarks cover blotter flattening and formatting, market-data model building,
 chart preparation, series querying, document parsing, line-pricer core
-operations, and the line-pricer grid build. Budgets and current gaps are
+operations, the line-pricer grid build, and the scenario pivot build and
+window prepare. Budgets and current gaps are
 recorded in [performance.md](performance.md).

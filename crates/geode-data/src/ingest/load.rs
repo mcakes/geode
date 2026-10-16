@@ -25,6 +25,11 @@ pub struct LoadRequest<'a> {
     pub sentinel: &'a Sentinel,
     /// The file's partition batch: its name with the date component removed.
     pub batch: &'a str,
+    /// The measures the file's source carries (`SourceSpec::measures`);
+    /// `None` is every measure. A measure the file lacks and the list
+    /// omits belongs to another report into the dataset: it reads as NULL
+    /// and is neither missing nor noted.
+    pub measures: Option<&'a [String]>,
 }
 
 #[derive(Debug)]
@@ -126,6 +131,13 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
             ));
         } else {
             projection.push(format!("NULL::{} as \"{}\"", col.ty.sql(), col.name));
+            // A measure the source does not list is another report's,
+            // expected absent here: no degradation and no note.
+            let expected = !matches!(col.role, geode_core::schema::ColumnRole::Measure { .. })
+                || req.measures.is_none_or(|m| m.contains(&col.name));
+            if !expected {
+                continue;
+            }
             if col.required {
                 missing_required.push(col.name.clone());
             } else {
@@ -168,6 +180,29 @@ pub fn load_file(store: &Store, req: &LoadRequest) -> Result<LoadOutcome, LoadEr
                 source,
             })?
     };
+
+    // An axis is a key: a NULL axis value would merge buckets under one
+    // row and every later sum would be plausible and wrong. Refuse the
+    // whole file, before any id is spent, and name the column and count so
+    // the producer can fix the drop.
+    for a in &req.dataset.axes {
+        let sql = format!("select count(*) from {RAW_TABLE} where \"{a}\" is null");
+        let nulls: i64 =
+            conn.query_row(&sql, [], |r| r.get(0))
+                .map_err(|source| StoreError::Sql {
+                    statement: sql,
+                    source,
+                })?;
+        if nulls > 0 {
+            return Err(LoadError::Store(StoreError::Sql {
+                statement: format!("load {}", req.csv_path.display()),
+                source: duckdb::Error::InvalidParameterName(format!(
+                    "axis '{a}' is NULL in {nulls} rows; an axis is a key, so the file is \
+                     refused rather than merged into one bucket"
+                )),
+            }));
+        }
+    }
 
     // Split by grain, deduplicating coarse measures and canonicalizing
     // pairs; collect any disagreements.
@@ -601,6 +636,7 @@ source_name = "ModelCode"
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch: &batch,
+                measures: None,
             },
         )
         .unwrap()
@@ -667,6 +703,7 @@ source_name = "ModelCode"
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch: &super::tests_support::batch_of(&file.csv_path),
+                measures: None,
             },
         )
         .unwrap();
@@ -811,6 +848,7 @@ source_name = "NPV"
                 csv_path: &csv_path,
                 sentinel: &sentinel,
                 batch: "BK0",
+                measures: None,
             },
         )
         .unwrap();
@@ -820,6 +858,83 @@ source_name = "NPV"
             "{:?}",
             out.health
         );
+    }
+
+    #[test]
+    fn a_file_without_its_axis_column_is_refused_before_a_generation_is_reserved() {
+        let ds = crate::store::ddl::tests_support::axis_dataset();
+        let db_dir = tempfile::tempdir().unwrap();
+        let store = Store::open(db_dir.path().join("geode.duckdb")).unwrap();
+        store.apply_schema(&ds).unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+
+        // The CSV lacks the tenor column, so the projection fills it with NULL.
+        let src_dir = tempfile::tempdir().unwrap();
+        let csv_path = src_dir.path().join("vega_buckets_2026-08-24_BK0.csv");
+        let header = [
+            "book",
+            "lhu",
+            "position_ref",
+            "counterparty",
+            "instrument_ref",
+            "underlying_ref",
+            "business_date",
+            "currency",
+            "moneyness",
+            "vega",
+        ];
+        std::fs::write(
+            &csv_path,
+            format!(
+                "{}\n\
+                 BK0,L0,P1,C,I1,SPX,2026-08-24,USD,100,10\n\
+                 BK0,L0,P1,C,I1,SPX,2026-08-24,USD,105,20\n",
+                header.join(",")
+            ),
+        )
+        .unwrap();
+        let sentinel = crate::source::Sentinel {
+            as_of: Utc::now(),
+            columns: header.iter().map(|s| s.to_string()).collect(),
+            books: vec!["BK0".to_string()],
+            row_count: None,
+            dataset: None,
+            business_date: None,
+        };
+
+        // A reserved id is spent, so the id handed out after the refused load
+        // must be the very next one.
+        let before = Catalog::new(store.writer()).reserve_gen_id().unwrap();
+        let err = load_file(
+            &store,
+            &LoadRequest {
+                dataset: &ds,
+                dataset_name: "vega_buckets",
+                csv_path: &csv_path,
+                sentinel: &sentinel,
+                batch: "BK0",
+                measures: None,
+            },
+        )
+        .expect_err("a NULL axis must refuse the file");
+        let text = err.to_string();
+        assert!(text.contains("axis 'tenor' is NULL in 2 rows"), "{text}");
+        assert!(text.contains("an axis is a key"), "{text}");
+        let after = Catalog::new(store.writer()).reserve_gen_id().unwrap();
+        assert_eq!(
+            after,
+            before + 1,
+            "no generation was spent on a refused file"
+        );
+        let n: i64 = store
+            .writer()
+            .query_row(
+                "select count(*) from vega_buckets_underlying_live",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     /// Rewrite every value of one CSV column, leaving the rest intact.
@@ -905,6 +1020,7 @@ source_name = "NPV"
                     csv_path: path,
                     sentinel,
                     batch: "shift",
+                    measures: None,
                 },
             )
             .unwrap()
@@ -984,6 +1100,7 @@ source_name = "NPV"
                     csv_path: &twin,
                     sentinel,
                     batch: "blank",
+                    measures: None,
                 },
             )
             .unwrap()
@@ -1047,6 +1164,7 @@ source_name = "NPV"
                 csv_path: &twin,
                 sentinel: &sentinel,
                 batch: "twin",
+                measures: None,
             },
         )
         .unwrap();
@@ -1209,6 +1327,7 @@ source_name = "NPV"
                 csv_path: &twin,
                 sentinel: &sentinel,
                 batch: &batch,
+                measures: None,
             },
         )
         .unwrap();
@@ -1264,6 +1383,7 @@ source_name = "NPV"
                 csv_path: &missing,
                 sentinel: &sentinel,
                 batch: "BK000",
+                measures: None,
             },
         );
         assert!(err.is_err());
@@ -1288,5 +1408,333 @@ source_name = "NPV"
         assert!(!fresh.is_empty(), "books must have freshness recorded");
         let as_of = cat.dataset_as_of("risk_snapshot", &[]).unwrap();
         assert!(as_of.is_some());
+    }
+}
+
+/// Several reports into one measures dataset: the demo's five term reports
+/// (repo, ATM vol, skew, curvature, diva) all land in `term_sensitivities`,
+/// each file carrying only its own measure.
+#[cfg(test)]
+mod several_reports_tests {
+    use super::*;
+    use crate::store::Catalog;
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::schema::SchemaSpec;
+    use geode_demo_data::{EmittedFile, ScenarioSet, TERM_REPORTS};
+    use std::collections::BTreeMap;
+
+    const DATASET: &str = "term_sensitivities";
+
+    fn demo_schema() -> SchemaSpec {
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin(
+                "datasets",
+                include_str!("../../../../examples/demo-config/datasets.toml"),
+            )
+            .unwrap()],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema
+    }
+
+    struct World {
+        _db: tempfile::TempDir,
+        _src: tempfile::TempDir,
+        store: Store,
+        schema: SchemaSpec,
+        set: ScenarioSet,
+        /// Each term report's file for `book`, in `TERM_REPORTS` order.
+        files: Vec<(&'static str, EmittedFile)>,
+        book: String,
+    }
+
+    fn world() -> World {
+        let db = tempfile::tempdir().unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let store = Store::open(db.path().join("g.duckdb")).unwrap();
+        let schema = demo_schema();
+        store
+            .apply_schema(schema.dataset(DATASET).unwrap())
+            .unwrap();
+        Catalog::new(store.writer()).ensure_tables().unwrap();
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 500,
+            seed: 42,
+            business_dates: 1,
+        });
+        let set = geode_demo_data::generate_scenarios(&batch, 40, 42);
+        let emitted = geode_demo_data::emit_scenario_directory(&set, src.path()).unwrap();
+        let named = |prefix: &str| -> Vec<&EmittedFile> {
+            emitted
+                .iter()
+                .filter(|f| {
+                    f.csv_path
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(&format!("{prefix}_"))
+                })
+                .collect()
+        };
+        // The book with the most positions, which every report covers.
+        let book = named("diva")
+            .into_iter()
+            .max_by_key(|f| f.rows)
+            .unwrap()
+            .books[0]
+            .clone();
+        let files: Vec<(&'static str, EmittedFile)> = TERM_REPORTS
+            .iter()
+            .map(|r| {
+                let f = named(r)
+                    .into_iter()
+                    .find(|f| f.books == [book.clone()])
+                    .unwrap_or_else(|| panic!("a {r} file for {book}"))
+                    .clone();
+                assert!(f.rows > 10, "{r}: a book with several positions");
+                (*r, f)
+            })
+            .collect();
+        World {
+            _db: db,
+            _src: src,
+            store,
+            schema,
+            set,
+            files,
+            book,
+        }
+    }
+
+    fn file<'a>(w: &'a World, report: &str) -> &'a EmittedFile {
+        &w.files.iter().find(|(r, _)| *r == report).unwrap().1
+    }
+
+    /// What each demo term source lists (`demo.rs::layer`): its measure
+    /// and its twin.
+    fn measures(report: &str) -> Vec<String> {
+        vec![report.to_string(), format!("{report}_usd")]
+    }
+
+    /// Load `report`'s file for the world's book under `batch`, listing the
+    /// report's own measures as its source does.
+    fn load(w: &World, report: &str, batch: &str) -> LoadOutcome {
+        let file = file(w, report);
+        let text = std::fs::read_to_string(file.sentinel_path.as_ref().unwrap()).unwrap();
+        let sentinel = crate::source::parse_sentinel(&text).unwrap();
+        let measures = measures(report);
+        load_file(
+            &w.store,
+            &LoadRequest {
+                dataset: w.schema.dataset(DATASET).unwrap(),
+                dataset_name: DATASET,
+                csv_path: &file.csv_path,
+                sentinel: &sentinel,
+                batch,
+                measures: Some(&measures),
+            },
+        )
+        .unwrap()
+    }
+
+    /// The batch a report's source captures: `<report>_<book>`.
+    fn own_batch(w: &World, report: &str) -> String {
+        format!("{report}_{}", w.book)
+    }
+
+    /// Per tenor, the generator's own sum of `measure` over `book`, from
+    /// whichever report into the dataset carries it.
+    fn expected(w: &World, measure: &str) -> BTreeMap<String, f64> {
+        let mut out = BTreeMap::new();
+        for t in w.set.tables.iter().filter(|t| t.dataset == DATASET) {
+            let Some(m) = t.columns.iter().position(|c| *c == measure) else {
+                continue;
+            };
+            let m = m - t.text_columns();
+            let tenor = t.columns.iter().position(|c| *c == "tenor").unwrap();
+            for r in t.rows.iter().filter(|r| r.text[1] == w.book) {
+                *out.entry(r.text[tenor].clone()).or_default() += r.measures[m];
+            }
+        }
+        out
+    }
+
+    /// The By maturity query as the tile asks it: the view the builtin
+    /// `by_maturity` shape derives (every measure and twin, `currency`
+    /// ungrouped). The shape text is read from geode-scenario's file, not
+    /// through a dependency on it.
+    fn by_tenor(w: &World) -> geode_core::snapshot::Snapshot {
+        use geode_core::scenario::{SCENARIOS_DOC, load_scenarios};
+        let doc = merge_docs(
+            SCENARIOS_DOC,
+            &[LayerDoc::builtin(
+                SCENARIOS_DOC,
+                include_str!("../../../geode-scenario/src/core/builtin_scenarios.toml"),
+            )
+            .unwrap()],
+        );
+        let (shapes, diags) = load_scenarios(&doc, &w.schema);
+        assert!(diags.is_empty(), "{diags:?}");
+        let shape = shapes.iter().find(|s| s.kind == "by_maturity").unwrap();
+        let view = shape.derive_view(w.schema.dataset(DATASET).unwrap());
+        assert!(
+            view.columns.iter().any(|c| c.name() == "diva"),
+            "the derived view reads diva"
+        );
+        let compiled = crate::query::compile::compile_view(
+            w.store.writer(),
+            &view,
+            &w.schema,
+            &geode_core::scope::Scope::default(),
+            &geode_core::dimensions::DerivedDimensions::default(),
+            &crate::query::as_of::AsOf::Live,
+            usize::MAX,
+        )
+        .unwrap();
+        crate::query::pool::run_snapshot(
+            w.store.writer(),
+            &compiled,
+            &compiled.grouping,
+            Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn cell(s: &geode_core::snapshot::Snapshot, tenor: Option<&str>, measure: &str) -> Option<f64> {
+        let r = (0..s.rows()).find(|&r| match tenor {
+            Some(t) => s.depth_of_row(r) == Some(1) && s.text_value("tenor", r) == Some(t),
+            None => s.depth_of_row(r) == Some(0),
+        })?;
+        s.f64_value(measure, r)
+    }
+
+    fn close(a: Option<f64>, b: f64) -> bool {
+        // The CSV carries six decimals per row.
+        a.is_some_and(|a| (a - b).abs() < 1e-4 * (1.0 + b.abs()))
+    }
+
+    /// All five reports for one desk batch load under their sources'
+    /// distinct batches, none degraded and none noted. Every measure
+    /// survives, and the grouped query sums each per tenor and in the Σ
+    /// (total) row, the other reports' NULLs neither zeroing nor blanking
+    /// a sum.
+    #[test]
+    fn all_five_term_reports_survive_and_sum_per_tenor() {
+        let w = world();
+        for report in TERM_REPORTS {
+            let out = load(&w, report, &own_batch(&w, report));
+            assert_eq!(out.health, Health::Ok, "{report}: {out:?}");
+            assert!(out.missing_required.is_empty(), "{report}: {out:?}");
+            assert!(out.missing_optional.is_empty(), "{report}: {out:?}");
+            assert_eq!(
+                LoadNotes::of(&file(&w, report).csv_path, &out),
+                None,
+                "{report}: the other reports' measures earn no warning"
+            );
+        }
+
+        let s = by_tenor(&w);
+        for measure in TERM_REPORTS {
+            let want = expected(&w, measure);
+            assert_eq!(want.len(), 10, "{measure}");
+            for (tenor, v) in &want {
+                let got = cell(&s, Some(tenor), measure);
+                assert!(close(got, *v), "{measure} at {tenor}: {got:?} vs {v}");
+            }
+            assert!(
+                want.values().any(|v| *v != 0.0),
+                "{measure}: a nonzero expectation"
+            );
+            let total = want.values().sum::<f64>();
+            let got = cell(&s, None, measure);
+            assert!(close(got, total), "Σ {measure}: {got:?} vs {total}");
+            // The USD twin, which the tile paints by default: the native
+            // value at the emitter's fixed factor, per tenor and in Σ.
+            let twin = format!("{measure}_usd");
+            for (tenor, v) in &want {
+                let usd = v * geode_demo_data::USD_FACTOR;
+                let got = cell(&s, Some(tenor), &twin);
+                assert!(close(got, usd), "{twin} at {tenor}: {got:?} vs {usd}");
+            }
+            let usd = total * geode_demo_data::USD_FACTOR;
+            let got = cell(&s, None, &twin);
+            assert!(close(got, usd), "Σ {twin}: {got:?} vs {usd}");
+        }
+
+        // The dataset time is the oldest of the five reports' times.
+        let oldest = w.files.iter().map(|(_, f)| f.as_of.clone()).min().unwrap();
+        let as_of = Catalog::new(w.store.writer())
+            .dataset_as_of(DATASET, &[])
+            .unwrap()
+            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+        assert_eq!(as_of.as_deref(), Some(oldest.as_str()));
+    }
+
+    /// A report file missing its OWN measure degrades: the source lists
+    /// `repo`, so its absence is the schema's required rule. A report
+    /// missing the others' measures (every file here) does not.
+    #[test]
+    fn a_report_missing_its_own_measure_is_degraded_and_not_the_others() {
+        let w = world();
+        drop_column(file(&w, "repo"), "Repo");
+        let out = load(&w, "repo", &own_batch(&w, "repo"));
+        assert!(
+            matches!(&out.health, Health::Degraded { reason } if reason.contains("repo")),
+            "{out:?}"
+        );
+        assert_eq!(out.missing_required, ["repo"]);
+        let out = load(&w, "skew", &own_batch(&w, "skew"));
+        assert_eq!(out.health, Health::Ok, "{out:?}");
+        assert!(out.missing_required.is_empty() && out.missing_optional.is_empty());
+    }
+
+    /// Rewrite `file` without the header `column`, sentinel included.
+    fn drop_column(file: &EmittedFile, column: &str) {
+        let text = std::fs::read_to_string(&file.csv_path).unwrap();
+        let mut lines = text.lines();
+        let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+        let at = header.iter().position(|h| *h == column).unwrap();
+        let keep = |line: &str| -> String {
+            line.split(',')
+                .enumerate()
+                .filter(|(i, _)| *i != at)
+                .map(|(_, v)| v)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let mut out = vec![keep(&header.join(","))];
+        out.extend(lines.map(keep));
+        std::fs::write(&file.csv_path, out.join("\n") + "\n").unwrap();
+        let sentinel = file.sentinel_path.as_ref().unwrap();
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(sentinel).unwrap()).unwrap();
+        doc["columns"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|c| c.as_str() != Some(column));
+        std::fs::write(sentinel, doc.to_string()).unwrap();
+    }
+
+    /// Why the batches must differ: two reports loaded under one batch
+    /// share a partition, so the newer replaces the older's rows.
+    #[test]
+    fn two_reports_sharing_a_batch_wipe_each_other() {
+        let w = world();
+        // An older and a newer report, so the second publishes live
+        // rather than to the archive.
+        let (older, newer) = w
+            .files
+            .iter()
+            .flat_map(|a| w.files.iter().map(move |b| (a, b)))
+            .find(|(a, b)| b.1.as_of > a.1.as_of)
+            .map(|(a, b)| (a.0, b.0))
+            .expect("two reports with different times");
+        load(&w, older, &w.book);
+        load(&w, newer, &w.book);
+        let s = by_tenor(&w);
+        assert_eq!(cell(&s, None, older), None, "{older}'s rows are gone");
+        assert!(cell(&s, None, newer).is_some());
     }
 }

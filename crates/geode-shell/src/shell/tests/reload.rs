@@ -2018,6 +2018,31 @@ fn a_panels_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// Scenario shapes are built into tile kinds (and derived views) at
+/// startup. A changed `scenarios.toml` requires restart while it differs
+/// from the startup baseline.
+#[gpui::test]
+fn a_scenarios_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let mut with_shapes = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("scenarios", "[vega_kt]\ntitle = \"Vega K/T\"\n").unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.apply_reload(std::mem::take(&mut with_shapes), cx)
+    });
+    let message = shell.read_with(&cx, |s, _| s.restart_required.clone());
+    assert!(
+        message.as_deref().is_some_and(|m| m.contains("scenarios")),
+        "{message:?}"
+    );
+}
+
 /// A diagnostic from startup composition (a refused panel) counts in the
 /// status bar's config errors from the first frame and survives a reload,
 /// which cannot re-derive it: only a restart changes which panels exist.

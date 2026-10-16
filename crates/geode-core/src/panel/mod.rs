@@ -13,7 +13,7 @@ use std::sync::Arc;
 mod tests;
 
 mod check;
-mod read;
+pub(crate) mod read;
 
 pub use check::load_panels;
 pub use read::read_panels;

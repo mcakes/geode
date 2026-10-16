@@ -1570,6 +1570,7 @@ fn run(
                         csv_path: &item.candidate.csv_path,
                         sentinel,
                         batch: &item.batch,
+                        measures: item.measures.as_deref(),
                     },
                 )
                 .map_err(|e| e.to_string())
@@ -1742,6 +1743,52 @@ mod tests {
         let found = crate::source::discover(&spec, &cat, std::time::SystemTime::now()).unwrap();
         let plan = crate::ingest::build_plan(&[(spec, found)]);
         (db_dir, src_dir, store, ds, plan)
+    }
+
+    /// The runner hands the source's `measures` to the load: a file
+    /// lacking a measure its source does not list publishes with no note.
+    #[test]
+    fn a_measure_the_source_does_not_list_is_not_noted() {
+        let (_db, _src, store, ds, plan) = harness();
+        let item = plan
+            .items
+            .iter()
+            .find(|i| match &i.candidate.state {
+                CandidateState::Ready(s) => !s.columns.iter().any(|c| c == "Skew01"),
+                _ => false,
+            })
+            .expect("a file without skew01")
+            .clone();
+        let listed: Vec<String> = ds
+            .columns
+            .iter()
+            .filter(|c| matches!(c.role, geode_core::schema::ColumnRole::Measure { .. }))
+            .map(|c| c.name.clone())
+            .filter(|n| n != "skew01")
+            .collect();
+        let item = WorkItem {
+            measures: Some(listed),
+            ..item
+        };
+        let (handle, rx) = IngestRunner::spawn_channel(store, schema_of(ds));
+        handle.submit(WorkPlan { items: vec![item] });
+        let events = drain(&rx, 1);
+        let published = events
+            .iter()
+            .find_map(|e| match e {
+                IngestEvent::Published { notes, health, .. } => Some((notes, health)),
+                _ => None,
+            })
+            .expect("published");
+        assert!(
+            published
+                .0
+                .as_ref()
+                .is_none_or(|n| n.missing_optional.is_empty()),
+            "skew01 is another report's: {:?}",
+            published.0
+        );
+        assert_eq!(published.1, &crate::health::Health::Ok);
     }
 
     #[test]
@@ -1979,6 +2026,7 @@ mod tests {
             },
             priority,
             source_time,
+            measures: None,
         }
     }
 
@@ -2472,6 +2520,7 @@ mod tests {
                 csv_path: &stale.candidate.csv_path,
                 sentinel,
                 batch: &stale.batch,
+                measures: None,
             },
         )
         .unwrap();

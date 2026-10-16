@@ -172,8 +172,13 @@ header carries the matching chip (`geode_tile::header::link_chips`): the
 group's letter with a down arrow for follow and an up arrow for emit. See
 [link groups](#link-groups) for what following and emitting do.
 
-Tile occupants are created through the app-supplied `ModuleRoster`. A new
-occupant begins hidden and receives an explicit visibility value during the
+Tile occupants are created through the app-supplied `ModuleRoster`. Each
+factory names its kind and its title, `ModuleFactory::title` (the
+capitalized kind unless the factory says otherwise: a market-data panel its
+panel title, a scenario shape its shape title). `ModuleRoster::titled_kinds`
+pairs them, and every place that names a kind to the trader reads the title:
+the palette's add rows (`Vega K/T: Split`), the tile picker's rows and the
+row menu's `Open {title}`. A new occupant begins hidden and receives an explicit visibility value during the
 next reconciliation. Hidden occupants may release live subscriptions and
 must requery when shown if their followed versions changed. Removing an
 occupant (closing its tile, or filling a placeholder in place) calls
@@ -515,17 +520,18 @@ matching branches. Enter or a row click reveals the selected row in the tree, an
 or leaving the tile cancels without moving the tree. No matches keeps the
 prompt open. The table virtualizes results and scrolls to keyboard selection.
 
-Blotter, pricer, and market-data implement Fzf search. Tree searches include
-collapsed descendants within the current scope. The blotter requests the full
-grouping depth when necessary. Every loaded parent and leaf is displayed together
-in full tree order, using labels prepared only for visible rows. Search text is
-indexed on a worker; completing that index does not change the empty-query
-display order. Queries entered during preparation wait for the complete index.
-The index is reused while the snapshot, column plan, and
-sort are unchanged; closing the prompt cancels pending preparation. Searching does not expand the tree; choosing a result
-opens its ancestors and restores the normal tree with that row active. Pricer
-results also include legs inside closed packages. Unsupported tiles retain
-their existing find behavior.
+Blotter, pricer, market-data and classifications implement Fzf search. Tree
+searches include collapsed descendants within the current scope. The blotter
+requests the full grouping depth when necessary. Every loaded parent and leaf
+is displayed together in full tree order, using labels prepared only for
+visible rows. Search text is indexed on a worker; completing that index does
+not change the empty-query display order. Queries entered during preparation
+wait for the complete index. The index is reused while the snapshot, column
+plan, and sort are unchanged; closing the prompt cancels pending preparation.
+Searching does not expand the tree; choosing a result opens its ancestors and
+restores the normal tree with that row active. Pricer results also include
+legs inside closed packages. Unsupported tiles retain their existing find
+behavior.
 
 ## Focus
 
@@ -847,7 +853,8 @@ needs to.)
 
 Only a tile whose content the frame's scope decides can follow: its module
 answers `TileContent::follows()` true, which the blotter and the pricer do
-(they query under it), and the vol slice viewer and the market-data panel do
+(they query under it), the scenario tiles do (they query under it too), and
+the vol slice viewer and the market-data panel do
 (each takes its underlying from it, the scope's one `underlying_ref`; see
 [features](features.md#link-groups)). A timeseries tile never reads the scope
 and answers false, so the chooser offers it no follow row and `set_follow`

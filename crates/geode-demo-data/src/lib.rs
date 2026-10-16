@@ -1,4 +1,4 @@
-//! Deterministic risk batches, CSV fixtures, and CVI, dividend, and option-chain documents.
+//! Deterministic risk batches, scenario tables, CSV fixtures, and CVI, dividend, and option-chain documents.
 //! Risk measures repeat at their declared grain. Document generators retain
 //! per-key state and produce repeatable sequences from explicit seeds and dates.
 
@@ -6,10 +6,17 @@ pub mod documents;
 mod emit;
 mod generate;
 mod model;
+pub mod scenario;
 
-pub use emit::{EmitOptions, EmittedDirectory, EmittedFile, emit_directory};
+pub use emit::{
+    EmitOptions, EmittedDirectory, EmittedFile, USD_FACTOR, emit_directory, emit_scenario_directory,
+};
 pub use generate::{GeneratorConfig, UNDERLYINGS, demo_underlyings, generate};
 pub use model::RiskBatch;
+pub use scenario::{
+    SCENARIO_COVERAGE, SCENARIO_DATASETS, ScenarioRow, ScenarioSet, ScenarioTable, TERM_REPORTS,
+    generate_scenarios,
+};
 
 #[cfg(test)]
 mod tests {

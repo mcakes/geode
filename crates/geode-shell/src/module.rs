@@ -516,6 +516,13 @@ pub struct TileOccupant {
 
 pub trait ModuleFactory {
     fn kind(&self) -> &'static str;
+    /// The palette and picker spelling of this kind: `{title}: Split`, the
+    /// tile picker's row and the row menu's `Open {title}`. Defaults to the
+    /// capitalised kind; a configured kind (a panel, a scenario shape)
+    /// answers its entry's `title`.
+    fn title(&self) -> String {
+        crate::defaults::capitalize(self.kind())
+    }
     /// Runs once, before the keymap builds — `build_keymap` drops any
     /// binding whose action is unregistered.
     fn register_actions(&self, registry: &mut ActionRegistry);
@@ -580,6 +587,9 @@ pub trait ModuleFactory {
 impl<F: ModuleFactory + ?Sized> ModuleFactory for Rc<F> {
     fn kind(&self) -> &'static str {
         (**self).kind()
+    }
+    fn title(&self) -> String {
+        (**self).title()
     }
     fn register_actions(&self, registry: &mut ActionRegistry) {
         (**self).register_actions(registry)
@@ -653,6 +663,14 @@ impl ModuleRoster {
 
     pub fn kinds(&self) -> Vec<&'static str> {
         self.factories.iter().map(|f| f.kind()).collect()
+    }
+
+    /// Every kind with its title, in roster order.
+    pub fn titled_kinds(&self) -> Vec<(&'static str, String)> {
+        self.factories
+            .iter()
+            .map(|f| (f.kind(), f.title()))
+            .collect()
     }
 
     /// Every column some factory accepts, then every action's column, first
@@ -1191,6 +1209,9 @@ pub mod recording {
         /// What `accepts` answers. Empty by default, so every existing
         /// fixture stays out of `tile::open_with`'s list.
         pub accepts: &'static [&'static str],
+        /// What `title` answers, when set; `None` keeps the trait's
+        /// capitalised kind.
+        pub title: Option<&'static str>,
         /// What every occupant this factory creates answers from
         /// `tile_columns`; shared and mutable like `dimension_context`.
         pub tile_columns: Rc<RefCell<Option<TileColumns>>>,
@@ -1292,6 +1313,7 @@ pub mod recording {
                 dimension_context: Rc::new(RefCell::new(None)),
                 press_context: Rc::new(RefCell::new(None)),
                 accepts: &[],
+                title: None,
                 tile_columns: Rc::new(RefCell::new(None)),
                 edit_on_launch: false,
                 grid: false,
@@ -1755,6 +1777,10 @@ pub mod recording {
     impl ModuleFactory for RecordingFactory {
         fn kind(&self) -> &'static str {
             self.kind
+        }
+        fn title(&self) -> String {
+            self.title
+                .map_or_else(|| crate::defaults::capitalize(self.kind), str::to_string)
         }
         fn contexts(&self) -> Vec<&'static str> {
             if self.contexts.is_empty() {

@@ -16,7 +16,7 @@ use geode_core::grid::selection::{Lost, SelectKind, UNSUMMABLE_LEGEND};
 use geode_core::groupings::GroupingSlots;
 use geode_core::query::{AsOf, QueryKey, QueryOutcome};
 use geode_core::schema::SchemaSpec;
-use geode_core::scope::{Scope, parse_expr};
+use geode_core::scope::{Scope, filter_summary, parse_expr};
 use geode_core::snapshot::Snapshot;
 use geode_core::sort::SortOrder;
 use geode_core::view::ViewSpec;
@@ -40,7 +40,7 @@ use geode_shell::vimfind::{FindDirection, FindStyle};
 use geode_tile::following::{
     Arrival, DeferredDoor, Delivered, FollowingQuery, FrameDoor, Promotion, Unanswered,
 };
-use geode_tile::header::{Cluster, HealthWatch, TimeRun};
+use geode_tile::header::{Cluster, HealthWatch, TimeRun, pinned_chip_text};
 use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
 use gpui::{
@@ -2122,48 +2122,6 @@ fn computed_view_refusal(view: &ViewSpec) -> String {
     )
 }
 
-/// Format an RFC 3339 freshness timestamp as `HH:MM` on the trader's clock.
-/// Echo malformed values intact so unexpected input cannot panic by slicing.
-pub(crate) fn short_time(t: &str, clock: geode_core::clock::Clock) -> String {
-    match chrono::DateTime::parse_from_rfc3339(t) {
-        Ok(at) => clock.hm(at.to_utc()),
-        Err(_) => t.to_string(),
-    }
-}
-
-/// Pinned chip text on the trader's configured clock: `AS OF HH:MM` for
-/// today, or `AS OF YYYY-MM-DD HH:MM` for another date.
-pub(crate) fn pinned_chip_text(
-    at: chrono::DateTime<chrono::Utc>,
-    now: chrono::DateTime<chrono::Utc>,
-    clock: geode_core::clock::Clock,
-) -> String {
-    let local = clock.local(at);
-    if local.date_naive() == clock.local(now).date_naive() {
-        format!("AS OF {}", local.format("%H:%M"))
-    } else {
-        format!("AS OF {}", local.format("%Y-%m-%d %H:%M"))
-    }
-}
-
-/// Tooltip summary of the tile's filter: dimensions, text, then expression,
-/// joined by ` · `; empty for an empty scope. Cached on construction and in
-/// `set_tile_scope` so render only clones the prepared text.
-pub(crate) fn filter_summary(scope: &Scope) -> String {
-    let mut parts: Vec<String> = scope
-        .dimensions
-        .iter()
-        .map(|d| format!("{} \u{2208} {}", d.column, d.values.join(", ")))
-        .collect();
-    if let Some(t) = &scope.text {
-        parts.push(format!("text \"{t}\""));
-    }
-    if let Some(e) = &scope.expression {
-        parts.push(e.to_string());
-    }
-    parts.join(" \u{b7} ")
-}
-
 impl gpui::Render for BlotterTile {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Record the first render after a snapshot is applied.
@@ -2415,22 +2373,6 @@ impl gpui::Render for BlotterTile {
     }
 }
 
-#[test]
-fn short_time_formats_an_rfc3339_instant_on_the_clock_and_echoes_garbage() {
-    use geode_core::clock::Clock;
-    let utc = Clock::utc();
-    assert_eq!(short_time("2026-08-30T14:32:00Z", utc), "14:32");
-    let shifted = Clock::in_zone_named("Asia/Tokyo");
-    assert_eq!(
-        short_time("2026-08-30T14:32:00Z", shifted),
-        "23:32",
-        "Tokyo is UTC+9"
-    );
-    // Not a time: echoed, never a panic.
-    assert_eq!(short_time("2026", utc), "2026");
-    assert_eq!(short_time("", utc), "");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2501,24 +2443,6 @@ mod tests {
         s.set(1, vec!["lhu".into()]);
         s.set(2, vec!["underlying_ref".into(), "lhu".into()]);
         s
-    }
-
-    #[test]
-    fn filter_summary_lists_dimensions_text_and_expression_in_order() {
-        use geode_core::scope::DimensionSelection;
-
-        let mut scope = Scope::default();
-        scope.dimensions.push(DimensionSelection {
-            column: "book".into(),
-            values: vec!["A".into(), "B".into()],
-        });
-        scope.text = Some("abc".into());
-        scope.expression = Some(parse_expr("npv > 0").unwrap());
-        assert_eq!(
-            filter_summary(&scope),
-            "book \u{2208} A, B \u{b7} text \"abc\" \u{b7} npv > 0"
-        );
-        assert_eq!(filter_summary(&Scope::default()), "");
     }
 
     /// The column shape `snapshot` builds — factored out so
@@ -6746,20 +6670,6 @@ mod tests {
             !h.frame.read_with(&cx, |f, _| f.barrier_open()),
             "and it answered the barrier without a query"
         );
-    }
-
-    /// The pinned chip omits the date for today on the configured clock and
-    /// includes it for other dates.
-    #[test]
-    fn pinned_chip_text_elides_todays_date() {
-        let now = chrono::Utc::now();
-        let clock = geode_core::clock::Clock::utc();
-        let today = pinned_chip_text(now, now, clock);
-        assert!(today.starts_with("AS OF "), "{today}");
-        assert_eq!(today.len(), "AS OF HH:MM".len(), "{today}");
-        let old = now - chrono::Duration::days(3);
-        let past = pinned_chip_text(old, now, clock);
-        assert_eq!(past.len(), "AS OF YYYY-MM-DD HH:MM".len(), "{past}");
     }
 
     /// The pinned chip paints from the tile's own state the moment the

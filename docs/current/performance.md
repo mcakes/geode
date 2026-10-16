@@ -122,6 +122,7 @@ cargo bench -p geode-marketdata
 cargo bench -p geode-chart
 cargo bench -p geode-timeseries
 cargo bench -p geode-volslice
+cargo bench -p geode-scenario
 cargo bench -p geode-pricer
 cargo bench -p geode-diagnostics
 cargo bench -p geode-classifications
@@ -164,6 +165,8 @@ the measurement log for fixture and hardware details.
 | Market-data window fill | 40 × five values | 17.7 µs |
 | Market-data cell patch | 10,000 × five values: one-cell window refill | 105 ns |
 | Market-data `/` open cells | 10,000 × five values: the find table's first window (64 rows) then its 40 shown rows, into a `RowCache` | 53 µs |
+| Scenario pivot build (`pivot_build_40x40`) | 40 × 40 matrix with its Σ companion, USD: `Pivot::build` only | 284 µs |
+| Scenario window prepare (`prepare_window_40x40`) | 40 rows × 42 table columns of a 40 × 40 USD matrix with Σ edges: text, sign, fill, color | 2.04 ms |
 | Line-pricer sheet shift + undo | 1,000 entries / 1,200 sheet rows | 1.52 ms |
 | Line-pricer single cell edit + undo | 1,000 entries / 1,200 sheet rows | 6.66 µs |
 | Line-pricer grid build | 1,000 entries / 1,200 sheet rows, every package open: the `GridIndex`, no measure text | 271 µs |
@@ -176,7 +179,7 @@ the measurement log for fixture and hardware details.
 | Line-pricer reference fill | 1,000 entries / 1,200 sheet rows, every line blank: one `fill_currencies` batch, packages folded once (folding per filled line measured 13.7 ms) | 17.4 µs |
 | Line-pricer sorted rebuild | the flat rebuild above under an `npv` descending sort over varied prices: rollup, `sort::rank`, index (heavily loaded machine; the unsorted rebuild measured 469 µs in the same run) | 549 µs |
 | Line-pricer sorted grouped rebuild | the grouped rebuild above under the same sort (the unsorted one measured 834 µs in the same run; the rank alone 102 µs) | 923 µs |
-| Classifications rebuild after an edit | 5,000 source values, half labelled, `rows` desc sort and a `/` filter active: `History::apply`, `to_toml`, `classification::rows` and the grid's relabel rebuild, before table preparation and paint (load 4.5) | 1.53 ms |
+| Classifications rebuild after an edit | 5,000 source values, half labelled, `rows` desc sort (the reference was measured with a `/` filter also active, which the grid no longer has): `History::apply`, `to_toml`, `classification::rows` and the grid's relabel rebuild, before table preparation and paint (load 4.5) | 1.53 ms |
 | Classifications rows rebuild | the same grid, rows and grid only (a values answer or a reload) | 1.21 ms |
 | In-process scope evaluation | one row, three-term expression plus text filter | 570 ns |
 | Scope expression suggestion refresh | 20,000 cached values, ranked and capped at 50 | 6.82 ms |

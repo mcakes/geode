@@ -2,6 +2,7 @@
 //! requiredness, and text-search participation determine ingestion and query
 //! behavior; the reader applies defaults only where the format allows them.
 
+use super::axis::{AxisKind, AxisOrder};
 use super::grain::Grain;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,10 +87,26 @@ pub enum ColumnRole {
     /// attributes and grain-bearing document attributes. Supported types are
     /// checked by dataset family; attributes need not be non-numeric.
     Attribute { grain: Option<Grain> },
-    /// Document row identity, in the dataset's declared `axes` order.
-    Axis,
+    /// Row identity within a document (`kind` None, in the dataset's
+    /// declared `axes` order), or a measures-family axis (`kind` Some)
+    /// that extends the key of every grain holding a measure. `order`
+    /// says how a text axis sorts; a numeric axis sorts numerically.
+    Axis {
+        kind: Option<AxisKind>,
+        order: AxisOrder,
+    },
     /// Document family only: a per-row f64, i64, date, or text value.
     Value,
+}
+
+impl ColumnRole {
+    /// The document family's axis: no kind, lexical order.
+    pub const fn document_axis() -> ColumnRole {
+        ColumnRole::Axis {
+            kind: None,
+            order: AxisOrder::Lexical,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,7 +147,7 @@ impl ColumnSpec {
             ColumnRole::Attribute { grain: None }
             | ColumnRole::Key
             | ColumnRole::Dimension { .. }
-            | ColumnRole::Axis
+            | ColumnRole::Axis { .. }
             | ColumnRole::Value => None,
         }
     }
@@ -140,6 +157,22 @@ impl ColumnSpec {
         match self.role {
             ColumnRole::Dimension { grain } => grain,
             _ => None,
+        }
+    }
+
+    /// `Some` for a measures-family axis; `None` for a document axis and
+    /// every other role.
+    pub fn axis_kind(&self) -> Option<AxisKind> {
+        match self.role {
+            ColumnRole::Axis { kind, .. } => kind,
+            _ => None,
+        }
+    }
+
+    pub fn axis_order(&self) -> AxisOrder {
+        match self.role {
+            ColumnRole::Axis { order, .. } => order,
+            _ => AxisOrder::Lexical,
         }
     }
 

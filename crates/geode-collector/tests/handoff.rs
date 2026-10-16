@@ -18,9 +18,11 @@
 //!
 //! - Every child process is held by a [`Proc`], which kills and reaps it on
 //!   drop, so a failed assertion never leaves a collector running.
-//! - Every wait is a poll with a deadline of 10 s or less ([`WAIT`]) that
-//!   fails on expiry. The one longer bound is the app's own 15 s open
-//!   deadline inside `acquire_app`, which returns by itself.
+//! - Every wait is a poll with a deadline that fails on expiry: 10 s
+//!   ([`WAIT`]) for everything but two. The demo's scenario startup burst
+//!   gets [`SCENARIO_WAIT`] (40 s), and a freshly copied binary's first
+//!   launch on macOS gets `FIRST_LAUNCH_WAIT` (30 s). The app's own 15 s
+//!   open deadline inside `acquire_app` returns by itself.
 //! - Tests run one at a time ([`serial`]). A spawned child shares this
 //!   process's open file descriptions between its fork and its exec, so a
 //!   `<db>.app.lock` dropped by one test while another test spawns a child
@@ -48,8 +50,10 @@ use geode_data::store::{Catalog, Store, StoreError};
 use tempfile::TempDir;
 
 const BIN: &str = env!("CARGO_BIN_EXE_geode-collector");
-/// The longest any test waits for anything.
+/// The bound on every wait except the scenario burst and a first launch.
 const WAIT: Duration = Duration::from_secs(10);
+/// The demo's scenario startup burst: every scenario report's files.
+const SCENARIO_WAIT: Duration = Duration::from_secs(40);
 /// The first launch of a freshly copied binary, which macOS scans before
 /// it runs.
 #[cfg(target_os = "macos")]
@@ -599,6 +603,33 @@ fn a_handoff_keeps_the_documents_the_collector_received() {
             .all(|u| done.contains_key(&("cvi_params".to_string(), u.clone())))
             .then_some(())
     });
+    // The directory sources' startup loads, the scenario files last,
+    // publish back to back for several seconds in a debug build, with no
+    // quiet second between them; wait for every scenario file first. The
+    // burst (nine reports over every book) takes longer than `WAIT` in a
+    // loaded debug build, so this wait has its own bound.
+    let scenario = world.db.parent().unwrap().join("scenario");
+    let expected = scenario_batches(&scenario);
+    assert!(!expected.is_empty(), "the demo emitted scenario files");
+    let burst = Instant::now();
+    wait_until("every scenario file published", SCENARIO_WAIT, || {
+        if let Some(status) = collector.exited() {
+            panic!("{}", world.exited_message(status));
+        }
+        let done = published(&world.log());
+        expected
+            .iter()
+            .all(|key| done.contains_key(key))
+            .then_some(())
+    });
+    // The burst's own time against its bound, so a shrinking margin shows
+    // (with `--nocapture`) before the wait fails.
+    println!(
+        "scenario burst: {} files in {:.1} s of {} s",
+        expected.len(),
+        burst.elapsed().as_secs_f64(),
+        SCENARIO_WAIT.as_secs()
+    );
     wait_quiet(&world, Duration::from_secs(1), WAIT);
 
     let (lease, store, _, _) = take_store(&world.db);
@@ -970,6 +1001,35 @@ fn handoff_once(world: &World, collector: &mut Proc, marker: &str) -> Sample {
         drained,
         release_ms,
     }
+}
+
+/// The (dataset, batch) of every scenario CSV under `dir`, as the
+/// collector's publish lines name them: `<dataset>_<date>_<batch>.csv`,
+/// and each term report's `<report>_<book>_<date>.csv` into
+/// `term_sensitivities` under batch `<report>_<book>`.
+fn scenario_batches(dir: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        let Some(stem) = name.strip_suffix(".csv") else {
+            continue;
+        };
+        let term_report = geode_demo_data::TERM_REPORTS
+            .iter()
+            .any(|r| stem.starts_with(&format!("{r}_")));
+        if term_report && let Some((batch, _date)) = stem.rsplit_once('_') {
+            out.push(("term_sensitivities".to_string(), batch.to_string()));
+            continue;
+        }
+        for ds in geode_demo_data::SCENARIO_DATASETS {
+            if let Some(rest) = stem.strip_prefix(&format!("{ds}_"))
+                && let Some((_date, batch)) = rest.split_once('_')
+            {
+                out.push((ds.to_string(), batch.to_string()));
+            }
+        }
+    }
+    out
 }
 
 /// Wait until no publish has been logged for `quiet`.

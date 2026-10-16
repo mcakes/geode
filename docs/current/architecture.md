@@ -67,15 +67,17 @@ which also uses them for its row menu; `geode-tile` re-exports them for tiles.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-timeseries`, `geode-volslice`, `geode-classifications`,
-`geode-watchlist`, and `geode-pricer` implement the shell's module contract
+`geode-watchlist`, `geode-scenario`, and `geode-pricer` implement the shell's module contract
 and may ask the data service through `DataHandle` (the watchlist tile asks
 nothing: its lists arrive through `WatchlistGlobal`). They do not depend on
 sibling features.
 `geode-compose` builds the engine configuration: the schema with the app's
 datasets pinned, sources, dimensions, document kinds, the clock and the
 adapters. `geode-app` adds the UI-facing services: it registers module
-factories (one market-data factory per accepted `panels` entry), kind
-actions, and pricers, and opens the window. Market-data panels are
+factories (one market-data factory per accepted `panels` entry, then one
+scenario factory per accepted `scenarios` shape, each with its derived view
+`scenario:<kind>` handed to the data service), kind actions, and pricers,
+and opens the window. Market-data panels are
 configuration checked there against the registered document kinds and kind
 actions; a kind action's behavior is code in the module that dispatches it.
 Diagnostics implements `PageFactory` and `PageContent`; `geode-nemo` and

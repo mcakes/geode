@@ -199,6 +199,13 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
         cols.push(format!("  \"{key}\" {ty}"));
     }
 
+    // Axes extend the key of a grain that holds measures: one row per key
+    // and axis values. An attribute-only grain keeps the plain key.
+    for a in ds.axes_at(grain) {
+        let ty = ds.column(a).map(|c| c.ty.sql()).unwrap_or("VARCHAR");
+        cols.push(format!("  \"{a}\" {ty}"));
+    }
+
     for c in ds.columns.iter() {
         let keep = match c.role {
             ColumnRole::Measure { grain: g, .. } => g == grain,
@@ -209,7 +216,7 @@ pub fn create_table_sql(ds: &DatasetSpec, grain: Grain, kind: TableKind) -> Stri
             ColumnRole::Attribute { grain: None }
             | ColumnRole::Key
             | ColumnRole::Dimension { .. }
-            | ColumnRole::Axis
+            | ColumnRole::Axis { .. }
             | ColumnRole::Value => false,
         };
         if keep {
@@ -521,6 +528,59 @@ grain = "underlying"
             .dataset("risk")
             .unwrap()
             .clone()
+    }
+
+    /// `vega_buckets`: axes `tenor` (utf8) and `moneyness` (f64), `vega` at
+    /// underlying grain, `business_date` at position grain. Built from TOML so
+    /// the reader's validation runs.
+    pub(crate) fn axis_dataset() -> DatasetSpec {
+        let text = r#"
+[vega_buckets]
+axes = ["tenor", "moneyness"]
+[vega_buckets.columns.book]
+type = "utf8"
+role = "dimension"
+[vega_buckets.columns.lhu]
+type = "utf8"
+role = "dimension"
+[vega_buckets.columns.position_ref]
+type = "utf8"
+role = "key"
+[vega_buckets.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[vega_buckets.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[vega_buckets.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[vega_buckets.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+[vega_buckets.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+[vega_buckets.columns.tenor]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+order = "tenor"
+[vega_buckets.columns.moneyness]
+type = "f64"
+role = "axis"
+axis = "bucket"
+[vega_buckets.columns.vega]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        schema.dataset("vega_buckets").unwrap().clone()
     }
 
     /// A CVI document dataset parsed from TOML. Using the schema reader verifies
@@ -1029,7 +1089,7 @@ role = "value"
 
 #[cfg(test)]
 mod tests {
-    use super::tests_support::{carried_dataset, cvi_dataset, sample_dataset};
+    use super::tests_support::{axis_dataset, carried_dataset, cvi_dataset, sample_dataset};
     use super::*;
     use geode_core::schema::{ColumnSpec, ColumnType};
 
@@ -1043,6 +1103,43 @@ mod tests {
         assert!(!sql.contains("underlying_ref"), "{sql}");
         // Nor a measure declared at another grain.
         assert!(!sql.contains("delta01"), "{sql}");
+    }
+
+    #[test]
+    fn axis_columns_extend_the_key_of_every_measure_grain_and_no_other() {
+        let ds = axis_dataset();
+        let under = create_table_sql(&ds, Grain::Underlying, TableKind::Live);
+        let cols: Vec<&str> = under
+            .lines()
+            .filter(|l| l.starts_with("  \""))
+            .map(|l| l.trim().trim_end_matches(','))
+            .collect();
+        assert_eq!(
+            cols,
+            [
+                "\"book\" VARCHAR",
+                "\"lhu\" VARCHAR",
+                "\"position_ref\" VARCHAR",
+                "\"counterparty\" VARCHAR",
+                "\"instrument_ref\" VARCHAR",
+                "\"underlying_ref\" VARCHAR",
+                "\"tenor\" VARCHAR",
+                "\"moneyness\" DOUBLE",
+                "\"vega\" DOUBLE",
+                "\"currency\" VARCHAR",
+                "\"batch\" VARCHAR",
+                "\"source_file_id\" BIGINT",
+                "\"gen_id\" BIGINT",
+                "\"source_time\" TIMESTAMP WITH TIME ZONE",
+            ],
+            "{under}"
+        );
+        let pos = create_table_sql(&ds, Grain::Position, TableKind::Live);
+        assert!(
+            !pos.contains("\"tenor\""),
+            "the attribute-only grain keeps one row per key: {pos}"
+        );
+        assert!(pos.contains("\"business_date\""));
     }
 
     #[test]
@@ -1135,7 +1232,7 @@ mod tests {
             textual: false,
             categorical: false,
             order: geode_core::schema::TextOrder::Lexical,
-            role: ColumnRole::Axis,
+            role: ColumnRole::document_axis(),
         });
         ds.columns.push(ColumnSpec {
             name: "param".into(),

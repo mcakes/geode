@@ -419,6 +419,19 @@ run_mutation "ctrl copy/paste: the guide binds ctrl+c to copy" \
   geode-app \
   the_production_keymap_binds_ctrl_c_and_ctrl_v_beside_y_and_p
 
+# The child-process fixture exercises Windows-only Velopack startup. Keep it
+# in cross-platform anchor checks, but execute the mutation only on Windows.
+if (( anchors_only )) || [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
+run_mutation "packaging: installer callbacks bypass application startup (Windows)" \
+  crates/geode-app/src/main.rs \
+  '    velopack::VelopackApp::build()
+        .set_auto_apply_on_startup(false)
+        .run();' \
+  '    std::thread::yield_now();' \
+  geode-app:velopack_startup \
+  installer_hooks_exit_before_application_startup
+fi
+
 run_mutation "guide: startup registers the guide tile" \
   crates/geode-app/src/main.rs \
   '    roster.add(Box::new(geode_guide::GuideFactory));' \
@@ -9224,9 +9237,9 @@ run_mutation 'bridge: a gone receiver is logged once per sink, not once per even
 run_mutation "service: open seeds the health load lane from the catalog" \
   crates/geode-data/src/service.rs \
   '        for dataset in datasets {
-            let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
+            let unhealthy = Catalog::new(&conn).live_health_with_paths(dataset)?;' \
   '        for dataset in datasets.into_iter().take(0) {
-            let unhealthy = Catalog::new(&conn).live_health(dataset)?;' \
+            let unhealthy = Catalog::new(&conn).live_health_with_paths(dataset)?;' \
   geode-data a_restart_seeds_the_load_lane_from_a_still_live_degraded_generation
 
 run_mutation "service: the seed is filed under the key a publish writes" \
@@ -10894,14 +10907,15 @@ run_mutation "schema: an unknown family drops the dataset rather than defaulting
   geode-core \
   an_unknown_family_is_an_error_and_the_dataset_is_dropped
 
-# Measure datasets clear `key` and `axes` after warning. Leaving them in
-# place passes document-only metadata to downstream consumers.
-run_mutation "schema: key/axes on the measure family are cleared, not left in place" \
+# Measure datasets clear `key` after warning; their identity is the grain
+# key, so a declared `key` left in place would claim an identity nothing
+# stores. `axes` are kept: on a measures dataset they extend the grain key.
+run_mutation "schema: key on the measure family is cleared, not left in place" \
   crates/geode-core/src/schema/mod.rs \
-  'if family == Family::Measures {' \
-  'if false {' \
+  '            if family == Family::Measures && !key.is_empty() {' \
+  '            if false {' \
   geode-core \
-  a_measure_family_key_and_axes_are_cleared_with_a_warning
+  a_measure_family_key_is_cleared_with_a_warning_and_axes_are_kept
 
 # Measure-grain table creation excludes document-level attributes, axes,
 # and values, along with keys and bare dimensions. The schema reader
@@ -10909,9 +10923,9 @@ run_mutation "schema: key/axes on the measure family are cleared, not left in pl
 # dataset directly to exercise the exclusion.
 run_mutation "ddl: create_table_sql never selects an axis, value, or document-level attribute" \
   crates/geode-data/src/store/ddl.rs \
-  '            | ColumnRole::Axis
+  '            | ColumnRole::Axis { .. }
             | ColumnRole::Value => false,' \
-  '            | ColumnRole::Axis
+  '            | ColumnRole::Axis { .. }
             | ColumnRole::Value => true,' \
   geode-data \
   create_table_never_selects_a_document_shaped_column
@@ -10986,8 +11000,8 @@ run_mutation "schema/document: a key column must be a dimension" \
 
 run_mutation "schema/document: an axis role not listed in axes is refused" \
   crates/geode-core/src/schema/mod.rs \
-  '        .filter(|c| c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))' \
-  '        .filter(|c| false && c.role == ColumnRole::Axis && !ds.axes.contains(&c.name))' \
+  '        .filter(|c| matches!(c.role, ColumnRole::Axis { .. }) && !ds.axes.contains(&c.name))' \
+  '        .filter(|c| false && matches!(c.role, ColumnRole::Axis { .. }) && !ds.axes.contains(&c.name))' \
   geode-core axes_and_axis_roles_must_agree_both_ways
 
 run_mutation "schema/document: measure vocabulary is dropped per column" \
@@ -11006,28 +11020,46 @@ run_mutation "schema/measures: document vocabulary is dropped per column" \
   crates/geode-core/src/schema/mod.rs \
   '    ds.columns.retain(|c| !foreign.contains(&c.name));
 
-    // Every grain in use groups by its key columns' \
+    // Axes: `axes` and the axis columns mirror each other' \
   '    let _ = &foreign;
 
-    // Every grain in use groups by its key columns' \
+    // Axes: `axes` and the axis columns mirror each other' \
   geode-core document_vocabulary_on_a_measure_dataset_is_the_mirror_error
 
 run_mutation "schema/document: a refused dataset is not pushed" \
   crates/geode-core/src/schema/mod.rs \
-  '            if (dataset.is_document() || dataset.is_reference() || dataset.is_history())' \
-  '            if (dataset.is_reference() || dataset.is_history())' \
+  '            if (dataset.is_document()
+                || dataset.is_reference()
+                || dataset.is_history()
+                || declared_axes)' \
+  '            if (false
+                || dataset.is_reference()
+                || dataset.is_history()
+                || declared_axes)' \
   geode-core a_document_dataset_declares_at_least_one_value
 
 run_mutation "schema/reference: a refused dataset is not pushed" \
   crates/geode-core/src/schema/mod.rs \
-  '            if (dataset.is_document() || dataset.is_reference() || dataset.is_history())' \
-  '            if (dataset.is_document() || dataset.is_history())' \
+  '            if (dataset.is_document()
+                || dataset.is_reference()
+                || dataset.is_history()
+                || declared_axes)' \
+  '            if (dataset.is_document()
+                || false
+                || dataset.is_history()
+                || declared_axes)' \
   geode-core a_reference_dataset_without_a_key_is_dropped
 
 run_mutation "schema/history: a refused dataset is not pushed" \
   crates/geode-core/src/schema/mod.rs \
-  '            if (dataset.is_document() || dataset.is_reference() || dataset.is_history())' \
-  '            if (dataset.is_document() || dataset.is_reference())' \
+  '            if (dataset.is_document()
+                || dataset.is_reference()
+                || dataset.is_history()
+                || declared_axes)' \
+  '            if (dataset.is_document()
+                || dataset.is_reference()
+                || false
+                || declared_axes)' \
   geode-core a_history_dataset_is_dropped_on_each_shape_error
 
 # A history dimension outside the key would let two rows with one key
@@ -11198,6 +11230,14 @@ run_mutation "document: a document with no rows is refused" \
   geode-core validate_refuses_a_document_with_no_rows
 
 # ---- Reference snapshot publishing ------------------------------------
+
+# A compound-keyed table's joined keys are not values of its first column.
+run_mutation "reference: keys by column skip compound keys" \
+  crates/geode-core/src/reference.rs \
+  '            .filter(|t| t.key_columns == 1 && t.columns.first().is_some_and(|c| c == column))' \
+  '            .filter(|t| t.columns.first().is_some_and(|c| c == column))' \
+  geode-core \
+  keys_by_column_takes_only_tables_keyed_by_that_one_column
 
 # Unchanged must mean live holds exactly the staged rows. Skipping the
 # comparison reports every repeat poll as unchanged, so a changed snapshot
@@ -11478,8 +11518,14 @@ run_mutation "schema/document: textual is cleared on a non-dimension, not set" \
 # and staging sources.
 run_mutation "schema/document: a listed axis whose role is not axis is refused" \
   crates/geode-core/src/schema/mod.rs \
-  '            Some(c) if c.role != ColumnRole::Axis => {' \
-  '            Some(c) if c.role != ColumnRole::Axis && false => {' \
+  '            Some(c) if !matches!(c.role, ColumnRole::Axis { .. }) => {
+                diags.push(err(
+                    format!(
+                        "dataset '"'"'{name}'"'"': axis' \
+  '            Some(c) if !matches!(c.role, ColumnRole::Axis { .. }) && false => {
+                diags.push(err(
+                    format!(
+                        "dataset '"'"'{name}'"'"': axis' \
   geode-core axes_and_axis_roles_must_agree_both_ways
 
 # Every key column must be declared. Otherwise `document_columns()`
@@ -12700,7 +12746,7 @@ run_mutation "colour: hue takes the shorter arc" \
 # Gamut overflow pulls chroma, never clamps channels.
 run_mutation "colour: gamut clip pulls chroma" \
   crates/geode-core/src/colour/oklab.rs \
-  '    if in_gamut(direct) {' \
+  '    if linear_in_gamut(direct) {' \
   '    if true {' \
   geode-core \
   gamut_clip_pulls_chroma_and_keeps_lightness_and_hue
@@ -12946,7 +12992,7 @@ run_mutation "colour: contrast_ratio applies the WCAG +0.05 floor" \
 # bundled-theme tests both check this through the resolver.
 run_mutation "colour: the readability floor pulls lightness until 3:1" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= ratio {
+  '    if contrast(rgb) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -13021,7 +13067,7 @@ run_mutation "theme additions: Dragon hue anchors keep link groups distinct" \
 
 run_mutation "theme: bundled themes clear 3:1 through the resolver" \
   crates/geode-core/src/colour/mod.rs \
-  '    if contrast_ratio(rgb, background) >= ratio {
+  '    if contrast(rgb) >= ratio {
         return rgb;
     }' \
   '    if true {
@@ -19977,7 +20023,7 @@ run_mutation "tilepicker: the door skips the click-to-focus tail" \
 # The placeholder kind is never a row.
 run_mutation "tilepicker: the placeholder is not a row" \
   crates/geode-shell/src/shell/choicedialog.rs \
-  '            .filter(|k| *k != PLACEHOLDER_KIND)' \
+  '            .filter(|(k, _)| *k != PLACEHOLDER_KIND)' \
   '            .filter(|_| true)' \
   geode-shell \
   tile_rows_are_the_roster_kinds_titled_minus_the_placeholder
@@ -22166,12 +22212,12 @@ run_mutation "clock: a reload republishes AppClock" \
   geode-shell \
   a_time_zone_reload_republishes_the_clock_without_a_requery
 
-# The blotter's freshness readout formats on the clock, not by slicing UTC.
-run_mutation "clock: the blotter's short_time reads on the clock" \
-  crates/geode-blotter/src/tile.rs \
+# A tile header's freshness readout formats on the clock, not by slicing UTC.
+run_mutation "clock: the shared short_time reads on the clock" \
+  crates/geode-tile/src/header.rs \
   '        Ok(at) => clock.hm(at.to_utc()),' \
   '        Ok(at) => at.format("%H:%M").to_string(),' \
-  geode-blotter \
+  geode-tile \
   short_time_formats_an_rfc3339_instant_on_the_clock_and_echoes_garbage
 
 # A time-zone reload must repaint the AS OF chip even when the calendar
@@ -36042,7 +36088,7 @@ run_mutation "blotter footer: a fold leaves the rows label" \
   the_footer_rows_label_follows_a_fold_and_is_unchanged_by_a_render
 
 run_mutation "blotter stale: an unparsable time parses as the epoch" \
-  crates/geode-blotter/src/header.rs \
+  crates/geode-tile/src/header.rs \
   '                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())' \
   '                    .map(|t| chrono::DateTime::parse_from_rfc3339(t).unwrap_or(chrono::DateTime::UNIX_EPOCH.fixed_offset()))' \
   geode-blotter \
@@ -38451,6 +38497,749 @@ run_mutation "demo recovery: dividend egress addresses the NOTIFY topic" \
   '         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n"' \
   '         dividend_schedule = \"marketdata/dividend/{key}\"\n"' \
   geode-app an_uploaded_dividend_document_echoes_through_the_real_data_service
+# A scenario axis enumerates alternative states: a level whose grouping omits
+# one would sum across states and show a plausible wrong total.
+run_mutation "axis: a prefix omitting a scenario axis is non-attributable" \
+  crates/geode-core/src/attribution.rs \
+  '    if ds.scenario_axes().iter().any(|a| !base.contains(a)) {' \
+  '    if false {' \
+  geode-core a_prefix_that_omits_a_scenario_axis_is_non_attributable
+# An attribute-only grain keeps the plain key; extending it would store the
+# attribute once per bucket.
+run_mutation "axis: axes extend only the measure grains" \
+  crates/geode-core/src/schema/mod.rs \
+  '        if self.has_axes() && self.holds_measures_at(grain) {' \
+  '        if self.has_axes() {' \
+  geode-core axes_extend_the_key_of_measure_grains_only
+# A measure grain's table without its axis columns merges every bucket under
+# one key.
+run_mutation "axis: the DDL puts the axes after the key" \
+  crates/geode-data/src/store/ddl.rs \
+  '    for a in ds.axes_at(grain) {' \
+  '    for a in ds.axes_at(grain).iter().filter(|_| false) {' \
+  geode-data axis_columns_extend_the_key_of_every_measure_grain_and_no_other
+# The split must group by the axes too, or buckets collapse into one row.
+run_mutation "axis: the split groups by the axes" \
+  crates/geode-data/src/ingest/split.rs \
+  '            .map(|a| (a.clone(), format!("\"{a}\""))),' \
+  '            .filter(|_| false).map(|a| (a.clone(), format!("\"{a}\""))),' \
+  geode-data the_split_groups_by_key_and_axes_and_dedups_attributes_once
+# A NULL axis value is a NULL key: the file is refused before an id is spent.
+run_mutation "axis: a NULL axis refuses the file" \
+  crates/geode-data/src/ingest/load.rs \
+  '        if nulls > 0 {' \
+  '        if nulls > i64::MAX - 1 {' \
+  geode-data a_file_without_its_axis_column_is_refused_before_a_generation_is_reserved
+# An axis with no kind would be silently summed as a bucket; the reader must
+# refuse rather than default it.
+run_mutation "axis: an axis needs a kind" \
+  crates/geode-core/src/schema/mod.rs \
+  '                let kind = match table.get("axis").and_then(|v| v.as_str()) {' \
+  '                let kind = match table.get("axis").and_then(|v| v.as_str()).or(Some("bucket")) {' \
+  geode-core an_axis_needs_a_kind
+# Tenor order sorts by length, so 18M lands between 1Y and 2Y, not lexically.
+run_mutation "axis: tenor order puts 18M between 1Y and 2Y" \
+  crates/geode-core/src/schema/axis.rs \
+  '            (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),' \
+  '            (Some(_), Some(_)) => a.cmp(b),' \
+  geode-core tenor_order_ignores_case_and_puts_unparsable_values_last
+# A repeated axis name emits the column twice; the failed CREATE TABLE would
+# close the whole data service.
+run_mutation "axis: axes may not name a column twice" \
+  crates/geode-core/src/schema/mod.rs \
+  '        if ds.axes[..i].contains(a) {' \
+  '        if false {' \
+  geode-core axes_may_not_name_a_column_twice
+# The instrument-grain NPV ladder must read instrument-level inputs; a
+# per-underlying delta makes the instrument's repeats disagree in the split.
+run_mutation "demo scenario: the npv ladder is per instrument" \
+  crates/geode-demo-data/src/scenario.rs \
+  '            let npv = batch.npv[i] + sum_delta * s + 0.5 * sum_gamma * s * s;' \
+  '            let npv = batch.npv[i] + batch.delta01[i] * s + 0.5 * batch.gamma01[i] * s * s + 0.0 * (sum_delta + sum_gamma);' \
+  geode-demo-data instrument_grain_measures_agree_across_an_instruments_underlyings
+# Coverage, not the risk batch size, bounds the scenario store.
+run_mutation "demo scenario: coverage bounds the rows" \
+  crates/geode-demo-data/src/scenario.rs \
+  '        if rows.len() == coverage {' \
+  '        if rows.len() == usize::MAX {' \
+  geode-demo-data coverage_bounds_the_underlying_rows_and_every_bucket_is_present
+# Scenario files live beside src; under it the risk glob would read them.
+run_mutation "demo scenario: the sources point beside src" \
+  crates/geode-compose/src/demo.rs \
+  '        .map(|p| p.join("scenario"))' \
+  '        .map(|p| p.join("src"))' \
+  geode-compose the_demo_layer_declares_the_scenario_sources
+# Each term report feeds term_sensitivities under batch `<report>_<book>`;
+# reports sharing a batch (`<book>`) would replace each other's rows (a
+# partition is dataset, batch and book).
+run_mutation "demo scenario: each term report's batch carries its name" \
+  crates/geode-compose/src/demo.rs \
+  '(?P<batch>{report}_.+)_' \
+  '{report}_(?P<batch>.+)_' \
+  geode-compose each_term_report_feeds_term_sensitivities_under_its_own_batch
+# `term_sensitivities` has no source of its own: one report per measure
+# feeds it, and a combined source would list no `measures`.
+run_mutation "demo scenario: no combined term source" \
+  crates/geode-compose/src/demo.rs \
+  '        if ds == TERM_DATASET {
+            continue;
+        }' \
+  '        if false {
+            continue;
+        }' \
+  geode-compose the_demo_layer_declares_the_scenario_sources
+# A term report's file puts the book before the date, so its batch
+# `<report>_<book>` leaves the date out and each date replaces the last.
+run_mutation "demo scenario: a term report's file name puts the book before the date" \
+  crates/geode-demo-data/src/emit.rs \
+  '                Some(report) => format!("{report}_{}_{}", r.text[1], r.text[0]),' \
+  '                Some(report) => format!("{report}_{}_{}", r.text[0], r.text[1]),' \
+  geode-demo-data emitting_writes_one_file_per_dataset_and_book_with_a_sentinel
+# Diva opposes delta: higher dividends lower the forward.
+run_mutation "demo scenario: diva opposes delta" \
+  crates/geode-demo-data/src/scenario.rs \
+  '                -batch.delta01[i] * width,' \
+  '                batch.delta01[i] * width,' \
+  geode-demo-data diva_opposes_delta_and_scales_with_the_bucket_time
+# Diva scales with the bucket's width in years, not the tenor's time.
+run_mutation "demo scenario: diva scales with the bucket width" \
+  crates/geode-demo-data/src/scenario.rs \
+  '            let width = TENOR_YEARS[t] - if t == 0 { 0.0 } else { TENOR_YEARS[t - 1] };' \
+  '            let width = TENOR_YEARS[t];' \
+  geode-demo-data diva_opposes_delta_and_scales_with_the_bucket_time
+# Each term report carries only its own measure: one report per measure.
+run_mutation "demo scenario: each term report carries only its measure" \
+  crates/geode-demo-data/src/scenario.rs \
+  '            let mut t = table("term_sensitivities", &["tenor"], std::slice::from_ref(r));' \
+  '            let mut t = table("term_sensitivities", &["tenor"], &[*r, "repo"]);' \
+  geode-demo-data each_term_report_carries_only_identity_tenor_and_its_measure
+
+# ---- scenario shapes (scenarios.toml) and the pivot ----
+# A measure the source does not list is another report's: a partial
+# report loads healthy with no note.
+run_mutation "multi-report: a partial report is not degraded" \
+  crates/geode-data/src/ingest/load.rs \
+  '            let expected = !matches!(col.role, geode_core::schema::ColumnRole::Measure { .. })' \
+  '            let expected = true || !matches!(col.role, geode_core::schema::ColumnRole::Measure { .. })' \
+  geode-data all_five_term_reports_survive_and_sum_per_tenor
+# A measure the source lists keeps the required rule: a truncated report
+# still degrades.
+run_mutation "multi-report: a listed measure the file lacks still degrades" \
+  crates/geode-data/src/ingest/load.rs \
+  '                || req.measures.is_none_or(|m| m.contains(&col.name));' \
+  '                || req.measures.is_none_or(|m| m.contains(&col.name) && false);' \
+  geode-data a_report_missing_its_own_measure_is_degraded_and_not_the_others
+# A `measures` name that is not a declared measure refuses the source.
+run_mutation "sources: a measures name that is not a measure refuses the source" \
+  crates/geode-core/src/source_config.rs \
+  '                    if let Some(m) = stranger {' \
+  '                    if let Some(m) = stranger.filter(|_| false) {' \
+  geode-core a_measures_entry_that_is_not_a_measure_refuses_the_source
+# The plan carries the source's list to each item.
+run_mutation "ingest: the plan carries the source's measures" \
+  crates/geode-data/src/ingest/plan.rs \
+  '                measures: spec.measures.clone(),' \
+  '                measures: None,' \
+  geode-data each_item_carries_its_sources_measures
+# The runner hands the item's list to the load.
+run_mutation "ingest: the runner hands the source's measures to the load" \
+  crates/geode-data/src/ingest/runner.rs \
+  '                        measures: item.measures.as_deref(),' \
+  '                        measures: None,' \
+  geode-data a_measure_the_source_does_not_list_is_not_noted
+# A restart seeds a persisted condition onto the source whose globs own
+# its file, not onto another report's source over the same dataset.
+run_mutation "restart seed: a batch goes to the source owning its file" \
+  crates/geode-data/src/service.rs \
+  '    if owners.is_empty() {' \
+  '    if true {' \
+  geode-data a_restart_seeds_a_degraded_batch_onto_its_own_source_only
+# Each demo term report's source lists its own measure and twin only, so
+# the other reports' measures read as another report's.
+run_mutation "demo scenario: each term report lists its own measures" \
+  crates/geode-compose/src/demo.rs \
+  '             measures = [\"{report}\", \"{report}_usd\"]' \
+  '             measures = [\"{report}\", \"{report}_usd\", \"repo\"]' \
+  geode-compose each_term_report_feeds_term_sensitivities_under_its_own_batch
+# By maturity's fifth column is the diva report's measure.
+run_mutation "scenario: by_maturity paints diva" \
+  crates/geode-scenario/src/core/builtin_scenarios.toml \
+  '  { column = "diva", unit = "per 1% div" },' \
+  '  { column = "curvature", label = "diva", unit = "per 1% div" },' \
+  geode-scenario the_builtin_shapes_check_clean_against_the_demo_datasets
+
+run_mutation "scenario: an axis laid out nowhere is refused" \
+  crates/geode-core/src/scenario/check.rs \
+  '    if let Some(unlaid) = ds.axes.iter().find(|a| !laid.contains(&a.as_str())) {' \
+  '    if let Some(unlaid) = ds.axes.iter().find(|a| false && !laid.contains(&a.as_str())) {' \
+  geode-core schema_refusals_name_their_field
+
+run_mutation "scenario: a measure's twin is its _usd column" \
+  crates/geode-core/src/scenario/check.rs \
+  '    let twin = format!("{}_usd", m.column);' \
+  '    let twin = format!("{}_eur", m.column);' \
+  geode-core a_checked_ladder_fills_twins_where_declared_and_leaves_the_rest
+
+# A column named m_usd that is not a measure (a dimension, say) must not be
+# offered as m's currency alternate: the toggle would paint a label column.
+run_mutation "scenario: only a measure is a _usd twin" \
+  crates/geode-core/src/scenario/check.rs \
+  '        Some(c) if matches!(c.role, ColumnRole::Measure { .. }) => {' \
+  '        Some(c) => {' \
+  geode-core a_usd_named_column_that_is_not_a_measure_is_no_twin
+
+run_mutation "scenario: a diff base must fit the rows axis type" \
+  crates/geode-core/src/scenario/check.rs \
+  '            DiffBase::Number(_) => rows.is_numeric(),' \
+  '            DiffBase::Number(_) => true,' \
+  geode-core a_diff_base_must_match_the_rows_axis_type
+
+run_mutation "scenario: a Σ across the columns needs every columns axis to be a bucket" \
+  crates/geode-core/src/scenario/mod.rs \
+  '                .all(|c| self.axis(c).is_some_and(|a| a.kind == AxisKind::Bucket))' \
+  '                .all(|c| self.axis(c).is_some())' \
+  geode-core a_matrix_over_a_scenario_columns_axis_has_no_column_sum
+
+run_mutation "scenario: a user override replaces the builtin whole" \
+  crates/geode-core/src/config/merge.rs \
+  '        "scenarios" => Some(1),' \
+  '        "scenarios" => None,' \
+  geode-core a_user_shape_replaces_the_builtin_one_whole_and_a_refused_one_takes_it_down
+
+run_mutation "scenario scale: cells under the floor take no fill" \
+  crates/geode-core/src/colour/scale.rs \
+  '        if value == 0.0 || ratio < FLOOR {' \
+  '        if value == 0.0 {' \
+  geode-core cells_under_the_floor_take_no_fill_and_the_largest_takes_the_cap
+
+run_mutation "scenario scale: magnitude beyond the domain clamps at the cap" \
+  crates/geode-core/src/colour/scale.rs \
+  '        let t = FLOOR + (CAP - FLOOR) * ratio.min(1.0);' \
+  '        let t = FLOOR + (CAP - FLOOR) * ratio;' \
+  geode-core cells_under_the_floor_take_no_fill_and_the_largest_takes_the_cap
+
+run_mutation "scenario pivot: numeric axis labels order by value" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '            (Some(x), Some(y)) => x
+                .partial_cmp(&y)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.text.cmp(&b.text)),' \
+  '            (Some(_), Some(_)) => a.text.cmp(&b.text),' \
+  geode-scenario numeric_axis_labels_order_numerically
+
+run_mutation "scenario pivot: the row Σ is the subtotal row, not the cells" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                    sums[*row] = main.f64_at(value_idx, r);' \
+  '                    sums[*row] = main.f64_at(value_idx, r).map(|v| v - 1.0);' \
+  geode-scenario row_sums_come_from_the_subtotal_rows_not_the_cells
+
+run_mutation "scenario pivot: disagreeing generations withhold the Σ row" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                        (Some(a), Some(b)) if a != b' \
+  '                        (Some(a), Some(b)) if a != b && false' \
+  geode-scenario column_sums_blank_while_the_pairs_generations_disagree
+
+run_mutation "scenario pivot: a missing diff base is reported" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                None => diff_base_missing = true,' \
+  '                None => diff_base_missing = false,' \
+  geode-scenario a_base_label_only_the_domain_carries_is_a_missing_base
+
+run_mutation "scenario pivot: a NULL diff base value is reported" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                            diff_base_missing = true;' \
+  '                            diff_base_missing = false;' \
+  geode-scenario a_null_base_value_leaves_that_column_absolute_and_says_so
+
+run_mutation "scenario pivot: a diffed column has no Σ" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                if column.diffed {' \
+  '                if false && column.diffed {' \
+  geode-scenario a_diffed_ladder_column_has_no_sum
+
+run_mutation "scenario pivot: the heat domain skips the base row's diffed cells" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                if Some(row) == base_row && column.diffed {' \
+  '                if false && Some(row) == base_row && column.diffed {' \
+  geode-scenario the_heat_domain_excludes_the_base_rows_absolute_cells_in_diff_mode
+
+run_mutation "scenario pivot: the domain never drops a present label" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                && !row_labels.iter().any(|l| l == label)' \
+  '                && !row_labels.iter().any(|l| l == label) && false' \
+  geode-scenario the_domain_adds_labels_the_scope_lacks_and_never_drops_present_ones
+
+# ---- scenario tile (Part 3): reader minors, the derived view, the heat domain, the chain ----
+
+run_mutation "scenario: an empty axis name is refused structurally" \
+  crates/geode-core/src/scenario/read.rs \
+  '            if axes.iter().any(|a| a.trim().is_empty()) {' \
+  '            if false && axes.iter().any(|a| a.trim().is_empty()) {' \
+  geode-core an_empty_axis_name_is_refused_structurally
+
+run_mutation "scenario: a non-finite diff base is refused" \
+  crates/geode-core/src/scenario/read.rs \
+  '        Value::Float(x) if x.is_finite() => DiffBase::Number(*x),' \
+  '        Value::Float(x) => DiffBase::Number(*x),' \
+  geode-core a_non_finite_diff_base_is_refused
+
+run_mutation "scenario: a duplicate diff measure is refused" \
+  crates/geode-core/src/scenario/read.rs \
+  '            if seen.contains(&name) {' \
+  '            if false && seen.contains(&name) {' \
+  geode-core a_duplicate_diff_measure_is_refused_at_its_index
+
+run_mutation "scenario: a twin at another grain is refused" \
+  crates/geode-core/src/scenario/check.rs \
+  '            if c.grain() != base_grain {' \
+  '            if false {' \
+  geode-core a_twin_at_another_grain_is_refused_at_the_measure
+
+# Only a builtin shape over an undeclared dataset is withheld quietly; a
+# desk or user shape keeps its configuration error.
+run_mutation "scenario: only a builtin shape is withheld for its dataset" \
+  crates/geode-core/src/scenario/check.rs \
+  '        .filter(|s| doc.provenance.get(&s.kind) == Some(&Layer::Builtin))' \
+  '        .filter(|_| true)' \
+  geode-core builtin_without_dataset_lists_only_builtin_shapes_over_undeclared_datasets
+
+run_mutation "scenario view: currency rides along only as a dimension" \
+  crates/geode-core/src/scenario/view.rs \
+  '            .is_some_and(|c| matches!(c.role, ColumnRole::Dimension { .. }))' \
+  '            .is_some()' \
+  geode-core a_dataset_without_a_currency_dimension_derives_no_currency_column
+
+run_mutation "scenario view: the grouping is every axis in shape order" \
+  crates/geode-core/src/scenario/view.rs \
+  '            grouping: self.grouping(),' \
+  '            grouping: vec![self.rows.clone()],' \
+  geode-scenario the_builtin_shapes_derive_views_the_demo_schema_accepts
+
+# A ladder's columns are different units: each column heats against its own
+# largest magnitude. Folding every cell into column 0 leaves the rest unfilled.
+run_mutation "scenario pivot: a ladder's heat domain is per column" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '                    heat_domains[col] = heat_domains[col].max(v.abs());' \
+  '                    heat_domains[0] = heat_domains[0].max(v.abs());' \
+  geode-scenario a_ladders_heat_domain_is_per_column
+
+run_mutation "scenario pivot: only a matrix shares one heat domain" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '        if matches!(shape.columns, Columns::Axes(_)) {' \
+  '        if true {' \
+  geode-scenario a_ladders_heat_domain_is_per_column
+
+run_mutation "scenario pivot: a matrix shares one heat domain" \
+  crates/geode-scenario/src/core/pivot.rs \
+  '        if matches!(shape.columns, Columns::Axes(_)) {' \
+  '        if false {' \
+  geode-scenario a_matrixs_heat_domain_is_the_largest_cell_magnitude_in_every_column
+
+run_mutation "scenario prepare: the base row's diffed cell takes no fill" \
+  crates/geode-scenario/src/core/prepare.rs \
+  '    let fill = (i.heat && !(base && column.diffed))' \
+  '    let fill = (i.heat)' \
+  geode-scenario a_ladder_fills_each_column_by_its_own_domain_and_the_base_row_unfilled
+
+run_mutation "scenario prepare: a cell fills by its own column's domain" \
+  crates/geode-scenario/src/core/prepare.rs \
+  '                domain: p.heat_domain(data_col),' \
+  '                domain: p.heat_domain(0),' \
+  geode-scenario a_ladder_fills_each_column_by_its_own_domain_and_the_base_row_unfilled
+
+run_mutation "scenario prepare: :scale 1 restores each column's own scale" \
+  crates/geode-scenario/src/core/prepare.rs \
+  '        if let Some(scale) = i.scale {' \
+  '        if let Some(scale) = i.scale.or(Some(Scale::None)) {' \
+  geode-scenario the_tile_scale_overrides_then_restores_each_columns_own
+
+run_mutation "scenario session: diff is written only for a shape with one" \
+  crates/geode-scenario/src/core/session.rs \
+  '    if shape.diff.is_some() {' \
+  '    if true {' \
+  geode-scenario diff_is_ignored_on_a_shape_without_one
+
+run_mutation "scenario readout: selections join with a slash" \
+  crates/geode-scenario/src/core/readout.rs \
+  'values.join(" / ")' \
+  'values.join(", ")' \
+  geode-scenario the_readout_is_the_selections_values_in_order_then_the_layers
+
+run_mutation "scenario commands: scale 1 is each column's own" \
+  crates/geode-scenario/src/core/commands.rs \
+  '"1" => Ok(Command::Scale(None)),' \
+  '"1" => Ok(Command::Scale(Some(Scale::None))),' \
+  geode-scenario every_command_parses_to_its_variant
+
+# The Σ rows ride along with the main query; at depth 1 there are no leaves.
+run_mutation "scenario data: the main query asks for full depth" \
+  crates/geode-scenario/src/tile/data.rs \
+  '            max_depth: grouping.len(),' \
+  '            max_depth: 1,' \
+  geode-scenario a_show_asks_domains_then_main_then_totals_under_one_tag
+
+run_mutation "scenario data: the domain read is restricted to the dataset" \
+  crates/geode-scenario/src/tile/data.rs \
+  '            dataset: Some(self.shape.dataset.clone()),' \
+  '            dataset: None,' \
+  geode-scenario a_show_asks_domains_then_main_then_totals_under_one_tag
+
+# The domain is the dataset's, so the matrix holds still as the scope or a
+# launch filter moves.
+run_mutation "scenario data: the domain read is unscoped" \
+  crates/geode-scenario/src/tile/data.rs \
+  '            scope: Scope::default(),' \
+  '            scope: self.state.filter.clone(),' \
+  geode-scenario a_launch_record_narrows_to_the_underlying
+
+run_mutation "scenario data: fresh domains are reused" \
+  crates/geode-scenario/src/tile/data.rs \
+  'self.domains.stamp.as_ref() != Some(&stamp)' \
+  'true' \
+  geode-scenario a_scope_only_change_reuses_the_domains
+
+# Domains, main and totals are one barrier arrival: handing over at the main
+# query releases a flip before the Σ row has landed.
+run_mutation "scenario data: the barrier sees one arrival for the chain" \
+  crates/geode-scenario/src/tile/data.rs \
+  '                    Some(grouping) => match self.submit_grouped(tag, grouping, &scope, &as_of) {
+                        Ok(()) => self.fetch = Fetch::Totals { tag, domains, main },
+                        Err(r) => self.refuse_step(&r, cx),
+                    },' \
+  '                    Some(_) => self.hand_over(
+                        tag,
+                        Ok(Arc::new(Fetched {
+                            domains,
+                            main,
+                            totals: None,
+                        })),
+                        cx,
+                    ),' \
+  geode-scenario the_barrier_sees_one_arrival_for_the_chain
+
+run_mutation "scenario data: closing cancels by key" \
+  crates/geode-scenario/src/tile/data.rs \
+  'self.data.cancel(key);' \
+  'let _ = key;' \
+  geode-scenario hide_keeps_the_query_and_close_cancels
+
+# "no data yet" only while the dataset has neither a generation nor an as-of:
+# an empty scope over published data is an empty grid, not a notice.
+run_mutation "scenario data: no data yet needs nothing published" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        (!has_leaves && !published)' \
+  '        (!has_leaves)' \
+  geode-scenario no_generation_yet_is_a_status_notice_and_an_empty_scope_paints_the_domain
+
+run_mutation "scenario data: a historical read is published data" \
+  crates/geode-scenario/src/tile/data.rs \
+  '            .is_some_and(|f| f.generation.is_some() || f.as_of.is_some());' \
+  '            .is_some_and(|f| f.generation.is_some());' \
+  geode-scenario no_generation_yet_is_a_status_notice_and_an_empty_scope_paints_the_domain
+
+# The currency chip reads the new pivot's mixed flag: chips prepared before
+# the picture lands would miss a mixed native sum.
+run_mutation "scenario data: a new picture re-prepares the chips" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        // The currency chip reads the new pivot'"'"'s mixed flag.
+        self.prepare_chips(cx);' \
+  '        // The currency chip reads the new pivot'"'"'s mixed flag.' \
+  geode-scenario the_currency_chip_warns_over_a_mixed_native_sum
+
+run_mutation "scenario tile: c without a twin refuses" \
+  crates/geode-scenario/src/tile/mod.rs \
+  '                if twinned {
+                    let previous = self.mode();' \
+  '                if true {
+                    let previous = self.mode();' \
+  geode-scenario c_toggles_currency_without_a_requery_and_refuses_without_a_twin
+
+run_mutation "scenario tile: m without a diff refuses" \
+  crates/geode-scenario/src/tile/mod.rs \
+  '                if self.shape.diff.is_none() {' \
+  '                if false {' \
+  geode-scenario p_cycles_heat_and_plain_and_m_refuses_without_a_diff
+
+run_mutation "scenario tile: a state change re-ticks an open menu" \
+  crates/geode-scenario/src/tile/mod.rs \
+  '        self.prepare_chips(cx);
+        self.refresh_menu(cx);' \
+  '        self.prepare_chips(cx);' \
+  geode-scenario a_command_row_runs_its_line_and_the_ticks_follow
+
+run_mutation "scenario delegate: a scenario rows axis never sums a selection" \
+  crates/geode-scenario/src/delegate.rs \
+  '                    let mut acc = if self.rows_axis_is_scenario {' \
+  '                    let mut acc = if false {' \
+  geode-scenario the_footer_reads_the_cursor_cell_or_the_selection
+
+# A reloaded colours.toml must reach the paint: a kept cache would resolve a
+# named color against the old definitions.
+run_mutation "scenario delegate: new named colours reset the cache" \
+  crates/geode-scenario/src/delegate.rs \
+  '        self.named = ColourCache::new();' \
+  '        {}' \
+  geode-scenario new_named_colours_resolve_afresh_and_the_same_ones_are_kept
+
+run_mutation "scenario delegate: an outer axis lays a group header row" \
+  crates/geode-scenario/src/delegate.rs \
+  '        Some(vec![row])' \
+  '        let _ = row;
+        None' \
+  geode-scenario the_band_spans_the_outer_axis_groups
+
+# A default width narrower than its widest text clips a right-aligned
+# number from the left, its minus sign first.
+run_mutation "scenario delegate: a default width holds the widest text" \
+  crates/geode-scenario/src/delegate.rs \
+  '        scale::design_px(design, px(self.rem_px)).max(content)' \
+  '        { let _ = content; scale::design_px(design, px(self.rem_px)) }' \
+  geode-scenario a_default_width_holds_the_widest_text_sigma_included
+
+# The Σ row counts toward a column's widest text.
+run_mutation "scenario prepare: the widest text reads every row" \
+  crates/geode-scenario/src/core/prepare.rs \
+  '            (0..layout.rows())' \
+  '            (0..layout.rows().saturating_sub(1))' \
+  geode-scenario a_default_width_holds_the_widest_text_sigma_included
+
+# A ladder with units lays its names in a header row of their own; stacked
+# with the unit in one head they clip.
+run_mutation "scenario delegate: a ladder lays a name row over its units" \
+  crates/geode-scenario/src/delegate.rs \
+  '        self.units_row.then(|| {' \
+  '        false.then(|| {' \
+  geode-scenario a_ladder_header_puts_each_name_on_a_row_above_its_unit
+
+run_mutation "scenario menu: diff is disabled on a shape without one" \
+  crates/geode-scenario/src/tile/menu.rs \
+  '        let diff = if self.shape.diff.is_some() {' \
+  '        let diff = if true {' \
+  geode-scenario the_menu_opens_from_dot_lists_the_verbs_and_a_pick_dispatches
+
+run_mutation "scenario menu: a command row runs its own line" \
+  crates/geode-scenario/src/tile/menu.rs \
+  '        "scenario::scale_k" => "scale k",' \
+  '        "scenario::scale_k" => "scale m",' \
+  geode-scenario a_command_row_runs_its_line_and_the_ticks_follow
+
+run_mutation "app: a shape named like an accepted panel is refused" \
+  crates/geode-app/src/bridge.rs \
+  '        if MODULE_KINDS.contains(&kind) || panel_kinds.contains(&kind) {' \
+  '        if MODULE_KINDS.contains(&kind) {' \
+  geode-app a_shape_named_like_another_kind_is_refused
+
+run_mutation "app: a configured view named like a derived one refuses the shape" \
+  crates/geode-app/src/bridge.rs \
+  '        if views.iter().any(|v| v.name == view) {' \
+  '        if false {' \
+  geode-app a_configured_view_named_like_a_derived_one_refuses_the_shape
+
+# On reload a configured view named like a running shape's derived view is
+# dropped from every consumer, so no tile reads the wrong columns.
+run_mutation "app: a reload drops a view named like a running shape" \
+  crates/geode-app/src/bridge.rs \
+  '            !taken
+        })' \
+  '            true
+        })' \
+  geode-app a_reload_drops_a_configured_view_named_like_a_running_shape
+
+run_mutation "app: builtin shapes over undeclared datasets are withheld quietly" \
+  crates/geode-app/src/bridge.rs \
+  '        !withheld.iter().any(|(kind, _)| {' \
+  '        true || !withheld.iter().any(|(kind, _)| {' \
+  geode-app without_the_demo_layer_the_builtin_shapes_are_withheld_quietly
+
+# PF-23: c and m rebuild over the last picture; only an installed picture
+# clears a query error, so a toggle never hides one.
+run_mutation "scenario data: a rebuilt pivot leaves a query error standing" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        self.standing = self.picture_notice(main, &pivot);' \
+  '        self.standing = self.picture_notice(main, &pivot);
+        self.error = None;' \
+  geode-scenario a_query_error_is_a_standing_notice_and_keeps_the_picture
+
+# A refusal mid-chain forgets what was asked: kept as acted, the versions
+# would read as answered and the next change would not ask again.
+run_mutation "scenario data: a refusal mid-chain asks again on the next change" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        self.set_error(Notice::danger(refused(refusal)));
+        self.following.submitted(
+            false,
+            Unanswered::Retry,' \
+  '        self.set_error(Notice::danger(refused(refusal)));
+        self.following.submitted(
+            false,
+            Unanswered::KeepActed,' \
+  geode-scenario a_refusal_mid_chain_answers_the_barrier_and_the_next_change_asks_again
+
+# install builds the pivot before it commits anything: a misfit snapshot
+# committed first is what c and m would rebuild over.
+run_mutation "scenario data: install builds before it commits the picture" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        match self.build(&fetched) {
+            Ok(pivot) => {
+                self.error = None;' \
+  '        self.picture = Some(fetched.clone());
+        match self.build(&fetched) {
+            Ok(pivot) => {
+                self.error = None;' \
+  geode-scenario a_snapshot_that_does_not_fit_keeps_the_last_picture
+
+# A contradiction selects no rows: read as its layers it would look like a
+# narrower scope over real numbers.
+run_mutation "scenario readout: a contradiction reads nothing" \
+  crates/geode-scenario/src/core/readout.rs \
+  '    if scope.impossible {
+        return ScopeReadout::Nothing;
+    }' \
+  '    if false {
+        return ScopeReadout::Nothing;
+    }' \
+  geode-scenario a_contradiction_reads_nothing_not_all
+
+run_mutation "scenario session: a pinned instant keeps its fractional seconds" \
+  crates/geode-scenario/src/core/session.rs \
+  'chrono::SecondsFormat::AutoSi' \
+  'chrono::SecondsFormat::Secs' \
+  geode-scenario a_pinned_instant_keeps_its_fractional_seconds
+
+# A filter part of the wrong type drops the whole filter with a notice; read
+# as empty, the rest would restore a different filter from the one saved.
+run_mutation "scenario session: a malformed filter part is a notice, not a silent drop" \
+  crates/geode-scenario/src/core/session.rs \
+  '            .ok_or_else(|| format!("text: expected a string, got {v}"))?;' \
+  '            .unwrap_or("");' \
+  geode-scenario a_filter_part_of_the_wrong_type_drops_the_filter_with_a_notice
+
+# An unscoped tile must not requery, or read, under the frame's scope: it
+# would show `unscoped` over scoped numbers.
+run_mutation "scenario data: an unscoped tile ignores the scope counter" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        (scoped && a.scope != b.scope)' \
+  '        (a.scope != b.scope)' \
+  geode-scenario an_unscoped_tile_queries_its_filter_alone_and_ignores_the_scope
+
+run_mutation "scenario data: an unscoped tile queries its filter alone" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        let scope = if self.state.unscoped {
+            self.state.filter.clone()' \
+  '        let scope = if false {
+            self.state.filter.clone()' \
+  geode-scenario an_unscoped_tile_queries_its_filter_alone_and_ignores_the_scope
+
+run_mutation "scenario data: a pinned tile ignores the as-of counter" \
+  crates/geode-scenario/src/tile/data.rs \
+  '            || (follows_as_of && a.as_of != b.as_of)' \
+  '            || (a.as_of != b.as_of)' \
+  geode-scenario a_pinned_as_of_ignores_the_frames_counter
+
+# Spec §7: an unknown column in :filter is refused, never dropped or widened.
+run_mutation "scenario tile: a filter expression is checked before it is kept" \
+  crates/geode-scenario/src/tile/mod.rs \
+  '                self.validate_filter(&scope)?;' \
+  '                let _ = self.validate_filter(&scope);' \
+  geode-scenario a_filter_expression_is_checked_and_reaches_the_query
+
+run_mutation "scenario tile: a filter over an undeclared dataset is refused" \
+  crates/geode-scenario/src/tile/mod.rs \
+  '        let Some(dataset) = schema.dataset(&self.shape.dataset) else {
+            return Err(format!(' \
+  '        let Some(dataset) = schema.dataset(&self.shape.dataset) else {
+            return Ok(());
+            return Err(format!(' \
+  geode-scenario a_filter_over_an_undeclared_dataset_is_refused
+
+# A mode the picture cannot be drawn in puts the previous mode back: kept,
+# the chip would name a mode the cells are not drawn in.
+run_mutation "scenario data: a mode the picture cannot take is put back" \
+  crates/geode-scenario/src/tile/data.rs \
+  '                self.state.currency = previous.currency;
+                self.state.diff = previous.diff;' \
+  '                let _ = previous;' \
+  geode-scenario a_mode_the_picture_cannot_take_is_refused_and_the_mode_stays
+
+# A named color resolves when the window is prepared; left named, render
+# would run the readable-text search per cell on every frame.
+run_mutation "scenario delegate: a named color is fixed when the window is prepared" \
+  crates/geode-scenario/src/delegate.rs \
+  '                cell.color = CellColor::Fixed(rgb);' \
+  '                let _ = rgb;' \
+  geode-scenario a_named_color_arrives_in_the_cache_fixed_and_readable_over_its_fill
+
+run_mutation "scenario delegate: new named colours re-prepare the window" \
+  crates/geode-scenario/src/delegate.rs \
+  '        self.named = ColourCache::new();
+        self.invalidate_cells();' \
+  '        self.named = ColourCache::new();' \
+  geode-scenario new_named_colours_resolve_afresh_and_the_same_ones_are_kept
+
+run_mutation "scenario delegate: unchanged paint re-prepares nothing" \
+  crates/geode-scenario/src/delegate.rs \
+  '        if self.heat != heat || self.scale != scale {' \
+  '        if true {' \
+  geode-scenario the_scale_override_is_kept_and_unchanged_paint_is_a_no_op
+
+run_mutation "scenario delegate: a cursor move re-prepares the footer readout" \
+  crates/geode-scenario/src/delegate.rs \
+  '        self.resolve_selection();
+        self.prepare_cursor_readout();' \
+  '        self.resolve_selection();' \
+  geode-scenario the_footer_reads_the_cursor_cell_or_the_selection
+
+run_mutation "scenario data: a frame change re-prepares the header readout" \
+  crates/geode-scenario/src/tile/data.rs \
+  '        self.prepare_readout(cx);
+        cx.notify();
+        if self.sync_following(cx) {' \
+  '        cx.notify();
+        if self.sync_following(cx) {' \
+  geode-scenario the_title_is_the_shape_title_and_the_readout
+
+# The scenario tiles compile :filter against the schema the service serves,
+# never an edited datasets doc awaiting restart.
+run_mutation "app: the scenario schema cell keeps the startup schema" \
+  crates/geode-app/src/bridge.rs \
+  '                    pinned = Some(Rc::new(schema.clone()));
+                    factory.set_schema(schema);' \
+  '                    pinned = Some(Rc::new(schema.clone()));
+                    *scenario_cells.schema.borrow_mut() = schema.clone();
+                    factory.set_schema(schema);' \
+  geode-app a_reload_leaves_the_scenario_schema_cell_on_the_startup_schema
+
+# The linear gamut shortcut decides only where encoding would agree; a
+# looser edge calls an out-of-gamut channel in.
+run_mutation "colour: the linear gamut test agrees with the encoded one" \
+  crates/geode-core/src/colour/oklab.rs \
+  '    if linear > -3.8e-5 && linear < 1.0011 {' \
+  '    if linear > -3.8e-5 && linear < 1.002 {' \
+  geode-core the_linear_gamut_test_agrees_with_the_encoded_one_at_both_edges
+
+run_mutation "colour: the contrast search holds the hue it hoists" \
+  crates/geode-core/src/colour/mod.rs \
+  '    let (cos_h, sin_h) = (lch.h.cos(), lch.h.sin());' \
+  '    let (cos_h, sin_h) = (lch.h.sin(), lch.h.cos());' \
+  geode-core the_contrast_search_matches_the_original_bit_for_bit
+
+run_mutation "tile header: dataset times sort oldest first" \
+  crates/geode-tile/src/header.rs \
+  '        sorted.sort_by(|a, b| a.as_of.cmp(&b.as_of));' \
+  '        sorted.sort_by(|a, b| b.as_of.cmp(&a.as_of));' \
+  geode-tile dataset_times_sort_oldest_first_and_label_on_the_clock
+
+run_mutation "shell: scenarios is restart-required" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                ("scenarios", &self.scenarios_baseline),' \
+  '                ("panels", &self.panels_baseline),' \
+  geode-shell a_scenarios_change_asks_for_a_restart
+
+run_mutation "shell: the row menu names a kind by its title" \
+  crates/geode-shell/src/dimension.rs \
+  '                    format!("Open {}", f.title()),' \
+  '                    format!("Open {}", f.kind()),' \
+  geode-shell a_section_per_column_with_rows_in_context_order
+
 # value_colors replaces one value's entry whole (depth 2). At depth 1 a user
 # entry would drop the desk's other values of the dimension.
 run_mutation "value colors: a dimension merges per value" \
@@ -39344,8 +40133,10 @@ run_mutation "classifications: a verb works over the pending object" \
 # The label loop: the cursor keeps its shown index after a verb.
 run_mutation "classifications: a relabel keeps the cursor index (grid)" \
   crates/geode-classifications/src/core/grid.rs \
-  '            self.place(at.min(self.visible.len() - 1));' \
-  '            let _ = at;' \
+  '        {
+            self.place(at.min(self.visible.len() - 1));' \
+  '        {
+            let _ = at;' \
   geode-classifications \
   a_relabel_rebuild_keeps_the_cursor_index_even_when_put
 
@@ -39363,13 +40154,6 @@ run_mutation "classifications: losing the cursor row ends a selection" \
   '            && lost(self.anchor.as_deref())' \
   geode-classifications \
   a_rebuild_removing_the_cursor_row_ends_a_selection
-
-run_mutation "classifications: the session saves a filter-hidden cursor row" \
-  crates/geode-classifications/src/core/grid.rs \
-  '            .or(self.hidden.as_deref())' \
-  '            .or(None)' \
-  geode-classifications \
-  the_saved_cursor_prefers_seed_then_hidden_then_cursor
 
 # `tech` typed over `Tech` must not make a second label.
 run_mutation "classifications: a case variant takes the existing label" \
@@ -39447,10 +40231,10 @@ run_mutation "classifications: the cursor follows its source across a rebuild" \
 
 run_mutation "classifications: a blank label counts as unclassified" \
   crates/geode-classifications/src/core/grid.rs \
-  '        self.unclassified = rows.iter().filter(|r| label_text(r).is_none()).count();' \
-  '        self.unclassified = rows.iter().filter(|r| r.label.is_none()).count();' \
+  '            rows.iter().filter(|r| label_text(r).is_none()).count() - usize::from(self.draft_shown);' \
+  '            rows.iter().filter(|r| r.label.is_none()).count() - usize::from(self.draft_shown);' \
   geode-classifications \
-  counts_ignore_the_filter_and_treat_a_blank_label_as_unclassified
+  counts_treat_a_blank_label_as_unclassified
 
 # Undo pops the last entry; taking the oldest reverts the wrong edit.
 run_mutation "classifications: undo reverts only the last edit" \
@@ -39633,9 +40417,9 @@ run_mutation "classifications: a landing plan never displaces an open edit" \
 run_mutation "classifications: a landing plan waits for the focused tile" \
   crates/geode-classifications/src/tile/mod.rs \
   '        if !self.focused
-            || self.find_entry.is_some()' \
+            || self.searching' \
   '        if false
-            || self.find_entry.is_some()' \
+            || self.searching' \
   geode-classifications \
   a_plan_landing_on_an_unfocused_tile_is_held_until_focused
 
@@ -39643,11 +40427,53 @@ run_mutation "classifications: a landing plan waits for the focused tile" \
 # into it must not answer the import.
 run_mutation "classifications: a landing plan waits for a search to end" \
   crates/geode-classifications/src/tile/mod.rs \
-  '            || self.find_entry.is_some()
+  '            || self.searching
             || self.editor.is_some()' \
   '            || self.editor.is_some()' \
   geode-classifications \
   a_plan_landing_during_a_search_is_held
+
+# Cancelling `/` returns the cursor to where the search began.
+run_mutation "classifications: a cancelled find returns to its origin" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                        && !self.grid.put_on(origin)' \
+  '                        && false' \
+  geode-classifications \
+  slash_moves_the_cursor_to_a_match_and_keeps_every_row
+
+# `n` past the last match wraps to the first.
+run_mutation "classifications: n wraps" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                FindDirection::Forward => (at + 1) % len,' \
+  '                FindDirection::Forward => (at + 1).min(len - 1),' \
+  geode-classifications \
+  n_and_shift_n_repeat_the_committed_find_and_wrap
+
+# A fzf pick moves the cursor to its row by source value.
+run_mutation "classifications: a fzf pick moves the cursor" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                            if !t.grid.put_on(&pick) {' \
+  '                            if false {' \
+  geode-classifications \
+  fzf_find_lists_every_row_and_reveal_moves_the_cursor
+
+# A fzf pick with nothing typed keeps the query an earlier find committed.
+run_mutation "classifications: an empty fzf pick keeps the committed query" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                                    .or(earlier),' \
+  '                                    .or(None::<String>.and(earlier)),' \
+  geode-classifications \
+  an_empty_fzf_pick_keeps_the_committed_query
+
+# The fzf results paint in the grid's place only while the session is open.
+run_mutation "classifications: fzf results replace the grid" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                    .filter(|r| r.read(cx).is_active());
+                v_flex()' \
+  '                    .filter(|_| false);
+                v_flex()' \
+  geode-classifications \
+  fzf_results_replace_the_grid_until_the_session_ends
 
 # A shell input (palette, command line) holds the keys over the focused
 # tile; the tile sees only that focus is not on the shell root or within it.
@@ -39822,6 +40648,86 @@ run_mutation "classifications: an import reads with the size limit" \
   '                max_bytes: u64::MAX,' \
   geode-classifications \
   import_reads_the_chosen_file_with_the_size_limit
+
+# `i` opens with the caret at the end; seeding Select would make typing
+# replace the label.
+run_mutation "classifications: i keeps the label and appends" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                self.open_editor(EditCaret::End, window, cx)' \
+  '                self.open_editor(EditCaret::Select, window, cx)' \
+  geode-classifications \
+  i_puts_the_caret_at_the_end_and_shift_i_selects_the_label
+
+# A clear that removed a map-only value says so; the row leaving the grid
+# must not read as lost.
+run_mutation "classifications: a removed value is announced" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        [] => return None,' \
+  '        _ => return None,' \
+  geode-classifications \
+  d_d_removes_a_map_only_value_and_clears_one_in_the_data
+
+# A refused clear wrote nothing: announcing a removal would report a value
+# gone that the map still holds.
+run_mutation "classifications: a refused clear announces no removal" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                if wrote && let Some(text) = removal_notice(&removed, cleared) {' \
+  '                if true && let Some(text) = removal_notice(&removed, cleared) {' \
+  geode-classifications \
+  a_refused_clear_announces_no_removal
+
+# A draft is written only by a label: a blank enter must leave no mapping,
+# not take the highlighted label. (A blank that did reach the write is
+# stopped again by the assign's normalisation and its no-change skip, so
+# the editor's rule is the line a single mutation can break.)
+run_mutation "classifications: a draft is committed only on a non-blank label" \
+  crates/geode-classifications/src/tile/editor.rs \
+  '        Some(h) if take => Some(h),' \
+  '        Some(h) if take || typed.is_empty() => Some(h),' \
+  geode-classifications \
+  escape_at_the_label_step_leaves_no_trace
+
+# An empty find commit keeps nothing for `escape` to end: a find left
+# open would eat the escape that dismisses the notices.
+run_mutation "classifications: an empty find commit keeps no find" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                if self.find.as_ref().is_some_and(|f| f.committed.is_none()) {' \
+  '                if false {' \
+  geode-classifications \
+  an_empty_find_commit_leaves_escape_to_the_notices
+
+# The draft goes with the editor: escape must not leave a phantom row.
+run_mutation "classifications: a closed editor drops its draft" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '        if self.draft.take().is_some() {' \
+  '        if false {' \
+  geode-classifications \
+  escape_at_the_label_step_leaves_no_trace
+
+# A value the rows already hold is the real row, never a second draft row.
+run_mutation "classifications: a draft the rows hold is not inserted" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            && !rows.iter().any(|r| r.source == d)' \
+  '            && true' \
+  geode-classifications \
+  a_draft_the_rows_now_hold_is_the_real_row
+
+# The draft is not a value yet: counting it would claim a row the data lacks.
+run_mutation "classifications: a draft is not counted" \
+  crates/geode-classifications/src/core/grid.rs \
+  '            self.rows.len() - usize::from(self.draft_shown),' \
+  '            self.rows.len(),' \
+  geode-classifications \
+  a_draft_sorts_after_the_observed_unclassified_rows_and_is_not_counted
+
+# The add field offers only reference keys not already rows: offering a
+# shown value would read as adding what is there.
+run_mutation "classifications: add offers only keys not yet rows" \
+  crates/geode-classifications/src/tile/mod.rs \
+  '                    .filter(|k| !rows.contains(*k))' \
+  '                    .filter(|_| true)' \
+  geode-classifications \
+  o_adds_a_value_and_its_label_writes_one_entry
 
 # A door tile shows its edit before the write: a failed write must reach it,
 # or its labels look saved.

@@ -200,28 +200,49 @@ pub fn demo_dir(rows: usize) -> PathBuf {
         .join(format!("{rows}-{SEED}"))
 }
 
-/// Returns `dir/src`, generating source files when it has no directory entries.
-/// Any existing entry suppresses generation; existing contents are reused
-/// without checking completeness so repeated launches can use a warm store.
-/// Directory creation and emission errors propagate to the caller.
+/// Returns `dir/src`, generating risk source files when it has no directory
+/// entries, and fills `dir/scenario` with the scenario files the same way.
+/// Any existing entry suppresses generation of that directory; existing
+/// contents are reused without checking completeness so repeated launches
+/// can use a warm store. Directory creation and emission errors propagate
+/// to the caller.
 pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
+    let populated = |path: &Path| {
+        std::fs::read_dir(path)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false)
+    };
     let src = dir.join("src");
-    let populated = std::fs::read_dir(&src)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    if !populated {
+    // Scenario files live beside `src`, not under it: the risk source's
+    // `<src>/*.csv` glob must never pick one up.
+    let scenario = dir.join("scenario");
+    let src_populated = populated(&src);
+    let scenario_populated = populated(&scenario);
+    if src_populated && scenario_populated {
+        return Ok(src);
+    }
+    let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+        rows,
+        seed: SEED,
+        business_dates: 1,
+    });
+    if !src_populated {
         std::fs::create_dir_all(&src)?;
-        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
-            rows,
-            seed: SEED,
-            business_dates: 1,
-        });
         let mut opts = geode_demo_data::EmitOptions::new(&src);
         opts.leave_one_pending = false;
         geode_demo_data::emit_directory(&batch, &opts)?;
     }
+    if !scenario_populated {
+        let set =
+            geode_demo_data::generate_scenarios(&batch, geode_demo_data::SCENARIO_COVERAGE, SEED);
+        geode_demo_data::emit_scenario_directory(&set, &scenario)?;
+    }
     Ok(src)
 }
+
+/// The scenario dataset fed by one report per measure
+/// (`geode_demo_data::TERM_REPORTS`).
+const TERM_DATASET: &str = "term_sensitivities";
 
 /// Builds the builtin demo layer from compiled-in example documents and
 /// source paths rooted at `source_dir`.
@@ -239,7 +260,42 @@ pub fn ensure_emitted(dir: &Path, rows: usize) -> std::io::Result<PathBuf> {
 /// 30 s. `hanweck_surface`, `hanweck_realized` and `hanweck_varswap` answer
 /// the `vol_surface`, `realized_vol` and `varswap` history datasets from
 /// `demo_hanweck`'s `surface`, `realized` and `varswap` tables.
+/// Each scenario dataset has a `demo_scenario_<dataset>` directory
+/// source over `scenario/` beside `source_dir`, polled every five seconds,
+/// except `term_sensitivities`: one report per measure feeds it, each from
+/// its own `demo_scenario_term_<report>` source listing its `measures`.
 pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
+    let scenario_dir = source_dir
+        .parent()
+        .map(|p| p.join("scenario"))
+        .unwrap_or_else(|| source_dir.join("scenario"));
+    let mut scenario_sources = String::new();
+    for ds in geode_demo_data::SCENARIO_DATASETS {
+        if ds == TERM_DATASET {
+            continue;
+        }
+        scenario_sources.push_str(&format!(
+            "[demo_scenario_{ds}]\ndataset = \"{ds}\"\npaths = [{:?}]\n\
+             readiness = \"sentinel\"\npriority = \"latest_other\"\npoll_interval = \"5s\"\n\
+             pending_timeout = \"1m\"\nbatch_pattern = '^{ds}_\\d{{4}}-\\d{{2}}-\\d{{2}}_(?P<batch>.+)$'\n",
+            scenario_dir.join(format!("{ds}_*.csv")).to_string_lossy()
+        ));
+    }
+    // `term_sensitivities` is fed by one report per measure, each its own
+    // source over `<report>_<book>_<date>.csv` with batch `<report>_<book>`:
+    // a partition is (dataset, batch, book), so reports sharing a batch
+    // would replace each other's rows. Each lists the measure (and twin)
+    // its files carry, so the others' read as NULL without a signal while
+    // a file missing its own still degrades.
+    for report in geode_demo_data::TERM_REPORTS {
+        scenario_sources.push_str(&format!(
+            "[demo_scenario_term_{report}]\ndataset = \"{TERM_DATASET}\"\npaths = [{:?}]\n\
+             readiness = \"sentinel\"\npriority = \"latest_other\"\npoll_interval = \"5s\"\n\
+             pending_timeout = \"1m\"\nbatch_pattern = '^(?P<batch>{report}_.+)_\\d{{4}}-\\d{{2}}-\\d{{2}}$'\n\
+             measures = [\"{report}\", \"{report}_usd\"]\n",
+            scenario_dir.join(format!("{report}_*.csv")).to_string_lossy()
+        ));
+    }
     let sources = format!(
         "config_version = 1\n[demo]\ndataset = \"risk_snapshot\"\npaths = [{:?}]\n\
          readiness = \"sentinel\"\npriority = \"latest_risk\"\npoll_interval = \"2s\"\n\
@@ -262,8 +318,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [hanweck_realized]\nadapter = \"demo_hanweck\"\ndataset = \"realized_vol\"\n\
          table = \"realized\"\n\
          [hanweck_varswap]\nadapter = \"demo_hanweck\"\ndataset = \"varswap\"\n\
-         table = \"varswap\"\n",
-        source_dir.join("*.csv").to_string_lossy()
+         table = \"varswap\"\n{}",
+        source_dir.join("*.csv").to_string_lossy(),
+        scenario_sources
     );
     // The `sophis` target publishes both document kinds through the same
     // adapter as their subscribed sources. Per-key NOTIFY addresses route
@@ -494,7 +551,13 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 10);
+        assert_eq!(
+            sources.len(),
+            19,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+             hanweck_realized, hanweck_varswap + four scenario datasets' sources + \
+             five term reports' sources"
+        );
     }
 
     /// The dividend source declares its document kind, topic, coalescing,
@@ -525,9 +588,10 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            10,
+            19,
             "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
-             hanweck_realized, hanweck_varswap"
+             hanweck_realized, hanweck_varswap + four scenario datasets' sources + \
+             five term reports' sources"
         );
         assert!(sources.iter().any(|s| s.name == "dividend"));
     }
@@ -560,9 +624,10 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            10,
+            19,
             "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
-             hanweck_realized, hanweck_varswap"
+             hanweck_realized, hanweck_varswap + four scenario datasets' sources + \
+             five term reports' sources"
         );
         assert!(sources.iter().any(|s| s.name == "opra_sim"));
     }
@@ -603,7 +668,13 @@ mod tests {
             d.is_empty(),
             "SourceSpec::from_doc found diagnostics: {d:?}"
         );
-        assert_eq!(sources.len(), 10);
+        assert_eq!(
+            sources.len(),
+            19,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+             hanweck_realized, hanweck_varswap + four scenario datasets' sources + \
+             five term reports' sources"
+        );
         let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
         let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
         assert_eq!(
@@ -696,6 +767,268 @@ mod tests {
             count,
             "not emitted twice"
         );
+    }
+
+    /// The demo schema and sources at `/tmp/geode-demo/100-42/src`.
+    fn demo_schema_and_sources() -> (
+        geode_core::schema::SchemaSpec,
+        Vec<geode_data::source::SourceSpec>,
+    ) {
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(d.is_empty(), "{d:?}");
+        (schema, sources)
+    }
+
+    #[test]
+    fn the_demo_layer_declares_the_scenario_sources() {
+        let (schema, sources) = demo_schema_and_sources();
+        for ds in geode_demo_data::SCENARIO_DATASETS {
+            let spec = schema
+                .dataset(ds)
+                .unwrap_or_else(|| panic!("{ds} declared"));
+            assert!(spec.has_axes(), "{ds} has axes");
+            assert!(
+                spec.column("underlying_ref").is_some() && spec.column("currency").is_some(),
+                "{ds} keeps the risk dimensions"
+            );
+            if ds == TERM_DATASET {
+                assert!(
+                    !sources
+                        .iter()
+                        .any(|s| s.name == format!("demo_scenario_{ds}")),
+                    "no combined term source"
+                );
+                continue;
+            }
+            let src = sources
+                .iter()
+                .find(|s| s.name == format!("demo_scenario_{ds}"))
+                .unwrap_or_else(|| panic!("source for {ds}"));
+            assert_eq!(src.dataset, ds);
+            assert_eq!(
+                src.paths,
+                [format!("/tmp/geode-demo/100-42/scenario/{ds}_*.csv")]
+            );
+            assert_eq!(
+                src.priority,
+                geode_core::source_config::Priority::LatestOther
+            );
+            assert!(
+                src.batch_pattern
+                    .as_deref()
+                    .unwrap()
+                    .starts_with(&format!("^{ds}_")),
+                "{:?}",
+                src.batch_pattern
+            );
+        }
+        assert_eq!(
+            sources.len(),
+            19,
+            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+             hanweck_realized, hanweck_varswap + four scenario datasets' sources + \
+             five term reports' sources"
+        );
+    }
+
+    /// One source per term report feeds `term_sensitivities`, each over
+    /// its own files and under its own batch `<report>_<book>`: a
+    /// partition is (dataset, batch, book), so reports sharing a batch would
+    /// replace each other's rows. Each lists its own measure and twin, and
+    /// together the lists are exactly the dataset's measures.
+    #[test]
+    fn each_term_report_feeds_term_sensitivities_under_its_own_batch() {
+        let (schema, sources) = demo_schema_and_sources();
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 300,
+            seed: SEED,
+            business_dates: 1,
+        });
+        let set = geode_demo_data::generate_scenarios(&batch, 20, SEED);
+        let dir = tempfile::tempdir().unwrap();
+        let files = geode_demo_data::emit_scenario_directory(&set, dir.path()).unwrap();
+        let book = files
+            .iter()
+            .find(|f| {
+                f.csv_path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("diva_")
+            })
+            .unwrap()
+            .books[0]
+            .clone();
+        let mut listed: Vec<String> = Vec::new();
+        let mut batches: Vec<String> = Vec::new();
+        for report in geode_demo_data::TERM_REPORTS {
+            let src = sources
+                .iter()
+                .find(|s| s.name == format!("demo_scenario_term_{report}"))
+                .unwrap_or_else(|| panic!("a source for {report}"));
+            assert_eq!(src.dataset, TERM_DATASET);
+            assert_eq!(
+                src.paths,
+                [format!("/tmp/geode-demo/100-42/scenario/{report}_*.csv")]
+            );
+            assert_eq!(
+                src.priority,
+                geode_core::source_config::Priority::LatestOther
+            );
+            assert_eq!(
+                src.measures,
+                Some(vec![report.to_string(), format!("{report}_usd")])
+            );
+            listed.extend(src.measures.clone().unwrap());
+            // The file the emitter writes for this report and book.
+            let file = files
+                .iter()
+                .map(|f| f.csv_path.clone())
+                .find(|p| {
+                    let n = p.file_name().unwrap().to_string_lossy();
+                    n.starts_with(&format!("{report}_")) && n.contains(&book)
+                })
+                .unwrap_or_else(|| panic!("a {report} file for {book}"));
+            let batch = src.batch_of(&file);
+            assert_eq!(batch, format!("{report}_{book}"));
+            // A second date keeps the same batch, so it replaces, not adds.
+            assert_eq!(
+                src.batch_of(Path::new(&format!("{report}_{book}_2026-08-25.csv"))),
+                batch
+            );
+            // No other report's glob picks this file up.
+            for other in geode_demo_data::TERM_REPORTS
+                .iter()
+                .filter(|o| **o != report)
+            {
+                assert!(
+                    !file
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .starts_with(&format!("{other}_")),
+                    "{other}'s glob would read a {report} file"
+                );
+            }
+            batches.push(batch);
+        }
+        batches.sort();
+        batches.dedup();
+        assert_eq!(batches.len(), geode_demo_data::TERM_REPORTS.len());
+        let mut declared: Vec<String> = schema
+            .dataset(TERM_DATASET)
+            .unwrap()
+            .columns
+            .iter()
+            .filter(|c| matches!(c.role, geode_core::schema::ColumnRole::Measure { .. }))
+            .map(|c| c.name.clone())
+            .collect();
+        declared.sort();
+        listed.sort();
+        assert_eq!(listed, declared, "each measure is exactly one report's");
+    }
+
+    /// `[demo]` reads `<src>/*.csv`; the scenario files live beside, not
+    /// under, `src`, so a scenario CSV never loads as risk.
+    #[test]
+    fn the_risk_glob_does_not_match_scenario_files() {
+        let (_, sources) = demo_schema_and_sources();
+        let risk = sources.iter().find(|s| s.name == "demo").unwrap();
+        assert_eq!(risk.paths, ["/tmp/geode-demo/100-42/src/*.csv"]);
+        let risk_dir = Path::new(&risk.paths[0]).parent().unwrap();
+        for src in sources
+            .iter()
+            .filter(|s| s.name.starts_with("demo_scenario_"))
+        {
+            let dir = Path::new(&src.paths[0]).parent().unwrap();
+            assert_ne!(dir, risk_dir, "{}", src.name);
+            assert_eq!(
+                dir,
+                Path::new("/tmp/geode-demo/100-42/scenario"),
+                "{}",
+                src.name
+            );
+        }
+    }
+
+    #[test]
+    fn ensure_emitted_fills_the_scenario_directory_too() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_emitted(dir.path(), 300).unwrap();
+        let scenario = dir.path().join("scenario");
+        let n = std::fs::read_dir(&scenario).unwrap().count();
+        assert!(n > 0, "scenario files emitted");
+        assert!(std::fs::read_dir(&scenario).unwrap().any(|e| {
+            e.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with(".csv.done")
+        }));
+        // A warm scenario directory is reused, like src.
+        ensure_emitted(dir.path(), 300).unwrap();
+        assert_eq!(std::fs::read_dir(&scenario).unwrap().count(), n);
+    }
+
+    /// Every scenario column's `source_name` is a header the emitter writes,
+    /// so a misspelling on either side fails here rather than as a
+    /// missing-column health condition at runtime.
+    #[test]
+    fn every_scenario_source_name_is_a_header_the_emitter_writes() {
+        let (schema, _) = demo_schema_and_sources();
+        let batch = geode_demo_data::generate(&geode_demo_data::GeneratorConfig {
+            rows: 300,
+            seed: SEED,
+            business_dates: 1,
+        });
+        let set = geode_demo_data::generate_scenarios(&batch, 20, SEED);
+        let dir = tempfile::tempdir().unwrap();
+        geode_demo_data::emit_scenario_directory(&set, dir.path()).unwrap();
+        // Each dataset's columns against the headers of every report into
+        // it: `term_sensitivities` reads the five term reports.
+        let header_of = |prefix: &str| -> Vec<String> {
+            let csv = std::fs::read_dir(dir.path())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| {
+                    let name = p.file_name().unwrap().to_string_lossy();
+                    name.starts_with(&format!("{prefix}_")) && name.ends_with(".csv")
+                })
+                .unwrap_or_else(|| panic!("a CSV for {prefix}"));
+            let text = std::fs::read_to_string(&csv).unwrap();
+            text.lines()
+                .next()
+                .unwrap()
+                .split(',')
+                .map(str::to_string)
+                .collect()
+        };
+        for ds in geode_demo_data::SCENARIO_DATASETS {
+            let header: Vec<String> = if ds == TERM_DATASET {
+                geode_demo_data::TERM_REPORTS
+                    .iter()
+                    .flat_map(|r| header_of(r))
+                    .collect()
+            } else {
+                header_of(ds)
+            };
+            let spec = schema.dataset(ds).unwrap();
+            for column in &spec.columns {
+                assert!(
+                    header.iter().any(|h| h == column.source_name()),
+                    "{ds}.{} reads {:?}, absent from {header:?}",
+                    column.name,
+                    column.source_name()
+                );
+            }
+        }
     }
 }
 

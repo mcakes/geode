@@ -4,6 +4,7 @@
 //! adjustment are shared by cells, swatches, and charts.
 
 pub mod oklab;
+pub mod scale;
 pub mod values;
 
 pub use values::{
@@ -566,22 +567,23 @@ pub fn readable_on(rgb: Rgb, background: Rgb, toward: Rgb) -> Rgb {
 }
 
 fn with_contrast(rgb: Rgb, background: Rgb, toward: Rgb, ratio: f32) -> Rgb {
-    if contrast_ratio(rgb, background) >= ratio {
+    // The background's luminance and the hue's cosine and sine are fixed
+    // for the whole search, so they are computed once. Each value equals
+    // what `contrast_ratio` and `to_srgb_in_gamut` compute per call, so the
+    // search takes the same steps and returns the same colour.
+    let background_luminance = oklab::relative_luminance(background);
+    let contrast = |c: Rgb| ratio_of(oklab::relative_luminance(c), background_luminance);
+    if contrast(rgb) >= ratio {
         return rgb;
     }
     let lch = lab_to_lch(srgb_to_oklab(rgb));
     let target_l = lab_to_lch(srgb_to_oklab(toward)).l;
-    let at = |t: f32| {
-        to_srgb_in_gamut(Lch {
-            l: lch.l + (target_l - lch.l) * t,
-            c: lch.c,
-            h: lch.h,
-        })
-    };
+    let (cos_h, sin_h) = (lch.h.cos(), lch.h.sin());
+    let at = |t: f32| oklab::in_gamut_at(lch.l + (target_l - lch.l) * t, lch.c, cos_h, sin_h);
     let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
     for _ in 0..16 {
         let mid = (lo + hi) / 2.0;
-        if contrast_ratio(at(mid), background) >= ratio {
+        if contrast(at(mid)) >= ratio {
             hi = mid;
         } else {
             lo = mid;
@@ -654,7 +656,11 @@ pub fn tint(rgb: Rgb, sign: Sign) -> Rgb {
 
 /// WCAG contrast ratio, `1..=21`.
 pub fn contrast_ratio(a: Rgb, b: Rgb) -> f32 {
-    let (la, lb) = (oklab::relative_luminance(a), oklab::relative_luminance(b));
+    ratio_of(oklab::relative_luminance(a), oklab::relative_luminance(b))
+}
+
+/// The WCAG ratio of two relative luminances, in either order.
+fn ratio_of(la: f32, lb: f32) -> f32 {
     let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
     (hi + 0.05) / (lo + 0.05)
 }
@@ -972,6 +978,84 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The contrast search as written before the background's luminance
+    /// and the hue's trigonometry were hoisted and the gamut test moved to
+    /// linear light: the oracle `with_contrast` is held equal to.
+    fn oracle_with_contrast(rgb: Rgb, background: Rgb, toward: Rgb, ratio: f32) -> Rgb {
+        if contrast_ratio(rgb, background) >= ratio {
+            return rgb;
+        }
+        let lch = lab_to_lch(srgb_to_oklab(rgb));
+        let target_l = lab_to_lch(srgb_to_oklab(toward)).l;
+        let at = |t: f32| {
+            oklab::oracle::to_srgb_in_gamut(Lch {
+                l: lch.l + (target_l - lch.l) * t,
+                c: lch.c,
+                h: lch.h,
+            })
+        };
+        let (mut lo, mut hi) = (0.0_f32, 1.0_f32);
+        for _ in 0..16 {
+            let mid = (lo + hi) / 2.0;
+            if contrast_ratio(at(mid), background) >= ratio {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        at(hi)
+    }
+
+    /// The faster search returns, bit for bit, what the original returned,
+    /// over fills × text colours × poles × targets. Fills and texts span
+    /// the sRGB cube (saturated corners included, which exercise the chroma
+    /// clip); the targets are `readable_on`'s 3:1, the 4.5:1 text minimum
+    /// and `readable_text_on`'s 4.7:1 with headroom.
+    #[test]
+    fn the_contrast_search_matches_the_original_bit_for_bit() {
+        let bits = |c: Rgb| [c.r.to_bits(), c.g.to_bits(), c.b.to_bits()];
+        let steps = [0.0, 0.3, 0.55, 0.8, 1.0];
+        let mut cube = Vec::new();
+        for r in steps {
+            for g in steps {
+                for b in steps {
+                    cube.push(Rgb { r, g, b });
+                }
+            }
+        }
+        let poles = [
+            Rgb {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+            },
+            Rgb {
+                r: 1.0,
+                g: 1.0,
+                b: 1.0,
+            },
+        ];
+        let mut moved = 0;
+        for &fill in &cube {
+            for &text in &cube {
+                for toward in poles {
+                    for ratio in [READABLE_RATIO, TEXT_READABLE_RATIO, 4.7] {
+                        let got = with_contrast(text, fill, toward, ratio);
+                        let want = oracle_with_contrast(text, fill, toward, ratio);
+                        assert_eq!(
+                            bits(got),
+                            bits(want),
+                            "{text:?} on {fill:?} toward {toward:?} at {ratio}"
+                        );
+                        moved += usize::from(got != text);
+                    }
+                }
+            }
+        }
+        // The grid must reach the search, not only the early return.
+        assert!(moved > 10_000, "only {moved} searches ran");
     }
 
     #[test]

@@ -16,11 +16,32 @@ parsed as a dataset. An omitted family defaults to `measures`.
 
 | Family | Shape and validation |
 |---|---|
-| `measures` | Columns declare roles and fixed grains. Measures and grain-bearing attributes create storage grains. Document-only roles and uncarriable dimensions are dropped. Missing grain-key declarations and reserved metadata names warn without removing the dataset. |
+| `measures` | Columns declare roles and fixed grains. Measures and grain-bearing attributes create storage grains. An optional `axes` list names axis columns that extend the key of every grain holding a measure (below). Document-only roles and uncarriable dimensions are dropped. Missing grain-key declarations and reserved metadata names warn without removing the dataset. |
 | `document` | A nonempty ordered key identifies a document; nonempty ordered axes identify its rows. Key columns must be grainless utf8 dimensions. At least one value is required. Invalid identity or row shape removes the dataset. |
 | `series` | Storage implies `source`, `series_id`, `ts`, `received_at`, and `value`. Declared columns are dropped and nonempty key/axes arrays cleared with errors. Invalid retention windows report errors and become unbounded. |
 | `reference` | One keyed table replaced whole per snapshot. A nonempty `key` of grainless utf8 dimensions identifies a row; every other column is a grainless attribute of utf8, f64, i64, date, or bool. `axes`, timestamp columns, and the storage names `batch`, `book`, `source_file_id`, `gen_id`, and `source_time` are refused. Any failure removes the dataset, because a half-understood mapping table would place rows wrongly. Storage order is the key columns, then the rest in declared order. A reference dataset offers no grouping vocabulary and is neither a document-kind nor an egress target. |
 | `history` | Keyed timestamped rows, cached per key from an on-demand source. A nonempty `key` of distinct grainless utf8 or f64 dimensions identifies an observation's key tuple, and at least one f64 `value` column holds what was observed. No other role is accepted, every dimension must be in the key, and `axes`, timestamp columns, and the storage names `ts`, `received_at`, `source`, `batch`, `source_file_id`, `gen_id`, `source_time`, `from_ts`, `to_ts`, `ts_us`, and `rn` (the coverage, staging and read columns) are refused. Any failure removes the dataset: a key the cache cannot ask by would file rows under keys no request covers. `history` and `retention` windows are read as for series. Storage order is the key columns, `ts`, `received_at`, then the values. A history dataset offers no grouping vocabulary, and a view naming one is refused with an error saying it is a history dataset: it has no view tables and is read by key through a history request. |
+
+**Axes on measures datasets.** A measures dataset may declare `axes = [...]`
+naming columns of `role = "axis"`, each utf8 or f64 with a required
+`axis = "bucket"` or `"scenario"` and, on a utf8 axis, an optional
+`order = "tenor"` (`1M 3M 1Y 18M 2Y` by length, case ignored, labels that do
+not parse last; the default is lexical). The axes extend the storage key of
+every grain that holds a measure, in `axes` order after the grain key; a
+grain holding only attributes keeps the plain key, so an attribute is stored
+once rather than once per bucket. An axis groups and scopes like a
+dimension. A bucket axis partitions a total (tenor buckets of vega sum to
+total vega), so sums along it are attributable; a grouping that omits a
+scenario axis is non-attributable at that level and shows NULL, because a
+sum across alternative states (spot shifts) is not a number that belongs to
+any row. Refusals drop the dataset, because every table would otherwise lack
+or misfile an axis: an axis without a kind, a kind or order outside the
+vocabulary, a `date` (or any non-utf8, non-f64) axis, `order` on a numeric
+axis, `axes` and axis roles that do not mirror (an `axes` entry naming an
+undeclared or non-axis column, or an axis column missing from `axes`), an
+axis named like a grain key column, and axes with no measure to index. See
+[`schema/axis.rs`](../../crates/geode-core/src/schema/axis.rs) for the
+vocabulary and tenor order.
 
 Unknown family strings or malformed key/axes arrays drop a dataset before
 family validation. A columnless measure dataset remains in the schema but
@@ -197,6 +218,28 @@ refused because a misspelt `format` would otherwise paint a plausible wrong
 grid. Accepted panels keep document order, and `config_version` is skipped.
 `geode-app` additionally refuses a panel named after another module's kind
 and builds one tile kind per accepted panel.
+
+## Scenario shapes
+
+The `scenarios` reader has two halves, both pure, shaped like the panels
+reader. [`read_scenarios`](../../crates/geode-core/src/scenario/read.rs)
+judges each shape alone: its name, required keys, exactly one `columns` form,
+the `value`, `diff` and `paint` rules, formats, and labels named once.
+[`load_scenarios`](../../crates/geode-core/src/scenario/check.rs) runs it,
+then checks each surviving shape against the schema — the dataset is a
+measures dataset with `axes`, every dataset axis is `rows` or in `columns`,
+every named measure is one, the diff base fits the rows axis's type — and
+fills in what only the schema knows: the dataset's axes (kind, order, type,
+in dataset order) and each measure's `_usd` twin. The pivot reads a shape
+only after this half has run; one straight out of `read_scenarios` has no
+axes and refuses to pivot. The full refusal list is in
+[configuration](configuration.md#scenario-shapes).
+
+Nothing here only warns. The first problem refuses the whole shape with one
+Error at `scenarios.<name>` or `scenarios.<name>.<field>` (for example
+`scenarios.rho.columns.axis.1` or `scenarios.spot_ladder.diff.base`),
+attributed to the layer that supplied it; its neighbours still load.
+Accepted shapes keep document order, and `config_version` is skipped.
 
 ## Grouping slots and saved scopes
 

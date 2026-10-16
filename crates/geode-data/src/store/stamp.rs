@@ -20,7 +20,12 @@ use duckdb::{AccessMode, Connection, OptionalExt};
 use super::StoreError;
 
 /// The on-disk layout version this build reads and writes.
-pub const STORE_FORMAT: u32 = 2;
+///
+/// 2 was taken twice — by scenario axes on main and by the history family on
+/// this branch — so the merged DDL is 3: axis columns after the grain key on
+/// measures datasets with axes, and the history family's payload and coverage
+/// tables (2026-10).
+pub const STORE_FORMAT: u32 = 3;
 
 /// The build that last stamped the store, `<version>+<GEODE_GIT_HASH>` or
 /// `<version>+dev` when the build sets no hash. For diagnosis only; never
@@ -157,10 +162,10 @@ mod tests {
 
     #[test]
     fn the_format_counts_the_history_tables() {
-        // Format 2 added the history payload and coverage tables; a build
-        // that loses the bump would let an older collector write a store it
-        // cannot lay out.
-        assert_eq!(STORE_FORMAT, 2);
+        // Format 3 is axes plus the history payload and coverage tables,
+        // each of which was format 2 alone; a build that loses the bump
+        // would let an older collector write a store it cannot lay out.
+        assert_eq!(STORE_FORMAT, 3);
     }
 
     #[test]

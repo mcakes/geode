@@ -120,6 +120,83 @@ desk-layer `sources.toml` entry and a `datasets.toml` declaration.
 - Key spellings: `underlying_ref`, `position_ref`, `instrument_ref` values
   are assumed to match the keys every other family uses (below).
 
+#### Scenario files
+
+**For:** bucketed and scenario risk — vega by tenor and moneyness, a vega
+spot ladder, a spot ladder, term sensitivities and rho by curve
+(`vega_buckets`, `vega_spot_ladder`, `spot_ladder`, `term_sensitivities`,
+`rho_curves` in the demo), each a measures dataset with `axes`. Term
+sensitivities come from five reports, one per measure: repo, ATM vol,
+skew, curvature and dividend sensitivity (diva).
+
+**Simulator:** `geode-demo-data`'s `scenario` module derives one table per
+dataset from the risk batch, and one per term report for
+`term_sensitivities`. `emit_scenario_directory` writes
+`<dataset>_<date>_<book>.csv` (`<report>_<book>_<date>.csv` for a term
+report) with `.done` sentinels into
+`$TMPDIR/geode-demo/<rows>-42/scenario/`, beside `src/` so the risk glob
+never picks one up. Bucket measures are unjittered shares of the row's own
+risk measure, so a sum over a bucket axis reproduces the blotter's value;
+the vega spot ladder and curvature are jittered. Only the first
+`SCENARIO_COVERAGE` (5,000) distinct (instrument, underlying) rows get
+scenarios, whatever the demo row count, so the scenario store stays bounded.
+The demo layer declares one `csv_dir` source per dataset,
+`demo_scenario_<dataset>`: sentinel readiness, a five-second poll, and
+`batch_pattern = '^<dataset>_\d{4}-\d{2}-\d{2}_(?P<batch>.+)$'`.
+
+`term_sensitivities` has no source of its own. Each of its five reports is
+named for its measure (`repo`, `atm_vol`, `skew`, `curvature`, `diva`)
+and is its own file, `<report>_<book>_<date>.csv`, carrying the identity
+columns, `Tenor`, the report's measure and its `_USD` twin. Its source,
+`demo_scenario_term_<report>`, lists that measure and twin in `measures`
+and uses `batch_pattern = '^(?P<batch><report>_.+)_\d{4}-\d{2}-\d{2}$'`,
+so its batch is `<report>_<book>`. The batches must differ between
+reports: a partition is (dataset, batch, book), and a load replaces its
+partitions' live rows, so two reports under one batch would delete each
+other's rows on every load. The book comes before the date in the file
+name because a batch is one capture and must leave the date out. Diva per
+bucket is `-delta01 × bucket width in years`: higher dividends lower the
+forward, so it opposes delta and grows with the bucket's time.
+
+**Seam:** the same as risk files: none to write. A real deployment needs a
+desk-layer `sources.toml` entry per report and a `datasets.toml`
+declaration with `axes`. Where several reports feed one dataset, each
+report's source lists the `measures` its files carry and each source's
+`batch_pattern` yields a batch no other report's does. Each demo term
+report's source lists its one measure and that measure's twin. Splitting
+a report into several, or changing a `batch_pattern`, leaves the old
+batch's partitions live beside the new ones: nothing retires them, and
+their measures add in with `Ok` health. Delete the store after such a
+change (see [several reports](configuration.md#validation-boundaries)).
+
+**Lag:** a position move rewrites the risk files only; scenario rows keep
+the old LHU until the next scenario run, and the scenario data's source
+time says how old the run is. The demo never re-drops its scenario files,
+so after a demo move the scenario datasets keep the old LHU until the demo
+directory is deleted (see
+[the demo position system](data-path.md#the-demo-position-system)).
+
+**Guessed — check against the real drop:**
+
+- Header spellings for axes and measures (`SCENARIO_SOURCE_NAMES`, each
+  measure followed by a `_USD` twin) and whether axis values print as the
+  demo writes them (`0`, `-5`, no trailing zeros).
+- Bucket vocabularies: the tenor list (`1M` … `5Y`), the moneyness and
+  spot-shift grids, the curve currencies and types. A tenor label outside
+  `<n>D|W|M|Y` sorts after the parsable ones under `order = "tenor"`.
+- Whether a real run covers the whole book or a subset, and whether every
+  bucket is present for every row. An absent row reads as no value, not
+  zero.
+- The term reports' file names, headers and bucketing, and diva's unit
+  (per 1% dividend change). Each real report is assumed to carry one
+  measure; a report carrying several would list them all in its source's
+  `measures`.
+- Whether spot shifts are joint across underlyings or per underlying. The
+  demo ladders each (instrument, underlying) row on its own underlying; a
+  joint shift changes what a sum across underlyings at one shift means.
+- Any NULL axis value refuses the whole file, so a producer that leaves an
+  axis blank for a total row must be asked to drop that row.
+
 ### Subscribed market-data documents
 
 **For:** CVI parameters (`cvi_params`), dividend schedules

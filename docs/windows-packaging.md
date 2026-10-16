@@ -6,10 +6,11 @@ collector, and vendor DLLs as one tested release. Velopack is the leading
 candidate for installation and updating, subject to a trial on a managed
 Windows machine under an ordinary employee account.
 
-Status as of 2026-10-11: planning only. The repository has Windows CI, but
-the packaging and update integration described below has not been built.
-Tool behavior and company policies should be checked again when implementation
-starts.
+The initial installer build and startup integration are described in
+[Windows packaging](current/packaging.md). Automatic update installation,
+collector coordination, signing, and intranet publication remain planned.
+The policies and alternatives below guide that remaining work; verify tool
+behavior and company policy before rolling out to employees.
 
 ## Deployment requirements
 

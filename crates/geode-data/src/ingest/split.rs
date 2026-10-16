@@ -44,10 +44,11 @@ fn sql_err(statement: &str) -> impl FnOnce(duckdb::Error) -> StoreError + '_ {
     }
 }
 
-/// Key expressions for a grain. The pair grain canonicalizes its two
-/// underlyings so both source orderings collapse to one row.
-fn key_exprs(grain: Grain) -> Vec<(String, String)> {
-    grain
+/// Key expressions for a grain: its key columns, then the axes that extend
+/// the key where the grain holds measures. The pair grain canonicalizes its
+/// two underlyings so both source orderings collapse to one row.
+fn key_exprs(ds: &DatasetSpec, grain: Grain) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = grain
         .key_columns()
         .iter()
         .map(|&col| match (grain, col) {
@@ -61,7 +62,13 @@ fn key_exprs(grain: Grain) -> Vec<(String, String)> {
             ),
             _ => (col.to_string(), format!("\"{col}\"")),
         })
-        .collect()
+        .collect();
+    out.extend(
+        ds.axes_at(grain)
+            .iter()
+            .map(|a| (a.clone(), format!("\"{a}\""))),
+    );
+    out
 }
 
 /// Measures and attributes declared at this grain, plus the carried
@@ -92,7 +99,7 @@ pub fn split_by_grain(conn: &Connection, req: &SplitRequest) -> Result<SplitResu
     let mut out = SplitResult::default();
 
     for grain in req.dataset.grains() {
-        let keys = key_exprs(grain);
+        let keys = key_exprs(req.dataset, grain);
         let payload = payload_columns(req.dataset, grain);
         let table = staging_table(grain);
 
@@ -298,7 +305,7 @@ grain = "instrument"
             textual: false,
             categorical: false,
             order: geode_core::schema::TextOrder::Lexical,
-            role: ColumnRole::Axis,
+            role: ColumnRole::document_axis(),
         });
         ds.columns.push(ColumnSpec {
             name: "param".into(),
@@ -526,5 +533,164 @@ grain = "instrument"
             "{:?}",
             out.conflicts
         );
+    }
+
+    #[test]
+    fn the_split_groups_by_key_and_axes_and_dedups_attributes_once() {
+        let ds = crate::store::ddl::tests_support::axis_dataset();
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table raw as select * from (values
+               ('BK0','L0','P1','C','I1','SPX','2026-08-24','USD','1M', 100.0, 10.0),
+               ('BK0','L0','P1','C','I1','SPX','2026-08-24','USD','1M', 105.0, 20.0),
+               ('BK0','L0','P1','C','I1','SPX','2026-08-24','USD','3M', 100.0, 30.0),
+               ('BK0','L0','P1','C','I1','RUT','2026-08-24','USD','1M', 100.0, 40.0))
+             t(book, lhu, position_ref, counterparty, instrument_ref, underlying_ref,
+               business_date, currency, tenor, moneyness, vega)",
+        )
+        .unwrap();
+        let out = split_by_grain(
+            &conn,
+            &SplitRequest {
+                dataset: &ds,
+                raw_table: "raw",
+                batch: "b",
+                file_id: 1,
+            },
+        )
+        .unwrap();
+        assert!(out.conflicts.is_empty(), "{:?}", out.conflicts);
+        let under: i64 = conn
+            .query_row(
+                "select count(*) from staging_measures_underlying",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(under, 4, "one row per (key, tenor, moneyness)");
+        let pos: i64 = conn
+            .query_row("select count(*) from staging_measures_position", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            pos, 1,
+            "the attribute grain is not multiplied by the buckets"
+        );
+        let v: f64 = conn
+            .query_row(
+                "select vega from staging_measures_underlying
+                 where tenor = '1M' and moneyness = 105.0 and underlying_ref = 'SPX'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, 20.0);
+    }
+
+    /// The demo spot ladder's shape: NPV and theta are per instrument and
+    /// repeat identically on each underlying row of a shift, delta is per
+    /// underlying. A generator that derived the instrument-grain NPV from a
+    /// per-underlying input would make the repeats disagree, and the split
+    /// would keep one underlying's value under a conflict.
+    #[test]
+    fn an_instrument_grain_measure_repeated_per_underlying_splits_without_conflict() {
+        use geode_core::config::{LayerDoc, merge_docs};
+        let text = r#"
+[spot_ladder]
+axes = ["spot_shift"]
+[spot_ladder.columns.book]
+type = "utf8"
+role = "dimension"
+[spot_ladder.columns.lhu]
+type = "utf8"
+role = "dimension"
+[spot_ladder.columns.position_ref]
+type = "utf8"
+role = "key"
+[spot_ladder.columns.counterparty]
+type = "utf8"
+role = "dimension"
+[spot_ladder.columns.instrument_ref]
+type = "utf8"
+role = "key"
+[spot_ladder.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+[spot_ladder.columns.spot_shift]
+type = "f64"
+role = "axis"
+axis = "scenario"
+[spot_ladder.columns.npv]
+type = "f64"
+role = "measure"
+grain = "instrument"
+[spot_ladder.columns.theta]
+type = "f64"
+role = "measure"
+grain = "instrument"
+[spot_ladder.columns.delta]
+type = "f64"
+role = "measure"
+grain = "underlying"
+"#;
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", text).unwrap()]);
+        let (schema, diags) = geode_core::schema::SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let ds = schema.dataset("spot_ladder").unwrap().clone();
+        let conn = duckdb::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "create table raw as select * from (values
+               ('BK0','L0','P1','C','I1','SPX', 0.0, 100.0, -3.0, 10.0),
+               ('BK0','L0','P1','C','I1','RUT', 0.0, 100.0, -3.0, 20.0),
+               ('BK0','L0','P1','C','I1','SPX', 5.0, 250.0, -2.88, 12.0),
+               ('BK0','L0','P1','C','I1','RUT', 5.0, 250.0, -2.88, 22.0))
+             t(book, lhu, position_ref, counterparty, instrument_ref, underlying_ref,
+               spot_shift, npv, theta, delta)",
+        )
+        .unwrap();
+        let out = split_by_grain(
+            &conn,
+            &SplitRequest {
+                dataset: &ds,
+                raw_table: "raw",
+                batch: "b",
+                file_id: 1,
+            },
+        )
+        .unwrap();
+        assert!(out.conflicts.is_empty(), "{:?}", out.conflicts);
+        let per_shift = |table: &str| -> Vec<(f64, i64)> {
+            let mut stmt = conn
+                .prepare(&format!(
+                    "select spot_shift, count(*) from {table} group by spot_shift order by spot_shift"
+                ))
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect()
+        };
+        assert_eq!(
+            per_shift(&staging_table(Grain::Instrument)),
+            [(0.0, 1), (5.0, 1)],
+            "one instrument row per (instrument, shift)"
+        );
+        assert_eq!(
+            per_shift(&staging_table(Grain::Underlying)),
+            [(0.0, 2), (5.0, 2)],
+            "one underlying row per (underlying, shift)"
+        );
+        let npv: f64 = conn
+            .query_row(
+                &format!(
+                    "select npv from {} where spot_shift = 5.0",
+                    staging_table(Grain::Instrument)
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(npv, 250.0);
     }
 }

@@ -358,16 +358,16 @@ pub struct ChoiceDialogState {
 }
 
 impl ChoiceDialogState {
-    /// The tile rows for the roster's `kinds`, in roster order, the
-    /// placeholder left out (it is what a pick REPLACES, never something
-    /// to add), the highlight on the first.
-    pub fn tile_kinds<'a>(kinds: impl IntoIterator<Item = &'a str>) -> Self {
-        let kinds: Vec<String> = kinds
+    /// The tile rows for the roster's `(kind, title)` pairs, in roster
+    /// order, each row spelled by its title (as the palette's add rows
+    /// are), the placeholder left out (it is what a pick REPLACES, never
+    /// something to add), the highlight on the first.
+    pub fn tile_kinds<'a>(kinds: impl IntoIterator<Item = (&'a str, String)>) -> Self {
+        let (kinds, options): (Vec<String>, Vec<String>) = kinds
             .into_iter()
-            .filter(|k| *k != PLACEHOLDER_KIND)
-            .map(str::to_string)
-            .collect();
-        let options = kinds.iter().map(|k| capitalize(k)).collect();
+            .filter(|(k, _)| *k != PLACEHOLDER_KIND)
+            .map(|(k, title)| (k.to_string(), title))
+            .unzip();
         Self {
             list: ChoiceList::new(options, choice::DEFAULT_CAP),
             target: Target::TileKind { kinds },
@@ -378,7 +378,7 @@ impl ChoiceDialogState {
     /// accepting `context`), in roster order, the highlight on the first,
     /// titled by `subject`.
     pub fn tile_kinds_with<'a>(
-        kinds: impl IntoIterator<Item = &'a str>,
+        kinds: impl IntoIterator<Item = (&'a str, String)>,
         context: DimensionContext,
         subject: Option<String>,
     ) -> Self {
@@ -1236,7 +1236,7 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
 /// focused tile at COMMIT time: a focused placeholder is filled in place,
 /// a real tile is split in the `add` setting's direction.
 pub fn open_tile_kinds(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    let state = ChoiceDialogState::tile_kinds(view.services.roster.kinds());
+    let state = ChoiceDialogState::tile_kinds(view.services.roster.titled_kinds());
     open(view, state, window, cx);
 }
 
@@ -1251,7 +1251,19 @@ pub fn open_tile_kinds_with(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let state = ChoiceDialogState::tile_kinds_with(kinds, context, subject);
+    let roster = &view.services.roster;
+    let titled: Vec<(&str, String)> = kinds
+        .into_iter()
+        .map(|k| {
+            (
+                k,
+                roster
+                    .factory(k)
+                    .map_or_else(|| capitalize(k), |f| f.title()),
+            )
+        })
+        .collect();
+    let state = ChoiceDialogState::tile_kinds_with(titled, context, subject);
     open(view, state, window, cx);
 }
 
@@ -2355,6 +2367,11 @@ mod tests {
     use crate::keymap::{Modifiers, parse_keystroke};
     use geode_core::tile_columns::{TileColumn, TileColumns};
 
+    /// `kinds` paired with their default (capitalised) titles.
+    fn titled<'a>(kinds: &[&'a str]) -> Vec<(&'a str, String)> {
+        kinds.iter().map(|k| (*k, capitalize(k))).collect()
+    }
+
     /// The value-color swatches resolve once per theme: a repaint under the
     /// same theme signature reuses the resolved rows, a changed signature
     /// (a theme change while the list is open) resolves them again.
@@ -2466,7 +2483,7 @@ mod tests {
     /// list, not the declared one — after a filter the two differ.
     #[test]
     fn a_click_resolves_through_the_ranked_order() {
-        let mut state = ChoiceDialogState::tile_kinds(["blotter", "cvi", "diagnostics"]);
+        let mut state = ChoiceDialogState::tile_kinds(titled(&["blotter", "cvi", "diagnostics"]));
         state.list.set_query("diag");
         assert_eq!(
             state.pick_at_ranked(0),
@@ -2489,9 +2506,13 @@ mod tests {
     /// palette titles them, with the placeholder left out.
     #[test]
     fn tile_rows_are_the_roster_kinds_titled_minus_the_placeholder() {
-        let state =
-            ChoiceDialogState::tile_kinds(["blotter", PLACEHOLDER_KIND, "cvi", "diagnostics"]);
-        assert_eq!(state.list.options(), ["Blotter", "Cvi", "Diagnostics"]);
+        let state = ChoiceDialogState::tile_kinds(vec![
+            ("blotter", "Blotter".to_string()),
+            (PLACEHOLDER_KIND, "Placeholder".to_string()),
+            ("cvi", "CVI".to_string()),
+            ("diagnostics", "Diagnostics".to_string()),
+        ]);
+        assert_eq!(state.list.options(), ["Blotter", "CVI", "Diagnostics"]);
         assert_eq!(state.highlighted_pick(), Some(Pick::Kind("blotter".into())));
         let mut state = state;
         state.list.set_query("diag");
@@ -2508,7 +2529,7 @@ mod tests {
     fn kinds_with_a_context_title_the_dialog_by_it_and_pick_with_it() {
         let ctx = DimensionContext::of(&[("underlying_ref", "SPX")]);
         let state = ChoiceDialogState::tile_kinds_with(
-            ["cvi", "dividend"],
+            titled(&["cvi", "dividend"]),
             ctx.clone(),
             Some("SPX".into()),
         );
@@ -2522,7 +2543,9 @@ mod tests {
             Some(Pick::KindWith("cvi".into(), ctx))
         );
         assert_eq!(
-            ChoiceDialogState::tile_kinds(["rec"]).title().as_ref(),
+            ChoiceDialogState::tile_kinds(titled(&["rec"]))
+                .title()
+                .as_ref(),
             "Add a tile"
         );
     }
@@ -2876,7 +2899,7 @@ mod tests {
     /// change, as `ChoiceList::set_query` does.
     #[test]
     fn other_targets_keep_the_highlight_by_text() {
-        let mut state = ChoiceDialogState::tile_kinds(["blotter", "cvi", "diagnostics"]);
+        let mut state = ChoiceDialogState::tile_kinds(titled(&["blotter", "cvi", "diagnostics"]));
         // Lit on `Diagnostics`, the last row.
         assert!(state.list.set_highlighted(2));
         assert!(state.set_query("i"));

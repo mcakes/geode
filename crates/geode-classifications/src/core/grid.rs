@@ -1,27 +1,21 @@
-//! The grid's pure model: one classification's rows (`classification::
-//! rows`), the order a sort puts them in, the rows the `/` filter keeps, a
-//! cursor and a row selection. The cursor and the selection's anchor are
-//! held by source value, so a rebuild (new values, a reload, a label edit
-//! that moves a row) keeps them on the rows they were on rather than on
-//! whatever now paints at the old index.
+//! The grid's pure model: one classification's rows
+//! (`classification::rows`), the order a sort puts them in, a cursor and a
+//! row selection. The cursor and the selection's anchor are held by source
+//! value, so a rebuild (new values, a reload, a label edit that moves a row)
+//! keeps them on the rows they were on rather than on whatever now paints at
+//! the old index.
 //!
-//! The order and the filtered rows are rebuilt only when the rows, the
-//! filter or the sort change; a cursor move reads them.
+//! The order and the shown rows are rebuilt only when the rows or the sort
+//! change; a cursor move reads them.
 
 use std::cmp::Ordering;
 use std::ops::Range;
 
 use geode_core::classification::ClassRow;
 use geode_core::grid::selection::{SelectKind, Selection};
-use geode_shell::listfilter::{ColumnMarks, Narrow};
 use geode_tile::motion::{self, Motion};
 
 pub use crate::core::session::SortCol;
-
-/// The filter's columns: what `/` searches and what [`GridModel::marks`]
-/// indexes. The row count is not searched.
-pub const SOURCE_COL: usize = 0;
-pub const LABEL_COL: usize = 1;
 
 /// A row's label as the grid shows it: trimmed, `None` when absent or
 /// blank. A hand-written `''` in the TOML means unclassified, and the grid
@@ -53,22 +47,15 @@ pub struct GridModel {
     sort: Option<(SortCol, bool)>,
     /// Indices into `rows` in sort order.
     order: Vec<usize>,
-    query: String,
-    /// `order` narrowed by the filter, with each kept row's highlights.
+    /// The shown rows: `order`, rebuilt with it.
     visible: Vec<usize>,
-    marks: Vec<ColumnMarks>,
+    /// What `/` searches, one per shown row, rebuilt with the order.
+    search: Vec<String>,
     /// Index into `visible`; `None` while nothing is shown.
     cursor: Option<usize>,
     /// The row under the cursor, by identity. Kept while nothing is shown,
-    /// so the cursor returns to its row when the rows (or a wider filter)
-    /// do.
+    /// so the cursor returns to its row when the rows do.
     cursor_source: Option<String>,
-    /// A put cursor's row that the filter hides while it is still held:
-    /// the cursor rests on the nearest shown row meanwhile, and returns
-    /// here when a filter shows the row again (escape restoring the filter
-    /// in force before a search). Dropped by a move, or when the rows no
-    /// longer hold it.
-    hidden: Option<String>,
     /// Whether the cursor was put on its row (a move, a press, a restored
     /// cursor) rather than resting where a rebuild left it. Only a put
     /// cursor follows its row: a resting one keeps its index, so a tile
@@ -82,6 +69,11 @@ pub struct GridModel {
     /// rows). It takes the cursor the first time a rebuild shows it, and
     /// is dropped by a move or by [`GridModel::forget_seed`].
     seed: Option<String>,
+    /// A value the trader is adding, asked for by [`GridModel::set_draft`].
+    draft: Option<String>,
+    /// Whether the last [`GridModel::set_rows`] inserted the draft's row:
+    /// false while no draft is asked for or the rows already hold it.
+    draft_shown: bool,
 }
 
 impl GridModel {
@@ -102,23 +94,52 @@ impl GridModel {
         self.seed = None;
     }
 
-    /// The cursor a session saves: a seed still waiting, else a put
-    /// cursor's row the filter hides (the row the trader chose, not the
-    /// one the cursor rests on meanwhile), else the cursor's.
+    /// The cursor a session saves: a seed still waiting, else the cursor's.
     pub fn saved_cursor(&self) -> Option<&str> {
-        self.seed
-            .as_deref()
-            .or(self.hidden.as_deref())
-            .or(self.cursor_source.as_deref())
+        self.seed.as_deref().or(self.cursor_source.as_deref())
+    }
+
+    /// Hold `source` as a draft row: a value the trader is adding, held only
+    /// here until its label is written. It is inserted after the unclassified
+    /// rows the data holds (the core order puts unclassified first) unless the
+    /// rows already hold it, and counts as neither a value nor unclassified.
+    /// Takes effect on the next [`GridModel::set_rows`].
+    pub fn set_draft(&mut self, source: Option<String>) {
+        self.draft = source;
+    }
+
+    /// The draft while a row of it is shown.
+    pub fn draft(&self) -> Option<&str> {
+        self.draft.as_deref().filter(|_| self.draft_shown)
     }
 
     /// Replace the rows. The cursor stays on its source value, else falls
     /// to the nearest index; a selection stays while its anchor is shown.
-    pub fn set_rows(&mut self, rows: Vec<ClassRow>) {
-        self.unclassified = rows.iter().filter(|r| label_text(r).is_none()).count();
+    pub fn set_rows(&mut self, mut rows: Vec<ClassRow>) {
+        self.draft_shown = false;
+        if let Some(d) = self.draft.as_deref()
+            && !rows.iter().any(|r| r.source == d)
+        {
+            let at = rows
+                .iter()
+                .position(|r| label_text(r).is_some() || !r.in_data)
+                .unwrap_or(rows.len());
+            rows.insert(
+                at,
+                ClassRow {
+                    source: d.to_string(),
+                    label: None,
+                    count: None,
+                    in_data: false,
+                },
+            );
+            self.draft_shown = true;
+        }
+        self.unclassified =
+            rows.iter().filter(|r| label_text(r).is_none()).count() - usize::from(self.draft_shown);
         self.rows = rows;
         self.reorder();
-        self.refilter();
+        self.reseat();
     }
 
     /// Replace the rows after a label verb (an edit, clear, paste, undo or
@@ -132,7 +153,6 @@ impl GridModel {
         let at = self.cursor;
         self.anchor = None;
         self.seed = None;
-        self.hidden = None;
         self.set_rows(rows);
         if let Some(at) = at
             && !self.visible.is_empty()
@@ -141,30 +161,15 @@ impl GridModel {
         }
     }
 
-    /// Narrow to rows whose source or label fuzzy-match `query`, in sort
-    /// order. A selection ends: its span would cover rows it never did.
-    pub fn set_filter(&mut self, query: &str) {
-        if self.query == query {
-            return;
-        }
-        self.query = query.to_string();
-        self.anchor = None;
-        self.refilter();
-    }
-
-    pub fn query(&self) -> &str {
-        &self.query
-    }
-
     /// Order by a column (`true` is descending), or `None` for the core
     /// order: unclassified first, then by label. Unclassified labels and
     /// values not in the data sort last in either direction; ties keep the
-    /// core order. A selection ends, as for a filter.
+    /// core order. A selection ends.
     pub fn set_sort(&mut self, sort: Option<(SortCol, bool)>) {
         self.sort = sort;
         self.anchor = None;
         self.reorder();
-        self.refilter();
+        self.reseat();
     }
 
     pub fn sort(&self) -> Option<(SortCol, bool)> {
@@ -178,6 +183,30 @@ impl GridModel {
 
     pub fn row(&self, i: usize) -> &ClassRow {
         &self.rows[i]
+    }
+
+    /// What `/` searches, one entry per shown row: source, tab, label.
+    pub fn search_text(&self) -> &[String] {
+        &self.search
+    }
+
+    /// Put the cursor on `source`'s row, as a press would; `false` when it
+    /// is not shown. Ends no selection.
+    pub fn put_on(&mut self, source: &str) -> bool {
+        match self.position(source) {
+            Some(at) => {
+                self.place(at);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Put the cursor on shown row `at`, clamped.
+    pub fn put_at(&mut self, at: usize) {
+        if !self.visible.is_empty() {
+            self.place(at.min(self.visible.len() - 1));
+        }
     }
 
     /// The cursor's index into [`GridModel::visible`].
@@ -280,18 +309,17 @@ impl GridModel {
         }
     }
 
-    /// `(values, unclassified)` over every row, whatever the filter shows.
+    /// `(values, unclassified)` over every row but a draft's.
     pub fn counts(&self) -> (usize, usize) {
-        (self.rows.len(), self.unclassified)
-    }
-
-    /// Shown row `visible_i`'s filter highlights, by column.
-    pub fn marks(&self, visible_i: usize) -> Option<&ColumnMarks> {
-        self.marks.get(visible_i)
+        (
+            self.rows.len() - usize::from(self.draft_shown),
+            self.unclassified,
+        )
     }
 
     /// Where `source` shows, if it does.
-    fn position(&self, source: &str) -> Option<usize> {
+    /// Where `source`'s row shows, if it is shown.
+    pub fn position(&self, source: &str) -> Option<usize> {
         self.visible
             .iter()
             .position(|&i| self.rows[i].source == source)
@@ -301,7 +329,6 @@ impl GridModel {
     /// still waiting is dropped with it.
     fn place(&mut self, to: usize) {
         self.seed = None;
-        self.hidden = None;
         self.put = true;
         self.set_cursor(to);
     }
@@ -329,24 +356,17 @@ impl GridModel {
         });
     }
 
-    /// Rebuild the shown rows from the order and the filter, then reseat
-    /// the cursor on its source when shown, else at the nearest index. A
-    /// selection whose anchor no longer shows ends.
-    fn refilter(&mut self) {
-        let mut narrow = Narrow::new(&self.query);
+    /// Rebuild the shown rows from the order, then reseat the cursor on its
+    /// source when shown, else at the nearest index. A selection whose anchor
+    /// or cursor row is no longer shown ends.
+    fn reseat(&mut self) {
         self.visible.clear();
-        self.marks.clear();
-        for &i in &self.order {
+        self.visible.extend(self.order.iter().copied());
+        self.search.clear();
+        self.search.extend(self.visible.iter().map(|&i| {
             let row = &self.rows[i];
-            let columns = [row.source.as_str(), label_text(row).unwrap_or("")];
-            if let Some(m) = narrow.row(&columns) {
-                self.visible.push(i);
-                self.marks.push(m);
-            }
-        }
-        // A selection whose anchor or cursor row is no longer shown ends:
-        // the cursor would fall to a neighbour, and the span re-resolved
-        // to it would cover rows the trader never chose.
+            format!("{}\t{}", row.source, label_text(row).unwrap_or(""))
+        }));
         let lost = |s: Option<&str>| s.is_none_or(|s| self.position(s).is_none());
         if self.anchor.is_some()
             && (lost(self.anchor.as_deref()) || lost(self.cursor_source.as_deref()))
@@ -364,32 +384,10 @@ impl GridModel {
             self.set_cursor(at);
             return;
         }
-        if self
-            .hidden
-            .as_deref()
-            .is_some_and(|h| !self.rows.iter().any(|r| r.source == h))
-        {
-            self.hidden = None;
-        }
-        if let Some(at) = self.hidden.as_deref().and_then(|h| self.position(h)) {
-            self.hidden = None;
-            self.set_cursor(at);
-            return;
-        }
         let put = self.cursor_source.as_deref().filter(|_| self.put);
         match put.and_then(|s| self.position(s)) {
             Some(at) => self.cursor = Some(at),
-            None => {
-                // A put cursor's row still held but filtered out: remember
-                // it, so a filter that shows it again returns the cursor.
-                if self.hidden.is_none()
-                    && let Some(s) = put
-                    && self.rows.iter().any(|r| r.source == s)
-                {
-                    self.hidden = Some(s.to_string());
-                }
-                self.set_cursor(self.cursor.map_or(0, |c| c.min(len - 1)));
-            }
+            None => self.set_cursor(self.cursor.map_or(0, |c| c.min(len - 1))),
         }
     }
 }
@@ -475,34 +473,51 @@ mod tests {
     }
 
     #[test]
-    fn the_filter_narrows_over_source_and_label_and_keeps_order() {
+    fn a_draft_sorts_after_the_observed_unclassified_rows_and_is_not_counted() {
         let mut g = GridModel::new();
+        g.set_draft(Some("NEW".into()));
         g.set_rows(vec![
-            row("AAPL", Some("Tech"), Some(1)),
-            row("XOM", Some("Energy"), Some(1)),
-            row("NKY", None, Some(1)),
+            row("NKY", None, Some(7)),
+            row("DAX", Some("Europe"), Some(5)),
         ]);
-        g.set_filter("tec");
-        assert_eq!(sources(&g), ["AAPL"]);
+        assert_eq!(sources(&g), ["NKY", "NEW", "DAX"]);
         assert_eq!(
-            g.marks(0).map(|m| m.get(1).to_vec()),
-            Some(vec![Range { start: 0, end: 3 }])
+            g.counts(),
+            (2, 1),
+            "a draft is neither a value nor unclassified"
         );
-        g.set_filter("x");
-        assert_eq!(sources(&g), ["XOM"], "the source column is searched");
-        g.set_filter("");
-        assert_eq!(sources(&g), ["AAPL", "XOM", "NKY"]);
+        assert_eq!(g.draft(), Some("NEW"));
+        assert!(g.put_on("NEW"));
     }
 
     #[test]
-    fn counts_ignore_the_filter_and_treat_a_blank_label_as_unclassified() {
+    fn a_draft_the_rows_now_hold_is_the_real_row() {
+        let mut g = GridModel::new();
+        g.set_draft(Some("NEW".into()));
+        g.set_rows(vec![row("NEW", None, Some(1))]);
+        assert_eq!(sources(&g), ["NEW"]);
+        assert_eq!(g.counts(), (1, 1));
+        assert_eq!(g.draft(), None, "nothing is held as a draft");
+    }
+
+    #[test]
+    fn dropping_the_draft_removes_its_row() {
+        let mut g = GridModel::new();
+        g.set_draft(Some("NEW".into()));
+        g.set_rows(vec![row("NKY", None, Some(7))]);
+        g.set_draft(None);
+        g.set_rows(vec![row("NKY", None, Some(7))]);
+        assert_eq!(sources(&g), ["NKY"]);
+    }
+
+    #[test]
+    fn counts_treat_a_blank_label_as_unclassified() {
         let mut g = GridModel::new();
         g.set_rows(vec![
             row("A", None, Some(1)),
             row("B", Some("  "), Some(1)),
             row("C", Some("X"), Some(1)),
         ]);
-        g.set_filter("C");
         assert_eq!(g.counts(), (3, 2));
     }
 
@@ -582,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sort_or_filter_ends_a_selection_and_a_rebuild_keeps_it() {
+    fn a_sort_ends_a_selection_and_a_rebuild_keeps_it() {
         let mut g = GridModel::new();
         let rows = vec![row("A", None, Some(2)), row("B", None, Some(1))];
         g.set_rows(rows.clone());
@@ -595,9 +610,6 @@ mod tests {
         g.set_rows(rows);
         g.start_selection();
         g.set_sort(Some((SortCol::Source, true)));
-        assert_eq!(g.selected(), None);
-        g.start_selection();
-        g.set_filter("a");
         assert_eq!(g.selected(), None);
     }
 
@@ -638,18 +650,6 @@ mod tests {
         assert_eq!(g.cursor_source(), Some("A"));
     }
 
-    #[test]
-    fn the_filter_hiding_the_cursor_row_moves_the_cursor_to_a_shown_one() {
-        let mut g = GridModel::new();
-        g.set_rows(vec![row("AB", None, Some(2)), row("C", None, Some(1))]);
-        g.move_cursor(down(1), false);
-        g.set_filter("a");
-        assert_eq!(g.cursor_source(), Some("AB"));
-        g.set_filter("zzz");
-        assert_eq!(g.cursor(), None);
-        assert!(g.targets().is_empty());
-    }
-
     /// Starting a selection puts a resting cursor: otherwise the anchor
     /// follows its row across a rebuild while the cursor keeps its index,
     /// and the span silently grows.
@@ -670,42 +670,6 @@ mod tests {
         ]);
         assert_eq!(g.targets(), ["DAX"]);
         assert_eq!(g.cursor_source(), Some("DAX"));
-    }
-
-    /// A filter hiding a put cursor's row rests the cursor on a shown one;
-    /// the filter that shows the row again (escape restoring the one in
-    /// force) returns the cursor to it.
-    #[test]
-    fn a_filter_hiding_the_cursor_row_returns_it_when_the_row_shows_again() {
-        let mut g = GridModel::new();
-        g.set_rows(vec![
-            row("AB", None, Some(3)),
-            row("AC", None, Some(2)),
-            row("XY", None, Some(1)),
-        ]);
-        g.move_cursor(Motion::Bottom(None), false);
-        assert_eq!(g.cursor_source(), Some("XY"));
-        g.set_filter("a");
-        assert_eq!(g.cursor_source(), Some("AC"), "the nearest shown row");
-        g.set_filter("ab");
-        g.set_filter("");
-        assert_eq!(g.cursor_source(), Some("XY"), "back on its own row");
-        // A move while the row is hidden is the trader's new choice.
-        g.set_filter("a");
-        g.move_cursor(Motion::Top(None), false);
-        g.set_filter("");
-        assert_eq!(g.cursor_source(), Some("AB"));
-        // A row the rows no longer hold is not waited for.
-        g.move_cursor(Motion::Bottom(None), false);
-        g.set_filter("a");
-        g.set_rows(vec![row("AB", None, Some(3)), row("AC", None, Some(2))]);
-        g.set_rows(vec![
-            row("AB", None, Some(3)),
-            row("AC", None, Some(2)),
-            row("XY", None, Some(1)),
-        ]);
-        g.set_filter("");
-        assert_eq!(g.cursor_source(), Some("AC"));
     }
 
     /// After a label verb the cursor keeps its shown index, whatever put
@@ -782,23 +746,14 @@ mod tests {
         assert_eq!(g.targets(), ["C"]);
     }
 
-    /// The session saves a seed still waiting, then a put cursor's row the
-    /// filter hides, then the cursor's own row.
     #[test]
-    fn the_saved_cursor_prefers_seed_then_hidden_then_cursor() {
+    fn the_saved_cursor_prefers_a_waiting_seed_then_the_cursor() {
         let mut g = GridModel::new();
-        g.set_rows(vec![row("AB", None, Some(2)), row("XY", None, Some(1))]);
-        g.move_cursor(Motion::Bottom(None), false);
-        g.set_filter("a");
-        assert_eq!(g.cursor_source(), Some("AB"));
-        assert_eq!(g.saved_cursor(), Some("XY"), "the hidden row");
-        g.seed_cursor("Q".into());
-        assert_eq!(g.saved_cursor(), Some("Q"), "a waiting seed first");
-        g.forget_seed();
-        g.set_filter("");
-        assert_eq!(g.saved_cursor(), Some("XY"));
-        g.move_cursor(Motion::Top(None), false);
-        assert_eq!(g.saved_cursor(), Some("AB"));
+        g.set_rows(vec![row("A", None, Some(3)), row("B", None, Some(2))]);
+        g.move_cursor(down(1), false);
+        assert_eq!(g.saved_cursor(), Some("B"));
+        g.seed_cursor("Z".into());
+        assert_eq!(g.saved_cursor(), Some("Z"), "a seed still waiting wins");
     }
 
     #[test]
@@ -810,5 +765,27 @@ mod tests {
         g.start_selection();
         assert!(g.targets().is_empty());
         assert_eq!(g.counts(), (0, 0));
+    }
+
+    #[test]
+    fn search_text_follows_the_order_and_blanks_unclassified_labels() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![
+            row("NKY", None, Some(7)),
+            row("DAX", Some("Europe"), Some(5)),
+        ]);
+        assert_eq!(g.search_text(), ["NKY\t", "DAX\tEurope"]);
+        g.set_sort(Some((SortCol::Source, false)));
+        assert_eq!(g.search_text(), ["DAX\tEurope", "NKY\t"]);
+    }
+
+    #[test]
+    fn put_on_places_the_cursor_on_a_shown_source() {
+        let mut g = GridModel::new();
+        g.set_rows(vec![row("A", None, Some(3)), row("B", None, Some(2))]);
+        assert!(g.put_on("B"));
+        assert_eq!(g.cursor_source(), Some("B"));
+        assert!(!g.put_on("Z"));
+        assert_eq!(g.cursor_source(), Some("B"));
     }
 }

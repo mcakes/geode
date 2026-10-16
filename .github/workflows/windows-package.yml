@@ -1,0 +1,73 @@
+name: Windows package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Package version (SemVer, for example 0.1.0-pilot.1)
+        required: true
+        type: string
+      channel:
+        description: Release channel
+        required: true
+        default: pilot
+        type: choice
+        options: [pilot, stable]
+  pull_request:
+    paths:
+      - .github/workflows/windows-package.yml
+      - .config/dotnet-tools.json
+      - scripts/package-windows*.ps1
+      - scripts/test-package-windows.ps1
+      - crates/geode-app/Cargo.toml
+      - crates/geode-app/src/main.rs
+      - crates/geode-app/tests/velopack_startup.rs
+      - Cargo.lock
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+      PACKAGE_VERSION: ${{ inputs.version || format('0.0.{0}-pr.{1}', github.run_number, github.event.number) }}
+      PACKAGE_CHANNEL: ${{ inputs.channel || 'pilot' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-package
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Test package staging and command failures
+        run: ./scripts/test-package-windows.ps1
+      - name: Build unsigned development package
+        run: >-
+          ./scripts/package-windows.ps1
+          -Version $env:PACKAGE_VERSION
+          -Channel $env:PACKAGE_CHANNEL
+          -OutputDirectory "$env:RUNNER_TEMP/geode-package"
+      - name: Upload installer and update feed
+        uses: actions/upload-artifact@v4
+        with:
+          name: geode-windows-${{ env.PACKAGE_CHANNEL }}-${{ env.PACKAGE_VERSION }}
+          path: |
+            ${{ runner.temp }}/geode-package/releases/
+            ${{ runner.temp }}/geode-package/release.json
+          if-no-files-found: error
+      - name: Upload debugging symbols
+        uses: actions/upload-artifact@v4
+        with:
+          name: geode-windows-symbols-${{ env.PACKAGE_VERSION }}
+          path: ${{ runner.temp }}/geode-package/symbols.zip
+          if-no-files-found: error

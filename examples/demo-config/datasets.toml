@@ -332,6 +332,509 @@ role = "measure"
 grain = "position"
 source_name = "SC"
 
+# ---- Scenario datasets. ----
+# Measures datasets with axes (bucket axes partition a total and sum;
+# scenario axes enumerate states and never sum). Every axis column extends
+# the key of the grains that hold measures. Each keeps the risk dimension
+# set so a blotter leaf path drills in; axis names never reuse one of them
+# (`moneyness` beside `strike`, `curve_ccy` beside `currency`). The demo
+# emitter writes them under `<demo root>/scenario/`. TOML has no include, so
+# the identity block repeats per dataset.
+
+[vega_buckets]
+axes = ["tenor", "moneyness"]
+[vega_buckets.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+source_name = "BusinessDate"
+[vega_buckets.columns.book]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Book"
+[vega_buckets.columns.lhu]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "LHU"
+[vega_buckets.columns.position_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "PositionRef"
+[vega_buckets.columns.instrument_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "InstrumentRef"
+[vega_buckets.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Underlying1Ref"
+[vega_buckets.columns.counterparty]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Counterparty"
+[vega_buckets.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+source_name = "Strike"
+[vega_buckets.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Expiry"
+[vega_buckets.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Currency"
+[vega_buckets.columns.model_code]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "ModelCode"
+[vega_buckets.columns.tenor]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+order = "tenor"
+source_name = "Tenor"
+[vega_buckets.columns.moneyness]
+type = "f64"
+role = "axis"
+axis = "bucket"
+source_name = "Moneyness"
+[vega_buckets.columns.vega]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Vega"
+[vega_buckets.columns.vega_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Vega_USD"
+
+[vega_spot_ladder]
+axes = ["tenor", "spot_shift"]
+[vega_spot_ladder.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+source_name = "BusinessDate"
+[vega_spot_ladder.columns.book]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Book"
+[vega_spot_ladder.columns.lhu]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "LHU"
+[vega_spot_ladder.columns.position_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "PositionRef"
+[vega_spot_ladder.columns.instrument_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "InstrumentRef"
+[vega_spot_ladder.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Underlying1Ref"
+[vega_spot_ladder.columns.counterparty]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Counterparty"
+[vega_spot_ladder.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+source_name = "Strike"
+[vega_spot_ladder.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Expiry"
+[vega_spot_ladder.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Currency"
+[vega_spot_ladder.columns.model_code]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "ModelCode"
+[vega_spot_ladder.columns.tenor]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+order = "tenor"
+source_name = "Tenor"
+[vega_spot_ladder.columns.spot_shift]
+type = "f64"
+role = "axis"
+axis = "scenario"
+source_name = "SpotShift"
+[vega_spot_ladder.columns.vega]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Vega"
+[vega_spot_ladder.columns.vega_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Vega_USD"
+
+# NPV and theta are per instrument and repeat identically on each of the
+# instrument's underlying rows; delta, gamma and vega are per underlying.
+[spot_ladder]
+axes = ["spot_shift"]
+[spot_ladder.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+source_name = "BusinessDate"
+[spot_ladder.columns.book]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Book"
+[spot_ladder.columns.lhu]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "LHU"
+[spot_ladder.columns.position_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "PositionRef"
+[spot_ladder.columns.instrument_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "InstrumentRef"
+[spot_ladder.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Underlying1Ref"
+[spot_ladder.columns.counterparty]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Counterparty"
+[spot_ladder.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+source_name = "Strike"
+[spot_ladder.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Expiry"
+[spot_ladder.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Currency"
+[spot_ladder.columns.model_code]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "ModelCode"
+[spot_ladder.columns.spot_shift]
+type = "f64"
+role = "axis"
+axis = "scenario"
+source_name = "SpotShift"
+[spot_ladder.columns.npv]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "NPV"
+[spot_ladder.columns.npv_usd]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "NPV_USD"
+[spot_ladder.columns.delta]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Delta"
+[spot_ladder.columns.delta_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Delta_USD"
+[spot_ladder.columns.gamma]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Gamma"
+[spot_ladder.columns.gamma_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Gamma_USD"
+[spot_ladder.columns.vega]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Vega"
+[spot_ladder.columns.vega_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Vega_USD"
+[spot_ladder.columns.theta]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "Theta"
+[spot_ladder.columns.theta_usd]
+type = "f64"
+role = "measure"
+grain = "instrument"
+source_name = "Theta_USD"
+
+# One report per measure feeds this dataset (repo, ATM vol, skew, curvature
+# and diva), each from its own source. Each source lists the measure its
+# files carry (`measures` in sources.toml), so the other reports' measures
+# read as NULL without a signal while a file missing its own still
+# degrades. The sources' batches differ, so no report's load replaces
+# another's rows (a partition is dataset, batch and book).
+[term_sensitivities]
+axes = ["tenor"]
+[term_sensitivities.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+source_name = "BusinessDate"
+[term_sensitivities.columns.book]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Book"
+[term_sensitivities.columns.lhu]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "LHU"
+[term_sensitivities.columns.position_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "PositionRef"
+[term_sensitivities.columns.instrument_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "InstrumentRef"
+[term_sensitivities.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Underlying1Ref"
+[term_sensitivities.columns.counterparty]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Counterparty"
+[term_sensitivities.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+source_name = "Strike"
+[term_sensitivities.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Expiry"
+[term_sensitivities.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Currency"
+[term_sensitivities.columns.model_code]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "ModelCode"
+[term_sensitivities.columns.tenor]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+order = "tenor"
+source_name = "Tenor"
+[term_sensitivities.columns.repo]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Repo"
+[term_sensitivities.columns.repo_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Repo_USD"
+[term_sensitivities.columns.atm_vol]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "ATMVol"
+[term_sensitivities.columns.atm_vol_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "ATMVol_USD"
+[term_sensitivities.columns.skew]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Skew"
+[term_sensitivities.columns.skew_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Skew_USD"
+[term_sensitivities.columns.curvature]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Curvature"
+[term_sensitivities.columns.curvature_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Curvature_USD"
+[term_sensitivities.columns.diva]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Diva"
+[term_sensitivities.columns.diva_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Diva_USD"
+
+# Rho keys at underlying grain, matching the risk file's per-underlying rho;
+# the curve's currency is the `curve_ccy` axis.
+[rho_curves]
+axes = ["tenor", "curve_ccy", "curve_type"]
+[rho_curves.columns.business_date]
+type = "utf8"
+role = "attribute"
+grain = "position"
+source_name = "BusinessDate"
+[rho_curves.columns.book]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Book"
+[rho_curves.columns.lhu]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "LHU"
+[rho_curves.columns.position_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "PositionRef"
+[rho_curves.columns.instrument_ref]
+type = "utf8"
+role = "key"
+textual = true
+source_name = "InstrumentRef"
+[rho_curves.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Underlying1Ref"
+[rho_curves.columns.counterparty]
+type = "utf8"
+role = "dimension"
+textual = true
+source_name = "Counterparty"
+[rho_curves.columns.strike]
+type = "f64"
+role = "dimension"
+grain = "instrument"
+source_name = "Strike"
+[rho_curves.columns.expiry]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Expiry"
+[rho_curves.columns.currency]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "Currency"
+[rho_curves.columns.model_code]
+type = "utf8"
+role = "dimension"
+grain = "instrument"
+textual = true
+source_name = "ModelCode"
+[rho_curves.columns.tenor]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+order = "tenor"
+source_name = "Tenor"
+[rho_curves.columns.curve_ccy]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+source_name = "CurveCcy"
+[rho_curves.columns.curve_type]
+type = "utf8"
+role = "axis"
+axis = "bucket"
+source_name = "CurveType"
+[rho_curves.columns.rho]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Rho"
+[rho_curves.columns.rho_usd]
+type = "f64"
+role = "measure"
+grain = "underlying"
+source_name = "Rho_USD"
+
 # ---- CVI parameter documents. ----
 # geode_compose::demo_bus publishes through the generated `[cvi]` source and
 # the demo_bus channel adapter. Each key replaces one complete document.

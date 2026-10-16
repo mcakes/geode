@@ -14,6 +14,9 @@ pub struct WorkItem {
     pub candidate: Candidate,
     pub priority: Priority,
     pub source_time: DateTime<Utc>,
+    /// The source's `measures`, handed to the load: a measure it omits is
+    /// another report's and reads as NULL without a signal.
+    pub measures: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default)]
@@ -57,6 +60,7 @@ pub fn build_plan(discovered: &[(SourceSpec, Vec<Candidate>)]) -> WorkPlan {
                     Priority::Backfill
                 },
                 source_time: sentinel.as_of,
+                measures: spec.measures.clone(),
             });
         }
     }
@@ -110,6 +114,31 @@ mod tests {
                 CandidateState::Pending
             },
         }
+    }
+
+    #[test]
+    fn each_item_carries_its_sources_measures() {
+        let listed = SourceSpec {
+            measures: Some(vec!["diva".into()]),
+            ..spec("diva", Priority::LatestOther)
+        };
+        let plan = build_plan(&[
+            (listed, vec![candidate("BK000", 30, true)]),
+            (
+                spec("risk", Priority::LatestRisk),
+                vec![candidate("BK001", 30, true)],
+            ),
+        ]);
+        let of = |source: &str| {
+            plan.items
+                .iter()
+                .find(|i| i.source == source)
+                .unwrap()
+                .measures
+                .clone()
+        };
+        assert_eq!(of("diva"), Some(vec!["diva".to_string()]));
+        assert_eq!(of("risk"), None);
     }
 
     #[test]

@@ -16,7 +16,8 @@ for startup, caching, and ingestion ownership.
 |---|---|
 | `generate` | Risk structure and measures assigned at position, instrument, underlying, and pair grains. `demo_underlyings` supplies the shared risk/document vocabulary. |
 | `model` | `RiskBatch`, canonical column groups, and typed column access. Each row names an ordered underlying pair for an instrument. |
-| `emit` | CSV header mapping, fixed-factor USD twins, file partitioning, sentinels, and deliberate missing-column and conflict fixtures. |
+| `emit` | CSV header mapping, fixed-factor USD twins, file partitioning, sentinels, and deliberate missing-column and conflict fixtures; `emit_scenario_directory` writes scenario tables. |
+| `scenario` | `generate_scenarios`: scenario tables (vega buckets, vega spot ladder, spot ladder, rho curves, and one report per measure into term sensitivities) derived from a risk batch. |
 | `documents::cvi` | Fixed CVI axes and per-key walks for node parameters, ATM volatility, and skew. |
 | `documents::dividend` | Per-key schedules with repeated dates, stable generated IDs, amount walks, status promotions, and appended rows. |
 | `documents::chain` | `ChainGenerator`: one option-chain document per `(underlying, expiry)`, rotating through twelve monthly expiries per underlying and priced off the latest CVI document through `geode_pricing::DemoVolModel`. |
@@ -52,6 +53,35 @@ slots start at `2026-08-24` and increment the day field without month rollover
 or business-day validation. Zero date slots uses one; the row limit can stop
 generation before later slots are visited or partway through an instrument's
 pairs. A zero row target currently emits one row.
+
+## Scenario fixtures
+
+`generate_scenarios` derives five axis datasets from the first `coverage`
+distinct (instrument, underlying) rows of a risk batch, in batch order.
+Each covered row fans out to as many as 110 rows per table, so
+`SCENARIO_COVERAGE` (5,000), not the batch size, bounds the scenario store:
+at most about 550,000 rows per table whatever `--demo` row count is asked
+for, so a large demo does not multiply its ingest time by the bucket count.
+Rows carry the risk file's identity columns minus `underlying2_ref`.
+
+`term_sensitivities` is one table per report (`TERM_REPORTS`: `repo`,
+`atm_vol`, `skew`, `curvature`, `diva`), each carrying only identity,
+`tenor` and its own measure. Vega buckets, rho curves, and the repo, ATM
+vol and skew reports are unjittered shares of the row's own risk measure,
+so a sum over a bucket axis reproduces the blotter's value. Seeded jitter
+shapes only the vega spot ladder and curvature. Rho curves exist only in
+the instrument's currency. Diva is `-delta01 × bucket width in years` per
+tenor (`TENOR_YEARS`), opposite in sign to delta, so a row's buckets sum
+to `-5 × delta01`; it draws nothing from the seeded generator. Axis values
+print without trailing zeros, so the spot ladder's base row is `0`.
+
+`emit_scenario_directory` writes `<dataset>_<date>_<book>.csv` with a `.done`
+sentinel naming the dataset; each term report writes
+`<report>_<book>_<date>.csv` into `term_sensitivities`, so a batch pattern
+can capture `<report>_<book>` whole and no two reports' partitions
+collide. Identity headers use the risk spelling; axis and
+measure headers use `SCENARIO_SOURCE_NAMES`, each measure followed by its
+`_USD` twin at the same fixed factor.
 
 ## Document sequences
 

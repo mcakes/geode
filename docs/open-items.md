@@ -744,6 +744,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   right-click menu position, "loading values…" mark, empty and removed states.
 - Classifications CSV: native open/save dialogs on macOS and Windows, confirm text
   wrapping, rejected-rows notice truncation, the held-plan notice and arm-on-focus.
+- Classifications alignment (2026-10-11): the add field and its reference
+  typeahead under the header; the draft row's paint with the label editor open
+  on it; the fzf results table in this tile (source-only highlight); the
+  `removed` / `cleared` notices after a clear.
 
 ## Watchlists
 
@@ -818,6 +822,76 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   Rename… and Delete… the copy, reading the `geode::watchlist` log line
   for each re-resolution.
 
+## Scenario tiles
+
+### Open work
+
+- A file from any report that carries a measure another source over the
+  same dataset reports (a `repo` report that starts carrying `Diva`)
+  loads, and that book's sum of the measure double-counts with no health
+  signal. A source's `measures` list could also refuse or degrade a column
+  it does not list; that is undecided.
+- Within-file `MEASURE` conflicts in a scenario source file are not
+  surfaced by the ingest runner.
+- The document family's axes lack a duplicate-name refusal.
+- The demo scope picker keeps a stale LHU after a demo move (the scenario
+  files are not re-dropped; see the data path's demo position system).
+- A builtin shape withheld over an undeclared dataset shows only as an
+  info log line: `Severity` has no Info, so the diagnostics page cannot
+  show it.
+- The withholding retain in `bridge.rs` matches `scenarios.<kind>` by
+  prefix; a quoted kind containing a dot could over-match (no builtin is
+  spelled so).
+- The in-flight `…` has no delay threshold, so a fast chain may flicker it
+  (the blotter waits 50 ms); lifting the threshold into
+  `geode_tile::following` would serve both.
+- `prepare_chips` (the chips and the scope readout) runs on every
+  non-motion verb, whether or not the verb changed what they read.
+- A dataset fed by several reports (By maturity's five) shows one dataset
+  time, the oldest report's; nothing says which report is the old one.
+- A report lagging another by a business date records a cross-file
+  `business_date` attribute conflict on every load of any of the reports;
+  attribute conflicts do not know that rows come from different reports.
+- Changing a source's `batch_pattern`, or splitting one report into
+  several, leaves the old batch's partitions live: sums include them, with
+  `Ok` health, until the store is cleared. Nothing detects a live batch no
+  configured source produces any more, and nothing retires it (retention
+  sweeps archives only).
+
+### Display checks
+
+- Heat fills on the light themes (Default Light, Solarized Light, Rosé Pine
+  Dawn): fills darken toward the token, and text stays readable at the cap.
+- The `rho` group header row: its height, alignment over the leaf heads at
+  rest and under horizontal scroll, the hairline per group and over the
+  pinned label column.
+- The ladder header (By maturity, spot ladder): each measure's name on the
+  row above its unit, right-aligned over the numbers, nothing clipped; a Σ
+  total wider than the cells keeps its minus sign.
+- By maturity in `--demo` after deleting `$TMPDIR/geode-demo/<rows>-42/`,
+  each column from its own report: all five columns present in every
+  tenor row with their Σ, `diva` (`per 1% div`) negative where delta is
+  long, nothing clipped at the default width.
+- The `native` chip's warning tone and tooltip over a mixed-currency scope.
+- The base-row highlight on the spot ladder in diff mode, and its
+  disappearance under `m`.
+- The Σ column on a narrow tile: does the pinned label column plus Σ leave
+  the cells legible?
+- The palette rows `Vega K/T: Split`, the picker rows, the row menu's
+  `Open Vega K/T`, and the panel rows' titles (`CVI: Split`).
+- The cursor readout and aggregates strip in the footer at the XSmall table
+  size.
+- `g m` from a blotter row onto each of the five kinds: the `filtered` chip
+  and the readout `… · SPX`.
+- A matrix painted in `--demo`.
+- The chips: spacing after the readout, the warning fill on `unscoped` and
+  mixed `native`, hover and pressed states on the currency and diff chips,
+  and a long readout truncating before the chips.
+- The `.` menu hung under `⋯` at the header's right edge: the corner, the
+  overlap with the table, the hint lane (chords and `:` lines).
+- `…` while a chain is out (see the flicker item above).
+- The `nothing` readout in the danger tone.
+
 ## Diagnostics page
 
 ### Open work
@@ -887,6 +961,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   next lever is a keyed lookup join); context columns (`query_context` 35.0 ms vs
   20.5 ms without); pricer grid build after the tree-column and scope slices
   (1.66–2.15 ms); the dividend benches' anomalous readings.
+- The two Classifications rows in `performance.md` (rebuild after an edit, rows
+  rebuild) were measured while the grid still had a `/` filter; re-run
+  `cargo bench -p geode-classifications` and replace them.
 - Painted-frame readings never taken: the per-keystroke scope text filter (recipe
   in `docs/perf.md`), the market-data panel at 10,000 rows, the diagnostics page
   p95 with the Log following.
@@ -901,7 +978,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   reclaimed inside the palette (spec §20.5)" (redundant binding); "dblclick: the
   browse click that opened a stage does not also open a field" (needs a real
   ancestor mouse-down focus GPUI test); "mdtable: a click while editing cancels the
-  editor" (re-anchor to `pointer()`'s close); "service: a forget to a non-local
+  editor" (re-anchor to `pointer()`'s close); "mdedit: a commit whose cell moved
+  under it is refused"; "service: a forget to a non-local
   dataset is queued"; "volslice: a refused read under unmoved versions is retried
   by a scope change"; "objectdialog: the tick's click does not stop propagation"
   reports `caught*`; plus the pricer entry above.
@@ -910,7 +988,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The scope-dialog retirement's `--changed` harness run (531 entries) was stopped
   and never completed.
 - Move the unfiltered full harness run to a scheduled CI job.
-- Flakes: geode-data
+- Flakes: geode-collector
+  `handoff::a_handoff_keeps_the_documents_the_collector_received` waits a fixed
+  10 s for a debug-build collector to publish the demo scenario files and times
+  out under heavy load; geode-data
   `a_flooded_subscription_reports_its_drops_as_degraded_source_health` (seen
   failing ~1/3 under load, sometimes alone); geode-app
   `bridge::tests::catalog_refusal_and_failure_retry_without_new_events` under heavy

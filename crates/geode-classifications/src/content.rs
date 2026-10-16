@@ -50,12 +50,23 @@ pub const ACTIONS: &[(&str, &str)] = &[
         "classifications::import",
         "Classification: Import CSV\u{2026}",
     ),
+    ("classifications::add", "Classification: Add value\u{2026}"),
     ("classifications::edit", "Classification: Set label"),
+    (
+        "classifications::edit_select",
+        "Classification: Set label (select all)",
+    ),
+    ("classifications::sort_cycle", "Classification: Sort column"),
     ("classifications::clear", "Classification: Clear label"),
     ("classifications::yank", "Classification: Copy label"),
     ("classifications::paste", "Classification: Paste label"),
     ("classifications::undo", "Classification: Undo"),
     ("classifications::redo", "Classification: Redo"),
+    ("classifications::find_next", "Classification: Find next"),
+    (
+        "classifications::find_prev",
+        "Classification: Find previous",
+    ),
     ("classifications::menu", "Classification: Actions"),
     // The popup and field verbs: registered beside the rest so the
     // fragment binds them and the palette lists them.
@@ -98,8 +109,10 @@ pub const DEFAULT_KEYMAP: &str = r#"
 context = "classifications && mode == visual"
 [bindings.keys]
 "enter" = "classifications::edit"
-"c" = "classifications::edit"
+"i" = "classifications::edit"
+"shift+i" = "classifications::edit_select"
 "x" = "classifications::clear"
+"d" = "classifications::clear"
 "ctrl+v" = "classifications::paste"
 "p" = "classifications::paste"
 "escape" = "classifications::cancel"
@@ -108,8 +121,13 @@ context = "classifications && mode == visual"
 context = "classifications && mode == normal"
 [bindings.keys]
 "enter" = "classifications::edit"
-"c" = "classifications::edit"
+"o" = "classifications::add"
+"shift+o" = "classifications::add"
+"i" = "classifications::edit"
+"shift+i" = "classifications::edit_select"
 "x" = "classifications::clear"
+"d d" = "classifications::clear"
+"s" = "classifications::sort_cycle"
 "ctrl+c" = "classifications::yank"
 "y y" = "classifications::yank"
 "ctrl+v" = "classifications::paste"
@@ -121,8 +139,10 @@ context = "classifications && mode == normal"
 "g c" = "classifications::switch"
 "shift+v" = "classifications::visual_rows"
 "v" = "classifications::visual_rows"
-# Nothing to cancel in normal mode but the header's notices: `escape`
-# dismisses the warning and danger ones, and does nothing otherwise.
+"n" = "classifications::find_next"
+"shift+n" = "classifications::find_prev"
+# In normal mode `escape` ends a committed `/` find, else dismisses the
+# header's warning and danger notices, and does nothing otherwise.
 "escape" = "classifications::cancel"
 
 [[bindings]]
@@ -197,9 +217,21 @@ impl TileContent for ClassificationsContent {
         self.tile.read(cx).completions(line, cursor)
     }
 
-    /// `/` narrows the grid's rows over source and label.
+    /// `/` (vim style) finds over source and label; a hit moves the cursor.
     fn find(&self, event: FindEvent, _window: &mut Window, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.find(event, cx))
+    }
+
+    /// `/` under `find_style = "fzf"`: every shown row as a result.
+    fn start_fuzzy_find(
+        &self,
+        results: gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        self.tile
+            .update(cx, |t, cx| t.start_fuzzy_find(results, window, cx));
+        true
     }
 
     fn deliver(&self, delivery: Delivery, window: &mut Window, cx: &mut App) {
@@ -380,7 +412,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 28);
+        assert_eq!(count, 37);
         // The config-level verbs are reached from the palette and the menu.
         for unbound in [
             "new",
@@ -407,6 +439,24 @@ mod tests {
             &registry,
         );
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn c_is_unbound_and_the_aligned_keys_are_bound() {
+        let fragment = DEFAULT_KEYMAP;
+        assert!(!fragment.contains("\"c\" ="), "c is retired");
+        for key in [
+            "\"i\" =",
+            "\"shift+i\" =",
+            "\"d d\" =",
+            "\"s\" =",
+            "\"n\" =",
+            "\"shift+n\" =",
+            "\"o\" =",
+            "\"shift+o\" =",
+        ] {
+            assert!(fragment.contains(key), "{key} is bound");
+        }
     }
 
     #[test]

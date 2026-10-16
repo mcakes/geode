@@ -16,7 +16,7 @@ use toml::{Table, Value};
 
 /// A refusal before it becomes a diagnostic: the path under `panels.<name>`
 /// and what is wrong there.
-pub(super) type Refusal = (String, String);
+pub(crate) type Refusal = (String, String);
 
 const NEEDS_PRECISION: &str =
     "an f64 needs 'format.precision': the panel will not guess how many places a value carries";
@@ -44,7 +44,7 @@ pub fn read_panels(
 
 /// A usable tile kind: the name becomes the roster kind, the
 /// `tile::add_<kind>` action ids and the session's `module` value.
-fn is_kind_name(name: &str) -> bool {
+pub(crate) fn is_kind_name(name: &str) -> bool {
     let mut chars = name.chars();
     chars.next().is_some_and(|c| c.is_ascii_lowercase())
         && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
@@ -130,7 +130,7 @@ fn read_panel(
     Ok(spec)
 }
 
-fn join(at: &str, key: &str) -> String {
+pub(crate) fn join(at: &str, key: &str) -> String {
     if at.is_empty() {
         key.to_string()
     } else {
@@ -138,7 +138,7 @@ fn join(at: &str, key: &str) -> String {
     }
 }
 
-fn known_keys(t: &Table, at: &str, keys: &[&str]) -> Result<(), Refusal> {
+pub(crate) fn known_keys(t: &Table, at: &str, keys: &[&str]) -> Result<(), Refusal> {
     match t.keys().find(|k| !keys.contains(&k.as_str())) {
         None => Ok(()),
         Some(k) => Err((
@@ -148,12 +148,12 @@ fn known_keys(t: &Table, at: &str, keys: &[&str]) -> Result<(), Refusal> {
     }
 }
 
-fn req<'a>(t: &'a Table, at: &str, key: &str) -> Result<&'a Value, Refusal> {
+pub(crate) fn req<'a>(t: &'a Table, at: &str, key: &str) -> Result<&'a Value, Refusal> {
     t.get(key)
         .ok_or_else(|| (join(at, key), format!("missing required key '{key}'")))
 }
 
-fn req_str(t: &Table, at: &str, key: &str) -> Result<String, Refusal> {
+pub(crate) fn req_str(t: &Table, at: &str, key: &str) -> Result<String, Refusal> {
     let v = req(t, at, key)?;
     match v.as_str() {
         Some(s) if !s.trim().is_empty() => Ok(s.to_string()),
@@ -174,7 +174,7 @@ fn req_bool(t: &Table, at: &str, key: &str) -> Result<bool, Refusal> {
     })
 }
 
-fn req_table<'a>(t: &'a Table, at: &str, key: &str) -> Result<&'a Table, Refusal> {
+pub(crate) fn req_table<'a>(t: &'a Table, at: &str, key: &str) -> Result<&'a Table, Refusal> {
     req(t, at, key)?
         .as_table()
         .ok_or_else(|| (join(at, key), format!("'{key}' must be a table")))
@@ -185,7 +185,7 @@ fn table_at<'a>(v: &'a Value, at: &str) -> Result<&'a Table, Refusal> {
         .ok_or_else(|| (at.to_string(), format!("must be a table (got {v})")))
 }
 
-fn opt_array<'a>(t: &'a Table, at: &str, key: &str) -> Result<&'a [Value], Refusal> {
+pub(crate) fn opt_array<'a>(t: &'a Table, at: &str, key: &str) -> Result<&'a [Value], Refusal> {
     match t.get(key) {
         None => Ok(&[]),
         Some(v) => v

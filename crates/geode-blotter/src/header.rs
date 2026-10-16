@@ -5,20 +5,8 @@
 
 use geode_core::clock::Clock;
 use geode_core::snapshot::Provenance;
+use geode_tile::header::DatasetTime;
 use gpui::{App, SharedString};
-
-use crate::tile::short_time;
-
-/// One dataset's freshness run: its label (`risk 14:00`, or `risk —`) and
-/// the source time, parsed once here.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DatasetTime {
-    pub label: SharedString,
-    /// The parsed source time render compares against `stale_after` and the
-    /// stale timer arms on; `None` for a missing or unparsable time, which is
-    /// never stale.
-    pub at: Option<chrono::DateTime<chrono::Utc>>,
-}
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct HeaderModel {
@@ -32,22 +20,7 @@ pub(crate) struct HeaderModel {
 
 impl HeaderModel {
     pub(crate) fn prepare(p: &Provenance, clock: Clock) -> HeaderModel {
-        let mut sorted: Vec<_> = p.datasets.iter().collect();
-        sorted.sort_by(|a, b| a.as_of.cmp(&b.as_of));
-        let times = sorted
-            .into_iter()
-            .map(|f| DatasetTime {
-                label: match &f.as_of {
-                    Some(t) => format!("{} {}", f.dataset, short_time(t, clock)).into(),
-                    None => format!("{} —", f.dataset).into(),
-                },
-                at: f
-                    .as_of
-                    .as_deref()
-                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
-                    .map(|t| t.with_timezone(&chrono::Utc)),
-            })
-            .collect();
+        let times = DatasetTime::from_provenance(p, clock);
         let frame_as_of = p.as_of_request.as_ref().map(|req| {
             chrono::DateTime::parse_from_rfc3339(req)
                 .map(|t| format!("AS OF {}", clock.local(t.to_utc()).format("%Y-%m-%d %H:%M")))

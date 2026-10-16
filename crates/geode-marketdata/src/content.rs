@@ -383,6 +383,11 @@ impl ModuleFactory for MarketDataFactory {
         self.kind
     }
 
+    /// The panel entry's `title`: `CVI: Split`, never the capitalised kind.
+    fn title(&self) -> String {
+        self.spec.title.clone()
+    }
+
     /// Declare the shared keymap context independently of this panel's roster kind.
     /// Bindings in an undeclared module context are rejected during keymap building.
     fn contexts(&self) -> Vec<&'static str> {

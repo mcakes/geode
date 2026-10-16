@@ -274,6 +274,11 @@ impl BlotterFactory {
         *self.views.borrow_mut() = views;
     }
 
+    /// The names of the shared views, in order: what a tile can show.
+    pub fn view_names(&self) -> Vec<String> {
+        self.views.borrow().iter().map(|v| v.name.clone()).collect()
+    }
+
     /// Replace named colors with a fresh `Arc` so delegates invalidate their
     /// resolved colors. Existing tiles pick up the definitions on their next
     /// applied snapshot, triggered by the reload handler's config bump.

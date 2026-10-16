@@ -369,6 +369,35 @@ that group. Editing the CVI panel updates the draft curve; it does not
 upload the edit. The demo's curves use a stand-in evaluator, not a
 production financial model.
 
+### Look at the scenario risk behind a row
+
+In a blotter, put the cursor on the SPX underlying row and press `g`, then
+`m`. Choose **Vega K/T**. The tile opens beside the blotter on SPX (its
+header shows `filtered`) and paints a matrix: tenors down the side,
+moneyness across, each cell the vega for that bucket, with Σ totals along
+the right and bottom edges. The demo's scenario data comes from its own
+simulator, not a production risk run.
+
+Cells are shaded by size, green for positive and red for negative; `p`
+switches the shading off and on. Values start in USD where the dataset
+carries a USD column; `c` switches to the native currency and back, and the
+currency chip turns to a warning if the scope mixes currencies. `:scale k`
+shows thousands, `:scale m` millions and `:scale 1` each column's own
+scale. Move with `h j k l`; the footer reads the cell under the cursor,
+for example `1Y × 100 · 254.5`. `v` starts a block selection, and the
+footer then shows its totals; `y` copies the cell or the selection as
+tab-separated text.
+
+Open **Spot ladder** the same way. Its first column is P&L against the
+unshifted row, which is highlighted; `m` switches between that difference
+and absolute values. Press `.` (or click `⋯`) for the tile's menu: every key
+above, plus the `:` commands.
+
+To have a scenario tile track the blotter's cursor instead of one
+underlying, run `:filter clear` in it, make the blotter emit A (`mod+u`,
+**emit · A**) and set the scenario tile to **follow · A**. Moving the
+blotter cursor then repaints the matrix for the row under it.
+
 ## Make it your workspace
 
 ### Keep a workspace's own context
@@ -403,7 +432,7 @@ Choose **follow · workspace** to return a tile to its workspace scope, or
 **emit · none** to stop changing a group.
 
 Blotters, pricers and market-data panels can follow and emit; vol-slice
-tiles can follow. A market-data panel or vol-slice tile following a group
+and scenario tiles can follow. A market-data panel or vol-slice tile following a group
 shows the group's one underlying, and nothing when the group names several.
 While following, a market-data panel's underlying is set by the group: `u`
 says `following A — set the underlying there`. Timeseries tiles use their

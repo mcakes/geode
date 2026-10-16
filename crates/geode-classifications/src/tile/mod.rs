@@ -30,7 +30,7 @@
 //! step. Each step is bound to the classification the import began on.
 //!
 //! What paint reads is prepared in `Chrome` and the table's `Prepared`
-//! whenever the configuration, the values, the filter or the sort change,
+//! whenever the configuration, the values or the sort change,
 //! never in render.
 
 mod editor;
@@ -41,9 +41,9 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use geode_core::classification;
 use geode_core::classification::import::{ImportPlan, MAX_IMPORT_BYTES, plan_import};
 use geode_core::classification::validate::{references, source_columns, validate_source};
+use geode_core::classification::{self, ClassRow};
 use geode_core::config::{DIMENSIONS_DOC, Layer};
 use geode_core::dimensions::DerivedDimension;
 use geode_core::query::{AsOf, DistinctOutcome, DistinctParams, QueryKey};
@@ -55,8 +55,10 @@ use geode_shell::actions::ActionId;
 use geode_shell::frame::{ConfigEdit, FrameRef, TileNotice};
 use geode_shell::keymap::{Binding, KeyContext};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
+use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
+use geode_shell::vimfind::{FindDirection, find_match};
 use geode_shell::vimnav::NavCommand;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::edit::EditCaret;
@@ -69,7 +71,7 @@ use gpui::{
     Pixels, Point, SharedString, Window, anchored, div,
 };
 use gpui_component::input::{InputEvent, InputState};
-use gpui_component::table::{TableEvent, TableState};
+use gpui_component::table::{TableDelegate as _, TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::{ClassificationsConfig, Shared, action_title};
@@ -109,6 +111,7 @@ impl MenuPick for Pick {
     }
 }
 
+const ADD_ACTION: &str = "classifications::add";
 const NEW_ACTION: &str = "classifications::new";
 const RENAME_ACTION: &str = "classifications::rename";
 const DELETE_ACTION: &str = "classifications::delete";
@@ -222,6 +225,14 @@ struct Asked {
     from: String,
 }
 
+/// A `/` search: the source the cursor was on when it began, where cancel
+/// returns it (`None` once the search has ended), and the query `n` and
+/// `shift+n` repeat (`None` until one commits).
+struct FindState {
+    origin: Option<String>,
+    committed: Option<String>,
+}
+
 pub struct ClassificationsTile {
     id: TileId,
     frame: FrameRef,
@@ -258,9 +269,15 @@ pub struct ClassificationsTile {
     file_dir: Option<PathBuf>,
     /// Why the values are not on screen: a refused or failed read.
     values_notice: Option<String>,
-    /// The filter in force when a `/` search began, which a cancelled
-    /// search restores; `None` while no search is open.
-    find_entry: Option<String>,
+    /// The `/` search: where it began (the cursor's source then) and the
+    /// last committed query `n`/`shift+n` repeat. `None` with no search.
+    find: Option<FindState>,
+    /// A `/` prompt is open (between its first change and its commit or
+    /// cancel): it holds the keyboard, so a held import waits.
+    searching: bool,
+    /// The open fzf `/` results, painted in the grid's place while active.
+    /// Weak: the shell owns the session, and closing its prompt ends it.
+    fuzzy_find: Option<gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>>,
     /// The rem the table's column widths were last scaled to.
     last_rem: f32,
     menu: Option<(MenuKind, Menu<Pick>)>,
@@ -278,6 +295,9 @@ pub struct ClassificationsTile {
     history: History,
     /// The open label editor; the tile is in insert mode while it is.
     editor: Option<LabelEditor>,
+    /// The value `o` is adding, shown as a draft row while the label editor
+    /// is open on it and dropped with the editor: only its label writes it.
+    draft: Option<String>,
     /// The open prompt (New, Rename); insert mode too.
     prompt: Option<PromptField>,
     /// The armed y/n question; it holds the keyboard, insert mode too.
@@ -346,11 +366,11 @@ impl ClassificationsTile {
         });
         // The window, for the double-click's edit through the tile's door.
         cx.subscribe_in(&table, window, |this, _, e: &RowPressed, window, cx| {
-            this.row_pressed(*e, window, cx)
+            this.row_pressed(e.clone(), window, cx)
         })
         .detach();
         cx.subscribe_in(&table, window, |this, _, e: &RowContext, window, cx| {
-            this.row_context(*e, window, cx)
+            this.row_context(e.clone(), window, cx)
         })
         .detach();
         cx.subscribe(&table, |this, _, e: &SortClicked, cx| {
@@ -392,6 +412,7 @@ impl ClassificationsTile {
             tag: 0,
             asked: None,
             observed: Vec::new(),
+            draft: None,
             values_loaded: false,
             file_op: None,
             planning: None,
@@ -400,7 +421,9 @@ impl ClassificationsTile {
             file_tag: 0,
             file_dir: None,
             values_notice: None,
-            find_entry: None,
+            find: None,
+            searching: false,
+            fuzzy_find: None,
             last_rem: 0.0,
             menu: None,
             menu_at: None,
@@ -723,17 +746,10 @@ impl ClassificationsTile {
                 .map_or(("", ""), |a| (a.from.as_str(), a.name.as_str()));
             Rc::new(Prepared::build(&self.grid, from, name))
         });
-        let (title, help) = if self.grid.query().is_empty() {
-            (
-                "No source values",
-                "Values appear here once the source column has data.",
-            )
-        } else {
-            (
-                "No matching values",
-                "Escape restores the filter in force before the search.",
-            )
-        };
+        let (title, help) = (
+            "No source values",
+            "Values appear here once the source column has data.",
+        );
         let selected = self.grid.selected();
         let sort = self.grid.sort();
         let cursor = self.grid.cursor();
@@ -744,7 +760,7 @@ impl ClassificationsTile {
             d.set_editor(editor);
             // The table reads headings and sort marks only on a refresh,
             // which also re-lays every column: refresh only when one of
-            // them changed, never for a filter keystroke or new values.
+            // them changed, never for new values.
             let mut refresh = d.set_sort(sort);
             if let Some(prepared) = prepared {
                 refresh |= d.set(prepared);
@@ -928,11 +944,20 @@ impl ClassificationsTile {
             }),
             (other, _) => other,
         };
+        let add = match (&shown, self.reverting()) {
+            (None, _) => Err(Blocked::same(NOTHING_SHOWN)),
+            (Some(_), Some(name)) => Err(Blocked {
+                short: "reverting\u{2026}",
+                long: format!("reverting {name}\u{2026}"),
+            }),
+            (Some(_), None) => Ok(()),
+        };
         let mut rows = vec![
             row("classifications::edit", labelled()),
             row("classifications::clear", labelled()),
             row("classifications::yank", labelled()),
             row("classifications::paste", paste),
+            row(ADD_ACTION, add),
             Row::Separator,
             row(NEW_ACTION, Ok(())),
             row(RENAME_ACTION, self.own(Verb::Rename).map(|_| ())),
@@ -1350,7 +1375,7 @@ impl ClassificationsTile {
     /// outside it does (focus is on the shell root or within the tile).
     fn keyboard_free(&self, window: &Window, cx: &mut Context<Self>) -> bool {
         if !self.focused
-            || self.find_entry.is_some()
+            || self.searching
             || self.editor.is_some()
             || self.prompt.is_some()
             || self.confirm.is_some()
@@ -1517,7 +1542,7 @@ impl ClassificationsTile {
         }
     }
 
-    /// Show `name`. The cursor, the filter, a selection and the label
+    /// Show `name`. The cursor, an open search, a selection and the label
     /// history belonged to the previous classification, so they are
     /// dropped; the sort is the tile's and stays.
     fn show(&mut self, name: &str, cx: &mut Context<Self>) {
@@ -1526,7 +1551,9 @@ impl ClassificationsTile {
             self.state.cursor = None;
             self.grid = GridModel::new();
             self.grid.set_sort(self.state.sort);
-            self.find_entry = None;
+            self.draft = None;
+            self.find = None;
+            self.searching = false;
             self.history.forget();
             self.notices.outcome.clear();
         }
@@ -1561,19 +1588,20 @@ impl ClassificationsTile {
         validate_source(&config_dim.from, &config.schema, &config.dims)
     }
 
-    /// Write one label change through the config door: validated, recorded
-    /// in the history, queued whole-object, and shown at once (the pending
-    /// edit) ahead of the reload that carries it. A classification whose
+    /// Write one label change through the config door, returning whether it
+    /// queued a change: validated, recorded in the history, queued
+    /// whole-object, and shown at once (the pending edit) ahead of the
+    /// reload that carries it. A classification whose
     /// source column is not one a classification may map (a hand-written
     /// definition) is never written: the door would write it even when the
     /// reload then rejected it.
-    fn write(&mut self, write: Write, cx: &mut Context<Self>) {
+    fn write(&mut self, write: Write, cx: &mut Context<Self>) -> bool {
         if self.refuse_while_reverting(cx) {
-            return;
+            return false;
         }
         self.notices.outcome.clear();
         let Some(config_dim) = self.config_dim() else {
-            return;
+            return false;
         };
         let checked = self.source_writable(&config_dim);
         if let Err(why) = checked {
@@ -1581,7 +1609,7 @@ impl ClassificationsTile {
                 .outcome(Notice::danger(format!("not saved: {why}")));
             self.rebuild_chrome();
             cx.notify();
-            return;
+            return false;
         }
         let before = self.history.current(&config_dim).clone();
         let mut changed = false;
@@ -1643,12 +1671,19 @@ impl ClassificationsTile {
             self.rebuild_chrome();
         }
         cx.notify();
+        changed
     }
 
-    /// `enter`/`c`: open the label editor over the verb's targets,
-    /// prefilled with their label when they all share one, the text
-    /// selected so typing replaces it.
-    fn open_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// The shown row for `source`, if it is shown.
+    fn row_of(&self, source: &str) -> Option<&ClassRow> {
+        let at = self.grid.position(source)?;
+        Some(self.grid.row(self.grid.visible()[at]))
+    }
+
+    /// Open the label editor over the verb's targets, prefilled with their
+    /// label when they all share one: `i`/`enter` (caret at the end),
+    /// `shift+i` (text selected, so typing replaces it).
+    fn open_editor(&mut self, caret: EditCaret, window: &mut Window, cx: &mut Context<Self>) {
         if self.refuse_while_reverting(cx) {
             return;
         }
@@ -1675,7 +1710,7 @@ impl ClassificationsTile {
         .map(str::to_string);
         let input = cx.new(|cx| InputState::new(window, cx));
         input.update(cx, |s, cx| {
-            EditCaret::Select.seed(s, prefill.clone().unwrap_or_default(), window, cx)
+            caret.seed(s, prefill.clone().unwrap_or_default(), window, cx)
         });
         // Every keystroke re-ranks; typing after a moved highlight makes
         // it a guess again. The subscription dies with the field.
@@ -1737,15 +1772,29 @@ impl ClassificationsTile {
         drop(e);
         self.sync_editor(cx);
         self.offer_held_later(cx);
+        self.drop_draft(cx);
+    }
+
+    /// The draft goes with the editor: written by its label, or dropped.
+    fn drop_draft(&mut self, cx: &mut Context<Self>) {
+        if self.draft.take().is_some() {
+            self.grid.set_draft(None);
+            self.rebuild_rows(false, cx);
+        }
     }
 
     /// Drop the editor where no window is at hand, blurring it later
     /// through the window it opened in if it still owns focus (a newer
     /// field is never blurred).
+    ///
+    /// The draft goes with it, unrebuilt: every caller rebuilds the rows
+    /// after (the classification went, or the tile closed).
     fn release_editor(&mut self, cx: &mut App) {
         let Some(e) = self.editor.take() else {
             return;
         };
+        self.draft = None;
+        self.grid.set_draft(None);
         self.release_field(e.input, cx);
     }
 
@@ -1781,6 +1830,7 @@ impl ClassificationsTile {
             && let Some(list) = p.list.as_mut()
         {
             list.nav(NavCommand::Move(delta));
+            p.moved = true;
             p.repaint();
             cx.notify();
         }
@@ -1821,10 +1871,11 @@ impl ClassificationsTile {
             self.commit_edit(window, cx);
             return;
         }
-        // The prompt's column list: that column answers the step.
+        // The prompt's list: that column or value answers the step.
         let picked = self.prompt.as_mut().and_then(|p| {
             let list = p.list.as_mut()?;
             list.set_highlighted(row).then(|| {
+                p.moved = true;
                 (
                     p.input.clone(),
                     list.highlighted_text().unwrap_or_default().to_string(),
@@ -1840,15 +1891,81 @@ impl ClassificationsTile {
     /// Open the prompt asking `prompt`, the field focused. A rename seeds
     /// the current name, selected, so typing replaces it.
     fn open_prompt(&mut self, prompt: Prompt, window: &mut Window, cx: &mut Context<Self>) {
+        let columns = self.columns();
+        self.open_prompt_with(prompt, columns, window, cx);
+    }
+
+    /// `o`: ask for a value to add, offering the reference keys of its
+    /// source column not already rows. Refused at once, before any typing,
+    /// where a label could not be written anyway: a revert on its way, or a
+    /// source column no classification may map.
+    fn open_add(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_while_reverting(cx) {
+            return;
+        }
+        let Some(config_dim) = self.config_dim() else {
+            return;
+        };
+        if let Err(why) = self.source_writable(&config_dim) {
+            self.refuse(format!("not saved: {why}"), cx);
+            return;
+        }
+        let rows: std::collections::HashSet<String> = self.row_sources().into_iter().collect();
+        let keys: Vec<String> = cx
+            .try_global::<ReferenceGlobal>()
+            .map(|g| {
+                g.0.keys_by_column(&config_dim.from)
+                    .into_iter()
+                    .filter(|k| !rows.contains(*k))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.notices.outcome.clear();
+        self.rebuild_chrome();
+        self.grid.clear_selection();
+        self.sync_table(false, cx);
+        self.open_prompt_with(
+            Prompt::Add {
+                from: config_dim.from.clone(),
+            },
+            keys,
+            window,
+            cx,
+        );
+    }
+
+    /// The rows' source values, a draft's left out: what `o` checks a
+    /// typed value against (a draft is not a row the data or the map holds).
+    fn row_sources(&self) -> Vec<String> {
+        let draft = self.grid.draft();
+        self.grid
+            .visible()
+            .iter()
+            .map(|&i| &self.grid.row(i).source)
+            .filter(|s| Some(s.as_str()) != draft)
+            .cloned()
+            .collect()
+    }
+
+    /// [`Self::open_prompt`] with the list's `choices` given.
+    fn open_prompt_with(
+        &mut self,
+        prompt: Prompt,
+        choices: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_prompt(window, cx);
         let seed = match &prompt {
             Prompt::Rename { from } => from.clone(),
-            Prompt::NewName | Prompt::NewColumn { .. } => String::new(),
+            Prompt::NewName | Prompt::NewColumn { .. } | Prompt::Add { .. } => String::new(),
         };
         let placeholder = editor::placeholder(&prompt);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
         input.update(cx, |s, cx| EditCaret::Select.seed(s, seed, window, cx));
-        // The column step's list re-ranks as the column is typed. The
+        // The column and add steps' lists re-rank as the text is typed;
+        // typing after a moved highlight makes it a guess again. The
         // subscription dies with the field.
         cx.subscribe_in(&input, window, |this, input, event: &InputEvent, _, cx| {
             if let InputEvent::Change = event {
@@ -1857,6 +1974,7 @@ impl ClassificationsTile {
                     && let Some(list) = p.list.as_mut()
                     && list.set_query(&query)
                 {
+                    p.moved = false;
                     p.repaint();
                     cx.notify();
                 }
@@ -1864,7 +1982,7 @@ impl ClassificationsTile {
         })
         .detach();
         input.read(cx).focus_handle(cx).focus(window, cx);
-        self.prompt = Some(PromptField::new(input, prompt, self.columns()));
+        self.prompt = Some(PromptField::new(input, prompt, choices));
         self.field_window = Some(window.window_handle());
         cx.notify();
     }
@@ -1878,21 +1996,30 @@ impl ClassificationsTile {
             .unwrap_or_default()
     }
 
-    /// `enter` in the prompt: the answer through `prompt::submit`. A
-    /// refusal stays on the bar with the field open; the name step moves
-    /// on to the column; the last step closes the prompt and creates, or
-    /// asks y/n to rename.
+    /// `enter` in the prompt: the answer through `prompt::submit` (an
+    /// added value through `prompt::submit_add`). A refusal stays on the
+    /// bar with the field open; the name step moves on to the column; the
+    /// last step closes the prompt and creates, or asks y/n to rename; an
+    /// added value opens the label editor on its row, a draft row when it
+    /// has none.
     fn commit_prompt(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.row_sources();
         let Some(p) = self.prompt.as_mut() else {
             return;
         };
         let text = p.input.read(cx).value().to_string();
         let answer = p.answer(&text);
-        let step = {
-            let config = self.shared.config.borrow();
-            match config.as_ref() {
-                Some(c) => prompt::submit(&p.prompt, &answer, &c.schema, &c.dims),
-                None => Step::Refuse("the configuration has not loaded yet".into()),
+        let step = match &p.prompt {
+            Prompt::Add { .. } => {
+                let rows: Vec<&str> = rows.iter().map(String::as_str).collect();
+                prompt::submit_add(&answer, &rows)
+            }
+            _ => {
+                let config = self.shared.config.borrow();
+                match config.as_ref() {
+                    Some(c) => prompt::submit(&p.prompt, &answer, &c.schema, &c.dims),
+                    None => Step::Refuse("the configuration has not loaded yet".into()),
+                }
             }
         };
         match step {
@@ -1920,8 +2047,31 @@ impl ClassificationsTile {
                 self.close_prompt(window, cx);
                 self.ask_rename(from, to, window, cx);
             }
+            Step::Existing(source) => {
+                self.close_prompt(window, cx);
+                self.label_added(&source, window, cx);
+            }
+            Step::Draft(source) => {
+                self.close_prompt(window, cx);
+                self.draft = Some(source.clone());
+                self.grid.set_draft(Some(source.clone()));
+                self.rebuild_rows(false, cx);
+                self.label_added(&source, window, cx);
+                // The draft lives only while its editor does.
+                if self.editor.is_none() {
+                    self.drop_draft(cx);
+                }
+            }
         }
         cx.notify();
+    }
+
+    /// Open the label editor on an added value's row, its own or the
+    /// draft's, with the caret at the end.
+    fn label_added(&mut self, source: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.grid.put_on(source);
+        self.sync_table(false, cx);
+        self.open_editor(EditCaret::End, window, cx);
     }
 
     /// Close the prompt with nothing written: `escape`, a press on the
@@ -2098,15 +2248,33 @@ impl ClassificationsTile {
         self.user_acted(cx);
         // A press on the grid leaves the editor or the prompt unwritten, as
         // escape would.
-        self.close_editor(window, cx);
-        self.close_prompt(window, cx);
-        self.grid.click(e.row, e.shift);
+        let Some(row) = self.close_fields_for_press(&e.source, window, cx) else {
+            self.sync_table(false, cx);
+            cx.notify();
+            return;
+        };
+        self.grid.click(row, e.shift);
         self.sync_table(false, cx);
         if e.clicks >= 2 && !e.shift {
             let edit = ActionId("classifications::edit".to_string());
             self.dispatch(&edit, None, window, cx);
         }
         cx.notify();
+    }
+
+    /// Close the editor and the prompt unwritten for a press on `source`'s
+    /// row, answering where that row shows now: closing the editor drops a
+    /// draft row, which moves every row under it up one. `None` when the row
+    /// is no longer shown (the draft's own, now dropped).
+    fn close_fields_for_press(
+        &mut self,
+        source: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        self.close_editor(window, cx);
+        self.close_prompt(window, cx);
+        self.grid.position(source)
     }
 
     /// A right press on shown row `row`: the cursor moves there (a row of a
@@ -2116,11 +2284,14 @@ impl ClassificationsTile {
     fn row_context(&mut self, e: RowContext, window: &mut Window, cx: &mut Context<Self>) {
         self.user_acted(cx);
         confirm::cancel(self, window, cx);
-        self.close_editor(window, cx);
-        self.close_prompt(window, cx);
-        let in_selection = self.grid.selected().is_some_and(|s| s.contains(&e.row));
+        let Some(row) = self.close_fields_for_press(&e.source, window, cx) else {
+            self.sync_table(false, cx);
+            cx.notify();
+            return;
+        };
+        let in_selection = self.grid.selected().is_some_and(|s| s.contains(&row));
         if !in_selection {
-            self.grid.click(e.row, false);
+            self.grid.click(row, false);
         }
         // The table's own right-press row outline: the tile paints the
         // cursor and the selection itself.
@@ -2207,32 +2378,206 @@ impl ClassificationsTile {
         }
     }
 
-    /// `/` narrows the rows as the query is typed; committing keeps it,
-    /// cancelling restores the filter in force when the search began.
+    /// `/`: each change searches forward from where the search began
+    /// (vim's incsearch) over source and label, wrapping, and a hit moves
+    /// the cursor. Commit keeps the query for `n`; cancel returns the cursor
+    /// to the origin row and keeps an earlier committed query. A plan held
+    /// while the search was open is offered once it ends. An open menu
+    /// closes first, as every tile's popups do at `/`.
     pub fn find(&mut self, event: FindEvent, cx: &mut Context<Self>) {
-        let query = match event {
-            FindEvent::Changed(q) => {
-                if self.find_entry.is_none() {
-                    self.find_entry = Some(self.grid.query().to_string());
+        self.close_menu(cx);
+        match event {
+            FindEvent::Changed(query) => {
+                // A new search (none open) takes the cursor's row as its
+                // origin; later changes in the same search keep it.
+                if !self.searching {
+                    self.searching = true;
+                    let committed = self.find.take().and_then(|f| f.committed);
+                    self.find = Some(FindState {
+                        origin: self.grid.cursor_source().map(str::to_string),
+                        committed,
+                    });
                 }
-                q
+                // Every change searches from the origin, not from where the
+                // last one landed: a lengthening query walks forward and a
+                // shortened one walks back.
+                let from = self
+                    .find
+                    .as_ref()
+                    .and_then(|f| f.origin.as_deref())
+                    .and_then(|s| self.grid.position(s))
+                    .unwrap_or(0);
+                if let Some(at) = find_match(
+                    self.grid.search_text(),
+                    from,
+                    FindDirection::Forward,
+                    &query,
+                ) {
+                    self.grid.put_at(at);
+                }
             }
-            FindEvent::Committed(q) => {
-                self.find_entry = None;
+            FindEvent::Committed(query) => {
+                self.searching = false;
+                // The search has ended: its origin is spent, so a later
+                // cancel with nothing typed has nowhere to return to.
+                if let Some(f) = self.find.as_mut() {
+                    f.origin = None;
+                    if !query.is_empty() {
+                        f.committed = Some(query);
+                    }
+                }
+                // An empty commit over no earlier query leaves nothing for
+                // `n`, and nothing for `escape` to end.
+                if self.find.as_ref().is_some_and(|f| f.committed.is_none()) {
+                    self.find = None;
+                }
                 self.offer_held_later(cx);
-                q
             }
-            FindEvent::Cancelled => match self.find_entry.take() {
-                Some(entry) => {
-                    self.offer_held_later(cx);
-                    entry
+            // The shell cancels on escape and on a blur with empty text
+            // even when nothing was typed: only an open search returns.
+            FindEvent::Cancelled => {
+                let was_searching = std::mem::replace(&mut self.searching, false);
+                if was_searching && let Some(f) = self.find.take() {
+                    if let Some(origin) = f.origin.as_deref()
+                        && !self.grid.put_on(origin)
+                    {
+                        self.grid.put_at(0);
+                    }
+                    self.find = f.committed.map(|q| FindState {
+                        origin: None,
+                        committed: Some(q),
+                    });
                 }
-                None => return,
-            },
-        };
-        self.grid.set_filter(&query);
-        self.sync_table(true, cx);
+                self.offer_held_later(cx);
+            }
+        }
+        self.sync_table(false, cx);
         cx.notify();
+    }
+
+    /// `/` under `find_style = "fzf"`: every shown row as a result,
+    /// searched by source and label, painted in the grid's own columns. A
+    /// pick puts the cursor on its row by source value and keeps the query
+    /// for `n`. The results paint in the grid's place while the session is
+    /// open; its end repaints the grid and offers a held import.
+    pub(crate) fn start_fuzzy_find(
+        &mut self,
+        results: gpui::WeakEntity<geode_shell::fuzzyfind::FuzzyFind>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_menu(cx);
+        self.fuzzy_find = Some(results.clone());
+        if let Some(results) = results.upgrade() {
+            cx.observe(&results, |t, results, cx| {
+                if !results.read(cx).is_active() {
+                    t.offer_held_later(cx);
+                    cx.notify();
+                }
+            })
+            .detach();
+            cx.observe_release(&results, |_, _, cx| cx.notify())
+                .detach();
+        }
+        cx.notify();
+        let (prepared, columns) = {
+            let d = self.table.read(cx).delegate();
+            let columns = (0..d.columns_count(cx))
+                .map(|ix| d.column(ix, cx))
+                .collect();
+            (d.prepared_rc(), columns)
+        };
+        let header = self.table.clone();
+        let cells = self.table.clone();
+        // The results paint the rows their items were built from, even if
+        // a later delivery re-prepares the grid while the session is open.
+        let shown = prepared.clone();
+        let _ = results.update(cx, |r, cx| {
+            r.set_table(
+                columns,
+                move |col, window, cx| {
+                    header.update(cx, |t, cx| {
+                        t.delegate_mut()
+                            .render_th(col, window, cx)
+                            .into_any_element()
+                    })
+                },
+                move |row, col, cx| {
+                    cells
+                        .read(cx)
+                        .delegate()
+                        .render_find_cell(&shown, row, col, cx)
+                },
+                |_, _| {},
+                window,
+                cx,
+            )
+        });
+        // Item order is the prepared rows' order: a result's source row
+        // indexes the `prepared.rows` that `render_find_cell` is handed.
+        let items = prepared
+            .rows
+            .iter()
+            .map(|r| {
+                let source = r.source.to_string();
+                let label = r.label.as_ref().map(|l| l.to_string()).unwrap_or_default();
+                let tile = cx.entity().downgrade();
+                let pick = source.clone();
+                geode_shell::fuzzyfind::FindItem::new(
+                    source.clone(),
+                    source,
+                    label,
+                    move |query, _, cx| {
+                        tile.update(cx, |t, cx| {
+                            if !t.grid.put_on(&pick) {
+                                return Err(
+                                    "This value is no longer shown. Search again.".to_string()
+                                );
+                            }
+                            // A pick with nothing typed keeps an earlier
+                            // committed query, as an empty vim commit does.
+                            let earlier = t.find.take().and_then(|f| f.committed);
+                            t.find = Some(FindState {
+                                origin: None,
+                                committed: (!query.is_empty())
+                                    .then(|| query.to_string())
+                                    .or(earlier),
+                            });
+                            t.sync_table(false, cx);
+                            cx.notify();
+                            Ok(())
+                        })
+                        .map_err(|_| "The tile is closed".to_string())?
+                    },
+                )
+            })
+            .collect();
+        let _ = results.update(cx, |r, cx| r.replace_items(items, cx));
+    }
+
+    /// `n`/`shift+n`, counted: the committed query stepped from the cursor,
+    /// wrapping, as market data's repeat does. Nothing committed, or no
+    /// match: the cursor stays.
+    fn repeat_find(&mut self, dir: FindDirection, count: Option<u32>) {
+        let Some(query) = self.find.as_ref().and_then(|f| f.committed.clone()) else {
+            return;
+        };
+        let len = self.grid.search_text().len();
+        if len == 0 {
+            return;
+        }
+        let mut at = self.grid.cursor().unwrap_or(0);
+        for _ in 0..count.unwrap_or(1).max(1) {
+            let start = match dir {
+                FindDirection::Forward => (at + 1) % len,
+                FindDirection::Backward => (at + len - 1) % len,
+            };
+            match find_match(self.grid.search_text(), start, dir, &query) {
+                Some(row) => at = row,
+                None => return,
+            }
+        }
+        self.grid.put_at(at);
     }
 
     /// `insert` while the label editor or the prompt is open (the shell
@@ -2366,6 +2711,12 @@ impl ClassificationsTile {
                 self.sync_table(false, cx);
                 cx.notify();
             }
+            "classifications::cancel"
+                if self.find.as_ref().is_some_and(|f| f.committed.is_some()) =>
+            {
+                self.find = None;
+                cx.notify();
+            }
             // Last in line: nothing above had anything to cancel, so
             // `escape` dismisses every warning and danger notice showing,
             // each as a click on it would. Nothing to dismiss: unhandled.
@@ -2378,6 +2729,16 @@ impl ClassificationsTile {
                 if !any {
                     return false;
                 }
+                cx.notify();
+            }
+            "classifications::find_next" | "classifications::find_prev" if self.menu.is_none() => {
+                let dir = if action.0 == "classifications::find_next" {
+                    FindDirection::Forward
+                } else {
+                    FindDirection::Backward
+                };
+                self.repeat_find(dir, count);
+                self.sync_table(false, cx);
                 cx.notify();
             }
             "classifications::visual_rows" if self.menu.is_none() => {
@@ -2450,10 +2811,44 @@ impl ClassificationsTile {
                     Err(why) => self.refuse(why, cx),
                 }
             }
+            ADD_ACTION if self.menu.is_none() => self.open_add(window, cx),
             // The label verbs act on the selection, else the cursor's row.
-            "classifications::edit" if self.menu.is_none() => self.open_editor(window, cx),
+            "classifications::edit" if self.menu.is_none() => {
+                self.open_editor(EditCaret::End, window, cx)
+            }
+            "classifications::edit_select" if self.menu.is_none() => {
+                self.open_editor(EditCaret::Select, window, cx)
+            }
+            "classifications::sort_cycle" if self.menu.is_none() => {
+                self.sort_clicked(SortCol::Label, cx)
+            }
             "classifications::clear" if self.menu.is_none() => {
-                self.write(Write::Assign(self.grid.targets(), None), cx)
+                // A value only the map holds leaves the grid once cleared:
+                // read which before the write rebuilds the rows.
+                let targets = self.grid.targets();
+                // Raw `label`, not `label_text`: a hand-written blank
+                // mapping still leaves the map, so it is still removed.
+                let removed: Vec<String> = targets
+                    .iter()
+                    .filter(|s| {
+                        self.row_of(s)
+                            .is_some_and(|r| !r.in_data && r.label.is_some())
+                    })
+                    .cloned()
+                    .collect();
+                let cleared = targets
+                    .iter()
+                    .filter(|s| {
+                        self.row_of(s)
+                            .is_some_and(|r| r.in_data && label_text(r).is_some())
+                    })
+                    .count();
+                let wrote = self.write(Write::Assign(targets, None), cx);
+                if wrote && let Some(text) = removal_notice(&removed, cleared) {
+                    self.notices.outcome(Notice::status(text));
+                    self.rebuild_chrome();
+                    cx.notify();
+                }
             }
             "classifications::yank" if self.menu.is_none() => {
                 if let Some(label) = self.cursor_label() {
@@ -2461,7 +2856,9 @@ impl ClassificationsTile {
                 }
             }
             "classifications::paste" if self.menu.is_none() => match self.register.clone() {
-                Some(label) => self.write(Write::Assign(self.grid.targets(), label), cx),
+                Some(label) => {
+                    self.write(Write::Assign(self.grid.targets(), label), cx);
+                }
                 None => {
                     self.notices.outcome.clear();
                     self.notices.outcome(Notice::status(NOTHING_COPIED));
@@ -2469,8 +2866,12 @@ impl ClassificationsTile {
                     cx.notify();
                 }
             },
-            "classifications::undo" if self.menu.is_none() => self.write(Write::Undo, cx),
-            "classifications::redo" if self.menu.is_none() => self.write(Write::Redo, cx),
+            "classifications::undo" if self.menu.is_none() => {
+                self.write(Write::Undo, cx);
+            }
+            "classifications::redo" if self.menu.is_none() => {
+                self.write(Write::Redo, cx);
+            }
             _ => return false,
         }
         true
@@ -2753,10 +3154,22 @@ impl Render for ClassificationsTile {
                         .debug_selector(move || format!("classifications-empty-{id}"))
                         .child(text.clone()),
                 ),
-            None => v_flex()
-                .flex_1()
-                .min_h_0()
-                .child(table::table_el(&self.table, id)),
+            None => {
+                let search = self
+                    .fuzzy_find
+                    .as_ref()
+                    .and_then(|r| r.upgrade())
+                    .filter(|r| r.read(cx).is_active());
+                v_flex().flex_1().min_h_0().child(match search {
+                    Some(results) => div()
+                        .flex_1()
+                        .min_h_0()
+                        .w_full()
+                        .child(results)
+                        .into_any_element(),
+                    None => table::table_el(&self.table, id).into_any_element(),
+                })
+            }
         };
         let root = v_flex()
             .size_full()
@@ -2911,6 +3324,28 @@ fn set_edit(dim: &DerivedDimension) -> ConfigEdit {
     }
 }
 
+/// What a clear says when it removed map-only values: they leave the
+/// grid, which a trader must not mistake for a lost row. Clearing labels
+/// alone says nothing.
+fn removal_notice(removed: &[String], cleared: usize) -> Option<String> {
+    let removed_part = match removed {
+        [] => return None,
+        [one] if cleared == 0 => return Some(format!("removed {one}")),
+        _ => format!(
+            "removed {} value{}",
+            removed.len(),
+            if removed.len() == 1 { "" } else { "s" }
+        ),
+    };
+    Some(match cleared {
+        0 => removed_part,
+        n => format!(
+            "cleared {n} label{}, {removed_part}",
+            if n == 1 { "" } else { "s" }
+        ),
+    })
+}
+
 /// `name`'s user definition, removed.
 fn remove_edit(name: &str) -> ConfigEdit {
     ConfigEdit {
@@ -2923,3 +3358,29 @@ fn remove_edit(name: &str) -> ConfigEdit {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod notice_tests {
+    use super::removal_notice;
+
+    #[test]
+    fn the_removal_notice_names_one_and_counts_many() {
+        assert_eq!(
+            removal_notice(&["GHOST".into()], 0).as_deref(),
+            Some("removed GHOST")
+        );
+        assert_eq!(
+            removal_notice(&["A".into(), "B".into()], 0).as_deref(),
+            Some("removed 2 values")
+        );
+        assert_eq!(
+            removal_notice(&["A".into()], 2).as_deref(),
+            Some("cleared 2 labels, removed 1 value")
+        );
+        assert_eq!(
+            removal_notice(&[], 3),
+            None,
+            "clearing alone says nothing, as today"
+        );
+    }
+}

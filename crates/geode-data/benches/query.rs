@@ -306,6 +306,7 @@ fn service_with(
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch: &batch_id,
+                measures: None,
             },
         ) {
             loaded += out.rows;
@@ -414,6 +415,7 @@ fn service_with_history(
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch: &batch_id,
+                measures: None,
             },
         ) {
             loaded += out.rows;
@@ -438,6 +440,7 @@ fn service_with_history(
                 csv_path: &file.csv_path,
                 sentinel: &sentinel,
                 batch: &batch_id,
+                measures: None,
             },
         )
         .unwrap();
@@ -720,6 +723,7 @@ fn bench_resolve(c: &mut Criterion) {
                     csv_path: &file.csv_path,
                     sentinel: &sentinel,
                     batch: &batch_id,
+                    measures: None,
                 },
             )
             .unwrap();
