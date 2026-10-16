@@ -59,9 +59,9 @@ impl ChipPaint {
 
 /// Minimum chip width at the design rem (the mockup's 44 px at a 13 px
 /// base), so short and long numbers line up as one column of chips.
-const MIN_WIDTH: f32 = 40.0;
+pub(crate) const MIN_WIDTH: f32 = super::widths::CHIP_MIN;
 /// Horizontal text inset at the design rem.
-const INSET: f32 = 4.0;
+pub(crate) const INSET: f32 = super::widths::CHIP_INSET;
 
 /// The chip, right-aligned text inside. `text` is the host's formatted
 /// number; with no chip it is painted in the plain text color.
@@ -272,7 +272,7 @@ mod column_tests {
                 .flex()
                 .flex_col()
                 .child(row("+1.1", chip(1.1, Sign::Positive, 2.2, 0.55), "r0"))
-                .child(row("—", None, "r1"))
+                .child(row(crate::cell::widths::DASH, None, "r1"))
                 // A block host: the chip keeps its own width, not the cell's.
                 .child(div().w(px(160.0)).child(paint(
                     "+1.1".into(),

@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use geode_chart::core::spark::shared_range;
-use geode_chart::spark::{Spark, SparkPaint};
+use geode_chart::spark::{Spark, SparkPaint, sizes};
 use gpui::{App, Context, KeyDownEvent, Render, SharedString, Window, div, prelude::*, rems};
 use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
 
@@ -92,7 +92,7 @@ struct Demo {
 fn cell(width_px: f32) -> gpui::Div {
     div()
         .w(rems(width_px / 12.0))
-        .h(rems(16.0 / 12.0))
+        .h(rems(sizes::HEIGHT / 12.0))
         .flex_none()
 }
 
@@ -137,10 +137,10 @@ impl Render for Demo {
                     .gap_3()
                     .pb_1()
                     .child(header("", 48.0))
-                    .child(header("30d", 72.0))
+                    .child(header("30d", sizes::WIDTH_30D))
                     .child(header("", 36.0))
-                    .child(header("term", 44.0))
-                    .child(header("1y", 140.0)),
+                    .child(header("term", sizes::WIDTH_TERM))
+                    .child(header("1y", sizes::WIDTH_1Y)),
             )
             .children(self.rows.iter().map(|r| {
                 div()
@@ -149,7 +149,7 @@ impl Render for Demo {
                     .gap_3()
                     .h(rems(21.0 / 12.0))
                     .child(div().w(rems(4.0)).flex_none().child(r.name.clone()))
-                    .child(cell(72.0).child(Spark::new(r.month.clone(), paint)))
+                    .child(cell(sizes::WIDTH_30D).child(Spark::new(r.month.clone(), paint)))
                     .child(
                         div()
                             .w(rems(3.0))
@@ -159,14 +159,14 @@ impl Render for Demo {
                             .child(r.last.clone()),
                     )
                     .child(
-                        cell(44.0).child(
+                        cell(sizes::WIDTH_TERM).child(
                             Spark::new(r.term.clone(), paint)
                                 .range(self.term_range)
                                 .mark(Some(MARK_3M))
                                 .end_dot(false),
                         ),
                     )
-                    .child(cell(140.0).child(Spark::new(r.year.clone(), paint)))
+                    .child(cell(sizes::WIDTH_1Y).child(Spark::new(r.year.clone(), paint)))
             }))
     }
 }

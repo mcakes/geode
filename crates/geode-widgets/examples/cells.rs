@@ -6,11 +6,17 @@
 //! `t` toggles light and dark.
 
 use geode_core::format::Sign;
-use geode_widgets::cell::{column_scale, delta_chip, design, heat, percent_slider, zero_bar};
+use geode_widgets::cell::{
+    column_scale, delta_chip, design, heat, percent_slider, widths, zero_bar,
+};
 use gpui::{
     App, Context, FocusHandle, KeyDownEvent, Render, SharedString, Window, div, prelude::*,
 };
 use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
+
+/// Every glyph column: the widest minimum, a bar with a 30 px label, from
+/// the exported widths so the example stays true to them.
+const COLUMN_PX: f32 = widths::bar(30.0);
 
 /// Host constants the vol watchlist will own: the chip and heat ceilings
 /// and the bar's fill alpha (the mockup's values).
@@ -97,7 +103,7 @@ impl Render for Cells {
         let levels = heat::range(ROWS.iter().map(|r| r.1));
         let header = |label: &'static str| {
             div()
-                .w(design(96.0))
+                .w(design(COLUMN_PX))
                 .flex()
                 .justify_end()
                 .text_color(t.muted_foreground)
@@ -129,7 +135,8 @@ impl Render for Cells {
             );
         for (i, (name, level, change, rank, spread)) in ROWS.iter().enumerate() {
             let [level_t, change_t, rank_t, spread_t] = self.text[i].clone();
-            let cell = |child: gpui::Div| div().w(design(96.0)).flex().justify_end().child(child);
+            let cell =
+                |child: gpui::Div| div().w(design(COLUMN_PX)).flex().justify_end().child(child);
             grid = grid.child(
                 div()
                     .flex()

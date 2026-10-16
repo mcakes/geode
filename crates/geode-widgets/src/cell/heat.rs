@@ -37,7 +37,7 @@ pub struct HeatPaint {
 }
 
 /// Horizontal text inset at the design rem.
-const INSET: f32 = 6.0;
+pub(crate) const INSET: f32 = super::widths::HEAT_INSET;
 
 /// The number on its tint; with no alpha (or a zero one) the number alone.
 pub fn paint(text: SharedString, alpha: Option<f32>, paint: HeatPaint, id: SharedString) -> Div {

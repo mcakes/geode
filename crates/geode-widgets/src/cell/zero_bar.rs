@@ -48,11 +48,11 @@ pub struct BarPaint {
 }
 
 /// Bar track geometry at the design rem (the mockup's 64 x 10 px at 13 px).
-const TRACK_WIDTH: f32 = 60.0;
+pub(crate) const TRACK_WIDTH: f32 = super::widths::BAR_TRACK;
 const TRACK_HEIGHT: f32 = 10.0;
 /// The bar's vertical inset inside the track.
 const BAR_INSET: f32 = 2.0;
-const GAP: f32 = 6.0;
+pub(crate) const GAP: f32 = super::widths::BAR_GAP;
 /// The zero axis is a hairline.
 const AXIS: f32 = 1.0;
 

@@ -19,6 +19,18 @@ const END_RADIUS: f32 = 2.0;
 const MARK_RADIUS: f32 = 1.75;
 const RING: f32 = 1.0;
 
+/// Cell sizes a host gives a `Spark`, in design px at the 12 px design rem:
+/// the element fills its parent, so the host sizes the wrapper from these.
+pub mod sizes {
+    pub const HEIGHT: f32 = 16.0;
+    /// A 30-day daily series.
+    pub const WIDTH_30D: f32 = 72.0;
+    /// A term glyph.
+    pub const WIDTH_TERM: f32 = 44.0;
+    /// A one-year daily series.
+    pub const WIDTH_1Y: f32 = 140.0;
+}
+
 /// Colors the host resolves once per theme.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SparkPaint {
@@ -129,6 +141,12 @@ impl Plot for Spark {
 mod tests {
     use super::*;
     use gpui::{Context, Render, div, hsla, prelude::*, px};
+
+    #[test]
+    fn the_example_cells_are_the_exported_sizes() {
+        assert_eq!(sizes::WIDTH_30D, 72.0);
+        assert_eq!(sizes::HEIGHT, 16.0);
+    }
 
     fn paint() -> SparkPaint {
         SparkPaint {

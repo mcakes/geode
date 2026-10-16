@@ -48,11 +48,11 @@ pub struct SliderPaint {
 
 /// Track geometry at the design rem (the mockup's 56 x 4 px track and
 /// 2 x 10 px marker at a 13 px base).
-const TRACK_WIDTH: f32 = 52.0;
+pub(crate) const TRACK_WIDTH: f32 = super::widths::SLIDER_TRACK;
 const TRACK_HEIGHT: f32 = 4.0;
 const MARKER_WIDTH: f32 = 2.0;
 const MARKER_HEIGHT: f32 = 10.0;
-const GAP: f32 = 6.0;
+pub(crate) const GAP: f32 = super::widths::SLIDER_GAP;
 /// Quartile ticks are one pixel: a hairline, not a size.
 const TICK: f32 = 1.0;
 
