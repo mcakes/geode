@@ -3223,3 +3223,80 @@ the pool.
 The Before round trips are well under the 655 ms and 978 ms recorded on
 2026-10-11; those ran on a different head and load, so only this table's
 two columns compare.
+
+
+## Rich/cheap read levers (Task 2) (2026-10-15)
+
+Fixture: `crates/geode-data/benches/vol_board.rs`, the `board_read/` cases
+(the read alone: `read_board`, SQL projection plus `reduce`, on one
+connection over the seeded 400-day cache). Every run is
+`--warm-up-time 2 --measurement-time 5`, 20 samples, Criterion medians.
+Load averages are the 1-minute figure at the start → end of each run, on 18
+cores. The bench's own DuckDB worker threads lift the 1-minute load by
+about 10 within a run, so no run stayed under 10; per the ruling, the
+budget is applied to the best run.
+
+Variants, all over the same `live` CTE (the latest version per `(key, ts)`):
+
+- **Baseline**: the head (`f308084a`); each projection a
+  `row_number() over (partition by …)` window select.
+- **Lever A** (as briefed): each projection a grouped aggregate
+  (`epoch_us(max(ts))`, `arg_max(v, ts)` per value, `group by` the key, plus
+  the day for the daily projection); `KIND_FIRST` reads the raw history
+  table through a second join on the asked tuples (bound twice).
+- **Lever A2**: Lever A with `KIND_FIRST` aggregating over `live` instead
+  (no second join), measured once A showed the second scan cost.
+- **Lever B**: Lever A with `with live as materialized (…)`. The pinned
+  `duckdb` crate is 1.10505.0 (DuckDB 1.5.5); the keyword parses.
+
+Solo runs, in the order taken:
+
+| Run | Load | `changes_view_25` | `rich_cheap_view_25` |
+|---|---|---|---|
+| Baseline 1 | 5.3 → 15.6 | 19.0 ms | 65.0 ms |
+| Baseline 2 | 15.1 → 12.1 | 22.2 ms | 60.8 ms |
+| Lever A 1 | 8.4 → 17.4 | 21.8 ms | 54.5 ms |
+| Lever A 2 | 17.4 → 15.5 | 21.9 ms | 54.8 ms |
+| Lever B 1 | 14.0 → 16.6 | 21.9 ms | 55.4 ms |
+| Lever B 2 | 16.6 → 12.3 | 22.2 ms | 54.9 ms |
+
+The two baseline runs were the first after a long stretch of 15-minute load
+above 30, and are noise: interleaved runs, swapping only `volboard.rs`
+between back-to-back runs, put the baseline at its Part 2 figure.
+
+| Interleaved | Load | `changes_view_25` | `rich_cheap_view_25` |
+|---|---|---|---|
+| Baseline | 4.4 → 16.5 | 18.0 ms | 56.6 ms (interval 51.8–63.6) |
+| Lever A | 16.5 → 20.0 | 21.9 ms | 54.9 ms |
+| Baseline | 20.0 → 18.7 | 18.0 ms | 52.2 ms |
+| Lever A | 18.7 → 20.7 | 22.0 ms | 63.5 ms (interval 58.9–69.3) |
+| Baseline | 14.8 → 18.9 | 18.1 ms | 51.8 ms |
+| Lever A2 | 18.9 → 23.0 | 18.0 ms | 51.7 ms |
+| Baseline | 23.0 → 17.4 | 18.0 ms | 51.9 ms |
+| Lever A2 | 17.4 → 21.6 | 18.2 ms | 53.3 ms |
+
+**Neither lever lands; the baseline stays.** Lever A is about 4 ms slower
+on Changes (21.9 against 18.0, tight intervals) and no faster on
+Rich/cheap: the second scan and join of the raw table for `KIND_FIRST` costs
+what the dropped window sorts saved. Lever A2 removes that scan and ties the
+baseline in both cases (best Rich/cheap run 51.7 ms against 51.8 ms).
+Lever B adds nothing over A: DuckDB 1.5 already shares the CTE's work. No
+variant beats the baseline, so under the ruling the window projections stay.
+
+**Where the 51.8 ms goes.** One instrumented run (timing printed around
+`prepare`, `query`, the row loop and `reduce`, then removed), medians over
+the run, load about 17:
+
+| Part | Surface (125 tuples) | Realized (50) | Varswap (25) | Total |
+|---|---|---|---|---|
+| `prepare` | 1.3 ms | 0.6 ms | 0.4 ms | 2.2 ms |
+| `query` (statement executes) | 12.6 ms | 5.4 ms | 4.4 ms | 22.4 ms |
+| row loop in `read_role` (rows) | 13.0 ms (32,875) | 3.8 ms (13,150) | 1.8 ms (6,575) | 18.6 ms |
+| `reduce` | | | | 8.4 ms |
+
+The statement is under half of the read. The row loop is 36%: 52,600 rows,
+nearly all of them daily (263 days per tuple), and per row it allocates the
+key's strings and, for every input asking that tuple, clones the input
+into a `HashMap` key. A latest-version table on append could save part of
+the 22.4 ms of statement time, not the loop's 18.6 ms. Both are recorded as
+open levers (`open-items.md`).

@@ -193,8 +193,8 @@ the measurement log for fixture and hardware details.
 | Diagnostics Log settled rebuild | the same tail under a held narrowing (records or gates changed, query unchanged; unfiltered 0.47 ms) | 0.60 to 0.95 ms |
 | Diagnostics Log cache fill | `LogCache::sync` formatting and lowering all 4,096 records cold, on the UI thread: paid when the Log is first shown over a full tail and after a clock change, then only for new records (load 29 to 31) | 5.14 ms |
 | Diagnostics Log narrowing, off the UI thread | the same: `log_cache::Narrowed::run`, two words / three / five / one 19-character word | 6.1 / 10.2 / 12.1 / 8.5 ms |
-| Vol board read, Changes view (`board_read/changes_view_25`) | 25 members over a 400-day cache (285 closes): the SQL projection plus `reduce` on one connection; excludes the fetches and paint (load 8) | 17.7 ms |
-| Vol board read, Rich/cheap view (`board_read/rich_cheap_view_25`) | the same, 365-day percentile window over three datasets; over the 50 ms budget (see Known gaps) | 51.9 ms |
+| Vol board read, Changes view (`board_read/changes_view_25`) | 25 members over a 400-day cache (285 closes): the SQL projection plus `reduce` on one connection; excludes the fetches and paint (load 15 to 23) | 18.0 ms |
+| Vol board read, Rich/cheap view (`board_read/rich_cheap_view_25`) | the same, 365-day percentile window over three datasets; over the 50 ms budget (see Known gaps) | 51.8 ms |
 | Vol board round trip, Changes view (`vol_board/changes_view_25`) | `DataService::vol_board` to its event: a prefix `Latest` fetch and append, the D1 exact `At` from coverage, the 30-day sparkline `Between` (`missing_by_key` plus a tail fetch), the read; excludes paint | 534 ms |
 | History prefix `Latest` (`history/prefix_latest_25`) | 25 members: fetch, append (all deduped), read | 113 ms |
 | History prefix `At` (`history/prefix_at_25_always_fetches`) | 25 members; a prefix `At` never reads from coverage: fetch, append, read | 120 ms |
@@ -350,10 +350,14 @@ joined on the unique source value, if the idle figure stays over budget.
   `validate_against` (`key_at`), and a window `Between` refetches its
   recent tail on every refresh.
 - The vol board read for the Rich/cheap view (365-day percentile window
-  over three datasets) measured 51.9 ms on a quiet machine, about 4% over
-  the 50 ms budget; the Changes view reads in 17.7 ms. The read's `live`
-  CTE groups every version of the asked tuples on every read; a
-  materialized latest-version table is the lever, and grows in value if a
+  over three datasets) reads in 51.8 ms, about 4% over the 50 ms budget;
+  the Changes view reads in 18.0 ms. Rewriting the projections as
+  aggregates and materializing the `live` CTE did not move it (DuckDB 1.5
+  already shares the CTE's work). The statement is 22.4 ms of the read;
+  `read_role`'s row loop over about 52,600 mostly daily rows is 18.6 ms
+  and `reduce` 8.4 ms. The open levers are a cheaper row loop (no
+  per-row key strings or input clones) and a latest-version table
+  maintained on append (a DDL change); the second grows in value if a
   desk's cache grows past the bench's.
 
 - The Diagnostics Log's fuzzy narrowing over a full tail exceeds the 8 ms UI

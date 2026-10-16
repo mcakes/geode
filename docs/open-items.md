@@ -687,11 +687,18 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   on `append/between_400d_prefix_answer_deduped`. A prefix ask still fans
   out to one adapter call per distinct gap list, uncapped; that half is off
   the board's path (its prefix ask is a `Latest`). Measure before acting.
-- Vol board: the Rich/cheap board read measured 51.9 ms, about 4% over the
-  50 ms budget (`board_read/rich_cheap_view_25`). The read's `live` CTE
-  groups every version of the asked tuples on every read; a materialized
-  latest-version table is the lever, more so if a desk's cache grows past
-  the bench's 400 days of closes.
+- Vol board: the Rich/cheap board read measures 51.8 ms, about 4% over the
+  50 ms budget (`board_read/rich_cheap_view_25`). Aggregate projections
+  instead of window sorts, and a `MATERIALIZED` `live` CTE, were measured
+  on 2026-10-15 and gave nothing (`docs/perf.md`, "Rich/cheap read
+  levers"). Of the read, the statement is 22.4 ms, `read_role`'s row loop
+  18.6 ms (about 52,600 rows, nearly all daily; per row it allocates the
+  key's strings and clones each asking input into a map key) and
+  `reduce` 8.4 ms. For the owner, two levers: a cheaper row loop
+  (no DDL change, likely enough alone), or a latest-version table
+  maintained on append (a DDL change and a `STORE_FORMAT` bump), which
+  can only shrink the statement's share and grows in value if a desk's
+  cache grows past the bench's 400 days of closes.
 - History family: `HISTORY_SETTLE` (30 minutes) is a guess at the vendors'
   publication lag. Tune it against the real Hanweck and KDB sources once they
   are reachable: too short and a late-published observation is lost behind

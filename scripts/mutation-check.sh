@@ -41918,6 +41918,27 @@ run_mutation "volboard: the current is the earliest observation" \
   geode-data \
   the_board_reads_current_changes_rank_spark_and_lists_the_missing_member
 
+# An At lookback reads the last observation at or before its instant.
+# Mutated to ascending, the lookback at the 9th's close reads the 8th's
+# 0.18. Two lines: the first alone is also the current select's prefix.
+run_mutation "volboard: an At lookback takes the earliest observation" \
+  crates/geode-data/src/query/volboard.rs \
+  '                 select *, row_number() over (partition by {key_list} order by ts desc) as rn
+                 from live where ts <= make_timestamp(?)' \
+  '                 select *, row_number() over (partition by {key_list} order by ts asc) as rn
+                 from live where ts <= make_timestamp(?)' \
+  geode-data \
+  the_live_version_wins
+
+# First is the earliest cached ts of a tuple. Mutated to the latest, the
+# 3M tuples' history reads as starting on the 10th, not the 8th.
+run_mutation "volboard: first reads the latest cached ts" \
+  crates/geode-data/src/query/volboard.rs \
+  '                 select *, row_number() over (partition by {key_list} order by ts asc) as rn from live' \
+  '                 select *, row_number() over (partition by {key_list} order by ts desc) as rn from live' \
+  geode-data \
+  the_board_reads_current_changes_rank_spark_and_lists_the_missing_member
+
 # A drifted or sourceless realized or varswap blanks its columns: the
 # surface is the board, the others are not. Mutated back to refusing, a
 # realized dataset with no source refuses the whole board.
