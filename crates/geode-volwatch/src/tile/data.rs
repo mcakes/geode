@@ -4,17 +4,20 @@
 //! notice, and nothing retries by itself.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use geode_core::clock::Clock;
 use geode_core::query::{HistoryKeysOutcome, HistoryKeysParams, QueryKey};
+use geode_core::volboard::Role;
 use geode_core::volboard::{VolBoardOutcome, VolBoardParams};
+use geode_tile::header::TimeRun;
 use geode_tile::stale::StaleTimer;
-use gpui::Context;
+use gpui::{Context, SharedString};
 
 use super::{MONO_ADVANCE_PX, RETRIES, VolwatchTile};
 use crate::content::VolwatchSettings;
-use crate::core::model::{Inputs, prepare};
+use crate::core::model::{Inputs, Prepared, Row, prepare};
 use crate::core::views::{Ask, REALIZED, SURFACE, VARSWAP, ask, needs_requery};
 
 /// The surface key the tenor listing enumerates.
@@ -204,6 +207,17 @@ impl VolwatchTile {
                 }
             }
         }
+        let runs = time_runs(&TimeInputs {
+            rows: self.grid.rows(),
+            prepared: &prepared,
+            board: self.board.is_some(),
+            failed,
+            now: Utc::now(),
+            after: stale_after,
+            timer: &self.stale_timer,
+            clock: &self.clock,
+        });
+        (self.times, self.times_at) = runs.into_iter().unzip();
         self.prepared = std::rc::Rc::new(prepared);
         self.rebuild_header();
     }
@@ -212,8 +226,9 @@ impl VolwatchTile {
         &mut t.stale_timer
     }
 
-    /// A wake-up at each present row's `as_of + stale_after`; none while
-    /// hidden.
+    /// A wake-up at each present row's `as_of + stale_after`, so one dead
+    /// member turns its own row stale without marking the list, and at the
+    /// realized and varswap runs' source times; none while hidden.
     pub(crate) fn arm_stale(&mut self, cx: &mut Context<Self>) {
         if !self.visible {
             self.stale_timer.disarm();
@@ -225,34 +240,118 @@ impl VolwatchTile {
             .iter()
             .filter(|r| r.present)
             .filter_map(|r| r.as_of)
+            .chain(self.times_at.iter().flatten().copied())
             .collect();
         let after = self.shared.settings.borrow().stale_after;
         self.stale_timer
             .arm_each(times, after, Utc::now(), cx, Self::stale_slot);
     }
 
-    /// After any notify: a row the stale timer has turned stale since the
-    /// last prepare is re-prepared. A cheap scan over tens of rows; `true`
-    /// when it re-prepared.
+    /// After any notify: a row or a source time the stale timer has turned
+    /// stale since the last prepare is re-prepared. A cheap scan over tens
+    /// of rows; `true` when it re-prepared.
     pub(crate) fn stale_fired(&mut self) -> bool {
         let after = self.shared.settings.borrow().stale_after;
-        let turned = self
-            .grid
-            .rows()
-            .iter()
-            .zip(&self.prepared.rows)
-            .any(|(row, p)| {
-                p.present
-                    && !p.stale
-                    && row
-                        .as_of
-                        .is_some_and(|at| self.stale_timer.fired_for(at, after))
-            });
+        let run_turned = self.times.iter().zip(&self.times_at).any(|(run, at)| {
+            !run.stale && at.is_some_and(|at| self.stale_timer.fired_for(at, after))
+        });
+        let turned = run_turned
+            || self
+                .grid
+                .rows()
+                .iter()
+                .zip(&self.prepared.rows)
+                .any(|(row, p)| {
+                    p.present
+                        && !p.stale
+                        && row
+                            .as_of
+                            .is_some_and(|at| self.stale_timer.fired_for(at, after))
+                });
         if turned {
             self.prepare();
         }
         turned
     }
+}
+
+/// What the cluster's times are read from.
+struct TimeInputs<'a> {
+    rows: &'a [Row],
+    prepared: &'a Prepared,
+    /// A board has landed; with none there are no times.
+    board: bool,
+    /// The last board failed: every run is stale.
+    failed: bool,
+    now: chrono::DateTime<Utc>,
+    after: Duration,
+    timer: &'a StaleTimer,
+    clock: &'a Clock,
+}
+
+/// One run per dataset the board read, with its source time: `surface
+/// HH:MM` from the stalest present row's `as_of` (stale exactly when that
+/// row paints stale), then `realized` and `varswap` from the oldest
+/// `current_at` among the cells that read them, each only when the board
+/// asked a measure reading it. A dataset with no time reads `—` and is
+/// never stale.
+fn time_runs(i: &TimeInputs<'_>) -> Vec<(TimeRun, Option<chrono::DateTime<Utc>>)> {
+    if !i.board {
+        return Vec::new();
+    }
+    let label = |role: Role, at: Option<chrono::DateTime<Utc>>| -> SharedString {
+        match at {
+            Some(at) => format!("{} {}", role.name(), i.clock.hm(at)).into(),
+            None => format!("{} \u{2014}", role.name()).into(),
+        }
+    };
+    let aged = |at: chrono::DateTime<Utc>| {
+        (i.now - at).to_std().is_ok_and(|age| age > i.after) || i.timer.fired_for(at, i.after)
+    };
+    let stalest = i
+        .rows
+        .iter()
+        .zip(&i.prepared.rows)
+        .filter(|(r, _)| r.present)
+        .filter_map(|(r, p)| r.as_of.map(|at| (at, p.stale)))
+        .min_by_key(|(at, _)| *at);
+    let mut out = vec![(
+        TimeRun {
+            label: label(Role::Surface, stalest.map(|(at, _)| at)),
+            stale_label: None,
+            stale: stalest.is_some_and(|(_, stale)| stale),
+        },
+        stalest.map(|(at, _)| at),
+    )];
+    for role in [Role::Realized, Role::Varswap] {
+        let mut read = false;
+        let mut oldest: Option<chrono::DateTime<Utc>> = None;
+        for c in i
+            .rows
+            .iter()
+            .filter_map(|r| r.board.as_ref())
+            .flat_map(|b| &b.cells)
+        {
+            if !c.measure.roles().contains(&role) {
+                continue;
+            }
+            read = true;
+            if let Some(at) = c.current_at {
+                oldest = Some(oldest.map_or(at, |o| o.min(at)));
+            }
+        }
+        if read {
+            out.push((
+                TimeRun {
+                    label: label(role, oldest),
+                    stale_label: None,
+                    stale: oldest.is_some_and(|at| i.failed || aged(at)),
+                },
+                oldest,
+            ));
+        }
+    }
+    out
 }
 
 /// The lookback the board was asked with; the one in force before any.

@@ -17,7 +17,7 @@ use geode_core::query::{HistoryKeysOutcome, HistoryKeysParams, QueryKey, Referen
 use geode_core::reference::ReferenceData;
 use geode_core::scopes::SavedScopes;
 use geode_core::volboard::{
-    Cell, Change, Lookback, VolBoard, VolBoardOutcome, VolBoardParams, VolRow,
+    Cell, Change, Lookback, Role, VolBoard, VolBoardOutcome, VolBoardParams, VolRow,
 };
 use geode_core::watchlist::Watchlist;
 use geode_core::watchlist::members::{Member, Origin};
@@ -145,6 +145,8 @@ pub(super) fn open_with(
     cx.update(crate::init);
     cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
     cx.update(|cx| cx.set_global(WatchlistGlobal(Arc::new(snap))));
+    // Displayed dates and times read the app's clock; UTC keeps them fixed.
+    cx.update(|cx| cx.set_global(geode_shell::clock::AppClock(geode_core::clock::Clock::utc())));
     let (data, rx) = DataHandle::for_tests();
     let factory = Rc::new(VolwatchFactory::new(data.clone(), settings));
     let keymap = Rc::new(app_keymap(&factory));
@@ -302,6 +304,52 @@ pub(super) fn board_for(members: &[&str], asked: &Ask) -> VolBoard {
         }
     }
     board
+}
+
+/// A tile restored on [`LIST`] in `view`, its first board asked and not
+/// answered.
+pub(super) fn open_on(
+    cx: &mut gpui::TestAppContext,
+    view: View,
+) -> (Harness, gpui::VisualTestContext) {
+    let record = crate::core::session::to_table(&crate::core::session::State {
+        list: Some(LIST.into()),
+        view,
+        ..Default::default()
+    });
+    open_with(cx, one_list(), Some(record), VolwatchSettings::default())
+}
+
+/// Blank every cell of `board` that reads `role`, as a failed dataset
+/// leaves them.
+pub(super) fn blank_role(board: &mut VolBoard, role: Role) {
+    for row in &mut board.rows {
+        for c in &mut row.cells {
+            if c.measure.roles().contains(&role) {
+                c.current = None;
+                c.current_at = None;
+                c.changes.iter_mut().for_each(|ch| *ch = None);
+                c.pctl = None;
+            }
+        }
+    }
+}
+
+/// The header's prepared chip texts in paint order.
+pub(super) fn chip_texts(h: &Harness, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    h.tile.read_with(vcx, |t, _| t.header.chip_texts())
+}
+
+pub(super) fn tag_of(h: &Harness, vcx: &gpui::VisualTestContext) -> u64 {
+    h.tag_of(vcx)
+}
+
+pub(super) fn asked_of(h: &Harness, vcx: &gpui::VisualTestContext) -> Ask {
+    h.asked_of(vcx)
+}
+
+pub(super) fn column_index(h: &Harness, vcx: &gpui::VisualTestContext, id: &str) -> usize {
+    h.column_index(vcx, id)
 }
 
 /// A tile on [`LIST`] (`DAX, SX5E, NEW`) whose first board has landed,

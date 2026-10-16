@@ -11,6 +11,7 @@
 
 mod chrome;
 mod data;
+mod header;
 pub(crate) mod table;
 
 #[cfg(test)]
@@ -23,6 +24,8 @@ mod tests;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+use geode_core::clock::Clock;
 use geode_core::link::{CursorScope, Emission, underlying_scope};
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
@@ -32,24 +35,24 @@ use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
-use geode_shell::keymap::{Binding, KeyContext};
+use geode_shell::keymap::{Binding, KeyContext, Keystroke};
 use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
 use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips;
 use geode_shell::watchlist::WatchlistGlobal;
-use geode_tile::header::HealthWatch;
+use geode_tile::header::{HealthWatch, TimeRun};
 use geode_tile::menu::{self, MenuHost};
 use geode_tile::motion::{self, Motion};
 use geode_tile::notice::{Dismissals, Notice};
 use geode_tile::rows::{Order, RowModel};
 use geode_tile::stale::StaleTimer;
 use gpui::prelude::*;
-use gpui::{App, ClipboardItem, Context, Entity, SharedString, Task, Window, div};
+use gpui::{App, ClipboardItem, Context, Entity, SharedString, Task, Window};
+use gpui_component::ActiveTheme as _;
 use gpui_component::table::TableState;
-use gpui_component::{ActiveTheme as _, v_flex};
-use table::{GridDelegate, GridEvent, Paints, sortable, table_el};
+use table::{GridDelegate, GridEvent, Paints, sortable};
 
 use crate::content::Shared;
 use crate::core::commands::{self, Command};
@@ -113,6 +116,14 @@ pub(super) fn snapshot(cx: &App) -> Arc<WatchlistSnapshot> {
         .unwrap_or_default()
 }
 
+/// The display clock: the app's, or the machine's where a tile is hosted
+/// without one.
+fn app_clock(cx: &App) -> Clock {
+    cx.try_global::<geode_shell::clock::AppClock>()
+        .map(|c| c.0)
+        .unwrap_or_else(|| Clock::machine().0)
+}
+
 /// The live reference tables; empty for a tile hosted without the global.
 fn reference(cx: &App) -> Arc<ReferenceData> {
     cx.try_global::<ReferenceGlobal>()
@@ -145,7 +156,6 @@ fn order_for(sort: &(String, SortOrder), columns: &[Column], asked: &Ask) -> Opt
 
 pub struct VolwatchTile {
     pub(crate) tile: TileId,
-    #[expect(dead_code, reason = "the header's link chips read the frame")]
     frame: FrameRef,
     pub(crate) data: DataHandle,
     pub(crate) shared: Rc<Shared>,
@@ -179,6 +189,18 @@ pub struct VolwatchTile {
     pub(crate) cursor_col: usize,
     pub(crate) paint: bool,
     pub(crate) header: HeaderModel,
+    /// The footer's cursor readout, rebuilt whenever the cursor, its
+    /// column, the board or the view changes.
+    pub(crate) readout: SharedString,
+    /// The cluster's source times, one run per dataset the board read,
+    /// rebuilt with the prepared model; `times_at` holds each run's source
+    /// time for the stale wake-ups.
+    pub(crate) times: Vec<TimeRun>,
+    times_at: Vec<Option<DateTime<Utc>>>,
+    /// The view strip's step key, resolved when the chords change.
+    strip_keys: Option<Vec<Keystroke>>,
+    /// The display clock the readout's dates and the times' labels read.
+    clock: Clock,
     /// The body's empty state; `None` while a list is shown.
     pub(crate) empty: Option<SharedString>,
     /// The filter in force when a `/` search began; `None` while none is open.
@@ -239,6 +261,14 @@ impl VolwatchTile {
         .detach();
         cx.observe_global::<ReferenceGlobal>(|this, cx| {
             this.rebuild_rows(cx);
+            cx.notify();
+        })
+        .detach();
+        // The readout's dates and the times' labels read the display clock.
+        cx.observe_global::<geode_shell::clock::AppClock>(|this, cx| {
+            this.clock = app_clock(cx);
+            this.prepare();
+            this.sync_table(cx);
             cx.notify();
         })
         .detach();
@@ -307,6 +337,11 @@ impl VolwatchTile {
             cursor_col: 1,
             paint: true,
             header: HeaderModel::default(),
+            readout: SharedString::default(),
+            times: Vec::new(),
+            times_at: Vec::new(),
+            strip_keys: None,
+            clock: app_clock(cx),
             empty: None,
             find_entry: None,
             health,
@@ -447,8 +482,28 @@ impl VolwatchTile {
         self.sync_table(cx);
     }
 
+    /// The footer's readout for the cursor cell, read through the board's
+    /// ask; empty with no cursor or before any board lands (a row is not
+    /// yet known to be missing).
+    fn rebuild_readout(&mut self) {
+        let row = self
+            .grid
+            .cursor()
+            .and_then(|at| self.grid.visible().get(at))
+            .map(|&i| self.grid.row(i));
+        let column = self.columns.get(self.cursor_col);
+        self.readout = match (row, column, self.board_ask.as_ref()) {
+            (Some(row), Some(column), Some(asked)) => {
+                crate::core::model::readout(row, column, asked, &self.clock).into()
+            }
+            _ => SharedString::default(),
+        };
+    }
+
     /// Hand the table what it paints: the prepared model, the columns, the
-    /// shown rows, the cursor, the selection and the sort mark. The
+    /// shown rows, the cursor, the selection and the sort mark. Every
+    /// cursor, board and view change passes through here, so the footer's
+    /// readout is rebuilt here too. The
     /// table's selected row is the cursor row (its highlight, and its
     /// scroll-to); its columns are re-read only when their layout changed.
     pub(crate) fn sync_table(&mut self, cx: &mut Context<Self>) {
@@ -460,6 +515,7 @@ impl VolwatchTile {
                 .position(|c| c.id == *id)
                 .map(|i| (i, o.descending()))
         });
+        self.rebuild_readout();
         let visible = self.grid.visible().to_vec();
         let cursor = self.grid.cursor().map(|r| (r, self.cursor_col));
         let selection = self.grid.selected();
@@ -765,11 +821,21 @@ impl VolwatchTile {
 
     /// D1 → W1 → M1 → D1; the request carries the one in force.
     fn cycle_lookback(&mut self, cx: &mut Context<Self>) {
-        self.state.lookback = match self.state.lookback {
+        let next = match self.state.lookback {
             Lookback::D1 => Lookback::W1,
             Lookback::W1 => Lookback::M1,
             Lookback::M1 => Lookback::D1,
         };
+        self.set_lookback(next, cx);
+    }
+
+    /// The one door a lookback change takes (`d`, a header chip): the
+    /// chip moves at once and the board is asked again.
+    fn set_lookback(&mut self, lookback: Lookback, cx: &mut Context<Self>) {
+        if self.state.lookback == lookback {
+            return;
+        }
+        self.state.lookback = lookback;
         self.resubmit(false, cx);
         self.prepare();
         self.sync_table(cx);
@@ -852,7 +918,7 @@ impl VolwatchTile {
     }
 
     pub(crate) fn title(&self) -> SharedString {
-        self.header.title.clone().into()
+        self.header.title.clone()
     }
 
     /// The cursor is saved by name: a restored one still waiting, else the
@@ -875,8 +941,7 @@ impl VolwatchTile {
     }
 }
 
-/// The title line above the grid (the header proper is the chrome's),
-/// then the empty state or the grid.
+/// The header, the view strip, the grid and the footer (`header`).
 impl Render for VolwatchTile {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Column widths follow the window's rem, which the delegate cannot
@@ -890,27 +955,6 @@ impl Render for VolwatchTile {
                 }
             });
         }
-        let theme = cx.theme();
-        let id = self.tile.0;
-        let close = self.close.as_ref().map(|c| c.button(theme, self.tile));
-        let body = match &self.empty {
-            Some(text) => div()
-                .text_color(theme.muted_foreground)
-                .child(text.clone())
-                .into_any_element(),
-            None => table_el(&self.table, id).into_any_element(),
-        };
-        v_flex()
-            .size_full()
-            .bg(theme.background)
-            .text_color(theme.foreground)
-            .debug_selector(move || format!("volwatch-{id}"))
-            .child(
-                gpui_component::h_flex()
-                    .justify_between()
-                    .child(self.header.title.clone())
-                    .children(close),
-            )
-            .child(body)
+        header::render(self, cx)
     }
 }

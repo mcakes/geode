@@ -587,16 +587,46 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, clock: &Clock) -> String
     parts.join(" \u{b7} ")
 }
 
+/// The header's left side, every string formatted when its inputs change
+/// so paint only clones: the switch control's title, the member count,
+/// the lookback chips (`Δ 1d` lit, `1w`, `1m`), the sort chip, the
+/// missing members (`1 not in surface`) and the failed datasets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeaderModel {
-    pub title: String,
+    pub title: SharedString,
     pub count: usize,
+    pub count_text: SharedString,
     /// `Lookback::ALL` in order, the one in force true.
     pub lookbacks: [(Lookback, bool); 3],
-    pub sort: Option<String>,
+    /// Parallel to `lookbacks`: the lit one carries the `Δ ` prefix.
+    pub lookback_texts: [SharedString; 3],
+    pub sort: Option<SharedString>,
     pub not_in_surface: usize,
-    pub failed: Vec<String>,
+    /// `<n> not in surface`; `None` while every member is in it.
+    pub missing_text: Option<SharedString>,
+    pub failed: Vec<SharedString>,
     pub notes: Vec<String>,
+}
+
+/// The glyph ahead of the title, naming the tile's kind at a glance.
+pub const MARK: &str = "\u{25a4}";
+
+/// The switch control's chevron.
+pub const CHEVRON: &str = "\u{25be}";
+
+impl HeaderModel {
+    /// The chips' texts in paint order: the mark, the switch control, the
+    /// count, the lookbacks, the sort, the missing, the failed.
+    #[cfg(test)]
+    pub fn chip_texts(&self) -> Vec<String> {
+        let mut out = vec![MARK.to_string(), format!("{} {CHEVRON}", self.title)];
+        out.push(self.count_text.to_string());
+        out.extend(self.lookback_texts.iter().map(ToString::to_string));
+        out.extend(self.sort.iter().map(ToString::to_string));
+        out.extend(self.missing_text.iter().map(ToString::to_string));
+        out.extend(self.failed.iter().map(ToString::to_string));
+        out
+    }
 }
 
 impl Default for HeaderModel {
@@ -613,14 +643,29 @@ pub fn header(
     sort: Option<&str>,
     board: Option<&VolBoard>,
 ) -> HeaderModel {
+    let lookbacks = Lookback::ALL.map(|l| (l, l == shown));
+    let not_in_surface = board.map_or(0, |b| b.missing.len());
     HeaderModel {
-        title: format!("{TITLE} \u{b7} {}", list.unwrap_or("New\u{2026}")),
+        title: format!("{TITLE} \u{b7} {}", list.unwrap_or("New\u{2026}")).into(),
         count,
-        lookbacks: Lookback::ALL.map(|l| (l, l == shown)),
-        sort: sort.map(str::to_string),
-        not_in_surface: board.map_or(0, |b| b.missing.len()),
+        count_text: count.to_string().into(),
+        lookbacks,
+        lookback_texts: lookbacks.map(|(l, lit)| {
+            if lit {
+                format!("\u{394} {}", l.label()).into()
+            } else {
+                SharedString::new_static(l.label())
+            }
+        }),
+        sort: sort.map(|s| s.to_string().into()),
+        not_in_surface,
+        missing_text: (not_in_surface > 0)
+            .then(|| format!("{not_in_surface} not in surface").into()),
         failed: board.map_or_else(Vec::new, |b| {
-            b.dataset_errors.iter().map(|(d, _)| d.clone()).collect()
+            b.dataset_errors
+                .iter()
+                .map(|(d, _)| d.clone().into())
+                .collect()
         }),
         notes: board.map_or_else(Vec::new, |b| b.notes.clone()),
     }

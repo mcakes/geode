@@ -8,7 +8,7 @@ use geode_tile::menu::{ActionRow, Menu, MenuHost, MenuPick, Row as MenuRow};
 use geode_tile::notice::{Notice, Tone};
 use gpui::{App, Context, SharedString, Window};
 
-use super::{SWITCH_ACTION, VolwatchTile, snapshot};
+use super::{SWITCH_ACTION, VIEW_NEXT_ACTION, VolwatchTile, snapshot};
 use crate::core::model::header;
 
 /// Which menu is up. Menu mode, its keys and its pick door are shared by
@@ -168,6 +168,11 @@ impl VolwatchTile {
         cx.notify();
     }
 
+    /// The header's `⋯` press. The action menu is not built yet: the
+    /// trigger is wired so its press already reaches this door, and asks
+    /// nothing.
+    pub(super) fn toggle_menu(&mut self, _cx: &mut Context<Self>) {}
+
     /// The header's title, count, lookback chips and board counts, from
     /// the shown list's name: rebuilt with the chrome, so a list switch or
     /// a restore whose snapshot has not arrived names its list at once.
@@ -184,6 +189,7 @@ impl VolwatchTile {
 
     pub(crate) fn rebuild_chrome(&mut self, cx: &App) {
         self.rebuild_header();
+        self.strip_keys = tips::chord_for(&self.chords, VIEW_NEXT_ACTION);
         let snapshot = snapshot(cx);
         let list = self.state.list.as_deref();
         let state = list.and_then(|n| snapshot.lists.get(n));
