@@ -58,8 +58,10 @@ background data work. It does not depend on the shell or feature modules.
 menu, the in-tile y/n confirm and the notice line, as models with one
 painter each, the `colour` cache (`ColourCache`/`Resolved`: one resolve per
 named color per theme input, shared by the blotter and pricer cell
-painters), and the `following` flip-barrier state machine every following
-tile runs for its own query. It depends on `geode-shell` for its paint doors
+painters), the `following` flip-barrier state machine every following
+tile runs for its own query, and the `rows` named-row grid model (cursor,
+selection and seed held by name, `/` narrowing, a kept sort order) list
+tiles run over their own row type. It depends on `geode-shell` for its paint doors
 and the live keymap, never on `geode-data` or a feature module, and the shell
 never depends on it. A tile mechanism two modules would otherwise each write
 lives there. The menu and popover implementations live in `geode-shell`,

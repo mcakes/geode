@@ -3517,8 +3517,9 @@ and the reference name as the query is typed, keeping the order; `enter`
 keeps the filter, `escape` restores the one in force when the search
 began, and the header counts ignore it.
 
-The shell's grid motions move a cursor held by name, so a snapshot or
-reference change keeps it on its row; `v`/`shift+v` start a row selection
+The shell's grid motions move a cursor held by name (the shared
+`geode_tile::rows::RowModel`), so a snapshot or reference change keeps it
+on its row; `v`/`shift+v` start a row selection
 and `escape` ends it. After a member verb the cursor keeps its visible
 index, so removing the top row leaves the cursor on the next one. A row
 press moves the cursor and shift-press extends a selection to it; a right

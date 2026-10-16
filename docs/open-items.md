@@ -754,9 +754,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   harness anchors the `watchlists` conjunct of `views_changed` in
   `hot_reload.rs` and the `dims` term of the fold comparison, not the
   `scopes` and `expressions` conjuncts.
-- The grid rebuild bench (`watchlist_rebuild_after_edit_5k` 4.0 ms,
-  `watchlist_rows_and_grid_5k` 1.7 ms) was taken on a loaded machine;
-  re-measure quiet.
+- The grid rebuild bench (`watchlist_rebuild_after_edit_5k` 3.86 ms,
+  `watchlist_rows_and_grid_5k` 1.71 ms on 2026-10-16) was taken with the
+  one-minute load average near 3 but the fifteen-minute near 40;
+  re-measure on a quiet machine.
 - `resolve_members` scans `include` once per name (O(m×n)); a set over the
   manual names would make it linear.
 - A `/` filter hiding a waiting seed's row lets the next `Current` snapshot

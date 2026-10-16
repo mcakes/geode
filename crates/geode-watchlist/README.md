@@ -71,16 +71,22 @@ request and never depends on `geode-data`.
   `manual`, `rule 1`, `rules 1, 3`, `manual + rule 2`, `excluded (rule 1)`,
   `excluded (manual)`, `excluded` for an exclusion nothing supplies, with
   ` · pending` while the row awaits its reload. Rules are numbered from 1.
-- `core/grid.rs`: `GridModel` over `WatchRow`s: the sort order, the `/`
-  filter (fuzzy over the name and the reference name, keeping the order),
-  a cursor and a row selection held by name so a rebuild keeps them on
-  their rows; `after_verb(rows)` keeps the cursor's shown index instead
-  (the next row lands under it) and ends the selection; `counts()` is
-  `(live, excluded)` over every row whatever the filter shows. The default
-  order is by name with excluded rows last; `Origin` sorts by its text,
+- `core/grid.rs`: `GridModel` is `geode_tile::rows::RowModel<WatchRow>`
+  (`WatchRow` implements `GridRow` in `core/rows.rs`): the sort order, the
+  `/` filter (fuzzy over the name and the reference name, `NAME_COL` and
+  `REFERENCE_COL`, keeping the order), a cursor and a row selection held
+  by name so a rebuild keeps them on their rows; `after_verb(rows)` keeps
+  the cursor's shown index instead (the next row lands under it) and ends
+  the selection; `counts()` is `(live, excluded)` over every row whatever
+  the filter shows. The default order is by name with excluded rows last.
+  `order((SortCol, desc))` turns the session's sort into the model's
+  `Order` (key `<column> <asc|desc>`): `Origin` sorts by its text (each
+  distinct origin formatted once per order, not per comparison),
   `Reference` by the reference name with a missing one last either way,
-  ties keep the default order. A restored cursor is a seed that waits for
-  the snapshot holding its row.
+  ties keep the default order. The tile's `state.sort` stays the source of
+  truth: every change derives a fresh `Order` from it, and readers read it
+  rather than the model. A restored cursor is a seed that waits for the
+  snapshot holding its row.
 - `tile/`: the hosted entity. It observes `WatchlistGlobal` (the lists),
   `ReferenceGlobal` (reference names), `AppClock` (the `as of` time), the
   frame (the shell's word on its config writes) and `Chords` (menu hints).
@@ -376,12 +382,19 @@ thread before table preparation and paint, over 5,000 names from three
 rules with a hundred manual includes and fifty exclusions, an origin sort
 and a `/` filter active: `rows::rows` with a pending definition, then
 `GridModel::after_verb`. Reference (2026-10-10, loaded machine, load
-average 35 to 48):
+average 35 to 48), and 2026-10-16 (one-minute load average about 3,
+falling from a loaded hour) before and after the grid model moved to
+`geode_tile::rows`:
 
-| Bench | Result |
-|---|---|
-| `watchlist_rebuild_after_edit_5k` | 4.0 ms |
-| `watchlist_rows_and_grid_5k` (no pending definition) | 1.7 ms |
+| Bench | 2026-10-10 | 2026-10-16, before | 2026-10-16, after |
+|---|---|---|---|
+| `watchlist_rebuild_after_edit_5k` | 4.0 ms | 3.75 ms | 3.86 ms |
+| `watchlist_rows_and_grid_5k` (no pending definition) | 1.7 ms | 1.66 ms | 1.71 ms |
+
+The move first cost 2 ms here: the generic comparator formatted the origin
+text twice per comparison. `grid::order` now keeps each distinct origin's
+text for the life of the order; the remaining 3% is the per-row field
+list `/` narrows over (`GridRow::narrow_fields`).
 
 ## Known limitations
 

@@ -56,7 +56,7 @@ use gpui_component::table::{TableEvent, TableState};
 use gpui_component::{ActiveTheme as _, v_flex};
 
 use crate::content::{Shared, action_title};
-use crate::core::grid::GridModel;
+use crate::core::grid::{GridModel, order};
 use crate::core::history::{History, Way};
 use crate::core::prompt::Prompt;
 use crate::core::rows;
@@ -223,7 +223,7 @@ fn spell(keystrokes: &[Keystroke]) -> String {
 /// shown list start from.
 fn fresh_grid(sort: Option<(SortCol, bool)>) -> GridModel {
     let mut grid = GridModel::new();
-    grid.set_sort(sort);
+    grid.set_sort(sort.map(order));
     grid
 }
 
@@ -651,7 +651,7 @@ impl WatchlistTile {
             )
         };
         let selected = self.grid.selected();
-        let sort = self.grid.sort();
+        let sort = self.state.sort;
         let cursor = self.grid.cursor();
         self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
@@ -990,17 +990,13 @@ impl WatchlistTile {
     /// another column starts at desc. No column here has a signed
     /// magnitude, so the absolute orders are skipped.
     fn sort_clicked(&mut self, col: SortCol, cx: &mut Context<Self>) {
-        let current = self
-            .grid
-            .sort()
-            .filter(|(c, _)| *c == col)
-            .map(|(_, desc)| {
-                if desc {
-                    SortOrder::Desc
-                } else {
-                    SortOrder::Asc
-                }
-            });
+        let current = self.state.sort.filter(|(c, _)| *c == col).map(|(_, desc)| {
+            if desc {
+                SortOrder::Desc
+            } else {
+                SortOrder::Asc
+            }
+        });
         let next = SortOrder::click_cycle(current, false).map(|o| (col, o.descending()));
         self.set_sort(next, cx);
     }
@@ -1008,7 +1004,7 @@ impl WatchlistTile {
     /// The one door every sort change takes; the session saves it.
     fn set_sort(&mut self, sort: Option<(SortCol, bool)>, cx: &mut Context<Self>) {
         self.state.sort = sort;
-        self.grid.set_sort(sort);
+        self.grid.set_sort(sort.map(order));
         self.sync_table(true, cx);
         cx.notify();
     }

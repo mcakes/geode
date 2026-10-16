@@ -16,7 +16,7 @@ use geode_core::reference::ReferenceData;
 use geode_core::watchlist::members::{Member, Origin};
 use geode_core::watchlist::state::{Status, WatchlistState};
 use geode_core::watchlist::{Rule, Watchlist};
-use geode_watchlist::core::grid::GridModel;
+use geode_watchlist::core::grid::{GridModel, order};
 use geode_watchlist::core::rows;
 use geode_watchlist::core::session::SortCol;
 
@@ -83,7 +83,7 @@ fn shape() -> (WatchlistState, ReferenceData) {
 fn rebuild_after_edit(c: &mut Criterion) {
     let (state, reference) = shape();
     let mut grid = GridModel::new();
-    grid.set_sort(Some((SortCol::Origin, true)));
+    grid.set_sort(Some(order((SortCol::Origin, true))));
     grid.set_filter("u1");
     grid.set_rows(rows::rows(&state, None, &reference));
     let mut pending = state.definition.clone();
@@ -102,7 +102,7 @@ fn rebuild_after_edit(c: &mut Criterion) {
 fn rows_and_grid(c: &mut Criterion) {
     let (state, reference) = shape();
     let mut grid = GridModel::new();
-    grid.set_sort(Some((SortCol::Origin, true)));
+    grid.set_sort(Some(order((SortCol::Origin, true))));
     grid.set_filter("u1");
     c.bench_function("watchlist_rows_and_grid_5k", |b| {
         b.iter(|| {

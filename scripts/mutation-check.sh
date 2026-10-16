@@ -41237,11 +41237,12 @@ run_mutation "watchlist tile: a pending manual change marks its row" \
   geode-watchlist \
   a_pending_include_adds_a_manual_pending_row
 
-# The default order puts excluded rows last.
+# The shared row model's default order puts excluded rows last; the
+# watchlist's test binds it.
 run_mutation "watchlist tile: excluded rows sort last by default" \
-  crates/geode-watchlist/src/core/grid.rs \
-  '            .cmp(&b.is_excluded())' \
-  '            .cmp(&a.is_excluded())' \
+  crates/geode-tile/src/rows.rs \
+  '            .cmp(&b.excluded())' \
+  '            .cmp(&a.excluded())' \
   geode-watchlist \
   the_default_order_is_by_name_with_excluded_last
 

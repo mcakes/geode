@@ -40,6 +40,21 @@ impl WatchRow {
     }
 }
 
+/// The shared grid model's view of a row: `/` searches the name and the
+/// reference name (`grid::NAME_COL`, `grid::REFERENCE_COL`), never the
+/// origin; an excluded member is counted apart and sorts last by default.
+impl geode_tile::rows::GridRow for WatchRow {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn narrow_fields(&self) -> Vec<&str> {
+        vec![self.name.as_str(), self.reference.as_deref().unwrap_or("")]
+    }
+    fn excluded(&self) -> bool {
+        self.is_excluded()
+    }
+}
+
 /// The members the tile shows and its verbs act on: the snapshot's, or,
 /// with a pending definition (an edit awaiting its reload), re-derived
 /// over it. The rule-supplied names are the snapshot's (each member's
