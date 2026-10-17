@@ -43,7 +43,9 @@ scales and ranges). Behaviour and limits are in the features guide's
   - `chrome.rs`: notices, the empty state, the switcher and the `.` action
     menu.
   - `table.rs`: the grid's `TableDelegate` and `Paints` (one per theme);
-    it formats nothing.
+    it formats nothing. It adds the table's fixed chrome (cell padding and
+    the cursor border, `chrome_px`) to a prepared width and truncates a
+    cut cell or head with a trailing ellipsis.
   - `header.rs`: the header, the view strip, the band's slot and the
     footer.
   - `band.rs`: the inspection band's paint, docked between the grid and

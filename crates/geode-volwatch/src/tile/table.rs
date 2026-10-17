@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use geode_chart::spark::{Spark, SparkPaint, sizes};
-use geode_shell::colfit::{FitMetrics, FittedWidths};
+use geode_shell::colfit::{CURSOR_BORDER_PX, FitMetrics, FittedWidths};
 use geode_shell::fonts;
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
@@ -26,7 +26,7 @@ use gpui_component::table::{
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme};
 
-use crate::core::model::{BAR_ALPHA, Glyph, Prepared, glyph_width};
+use crate::core::model::{BAR_ALPHA, Glyph, Prepared, SORT_MARK_DESIGN_PX, glyph_width};
 use crate::core::views::{Column, ColumnKind};
 
 /// Whether alternate rows are striped. Every geode grid paints unstriped;
@@ -177,6 +177,21 @@ pub(crate) fn table_el(state: &Entity<TableState<GridDelegate>>, tile_id: u64) -
 
 pub(crate) use crate::core::views::sortable;
 
+/// The table's horizontal chrome inside a column's width, in real px: its
+/// own cell padding (read from the registry size, not restated; it is
+/// fixed px, not rem) on both sides and the cursor cell's border. A width
+/// that forgot it clips the cell's text.
+pub(crate) fn chrome_px() -> f32 {
+    let pad = Size::XSmall.table_cell_padding();
+    f32::from(pad.left) + f32::from(pad.right) + CURSOR_BORDER_PX
+}
+
+/// The sort mark's width at the fit's rem: [`SORT_MARK_DESIGN_PX`] (the
+/// table's `Icon::size_3` in `p(px(2.))`) on the rem scale.
+fn sort_mark_px(m: &FitMetrics) -> f32 {
+    scale::design_px(SORT_MARK_DESIGN_PX, px(m.rem_px))
+}
+
 pub(crate) struct GridDelegate {
     pub(crate) prepared: Rc<Prepared>,
     pub(crate) columns: Rc<Vec<Column>>,
@@ -282,8 +297,12 @@ impl GridDelegate {
         true
     }
 
+    /// A prepared width is design px of content, so the table's chrome
+    /// is added here where real px are known; a fitted width already
+    /// holds it (`FitMetrics::xsmall_mono` pads) and is taken as is.
     fn relayout(&mut self) {
         let rem = px(self.rem_px);
+        let chrome = chrome_px();
         self.widths = self
             .prepared
             .widths
@@ -292,7 +311,7 @@ impl GridDelegate {
             .map(
                 |(ix, w)| match self.ids.get(ix).and_then(|id| self.fitted.get(&**id)) {
                     Some(fitted) => px(*fitted),
-                    None => px(scale::design_px(*w, rem)),
+                    None => px(scale::design_px(*w, rem) + chrome),
                 },
             )
             .collect();
@@ -304,9 +323,10 @@ impl GridDelegate {
         self.relayout();
     }
 
-    /// Each column fitted to its head and widest cell in the real mono
-    /// metrics: a glyph column keeps the glyph's own minimum around its
-    /// text. `None` while there are no rows to measure.
+    /// Each column fitted to its head (with the sort mark when sortable)
+    /// and widest cell in the real mono metrics: a glyph column keeps the
+    /// glyph's own minimum around its text. `None` while there are no
+    /// rows to measure.
     pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
         if self.prepared.rows.is_empty() || self.columns.is_empty() {
             return None;
@@ -328,7 +348,12 @@ impl GridDelegate {
                             let text = cell.text.chars().count() as f32 * design_advance;
                             scale::design_px(glyph_width(&c.kind, text), rem)
                         });
-                    let width = m.fit(std::iter::once(m.text_px(&c.head)).chain(cells));
+                    let head = if sortable(&c.kind) {
+                        m.text_px(&c.head) + sort_mark_px(m)
+                    } else {
+                        m.text_px(&c.head)
+                    };
+                    let width = m.fit(std::iter::once(head).chain(cells));
                     (c.id.clone(), width)
                 })
                 .collect(),
@@ -500,7 +525,16 @@ impl TableDelegate for GridDelegate {
                     }),
                 )
             })
-            .children(self.heads.get(col_ix).cloned())
+            // As a cell's text: a cut head reads `ATFM…`, not `:M 1M`.
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .when(!underlying, |el| el.text_right())
+                    .truncate()
+                    .text_ellipsis()
+                    .children(self.heads.get(col_ix).cloned()),
+            )
     }
 
     /// Each row is identified by its member's name. A press with a
@@ -577,8 +611,23 @@ impl TableDelegate for GridDelegate {
         let p = &self.paints;
         let text = cell.text.clone();
         let id = cell.id.clone();
+        let cell_id = cell.id.clone();
+        let underlying = column.kind == ColumnKind::Underlying;
         let content: AnyElement = match &cell.glyph {
-            Glyph::None => div().text_color(tone).child(text).into_any_element(),
+            // Plain text fills the cell and aligns as text, so a column
+            // narrower than its number cuts the trailing side into an
+            // ellipsis; a flex-justified child would overflow on the
+            // leading side and show a plausible wrong number.
+            Glyph::None => div()
+                .w_full()
+                .min_w_0()
+                .text_color(tone)
+                .when(!underlying, |el| el.text_right())
+                .truncate()
+                .text_ellipsis()
+                .debug_selector(move || format!("{id}-text"))
+                .child(text)
+                .into_any_element(),
             Glyph::Chip(chip) => {
                 let paint = if muted { p.chip_muted } else { p.chip };
                 delta_chip::paint(text, *chip, paint, id).into_any_element()
@@ -628,7 +677,6 @@ impl TableDelegate for GridDelegate {
                     .into_any_element()
             }
         };
-        let underlying = column.kind == ColumnKind::Underlying;
         div()
             .size_full()
             .flex()
@@ -639,6 +687,7 @@ impl TableDelegate for GridDelegate {
             .whitespace_nowrap()
             .overflow_hidden()
             .text_color(tone)
+            .debug_selector(move || format!("volwatch-td-{cell_id}"))
             .when(at_cursor, |el| {
                 el.border_1().border_color(theme.table_active_border)
             })
@@ -659,5 +708,26 @@ mod tests {
         assert_eq!(g[0].label.as_ref(), "", "Underlying is ungrouped");
         assert_eq!((g[2].label.as_ref(), g[2].span), ("ATFM 1M", 2));
         assert!(groups(&columns(View::Levels, &order_tenors(None))).is_empty());
+    }
+
+    #[test]
+    fn relayout_adds_the_tables_fixed_chrome_to_every_width() {
+        let mut d = GridDelegate::new(Paints::from_theme(&Theme::default()));
+        let cols = Rc::new(columns(View::Levels, &order_tenors(None)));
+        let prepared = Rc::new(Prepared {
+            rows: Vec::new(),
+            widths: vec![30.0; cols.len()],
+        });
+        d.set_model(prepared, cols, None);
+        d.set_rem(12.0);
+        // The chrome as the registry states it, not as `chrome_px` says.
+        let pad = Size::XSmall.table_cell_padding();
+        let chrome = f32::from(pad.left) + f32::from(pad.right) + CURSOR_BORDER_PX;
+        assert_eq!(chrome, 10.0, "4 px each side and a 2 px cursor border");
+        assert_eq!(f32::from(d.width(0)), 30.0 + chrome);
+        // A fitted width already holds the chrome: it is taken as is.
+        d.set_fitted(FittedWidths::from([("underlying".to_string(), 50.0)]));
+        assert_eq!(f32::from(d.width(0)), 50.0);
+        assert_eq!(f32::from(d.width(1)), 30.0 + chrome);
     }
 }

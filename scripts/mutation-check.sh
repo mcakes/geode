@@ -42375,6 +42375,33 @@ run_mutation "volwatch: a stale_after reload re-arms the stale wake-ups" \
   geode-volwatch \
   a_stale_after_reload_rearms_the_row_wake_ups
 
+# A sortable head reserves the table's sort mark beside its text; without
+# the allowance the mark pushes the head's leading letters out of the cell.
+run_mutation "volwatch: widths reserve the sort mark on a sortable head" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                head + SORT_MARK_DESIGN_PX' \
+  '                head' \
+  geode-volwatch \
+  a_sortable_head_reserves_the_sort_mark
+
+# A group label wider than its run of columns widens them; without the
+# share the label clips over columns whose texts are short.
+run_mutation "volwatch: widths share a group label across its columns" \
+  crates/geode-volwatch/src/core/model.rs \
+  '        if label_px > have {' \
+  '        if false {' \
+  geode-volwatch \
+  a_group_label_wider_than_its_columns_is_shared_across_them
+
+# A prepared width is content only; the table's cell padding and cursor
+# border are added in relayout. Without them every cell clips.
+run_mutation "volwatch: widths add the table's fixed chrome" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '    f32::from(pad.left) + f32::from(pad.right) + CURSOR_BORDER_PX' \
+  '    0.0' \
+  geode-volwatch \
+  relayout_adds_the_tables_fixed_chrome_to_every_width
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

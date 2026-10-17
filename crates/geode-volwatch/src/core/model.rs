@@ -23,11 +23,11 @@ use geode_widgets::cell::delta_chip::{Chip, chip};
 use geode_widgets::cell::heat::{heat, range};
 use geode_widgets::cell::percent_slider::{Slider, slider};
 use geode_widgets::cell::zero_bar::{Bar, bar};
-use geode_widgets::cell::{column_scale, widths};
+use geode_widgets::cell::{DESIGN_REM, column_scale, widths};
 use gpui::SharedString;
 
 use super::views::{
-    Ask, Column, ColumnKind, PCTL_MIN_COUNT, REALIZED, SURFACE, TITLE, VARSWAP, WINDOW_1Y,
+    Ask, Column, ColumnKind, PCTL_MIN_COUNT, REALIZED, SURFACE, TITLE, VARSWAP, WINDOW_1Y, sortable,
 };
 
 /// Fill alpha of a change chip at the column's largest move.
@@ -36,6 +36,10 @@ pub const CHIP_CEILING: f32 = 0.55;
 pub const HEAT_CEILING: f32 = 0.40;
 /// Zero bar fill alpha over its sign color.
 pub const BAR_ALPHA: f32 = 0.75;
+/// Design px a sortable head keeps clear beside its text for the table's
+/// sort mark: an `Icon::size_3` (0.75 rem) in `p(px(2.))`, right of the
+/// head. A head that forgot it loses its leading letters under the mark.
+pub const SORT_MARK_DESIGN_PX: f32 = 0.75 * DESIGN_REM + 4.0;
 
 /// Levels, changes and bars: one decimal.
 pub const ONE_DP: ColumnFormat = ColumnFormat {
@@ -378,7 +382,14 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
     let mut col_px: Vec<f32> = i
         .columns
         .iter()
-        .map(|c| c.head.chars().count() as f32 * i.mono_advance_px)
+        .map(|c| {
+            let head = c.head.chars().count() as f32 * i.mono_advance_px;
+            if sortable(&c.kind) {
+                head + SORT_MARK_DESIGN_PX
+            } else {
+                head
+            }
+        })
         .collect();
 
     let rows = i
@@ -431,9 +442,37 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
     for (ci, c) in i.columns.iter().enumerate() {
         col_px[ci] = col_px[ci].max(glyph_width(&c.kind, 0.0));
     }
+    share_group_labels(i.columns, &mut col_px, i.mono_advance_px);
     Prepared {
         rows,
         widths: col_px,
+    }
+}
+
+/// A group label spans its run of equal `Some` groups (as the table's
+/// group row is built); a label wider than those columns' texts would
+/// clip, so the deficit is split evenly across the run.
+fn share_group_labels(columns: &[Column], col_px: &mut [f32], advance_px: f32) {
+    let mut start = 0;
+    while start < columns.len() {
+        let Some(group) = columns[start].group.as_deref() else {
+            start += 1;
+            continue;
+        };
+        let end = start
+            + columns[start..]
+                .iter()
+                .take_while(|c| c.group.as_deref() == Some(group))
+                .count();
+        let label_px = group.chars().count() as f32 * advance_px;
+        let have: f32 = col_px[start..end].iter().sum();
+        if label_px > have {
+            let share = (label_px - have) / (end - start) as f32;
+            for w in &mut col_px[start..end] {
+                *w += share;
+            }
+        }
+        start = end;
     }
 }
 
@@ -1325,12 +1364,38 @@ mod tests {
         );
         let p = prepare(&inputs(rows_with_changes(&[1.0]), View::Changes));
         assert!(p.widths[column_index("spark-0")] >= sizes::WIDTH_30D);
-        // A level column without a tint is as wide as its widest text or head.
+        // A level column without a tint is as wide as its widest text or
+        // its head with the sort mark, whichever is wider.
         assert_eq!(
             p.widths[column_index("atfm-3M-level")],
-            4.0 * 7.0,
-            "`15.0` beside the `vol` head"
+            (3.0 * 7.0 + SORT_MARK_DESIGN_PX).max(4.0 * 7.0),
+            "`vol` plus the sort mark, wider than `15.0`"
         );
+    }
+
+    #[test]
+    fn a_sortable_head_reserves_the_sort_mark() {
+        let p = prepare(&inputs(rows_with_changes(&[1.0]), View::Changes));
+        let vol = column_index("atfm-1M-level");
+        let head_px = "vol".chars().count() as f32 * 7.0;
+        assert!(p.widths[vol] >= head_px + SORT_MARK_DESIGN_PX);
+        // A spark column is not sortable: as wide as its label, no mark.
+        let spark = column_index("spark-0");
+        let label_px = "ATFM 3M \u{b7} 30d".chars().count() as f32 * 7.0;
+        assert!(p.widths[spark] >= label_px);
+        assert!(p.widths[spark] < label_px + SORT_MARK_DESIGN_PX);
+    }
+
+    #[test]
+    fn a_group_label_wider_than_its_columns_is_shared_across_them() {
+        // Changes: "25Δ skew 3M" over `pts` and `Δ`, both blank in this board.
+        let p = prepare(&inputs(rows_with_changes(&[1.0]), View::Changes));
+        let (a, b) = (
+            column_index("skew-3M-level"),
+            column_index("skew-3M-change"),
+        );
+        let label_px = "25\u{394} skew 3M".chars().count() as f32 * 7.0;
+        assert!(p.widths[a] + p.widths[b] >= label_px);
     }
 
     #[test]

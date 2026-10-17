@@ -3728,10 +3728,13 @@ answered first and those it lacks at the foot, muted and blank (`not in
 surface` in the readout). The Underlying column is pinned left; the
 reference name is in the readout. Column heads group under a shared header
 row (`ATFM 3M` over `vol` and `Δ`); Levels has no groups. A column's width
-is its glyph's minimum plus the widest text, head included; `:autosize`
-(the shell's verb, also in the palette) fits the shown cells in the real
-mono metrics and persists the widths in the session, and refuses before a
-board lands. `j k` move rows,
+is its glyph's minimum plus the widest text, head included, the sort mark
+on a sortable head and the table's cell padding; a group label wider than
+its columns widens them, the deficit shared across the run; a column
+narrower than its text ends it in an ellipsis, never cutting a number's
+leading digits. `:autosize` (the shell's verb, also in the palette) fits
+the shown cells in the real mono metrics and persists the widths in the
+session, and refuses before a board lands. `j k` move rows,
 `h l` columns, `g g`/`shift+g` the ends, `v`/`shift+v` start a row
 selection, `y` yanks the cursor cell (or the cursor column over a
 selection, one row per line). `/` narrows by name and reference, keeping

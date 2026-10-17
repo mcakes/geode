@@ -194,6 +194,32 @@ fn a_spark_column_refuses_to_sort_with_a_notice(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
+fn a_column_narrower_than_its_number_keeps_its_text_inside_the_cell(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    // Force the level column to 20 px, narrower than DAX's `15.9`.
+    h.tile.update(&mut vcx, |t, cx| {
+        t.table.update(cx, |tb, cx| {
+            let mut sized = tb.delegate().fitted.clone();
+            sized.insert("atfm-1M-level".to_string(), 20.0);
+            tb.delegate_mut().set_fitted(sized);
+            tb.refresh(cx);
+        });
+    });
+    h.draw(&mut vcx);
+    // The prepared cell id is `{tile}-{name}-{column}`.
+    let cell = vcx
+        .debug_bounds("volwatch-td-7-DAX-atfm-1M-level")
+        .expect("the cell is painted");
+    let text = vcx
+        .debug_bounds("7-DAX-atfm-1M-level-text")
+        .expect("the cell's text is painted");
+    assert!(
+        text.left() >= cell.left() && text.right() <= cell.right(),
+        "a number's leading digits must never be cut: text {text:?} in cell {cell:?}"
+    );
+}
+
+#[gpui::test]
 fn a_header_click_walks_the_click_cycle(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = sx5e_higher(cx);
     let click = |vcx: &mut gpui::VisualTestContext| {
