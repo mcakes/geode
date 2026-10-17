@@ -31,6 +31,18 @@ accessors and never updates the app entity: the session-restore inputs
 and the rosters hand out shared factory handles, so creating an occupant or a
 page holds no borrow of the services while `create` runs.
 
+`ShellApp` also creates the shared `Frame` and the `Diagnostics` entities
+(`frame()`, `diagnostics()`) and applies the session's restored frame state to
+the frame once, before any window exists: the `[frame]` record to the shared
+lane, each `workspaces.N.frame` record to its pinned lane, and each
+`[links.<letter>]` scope to its group, with scope history cleared. It seeds
+the diagnostics entity with the startup config, keymap and composition
+diagnostics in the same order `apply_reload` restates them. Each `ShellView`
+holds clones of both handles, observes them for its own window (the flip
+barrier, the page-open drain) and seeds its flip baselines from the frame it
+is handed, so a restored session is never read as a change by the first
+window or by a second one.
+
 State with a narrower owner stays outside `ShellView`:
 
 - `Workspaces` and the tiling tree own layout and structural focus.

@@ -9818,7 +9818,7 @@ run_mutation "focus: the departed-tile backstop spares the shell's own surfaces"
 # `diags` token can match the prefix of the next statement and produce an
 # invalid replacement instead of testing the diagnostic omission.
 run_mutation "diagnostics: startup seeding folds in the computed config diagnostics" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '            let mut diags = cfg.diagnostics.clone();
             diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
             diags.extend(crate::defaults::modules_default_diagnostic(cfg));' \
@@ -9830,7 +9830,7 @@ run_mutation "diagnostics: startup seeding folds in the computed config diagnost
 # in a way the other three are not: nothing else would ever put a
 # `build_keymap` diagnostic in front of a trader at startup.
 run_mutation "diagnostics: the startup seeding carries build_keymap's own diagnostics" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '            diags.extend(services.keymap_diagnostics.iter().cloned());' \
   '' \
   geode-shell startup_keymap_diagnostics_are_in_the_diagnostics_entity
@@ -18063,7 +18063,7 @@ run_mutation "ad hoc: a chain with a repeated name is refused" \
 
 # Restore applies the chain to the lane.
 run_mutation "ad hoc: the session restore reaches the lane" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '                if let Some(chain) = record.ad_hoc {
                     s.restore_ad_hoc(chain, record.ad_hoc_active);
                 }' \
@@ -18073,7 +18073,7 @@ run_mutation "ad hoc: the session restore reaches the lane" \
 
 # A pinned workspace's record restores into its own lane, not the shared one.
 run_mutation "ad hoc: a pinned restore applies its own chain" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '                if let Some(chain) = record.ad_hoc {
                     lane.restore_ad_hoc(chain, record.ad_hoc_active);
                 }' \
@@ -18101,7 +18101,7 @@ run_mutation "ad hoc: the session writer captures a pinned chain" \
 # Pinning at restore copies the shared lane's chain; a pinned record
 # without one must not keep it, or the writer saves it as the pin's own.
 run_mutation "ad hoc: a pinned restore clears the copied chain" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '                lane.set_active_slot(None);
                 lane.forget_ad_hoc();' \
   '                lane.set_active_slot(None);' \
@@ -18111,7 +18111,7 @@ run_mutation "ad hoc: a pinned restore clears the copied chain" \
 # A session written under another configuration can name a column this
 # one cannot group by; startup must drop that chain whole.
 run_mutation "ad hoc: startup checks the restored chain" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '            for column in f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column)) {' \
   '            for column in f.retain_ad_hoc(|_| true) {' \
   geode-shell \
@@ -28970,14 +28970,14 @@ run_mutation "session: a workspace frame table restores pinned" \
 
 # A restored lane written without pinning lands in the shared lane.
 run_mutation "shell: restored pinned lanes are pinned" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '                f.pin(ws);
                 let mut lane = f.view_mut(ws);' \
   '                let mut lane = f.view_mut(ws);' \
   geode-shell a_restored_pinned_workspace_is_pinned_with_its_record
 
 run_mutation "shell: a restored pinned lane has no undo back to empty" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '                lane.clear_history();' \
   '' \
   geode-shell a_restored_pinned_workspace_is_pinned_with_its_record
@@ -28985,7 +28985,7 @@ run_mutation "shell: a restored pinned lane has no undo back to empty" \
 # Pinning copies the shared slot; a recorded slot that is now empty is
 # refused, so without the clear the pinned lane keeps the shared slot.
 run_mutation "shell: a restored pinned lane drops an empty recorded slot" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '                lane.set_active_slot(None);
                 lane.forget_ad_hoc();
                 lane.set_active_slot(record.active_slot);' \
@@ -28996,7 +28996,7 @@ run_mutation "shell: a restored pinned lane drops an empty recorded slot" \
 # A pin restored onto a workspace the layout lacks would surface as an
 # unexpected pin if that workspace were created later.
 run_mutation "shell: a restored pin without its workspace is skipped" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '                    ws.get()
                 );
                 continue;' \
@@ -31833,7 +31833,7 @@ run_mutation "panels: composition diagnostics survive a reload" \
   geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
 
 run_mutation "panels: composition diagnostics are seeded at startup" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '            diags.extend(services.composition_diagnostics.iter().cloned());' \
   '' \
   geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
@@ -34372,7 +34372,7 @@ run_mutation "link: the quit-time save writes the groups' scopes" \
 # before the flip baseline is seeded, so it is the scope of a restored
 # follower's first query and is not read as a change.
 run_mutation "link: a restored group scope is applied before the first frame" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '                        f.restore_group_scope(group, scope.clone());' \
   '                        let _ = (&f, group, scope);' \
   geode-shell a_restored_follower_reads_the_saved_group_scope_on_its_first_frame

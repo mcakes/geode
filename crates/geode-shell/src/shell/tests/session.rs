@@ -29,6 +29,43 @@ fn two_views_over_one_app_read_the_same_workspaces(cx: &mut gpui::TestAppContext
     });
 }
 
+/// Two windows over one `ShellApp` hold one `Frame`: the app creates it
+/// and applies the session's restored lanes once, so a pin restored from
+/// `[workspaces.1.frame]` (the fixture's one workspace; a pin on an absent
+/// workspace is ignored) is visible through the second view as well.
+#[gpui::test]
+fn two_views_share_one_frame_and_a_restored_pin(cx: &mut gpui::TestAppContext) {
+    let mut services = test_services();
+    services.restored_pinned.insert(
+        WorkspaceIx::new(1).unwrap(),
+        session::FrameRecord {
+            scope: geode_core::scope::Scope::default(),
+            active_slot: None,
+            ad_hoc: None,
+            ad_hoc_active: false,
+            loaded_from: None,
+            as_of: geode_core::query::AsOf::Live,
+        },
+    );
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx) = open_shell_on(cx, app.clone());
+    let (w2, _) = open_shell_on(cx, app.clone());
+    let (s1, s2) = (shell_of(&w1, &mut vcx), shell_of(&w2, &mut vcx));
+    vcx.update(|_, cx| {
+        assert_eq!(
+            s1.read(cx).frame().entity_id(),
+            s2.read(cx).frame().entity_id(),
+            "two views, two frames"
+        );
+        assert!(
+            s1.read(cx)
+                .frame()
+                .read(cx)
+                .is_pinned(WorkspaceIx::new(1).unwrap())
+        );
+    });
+}
+
 pub(super) fn test_services_with_session(session_path: std::path::PathBuf) -> ShellServices {
     let mut services = test_services();
     services.session_path = Some(session_path);

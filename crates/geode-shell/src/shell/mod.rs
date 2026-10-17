@@ -110,14 +110,14 @@ pub struct ShellServices {
     /// creates occupants. Unavailable kinds retain their records separately.
     pub restored_tiles: crate::session::TileRecords,
     /// Optional scope, grouping slot, and as-of from `[frame]`.
-    /// `ShellView::new` applies them and clears scope undo/redo history.
+    /// `ShellApp::new` applies them and clears scope undo/redo history.
     pub restored_frame: Option<crate::session::FrameRecord>,
     /// Pinned workspace lanes from `session.toml`'s `workspaces.N.frame`;
-    /// `ShellView::new` pins each workspace and fills its lane with clean
+    /// `ShellApp::new` pins each workspace and fills its lane with clean
     /// scope history.
     pub restored_pinned: crate::session::PinnedRecords,
     /// Link group scopes from `session.toml`'s `[links.<letter>]`, in
-    /// `Group::ALL` order; `ShellView::new` sets each non-empty one on its
+    /// `Group::ALL` order; `ShellApp::new` sets each non-empty one on its
     /// group before any tile is linked or created.
     pub restored_links: crate::session::GroupScopes,
     /// The palette's usage history from `session.toml`'s `[palette.usage]`
@@ -653,11 +653,13 @@ pub struct ShellView {
     /// the roster never changes after startup, and the sidebar paints from
     /// this on every render without collecting.
     page_entries: Vec<crate::module::PageEntry>,
-    /// The shared frame, created here so every occupant can hold it.
+    /// The app's shared frame (`ShellApp::frame`), cloned here so every
+    /// occupant can hold it.
     frame: Entity<Frame>,
-    /// Shared diagnostics state, fed by the app bridge and config load/reload.
-    /// Its observer drains log-level and overlay requests; the app bridge
-    /// handles catalog requests.
+    /// The app's diagnostics state (`ShellApp::diagnostics`), fed by the app
+    /// bridge and config load/reload. This window's observer drains
+    /// log-level and overlay requests; the app bridge handles catalog
+    /// requests.
     diagnostics: Entity<Diagnostics>,
     /// Pending occupant creation, addressed by the tile ID allocated or filled
     /// by `add_tile`. `ensure_occupants` consumes each request at that tile on
@@ -691,8 +693,9 @@ pub struct ShellView {
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
-    /// Seeded once in `new`, right after a restored session's scope/slot/
-    /// as-of are applied, so that restore is never itself mistaken for
+    /// Seeded once in `new`, from the frame `ShellApp::new` has already
+    /// applied a restored session's scope/slot/as-of to, so that restore is
+    /// never itself mistaken for
     /// "just changed" (which would open a barrier over whatever tiles
     /// happen to exist yet at construction time, before any occupant
     /// does).
@@ -1306,7 +1309,6 @@ impl ShellView {
 
         // Every read below is a short borrow of `app`: the globals and
         // entities set up between them need `cx` mutably.
-        let user_dir = app.read(cx).user_dir.clone();
         let font_size = FontSize::from_config(app.read(cx).config());
         let find_style = FindStyle::from_config(app.read(cx).config());
         let add_direction = crate::tileadd::AddDirection::from_config(app.read(cx).config());
@@ -1323,7 +1325,8 @@ impl ShellView {
         cx.set_global(series);
         // The app-wide clock (`crate::clock::AppClock`, another of the workspace's
         // six globals — see its own doc comment).
-        let (clock, clock_diags) = geode_core::clock::Clock::from_config(app.read(cx).config());
+        // Its config diagnostics seed the diagnostics entity in `ShellApp::new`.
+        let (clock, _) = geode_core::clock::Clock::from_config(app.read(cx).config());
         cx.set_global(crate::clock::AppClock(clock));
         // Empty until the bridge's first live reference answer: a module
         // reading it before then sees no table rather than a missing global.
@@ -1336,23 +1339,13 @@ impl ShellView {
         let bindings = app.read(cx).services.keymap.bindings().to_vec();
         cx.set_global(crate::tips::Chords(Arc::new(bindings)));
 
-        // The shared frame: built from whatever `[groupings]`/
-        // `[scopes]` (plus the `datasets`/`dimensions` docs they validate
-        // against) config resolved to — see `hot_reload::rebuild_slots`/
-        // `rebuild_saved_scopes`, shared with `apply_reload`'s own
-        // rebuilds.
-        let frame = {
-            let config = app.read(cx).config();
-            let slots = hot_reload::rebuild_slots(config);
-            // Report saved-scope diagnostics here. Startup action registration
-            // loads the same scopes with reporting disabled to avoid duplicate logs.
-            let saved = hot_reload::rebuild_saved_scopes(config, true);
-            let named = hot_reload::rebuild_named_expressions(config);
-            cx.new(|_| {
-                let mut frame = Frame::new(slots, saved, user_dir.clone());
-                frame.replace_named_expressions(named);
-                frame
-            })
+        // The frame and the diagnostics gatherer are the app's, created and
+        // seeded in `ShellApp::new` (a restored session's lanes and group
+        // scopes are already applied); this window holds clones so its
+        // occupants and surfaces reach them without the app entity.
+        let (frame, diagnostics) = {
+            let app = app.read(cx);
+            (app.frame().clone(), app.diagnostics().clone())
         };
         // Observe the frame before creating occupants. GPUI notifies observers
         // in registration order, so `on_frame_changed` opens the flip barrier
@@ -1365,41 +1358,6 @@ impl ShellView {
             view.on_frame_changed(frame, window, cx)
         })
         .detach();
-
-        // The shell-owned diagnostics gatherer, created
-        // alongside the frame — see the field's own doc comment. Seeded
-        // from `services.log`'s levels when logging is wired up (`None`
-        // in every test setup that doesn't opt in, mirroring `log`
-        // itself), `LogLevels::default()` otherwise.
-        let diagnostics = {
-            let levels = app
-                .read(cx)
-                .services
-                .log
-                .as_ref()
-                .map(|l| l.levels.clone())
-                .unwrap_or_default();
-            cx.new(|_| Diagnostics::new(levels))
-        };
-        // Seed diagnostics from config loading, derived settings validation,
-        // and startup keymap compilation. Keep this order aligned with
-        // `apply_reload` so the section is consistent before and after reload.
-        let startup_diagnostics = {
-            let services = app.read(cx).services();
-            let cfg = &services.config;
-            let mut diags = cfg.diagnostics.clone();
-            diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
-            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
-            // Warn when the default timeseries source names no fetch source.
-            diags.extend(crate::series::default_source_diagnostic(cfg));
-            diags.extend(clock_diags.iter().cloned());
-            diags.extend(services.keymap_diagnostics.iter().cloned());
-            diags.extend(services.composition_diagnostics.iter().cloned());
-            diags
-        };
-        diagnostics.update(cx, |d, _cx| {
-            d.note_config(startup_diagnostics, std::time::SystemTime::now());
-        });
         // Window-bound like the frame's observer above: the page-open drain
         // moves focus to the page.
         cx.observe_in(&diagnostics, window, |view, diagnostics, window, cx| {
@@ -1407,114 +1365,7 @@ impl ShellView {
         })
         .detach();
 
-        // Restore palette usage and frame state. Clearing scope history removes
-        // the undo entry created by `set_scope`, so startup does not offer an
-        // undo back to the initial empty scope.
         let palette_usage = app.read(cx).services.restored_palette_usage.clone();
-        if let Some(record) = app.read(cx).services.restored_frame.clone() {
-            // `[frame]` is the shared lane's record; pinned lanes restore
-            // from their own workspace records.
-            frame.update(cx, |f, _cx| {
-                let mut s = f.shared_mut();
-                s.set_scope(record.scope);
-                s.set_active_slot(record.active_slot);
-                if let Some(chain) = record.ad_hoc {
-                    s.restore_ad_hoc(chain, record.ad_hoc_active);
-                }
-                if !s.restore_loaded_from(record.loaded_from.clone()) {
-                    tracing::warn!(
-                        target: "geode::session",
-                        "restored scope provenance dropped: no saved scope '{}'",
-                        record.loaded_from.as_deref().unwrap_or_default()
-                    );
-                }
-                s.set_as_of(record.as_of);
-                s.clear_history();
-            });
-        }
-        // Each restored pinned workspace gets its own lane. Clearing history
-        // keeps startup from offering an undo back to the empty scope; this
-        // runs before the flip seed below so a restored lane never reads as
-        // "just changed".
-        for (ws, record) in app.read(cx).services.restored_pinned.clone() {
-            // A pin on a workspace the layout lacks would surface as an
-            // unexpected pin if that workspace were created later. Both come
-            // from one session read, so this only guards a hand-assembled
-            // `ShellServices`.
-            let present = app
-                .read(cx)
-                .services
-                .workspaces
-                .spaces()
-                .any(|(ix, _)| ix == ws.get());
-            if !present {
-                tracing::warn!(
-                    target: "geode::session",
-                    "pinned frame for workspace {} has no workspace; ignored",
-                    ws.get()
-                );
-                continue;
-            }
-            frame.update(cx, |f, _| {
-                f.pin(ws);
-                let mut lane = f.view_mut(ws);
-                lane.set_scope(record.scope);
-                // Pinning copied the shared slot and ad hoc chain. Clear
-                // both first so a recorded slot that is now empty (refused
-                // below) leaves no slot rather than the shared lane's, and a
-                // record without a chain does not keep the shared lane's
-                // chain, which the session writer would then save as this
-                // workspace's own.
-                lane.set_active_slot(None);
-                lane.forget_ad_hoc();
-                lane.set_active_slot(record.active_slot);
-                // After the slot, so an active chain wins over it; before
-                // `clear_history`, like every other restored value.
-                if let Some(chain) = record.ad_hoc {
-                    lane.restore_ad_hoc(chain, record.ad_hoc_active);
-                }
-                // `pin` copied the shared lane's provenance; the record names
-                // this lane's own, and a record without one clears the copy.
-                if !lane.restore_loaded_from(record.loaded_from.clone()) {
-                    tracing::warn!(
-                        target: "geode::session",
-                        "restored scope provenance dropped: no saved scope '{}'",
-                        record.loaded_from.as_deref().unwrap_or_default()
-                    );
-                }
-                lane.set_as_of(record.as_of);
-                lane.clear_history();
-            });
-        }
-        // A session written under another configuration can name columns
-        // this one cannot group by. Checked once for every restored lane.
-        let groupable = hot_reload::groupable_names(app.read(cx).config());
-        frame.update(cx, |f, _| {
-            for column in f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column)) {
-                tracing::warn!(
-                    target: "geode::session",
-                    "restored ad hoc grouping dropped: '{column}' is not a groupable column"
-                );
-            }
-        });
-        // A group keeps its last scope across a restart. Restored before any
-        // membership is applied and before the flip baselines below are
-        // seeded, and nothing is notified: a restored follower's first
-        // query is already scoped by its group, with no emitter needed to
-        // post it again, and the restored scope is not read as a change.
-        // Lost, a follower that showed one underlying would show the whole
-        // book under the same chip.
-        let restored_links = app.read(cx).services.restored_links.clone();
-        if restored_links.iter().any(|scope| !scope.is_empty()) {
-            frame.update(cx, |f, _| {
-                for group in geode_core::link::Group::ALL {
-                    let scope = &restored_links[group.index()];
-                    if !scope.is_empty() {
-                        f.restore_group_scope(group, scope.clone());
-                    }
-                }
-            });
-        }
         // A restored tile is in its link groups before its occupant exists,
         // so the first query it sends is already scoped by the group it
         // follows. Two conditions, each for a tile that will never have a
