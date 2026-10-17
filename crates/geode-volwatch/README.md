@@ -36,7 +36,8 @@ scales and ranges). Behaviour and limits are in the features guide's
     unsortable column refuses as `s` does.
 - `tile/`: the hosted entity.
   - `mod.rs`: the entity, the watchlist snapshot settle, the keys and the
-    escape order, `t`'s refusal, yank, emission and autosize.
+    escape order, `t`'s refusal, yank, emission and autosize (the shown
+    view's columns only; `reset` clears that view's).
   - `data.rs`: the board's request lifecycle (tags, `deliver_board`,
     `deliver_keys`, the refresh and stale timers, the prepared model, the
     header's dataset times).
@@ -45,7 +46,11 @@ scales and ranges). Behaviour and limits are in the features guide's
   - `table.rs`: the grid's `TableDelegate` and `Paints` (one per theme);
     it formats nothing. It adds the table's fixed chrome (cell padding and
     the cursor border, `chrome_px`) to a prepared width and truncates a
-    cut cell or head with a trailing ellipsis.
+    cut cell or head with a trailing ellipsis. Sized widths (an `:autosize`
+    fit, a header drag through `record_widths`) are keyed `view:id`
+    (`sized_key`): a column id is shared across views whose heads and
+    glyphs differ. `restored_widths` drops a session entry without a view
+    prefix.
   - `header.rs`: the header, the view strip, the band's slot and the
     footer.
   - `band.rs`: the inspection band's paint, docked between the grid and

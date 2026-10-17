@@ -3732,9 +3732,13 @@ is its glyph's minimum plus the widest text, head included, the sort mark
 on a sortable head and the table's cell padding; a group label wider than
 its columns widens them, the deficit shared across the run; a column
 narrower than its text ends it in an ellipsis, never cutting a number's
-leading digits. `:autosize` (the shell's verb, also in the palette) fits
-the shown cells in the real mono metrics and persists the widths in the
-session, and refuses before a board lands. `j k` move rows,
+leading digits. Widths belong to a view: `:autosize` (the shell's verb,
+also in the palette) fits the shown view's columns in the real mono
+metrics and refuses before a board lands, `:autosize reset` returns that
+view to its prepared widths, and a header drag sets one column's width in
+that view; all persist in the session under `column_widths` as
+`<view>:<column>`, so a width fitted in Skew never lands on the Levels
+column of the same id, whose head is wider. `j k` move rows,
 `h l` columns, `g g`/`shift+g` the ends, `v`/`shift+v` start a row
 selection, `y` yanks the cursor cell (or the cursor column over a
 selection, one row per line). `/` narrows by name and reference, keeping
@@ -3811,8 +3815,10 @@ carries one, by its note for the measure's dataset
 `no observation at or before <date>`).
 
 **Session.** The table saves the list, the view, the lookback, the sort,
-the cursor's name, whether the band is open and fitted widths. An
-unreadable key is dropped with its own notice and the rest kept. A restored
+the cursor's name, whether the band is open and column widths per view
+(`column_widths`, keyed `<view>:<column>`; an entry without a view prefix
+is dropped). An unreadable key is dropped with its own notice and the rest
+kept. A restored
 cursor rests on its row at once (the members are blank rows before any
 board); a restored open band puts its measures into the first ask.
 
@@ -3852,7 +3858,8 @@ Known limitations:
   should move to `WindowCache`.
 - A hovered row's sparkline ring is the row's resting fill, not
   `DataTable`'s hover fill.
-- Fitted widths do not rescale with the rem until the next `:autosize`.
+- Sized widths (fitted or dragged) do not rescale with the rem until the
+  next `:autosize` or drag.
 - In a narrow tile the band's three blocks clip rather than wrap.
 - A same-members reorder of the list requeries.
 - A spark column cuts its tail from the board's sparkline by proportion of

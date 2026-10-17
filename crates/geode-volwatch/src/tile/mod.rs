@@ -35,9 +35,7 @@ use geode_core::volboard::{Lookback, Role, VolBoard};
 use geode_core::watchlist::state::{Status, WatchlistSnapshot};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
-use geode_shell::colfit::{
-    FitMetrics, FittedWidths, NOTHING_TO_FIT, SESSION_KEY, widths_from_record, widths_to_toml,
-};
+use geode_shell::colfit::{FitMetrics, NOTHING_TO_FIT, SESSION_KEY, widths_to_toml};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext, Keystroke};
@@ -56,8 +54,8 @@ use geode_tile::stale::StaleTimer;
 use gpui::prelude::*;
 use gpui::{App, ClipboardItem, Context, Entity, SharedString, Task, Window};
 use gpui_component::ActiveTheme as _;
-use gpui_component::table::TableState;
-use table::{GridDelegate, GridEvent, Paints, sortable};
+use gpui_component::table::{TableEvent, TableState};
+use table::{GridDelegate, GridEvent, Paints, restored_widths, sized_key, sortable};
 
 use crate::content::Shared;
 use crate::core::commands::{self, Command};
@@ -312,19 +310,32 @@ impl VolwatchTile {
             .detach();
         let paints = Paints::from_theme(cx.theme());
         let mut delegate = GridDelegate::new(paints);
-        delegate.fitted = widths_from_record(restored);
+        delegate.fitted = restored_widths(restored);
         let table = cx.new(|cx| {
             TableState::new(delegate, window, cx)
                 .row_selectable(true)
                 .col_selectable(false)
                 .cell_selectable(false)
-                .col_resizable(false)
+                .col_resizable(true)
                 .col_movable(false)
                 .sortable(true)
                 .loop_selection(false)
         });
         cx.subscribe(&table, |this, _, e: &GridEvent, cx| this.grid_event(*e, cx))
             .detach();
+        // A header drag's widths are recorded in the delegate for the shown
+        // view, so the next refresh (a sort, the rem, a view round trip)
+        // keeps them. The table's other events are its own.
+        cx.subscribe(&table, |this, _, e: &TableEvent, cx| {
+            if let TableEvent::ColumnWidthsChanged(widths) = e {
+                this.table.update(cx, |t, cx| {
+                    t.delegate_mut().record_widths(widths);
+                    t.refresh(cx);
+                });
+                cx.notify();
+            }
+        })
+        .detach();
         // Prepared cells hold glyph cores, not colors: a theme change
         // rebuilds the paints alone.
         cx.observe_global::<gpui_component::theme::Theme>(|this, cx| {
@@ -583,7 +594,7 @@ impl VolwatchTile {
         });
         self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
-            let relayout = d.set_model(prepared, columns, sorted);
+            let relayout = d.set_model(prepared, columns, sorted, self.state.view);
             d.set_view(visible, cursor, selection, empty);
             if relayout {
                 t.refresh(cx);
@@ -1105,30 +1116,38 @@ impl VolwatchTile {
         t
     }
 
-    /// `:autosize` / `tile::autosize_columns`: fit every column to its
-    /// head and widest cell at the window's rem, or `reset` to the prepared
-    /// widths. Nothing to measure before a board has landed refuses.
+    /// `:autosize` / `tile::autosize_columns`: fit the shown view's
+    /// columns to their head and widest cell at the window's rem, or
+    /// `reset` that view to its prepared widths. Another view's widths
+    /// are untouched. Nothing to measure before a board has landed
+    /// refuses.
     pub(crate) fn autosize_columns(
         &mut self,
         reset: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), &'static str> {
-        let fitted = if reset {
-            FittedWidths::new()
+        let fit = if reset {
+            None
         } else {
             // Before a board lands the rows are blank placeholders.
             if self.board.is_none() {
                 return Err(NOTHING_TO_FIT);
             }
             let metrics = FitMetrics::xsmall_mono(window.rem_size());
-            self.table
-                .read(cx)
-                .delegate()
-                .fit_columns(&metrics)
-                .ok_or(NOTHING_TO_FIT)?
+            Some(
+                self.table
+                    .read(cx)
+                    .delegate()
+                    .fit_columns(&metrics)
+                    .ok_or(NOTHING_TO_FIT)?,
+            )
         };
+        let prefix = sized_key(self.state.view, "");
         self.table.update(cx, |t, cx| {
+            let mut fitted = t.delegate().fitted.clone();
+            fitted.retain(|k, _| !k.starts_with(&prefix));
+            fitted.extend(fit.into_iter().flatten());
             t.delegate_mut().set_fitted(fitted);
             t.refresh(cx);
         });

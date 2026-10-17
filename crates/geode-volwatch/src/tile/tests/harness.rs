@@ -439,6 +439,14 @@ impl Harness {
         })
     }
 
+    /// Column `id`'s width as the table paints it, in real px.
+    pub(super) fn column_width(&self, vcx: &gpui::VisualTestContext, id: &str) -> f32 {
+        let ix = self.column_index(vcx, id);
+        self.tile.read_with(vcx, |t, cx| {
+            f32::from(t.table.read(cx).delegate().width(ix))
+        })
+    }
+
     /// Press `l` or `h` until the cursor column is `id`.
     pub(super) fn move_to_column(&self, vcx: &mut gpui::VisualTestContext, id: &str) {
         let want = self.column_index(vcx, id);

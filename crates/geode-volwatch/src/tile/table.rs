@@ -8,7 +8,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use geode_chart::spark::{Spark, SparkPaint, sizes};
-use geode_shell::colfit::{CURSOR_BORDER_PX, FitMetrics, FittedWidths};
+use geode_shell::colfit::{CURSOR_BORDER_PX, FitMetrics, FittedWidths, widths_from_record};
 use geode_shell::fonts;
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
@@ -27,7 +27,7 @@ use gpui_component::table::{
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme};
 
 use crate::core::model::{BAR_ALPHA, Glyph, Prepared, SORT_MARK_DESIGN_PX, glyph_width};
-use crate::core::views::{Column, ColumnKind};
+use crate::core::views::{Column, ColumnKind, View};
 
 /// Whether alternate rows are striped. Every geode grid paints unstriped;
 /// the ring choice follows this, so flipping it keeps sparkline rings true.
@@ -192,9 +192,33 @@ fn sort_mark_px(m: &FitMetrics) -> f32 {
     scale::design_px(SORT_MARK_DESIGN_PX, px(m.rem_px))
 }
 
+/// A width belongs to a column in a view: the same measure paints as a
+/// chip in Changes and a heat tint in Term, and its head differs, so a
+/// width fitted in one view is wrong in another. The session key is
+/// `<view>:<column id>`.
+pub(crate) fn sized_key(view: View, id: &str) -> String {
+    format!("{}:{}", view.key(), id)
+}
+
+/// The sized widths a restored record holds, keyed by view. A record
+/// written before widths were keyed by view holds bare column ids: an
+/// autosize in Skew once wrote `skew-3M-level = 30`, which Levels then
+/// applied to a column whose head needs 60 px. An entry without a known
+/// view prefix is dropped, as every malformed session value is.
+pub(crate) fn restored_widths(record: Option<&toml::Table>) -> FittedWidths {
+    let mut fitted = widths_from_record(record);
+    fitted.retain(|k, _| {
+        k.split_once(':')
+            .is_some_and(|(v, _)| View::ALL.iter().any(|view| view.key() == v))
+    });
+    fitted
+}
+
 pub(crate) struct GridDelegate {
     pub(crate) prepared: Rc<Prepared>,
     pub(crate) columns: Rc<Vec<Column>>,
+    /// The view the columns belong to: the key space of `fitted`.
+    view: View,
     /// Shown rows in painted order, as indices into `prepared.rows`.
     pub(crate) visible: Vec<usize>,
     /// (shown row, column) under the cursor.
@@ -206,8 +230,9 @@ pub(crate) struct GridDelegate {
     rem_px: f32,
     /// Column widths at the window's rem, from the prepared design px.
     widths: Vec<Pixels>,
-    /// Widths `:autosize` fitted, by column id, in pixels at the rem they
-    /// were measured at; each replaces its column's prepared width.
+    /// Widths `:autosize` fitted and a header drag set, keyed
+    /// [`sized_key`] (`view:id`), in pixels at the rem they were set at;
+    /// each replaces its column's prepared width in that view.
     pub(crate) fitted: FittedWidths,
     /// One run of equal `Column::group`s per entry; empty when no column
     /// is grouped.
@@ -223,6 +248,7 @@ impl GridDelegate {
         GridDelegate {
             prepared: Rc::default(),
             columns: Rc::default(),
+            view: View::Changes,
             visible: Vec::new(),
             cursor: None,
             selection: None,
@@ -238,20 +264,24 @@ impl GridDelegate {
         }
     }
 
-    /// Install a prepared model over `columns`. `true` when the column
-    /// layout (widths, heads, groups or the sort mark) changed: the table
-    /// re-reads columns only on a refresh.
+    /// Install a prepared model over `columns`, the columns of `view`.
+    /// `true` when the column layout (widths, heads, groups, the view's
+    /// sized widths or the sort mark) changed: the table re-reads columns
+    /// only on a refresh.
     pub(crate) fn set_model(
         &mut self,
         prepared: Rc<Prepared>,
         columns: Rc<Vec<Column>>,
         sorted: Option<(usize, bool)>,
+        view: View,
     ) -> bool {
         let relayout = !Rc::ptr_eq(&self.columns, &columns)
             || self.prepared.widths != prepared.widths
-            || self.sorted != sorted;
+            || self.sorted != sorted
+            || self.view != view;
         self.prepared = prepared;
         self.sorted = sorted;
+        self.view = view;
         if !Rc::ptr_eq(&self.columns, &columns) {
             self.groups = groups(&columns);
             self.heads = columns
@@ -298,8 +328,8 @@ impl GridDelegate {
     }
 
     /// A prepared width is design px of content, so the table's chrome
-    /// is added here where real px are known; a fitted width already
-    /// holds it (`FitMetrics::xsmall_mono` pads) and is taken as is.
+    /// is added here where real px are known; a sized width (fitted or
+    /// dragged, in this view) already holds it and is taken as is.
     fn relayout(&mut self) {
         let rem = px(self.rem_px);
         let chrome = chrome_px();
@@ -308,25 +338,44 @@ impl GridDelegate {
             .widths
             .iter()
             .enumerate()
-            .map(
-                |(ix, w)| match self.ids.get(ix).and_then(|id| self.fitted.get(&**id)) {
-                    Some(fitted) => px(*fitted),
+            .map(|(ix, w)| {
+                match self
+                    .ids
+                    .get(ix)
+                    .and_then(|id| self.fitted.get(&sized_key(self.view, id)))
+                {
+                    Some(sized) => px(*sized),
                     None => px(scale::design_px(*w, rem) + chrome),
-                },
-            )
+                }
+            })
             .collect();
     }
 
-    /// Install fitted widths (empty returns to the prepared ones).
+    /// Record the widths a header drag reports (every column's, in table
+    /// order) for this view. Only a column whose width differs from what
+    /// `column()` gives is recorded, so an untouched column keeps
+    /// following the rem and its fit.
+    pub(crate) fn record_widths(&mut self, widths: &[Pixels]) {
+        for (ix, w) in widths.iter().enumerate().take(self.ids.len()) {
+            if *w != self.width(ix) {
+                self.fitted
+                    .insert(sized_key(self.view, &self.ids[ix]), f32::from(*w));
+            }
+        }
+        self.relayout();
+    }
+
+    /// Install the sized widths (none for a view returns it to the
+    /// prepared ones).
     pub(crate) fn set_fitted(&mut self, fitted: FittedWidths) {
         self.fitted = fitted;
         self.relayout();
     }
 
     /// Each column fitted to its head (with the sort mark when sortable)
-    /// and widest cell in the real mono metrics: a glyph column keeps the
-    /// glyph's own minimum around its text. `None` while there are no
-    /// rows to measure.
+    /// and widest cell in the real mono metrics, keyed for this view: a
+    /// glyph column keeps the glyph's own minimum around its text. `None`
+    /// while there are no rows to measure.
     pub(crate) fn fit_columns(&self, m: &FitMetrics) -> Option<FittedWidths> {
         if self.prepared.rows.is_empty() || self.columns.is_empty() {
             return None;
@@ -354,7 +403,7 @@ impl GridDelegate {
                         m.text_px(&c.head)
                     };
                     let width = m.fit(std::iter::once(head).chain(cells));
-                    (c.id.clone(), width)
+                    (sized_key(self.view, &c.id), width)
                 })
                 .collect(),
         )
@@ -362,7 +411,7 @@ impl GridDelegate {
 
     /// Column `ix`'s width. `prepare` measures every column of the view,
     /// so a missing width is only the instant before the first model.
-    fn width(&self, ix: usize) -> Pixels {
+    pub(crate) fn width(&self, ix: usize) -> Pixels {
         self.widths.get(ix).copied().unwrap_or_default()
     }
 
@@ -430,7 +479,7 @@ impl TableDelegate for GridDelegate {
         };
         let mut col = TableColumn::new(SharedString::from(c.id.clone()), c.head.clone())
             .width(self.width(col_ix))
-            .resizable(false)
+            .resizable(true)
             .movable(false);
         if c.kind == ColumnKind::Underlying {
             col = col.fixed_left();
@@ -698,7 +747,7 @@ impl TableDelegate for GridDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::views::{View, columns, order_tenors};
+    use crate::core::views::{columns, order_tenors};
 
     #[test]
     fn groups_are_runs_of_equal_column_groups() {
@@ -718,7 +767,7 @@ mod tests {
             rows: Vec::new(),
             widths: vec![30.0; cols.len()],
         });
-        d.set_model(prepared, cols, None);
+        d.set_model(prepared, cols, None, View::Levels);
         d.set_rem(12.0);
         // The chrome as the registry states it, not as `chrome_px` says.
         let pad = Size::XSmall.table_cell_padding();
@@ -726,7 +775,10 @@ mod tests {
         assert_eq!(chrome, 10.0, "4 px each side and a 2 px cursor border");
         assert_eq!(f32::from(d.width(0)), 30.0 + chrome);
         // A fitted width already holds the chrome: it is taken as is.
-        d.set_fitted(FittedWidths::from([("underlying".to_string(), 50.0)]));
+        d.set_fitted(FittedWidths::from([(
+            sized_key(View::Levels, "underlying"),
+            50.0,
+        )]));
         assert_eq!(f32::from(d.width(0)), 50.0);
         assert_eq!(f32::from(d.width(1)), 30.0 + chrome);
     }

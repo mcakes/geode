@@ -833,7 +833,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   runs armed on the shared stale timer) has no test.
 - In a narrow tile the band's three blocks clip rather than wrap (display
   check below).
-- Fitted widths do not rescale with the rem until the next `:autosize`.
+- Sized widths (fitted or dragged) do not rescale with the rem until the
+  next `:autosize` or drag.
 - Request: a same-members reorder of the list requeries (comparing sets
   would not); the refresh timer re-arms after a resubmit that had nothing
   to ask and wakes for nothing.

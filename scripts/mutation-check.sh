@@ -42402,6 +42402,36 @@ run_mutation "volwatch: widths add the table's fixed chrome" \
   geode-volwatch \
   relayout_adds_the_tables_fixed_chrome_to_every_width
 
+# A width belongs to a column in a view: keyed by the bare id, a fit in
+# Changes lands on Levels' column of the same id, whose head is wider.
+run_mutation "volwatch: widths are keyed by view" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '    format!("{}:{}", view.key(), id)' \
+  '    id.to_string()' \
+  geode-volwatch \
+  autosize_sizes_only_the_current_view_and_a_view_switch_keeps_it
+
+# A header drag records only the column whose width changed; recording
+# none loses the drag, recording all pins every column at its current px.
+run_mutation "volwatch: a header drag records the dragged column" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '            if *w != self.width(ix) {' \
+  '            if false {' \
+  geode-volwatch \
+  a_header_drag_records_the_width_for_this_view_and_persists
+
+# A session record keyed by bare column ids (written before widths were
+# keyed by view) is dropped, not applied to every view.
+run_mutation "volwatch: a record without view prefixes is ignored" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '    fitted.retain(|k, _| {
+        k.split_once('"'"':'"'"')
+            .is_some_and(|(v, _)| View::ALL.iter().any(|view| view.key() == v))
+    });' \
+  '    fitted.retain(|_, _| true);' \
+  geode-volwatch \
+  a_part_4_record_without_view_prefixes_is_ignored
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

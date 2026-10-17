@@ -8,10 +8,12 @@ use geode_core::link::{CursorScope, underlying_scope};
 use geode_core::volboard::{Lookback, Measure};
 use geode_shell::module::FindEvent;
 use gpui_component::ActiveTheme as _;
+use gpui_component::table::TableEvent;
 
 use super::harness::*;
 use crate::content::VolwatchSettings;
 use crate::core::views::View;
+use crate::tile::table::sized_key;
 
 #[gpui::test]
 fn every_key_reaches_its_action(cx: &mut gpui::TestAppContext) {
@@ -200,7 +202,7 @@ fn a_column_narrower_than_its_number_keeps_its_text_inside_the_cell(cx: &mut gpu
     h.tile.update(&mut vcx, |t, cx| {
         t.table.update(cx, |tb, cx| {
             let mut sized = tb.delegate().fitted.clone();
-            sized.insert("atfm-1M-level".to_string(), 20.0);
+            sized.insert(sized_key(View::Changes, "atfm-1M-level"), 20.0);
             tb.delegate_mut().set_fitted(sized);
             tb.refresh(cx);
         });
@@ -623,15 +625,17 @@ fn autosize_refuses_before_a_board_lands(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The delegate's sized widths, keyed `view:id`.
+fn widths(h: &Harness, vcx: &gpui::VisualTestContext) -> geode_shell::colfit::FittedWidths {
+    h.tile
+        .read_with(vcx, |t, cx| t.table.read(cx).delegate().fitted.clone())
+}
+
 #[gpui::test]
 fn autosize_fits_resets_and_persists(cx: &mut gpui::TestAppContext) {
     use geode_shell::colfit::SESSION_KEY;
     let (h, mut vcx) = landed(cx);
     let tile = h.content.clone();
-    let widths = |h: &Harness, vcx: &gpui::VisualTestContext| {
-        h.tile
-            .read_with(vcx, |t, cx| t.table.read(cx).delegate().fitted.clone())
-    };
     assert!(widths(&h, &vcx).is_empty());
     assert_eq!(
         vcx.update(|window, cx| tile.autosize_columns(false, window, cx)),
@@ -659,7 +663,10 @@ fn fitted_widths_restore_from_the_session_record(cx: &mut gpui::TestAppContext) 
     use geode_shell::colfit::SESSION_KEY;
     let mut record = restored(LIST);
     let mut widths = toml::Table::new();
-    widths.insert("atfm-3M-level".into(), toml::Value::Float(123.0));
+    widths.insert(
+        sized_key(View::Changes, "atfm-3M-level"),
+        toml::Value::Float(123.0),
+    );
     record.insert(SESSION_KEY.into(), toml::Value::Table(widths));
     let (h, vcx) = open_with(cx, one_list(), Some(record), VolwatchSettings::default());
     let got = h.tile.read_with(&vcx, |t, cx| {
@@ -667,8 +674,84 @@ fn fitted_widths_restore_from_the_session_record(cx: &mut gpui::TestAppContext) 
             .read(cx)
             .delegate()
             .fitted
-            .get("atfm-3M-level")
+            .get(&sized_key(View::Changes, "atfm-3M-level"))
             .copied()
     });
     assert_eq!(got, Some(123.0));
+}
+
+#[gpui::test]
+fn autosize_sizes_only_the_current_view_and_a_view_switch_keeps_it(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    let tile = h.content.clone();
+    assert_eq!(
+        vcx.update(|window, cx| tile.autosize_columns(false, window, cx)),
+        Ok(())
+    );
+    let sized = widths(&h, &vcx);
+    assert!(sized.keys().all(|k| k.starts_with("changes:")), "{sized:?}");
+    let w = sized[&sized_key(View::Changes, "atfm-1M-level")];
+    h.press(&mut vcx, "2");
+    assert_eq!(h.view(&vcx), View::Levels);
+    // Levels' atfm-1M-level is unfitted: the prepared width, not Changes'.
+    assert_ne!(h.column_width(&vcx, "atfm-1M-level"), w);
+    h.press(&mut vcx, "1");
+    assert_eq!(
+        h.column_width(&vcx, "atfm-1M-level"),
+        w,
+        "the fit survives a round trip"
+    );
+    // Reset clears only this view.
+    h.press(&mut vcx, "2");
+    assert_eq!(
+        vcx.update(|window, cx| tile.autosize_columns(false, window, cx)),
+        Ok(())
+    );
+    assert_eq!(
+        vcx.update(|window, cx| tile.autosize_columns(true, window, cx)),
+        Ok(())
+    );
+    assert!(widths(&h, &vcx).keys().all(|k| k.starts_with("changes:")));
+}
+
+#[gpui::test]
+fn a_header_drag_records_the_width_for_this_view_and_persists(cx: &mut gpui::TestAppContext) {
+    use geode_shell::colfit::SESSION_KEY;
+    let (h, mut vcx) = landed(cx);
+    let col = h.column_index(&vcx, "atfm-1M-level");
+    // The production route: the table's own event, as a drag emits it.
+    let mut all: Vec<gpui::Pixels> = h.tile.read_with(&vcx, |t, cx| {
+        (0..t.columns.len())
+            .map(|i| t.table.read(cx).delegate().width(i))
+            .collect()
+    });
+    all[col] = gpui::px(97.0);
+    h.tile.update(&mut vcx, |t, cx| {
+        t.table.update(cx, |_, cx| {
+            cx.emit(TableEvent::ColumnWidthsChanged(all.clone()));
+        });
+    });
+    vcx.run_until_parked();
+    assert_eq!(h.column_width(&vcx, "atfm-1M-level"), 97.0);
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    let t = saved[SESSION_KEY].as_table().unwrap();
+    assert_eq!(
+        t[&sized_key(View::Changes, "atfm-1M-level")].as_float(),
+        Some(97.0)
+    );
+    assert_eq!(t.len(), 1, "an undragged column is not recorded");
+}
+
+#[gpui::test]
+fn a_part_4_record_without_view_prefixes_is_ignored(cx: &mut gpui::TestAppContext) {
+    use geode_shell::colfit::SESSION_KEY;
+    let mut record = restored(LIST);
+    let mut widths = toml::Table::new();
+    widths.insert("atfm-3M-level".into(), toml::Value::Float(30.0));
+    record.insert(SESSION_KEY.into(), toml::Value::Table(widths));
+    let (h, vcx) = open_with(cx, one_list(), Some(record), VolwatchSettings::default());
+    assert!(
+        h.tile
+            .read_with(&vcx, |t, cx| t.table.read(cx).delegate().fitted.is_empty())
+    );
 }
