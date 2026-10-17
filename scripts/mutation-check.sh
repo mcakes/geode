@@ -42508,6 +42508,77 @@ run_mutation "volwatch: the band paints at the grid's text size" \
   geode-volwatch \
   group_heads_and_the_band_paint_at_the_grids_text_size
 
+# A chip is a fixed-width glyph in a right-aligned cell: at the registry's
+# 20 px floor a drag cut the leading sign, so `-1.1` read as a red `1.1`.
+run_mutation "volwatch: a column's minimum is its glyph's width plus the chrome" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '            .min_width(self.min_width(col_ix))
+' \
+  '' \
+  geode-volwatch \
+  a_glyph_column_is_never_narrower_than_its_glyph_and_the_chrome
+
+# A sized width restored from a narrower record lays out at the minimum;
+# taken as is it paints the cut chip the drag was stopped from making.
+run_mutation "volwatch: a sized width stops at the column's minimum" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '                px(width.max(min))' \
+  '                px(width)' \
+  geode-volwatch \
+  a_glyph_column_is_never_narrower_than_its_glyph_and_the_chrome
+
+# A text cell fills its cell and shrinks with it, so a cut ends in a
+# trailing ellipsis; a child that keeps its own width (as the glyphs do)
+# is pushed out on the leading side by the right-aligned cell and shows a
+# plausible wrong number. The ellipsis itself has no headless guard
+# (docs/open-items.md); this pins the containment half.
+run_mutation "volwatch: a cut cell's text fills the cell" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '            Glyph::None => div()
+                .w_full()
+                .min_w_0()
+                .text_color(tone)' \
+  '            Glyph::None => div()
+                .flex_none()
+                .text_color(tone)' \
+  geode-volwatch \
+  a_column_narrower_than_its_number_keeps_its_text_inside_the_cell
+
+# The band's name carries the row's staleness as the grid's Underlying
+# cell does; without it a muted name sits over a lit band.
+run_mutation "volwatch: the band's name carries the row's staleness" \
+  crates/geode-volwatch/src/core/model.rs \
+  '        stale: is_stale(row, i.now, i.stale_after),' \
+  '        stale: false,' \
+  geode-volwatch \
+  a_stale_rows_band_keeps_its_cells_tone
+
+# The grid's verdict ORs the clock with a fired wake-up and a failed
+# board; the band read the clock alone and stayed lit under a muted name.
+run_mutation "volwatch: the band's name follows the grid's stale verdict" \
+  crates/geode-volwatch/src/tile/data.rs \
+  '                band.stale |= self.prepared.rows.get(i).is_some_and(|p| p.stale);
+' \
+  '' \
+  geode-volwatch \
+  a_stale_after_reload_rearms_the_row_wake_ups
+
+# Each step key hints on its own; zipped, unbinding one hid both.
+run_mutation "volwatch: the strip hints each bound step key on its own" \
+  crates/geode-volwatch/src/tile/chrome.rs \
+  '        self.strip_keys = (
+            tips::chord_for(&self.chords, VIEW_NEXT_ACTION),
+            tips::chord_for(&self.chords, VIEW_PREV_ACTION),
+        );' \
+  '        self.strip_keys = match tips::chord_for(&self.chords, VIEW_NEXT_ACTION)
+            .zip(tips::chord_for(&self.chords, VIEW_PREV_ACTION))
+        {
+            Some((n, p)) => (Some(n), Some(p)),
+            None => (None, None),
+        };' \
+  geode-volwatch \
+  the_strip_names_each_bound_step_key_on_its_own
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
