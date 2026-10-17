@@ -42490,6 +42490,24 @@ run_mutation "volwatch: a stale row's band keeps its tone" \
   geode-volwatch \
   a_stale_rows_band_keeps_its_cells_tone
 
+# shift+tab is the inverse of tab: off by one it skips a view in one
+# direction and lands on the same view in the other.
+run_mutation "volwatch: shift+tab steps back and wraps" \
+  crates/geode-volwatch/src/core/views.rs \
+  '        Self::ALL[(usize::from(self.digit()) + n - 2) % n]' \
+  '        Self::ALL[(usize::from(self.digit()) + n - 1) % n]' \
+  geode-volwatch \
+  prev_is_the_inverse_of_next_and_wraps
+
+# The band reads as part of the grid above it: at the chrome's smaller
+# size it reads as a footer instead.
+run_mutation "volwatch: the band paints at the grid's text size" \
+  crates/geode-volwatch/src/tile/band.rs \
+  '        .text_size(rems(TABLE_TEXT_REM))' \
+  '        .text_xs()' \
+  geode-volwatch \
+  group_heads_and_the_band_paint_at_the_grids_text_size
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
