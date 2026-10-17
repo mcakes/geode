@@ -105,6 +105,11 @@ fn a_stale_after_reload_rearms_the_row_wake_ups(cx: &mut gpui::TestAppContext) {
     b.rows[0].as_of = Some(Utc::now() - chrono::Duration::seconds(120));
     h.answer_board(&mut vcx, tag, b);
     assert!(h.tile.read_with(&vcx, |t, _| !t.prepared.rows[0].stale));
+    h.press(&mut vcx, "enter"); // the band opens on DAX
+    assert!(
+        h.tile
+            .read_with(&vcx, |t, _| t.state.band && !t.band_model.stale)
+    );
     // 120 s old: fresh under 600 s, stale 60 s from now under 180 s.
     vcx.update(|_, cx| {
         h.factory.set_settings(
@@ -141,7 +146,40 @@ fn a_stale_after_reload_rearms_the_row_wake_ups(cx: &mut gpui::TestAppContext) {
             muted[1..].iter().all(|m| !m),
             "every other cell paints as it is: {muted:?}"
         );
+        assert!(
+            t.band_model.stale,
+            "the band's name follows the grid's Underlying cell"
+        );
     });
+}
+
+#[gpui::test]
+fn the_strip_names_each_bound_step_key_on_its_own(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    assert!(vcx.debug_bounds("volwatch-strip-next-7").is_some());
+    assert!(vcx.debug_bounds("volwatch-strip-prev-7").is_some());
+    // Unbind the step back, as a user keymap removal would: the forward
+    // hint stays.
+    vcx.update(|_, cx| {
+        let kept: Vec<_> = cx
+            .global::<geode_shell::tips::Chords>()
+            .0
+            .iter()
+            .filter(|b| b.action.0 != crate::tile::VIEW_PREV_ACTION)
+            .cloned()
+            .collect();
+        cx.set_global(geode_shell::tips::Chords(std::sync::Arc::new(kept)));
+    });
+    vcx.run_until_parked();
+    h.draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds("volwatch-strip-next-7").is_some(),
+        "the bound key still hints"
+    );
+    assert!(
+        vcx.debug_bounds("volwatch-strip-prev-7").is_none(),
+        "the unbound key hints nothing"
+    );
 }
 
 #[gpui::test]

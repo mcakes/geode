@@ -215,7 +215,8 @@ fn context(band: &BandModel, theme: &Theme) -> Div {
         }))
 }
 
-/// The band under the grid, above the footer: the member's name, then the
+/// The band under the grid, above the footer: the member's name (in the
+/// muted tone when the row is stale, as its Underlying cell is), then the
 /// surface, the sparks and the context side by side.
 pub(crate) fn render(band: &BandModel, paints: &Paints, theme: &Theme, tile: u64) -> Div {
     v_flex()
@@ -234,7 +235,11 @@ pub(crate) fn render(band: &BandModel, paints: &Paints, theme: &Theme, tile: u64
         .debug_selector(move || format!("volwatch-band-{tile}"))
         .child(
             div()
-                .text_color(theme.foreground)
+                .text_color(if band.stale {
+                    theme.muted_foreground
+                } else {
+                    theme.foreground
+                })
                 .debug_selector(move || format!("volwatch-band-name-{tile}"))
                 .child(band.name.clone()),
         )

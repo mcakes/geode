@@ -18,9 +18,10 @@ use gpui_component::{ActiveTheme, Root, Theme, ThemeMode};
 /// the exported widths so the example stays true to them.
 const COLUMN_PX: f32 = widths::bar(30.0);
 
-/// Host constants the vol watchlist will own: the chip and heat ceilings
-/// and the bar's fill alpha (the mockup's values).
-const CHIP_CEILING: f32 = 0.55;
+/// Host constants the vol watchlist owns: the chip and heat ceilings and
+/// the bar's fill alpha, as it ships them (a chip is a tint under a
+/// colored number, not a fill).
+const CHIP_CEILING: f32 = 0.25;
 const HEAT_CEILING: f32 = 0.4;
 const BAR_ALPHA: f32 = 0.75;
 

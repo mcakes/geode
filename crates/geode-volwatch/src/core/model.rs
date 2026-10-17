@@ -701,6 +701,10 @@ pub struct BandModel {
     /// `(Varswap 3M, 18.1)`, `(vs ATM, +2.2)`, `(Book vega, -312k)`,
     /// `(Source, surface 10:58 · realized 10:57 · varswap 10:58)`.
     pub context: Vec<(SharedString, SharedString)>,
+    /// The row is older than `stale_after`: the name paints in the muted
+    /// tone, as the grid's Underlying cell does; every number keeps its
+    /// tone.
+    pub stale: bool,
 }
 
 /// A rank as `<label> 91 of 251`.
@@ -759,8 +763,8 @@ fn source_line(row: &Row, clock: &Clock) -> String {
 /// the surface lacks shows dashes), heat-tinted over one range for the
 /// whole table; the three one-year sparks and their captions; the context
 /// pairs. A row the surface lacks is all dashes. A stale row's band keeps
-/// its tone and colors like its grid row; the name and the header's
-/// surface run carry the staleness.
+/// its tone and colors like its grid row; its name (`stale`) and the
+/// header's surface run carry the staleness.
 pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock) -> BandModel {
     let read = |m: &Measure| -> Option<&Cell> {
         if row.present {
@@ -934,6 +938,7 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
         sparks,
         captions,
         context,
+        stale: is_stale(row, i.now, i.stale_after),
     }
 }
 
@@ -1748,7 +1753,8 @@ mod tests {
     }
 
     /// The band follows the grid: a stale row's surface, skew, delta chip
-    /// and sparks keep their tone; only a lookback mismatch mutes the chip.
+    /// and sparks keep their tone and its name carries the staleness; only
+    /// a lookback mismatch mutes the chip.
     #[test]
     fn a_stale_rows_band_keeps_its_cells_tone() {
         let listed = tenors();
@@ -1766,6 +1772,16 @@ mod tests {
         assert!(!three_m[6].muted, "the delta chip keeps its color");
         let spark = b.sparks[0].as_ref().expect("the ATFM spark");
         assert!(!spark.muted, "a spark keeps its tone");
+        assert!(
+            b.stale,
+            "the name carries the staleness, as the grid's does"
+        );
+        i.stale_after = Duration::from_secs(3 * 86_400);
+        assert!(
+            !prepare_band(&i, &rows[0], &listed, &clock_utc()).stale,
+            "fresh under a wider threshold"
+        );
+        i.stale_after = Duration::from_secs(60);
         i.shown = Lookback::W1;
         let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
         assert!(

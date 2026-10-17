@@ -834,9 +834,21 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - In a narrow tile the band's three blocks clip rather than wrap (display
   check below); the band's right edge clips in a tile narrower than about
   1020 design px.
-- A five-character vol level (`100.0`) clips in the band's heat slot.
+- A five-character vol level (`100.0`) clips on its trailing side in the
+  band's `VOL_WIDTH` heat slot: the heat painter lays its text from the
+  left inset, so the leading digit stays and the last one is cut.
 - `fit_columns` does not share a group label across its run and the
   group cell has no ellipsis, so a fitted group head can cut.
+- The trailing ellipsis on a cut cell or head has no headless guard:
+  gpui records `debug_bounds` for divs only, never a text run, so the
+  keys test pins only containment (a text child that kept its own width
+  would be pushed out on the leading side; one that fills and shrinks
+  stays inside, with or without the ellipsis) and the ellipsis itself is
+  evidenced by the screenshot `scratchpad/shots/t7-t7-narrow2.png`.
+- The day `stale_after` default is wall-clock: on a Monday morning
+  Friday's 17:00 publish is 64 h old at 09:00, so every name is muted,
+  and likewise after a holiday. A business-day-aware threshold is a
+  follow-up; `[volwatch] stale_after` is the workaround.
 - Sized widths (fitted or dragged) do not rescale with the rem until the
   next `:autosize` or drag.
 - Request: a same-members reorder of the list requeries (comparing sets

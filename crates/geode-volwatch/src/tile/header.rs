@@ -447,16 +447,27 @@ fn render_strip(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTil
                 .overflow_hidden()
                 .children(views),
         )
-        .when_some(tile.strip_keys.as_ref(), |el, (next, prev)| {
-            el.child(
-                h_flex()
-                    .flex_none()
-                    .gap_2()
-                    .text_color(muted)
-                    .child(kbd::hint(next, "next view"))
-                    .child(kbd::hint(prev, "previous")),
-            )
-        })
+        // Each step key hints on its own: unbinding one keeps the other.
+        .child(
+            h_flex()
+                .flex_none()
+                .gap_2()
+                .text_color(muted)
+                .when_some(tile.strip_keys.0.as_deref(), |el, next| {
+                    el.child(
+                        div()
+                            .debug_selector(move || format!("volwatch-strip-next-{id}"))
+                            .child(kbd::hint(next, "next view")),
+                    )
+                })
+                .when_some(tile.strip_keys.1.as_deref(), |el, prev| {
+                    el.child(
+                        div()
+                            .debug_selector(move || format!("volwatch-strip-prev-{id}"))
+                            .child(kbd::hint(prev, "previous view")),
+                    )
+                }),
+        )
 }
 
 /// The first reported notice on the left, the cursor readout on the

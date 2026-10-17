@@ -21,3 +21,6 @@ payout_currency = "underlyings.currency"
 [volwatch]
 refresh = "60s"
 vega = { view = "by_underlying", column = "vega01_usd" }
+# A row older than this shows its name muted (grid and band); a surface
+# publishes once a day, so the default is a day.
+# stale_after = "24h"

@@ -314,8 +314,10 @@ impl VolwatchTile {
     pub(crate) fn rebuild_chrome(&mut self, cx: &App) {
         self.rebuild_header();
         self.refresh_actions();
-        self.strip_keys = tips::chord_for(&self.chords, VIEW_NEXT_ACTION)
-            .zip(tips::chord_for(&self.chords, VIEW_PREV_ACTION));
+        self.strip_keys = (
+            tips::chord_for(&self.chords, VIEW_NEXT_ACTION),
+            tips::chord_for(&self.chords, VIEW_PREV_ACTION),
+        );
         let snapshot = snapshot(cx);
         let list = self.state.list.as_deref();
         let state = list.and_then(|n| snapshot.lists.get(n));

@@ -232,22 +232,26 @@ impl VolwatchTile {
     /// The band for the cursor row while it is open; empty while closed or
     /// with no row under the cursor. Read through the board's ask, so a
     /// band just opened shows dashes until the grown ask's board lands.
+    /// Its name takes the grid row's stale verdict, which ORs the clock
+    /// with a fired wake-up and a failed board; the clock alone would
+    /// leave the band's name lit under a muted Underlying cell.
     pub(crate) fn rebuild_band(&mut self) {
         let row = self
             .grid
             .cursor()
-            .and_then(|at| self.grid.visible().get(at))
-            .map(|&i| self.grid.row(i));
+            .and_then(|at| self.grid.visible().get(at).copied());
         self.band_model = match row.filter(|_| self.state.band) {
-            Some(row) => {
+            Some(i) => {
                 let empty = Ask::default();
                 let asked = self.board_ask.as_ref().unwrap_or(&empty);
-                prepare_band(
+                let mut band = prepare_band(
                     &self.inputs(asked),
-                    row,
+                    self.grid.row(i),
                     &self.ordered_tenors(),
                     &self.clock,
-                )
+                );
+                band.stale |= self.prepared.rows.get(i).is_some_and(|p| p.stale);
+                band
             }
             None => BandModel::default(),
         };

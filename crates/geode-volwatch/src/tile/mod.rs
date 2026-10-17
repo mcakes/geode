@@ -207,9 +207,9 @@ pub struct VolwatchTile {
     /// time for the stale wake-ups.
     pub(crate) times: Vec<TimeRun>,
     times_at: Vec<Option<DateTime<Utc>>>,
-    /// The view strip's step keys (next, previous), resolved when the
-    /// chords change.
-    strip_keys: Option<(Vec<Keystroke>, Vec<Keystroke>)>,
+    /// The view strip's step keys (next, previous), each resolved on its
+    /// own when the chords change: an unbound one hides only its hint.
+    strip_keys: (Option<Vec<Keystroke>>, Option<Vec<Keystroke>>),
     /// The display clock the readout's dates and the times' labels read.
     clock: Clock,
     /// The body's empty state; `None` while a list is shown.
@@ -375,7 +375,7 @@ impl VolwatchTile {
             band_model: BandModel::default(),
             times: Vec::new(),
             times_at: Vec::new(),
-            strip_keys: None,
+            strip_keys: (None, None),
             clock: app_clock(cx),
             empty: None,
             find_entry: None,

@@ -244,6 +244,10 @@ pub(crate) struct GridDelegate {
     rem_px: f32,
     /// Column widths at the window's rem, from the prepared design px.
     widths: Vec<Pixels>,
+    /// Each column's narrowest width, parallel to `widths`: its glyph's own
+    /// minimum with no text plus the chrome, or the registry's floor for
+    /// a text column. A drag and a sized width stop here.
+    min_widths: Vec<Pixels>,
     /// Widths `:autosize` fitted and a header drag set, keyed
     /// [`sized_key`] (`view:id`), in pixels at the rem they were set at;
     /// each replaces its column's prepared width in that view.
@@ -270,6 +274,7 @@ impl GridDelegate {
             paints,
             rem_px: scale::DESIGN_REM,
             widths: Vec::new(),
+            min_widths: Vec::new(),
             fitted: FittedWidths::new(),
             groups: Vec::new(),
             heads: Vec::new(),
@@ -343,24 +348,38 @@ impl GridDelegate {
 
     /// A prepared width is design px of content, so the table's chrome
     /// is added here where real px are known; a sized width (fitted or
-    /// dragged, in this view) already holds it and is taken as is.
+    /// dragged, in this view) already holds it and is taken as is, down
+    /// to the column's minimum. The minimum is the glyph's own width with
+    /// no text ([`glyph_width`] at zero) plus the chrome, or the registry's
+    /// default floor for a text column: a chip is a fixed-width glyph in a
+    /// right-aligned cell, so a column narrower than it cut the leading
+    /// sign and `-1.1` read as a red `1.1` in every row, and the width
+    /// persisted in the session.
     fn relayout(&mut self) {
         let rem = px(self.rem_px);
         let chrome = chrome_px();
+        let floor = f32::from(TableColumn::default().min_width);
+        self.min_widths = self
+            .columns
+            .iter()
+            .map(|c| px((scale::design_px(glyph_width(&c.kind, 0.0), rem) + chrome).max(floor)))
+            .collect();
         self.widths = self
             .prepared
             .widths
             .iter()
             .enumerate()
             .map(|(ix, w)| {
-                match self
+                let min = self.min_widths.get(ix).map_or(floor, |m| f32::from(*m));
+                let width = match self
                     .ids
                     .get(ix)
                     .and_then(|id| self.fitted.get(&sized_key(self.view, id)))
                 {
-                    Some(sized) => px(*sized),
-                    None => px(scale::design_px(*w, rem) + chrome),
-                }
+                    Some(sized) => *sized,
+                    None => scale::design_px(*w, rem) + chrome,
+                };
+                px(width.max(min))
             })
             .collect();
     }
@@ -429,6 +448,15 @@ impl GridDelegate {
         self.widths.get(ix).copied().unwrap_or_default()
     }
 
+    /// Column `ix`'s narrowest width: the table clamps a header drag to
+    /// it, and `relayout` a sized width.
+    pub(crate) fn min_width(&self, ix: usize) -> Pixels {
+        self.min_widths
+            .get(ix)
+            .copied()
+            .unwrap_or(TableColumn::default().min_width)
+    }
+
     /// The fill under row `row_ix`, for a sparkline's ring.
     fn ring(&self, row_ix: usize) -> Hsla {
         let p = &self.paints;
@@ -493,6 +521,7 @@ impl TableDelegate for GridDelegate {
         };
         let mut col = TableColumn::new(SharedString::from(c.id.clone()), c.head.clone())
             .width(self.width(col_ix))
+            .min_width(self.min_width(col_ix))
             .resizable(true)
             .movable(false);
         if c.kind == ColumnKind::Underlying {
@@ -606,7 +635,6 @@ impl TableDelegate for GridDelegate {
                     .min_w_0()
                     .when(!underlying, |el| el.text_right())
                     .truncate()
-                    .text_ellipsis()
                     .debug_selector(move || format!("volwatch-th-text-{text_id}"))
                     .children(self.heads.get(col_ix).cloned()),
             )
@@ -689,17 +717,17 @@ impl TableDelegate for GridDelegate {
         let cell_id = cell.id.clone();
         let underlying = column.kind == ColumnKind::Underlying;
         let content: AnyElement = match &cell.glyph {
-            // Plain text fills the cell and aligns as text, so a column
-            // narrower than its number cuts the trailing side into an
-            // ellipsis; a flex-justified child would overflow on the
-            // leading side and show a plausible wrong number.
+            // Plain text fills the cell, shrinks with it and aligns as
+            // text, so a column narrower than its number cuts the trailing
+            // side into an ellipsis; a child that kept its own width would
+            // be pushed out on the leading side by the right-aligned cell
+            // and show a plausible wrong number.
             Glyph::None => div()
                 .w_full()
                 .min_w_0()
                 .text_color(tone)
                 .when(!underlying, |el| el.text_right())
                 .truncate()
-                .text_ellipsis()
                 .debug_selector(move || format!("{id}-text"))
                 .child(text)
                 .into_any_element(),
@@ -807,5 +835,62 @@ mod tests {
         )]));
         assert_eq!(f32::from(d.width(0)), 50.0);
         assert_eq!(f32::from(d.width(1)), 30.0 + chrome);
+    }
+
+    /// A chip is a fixed-width glyph in a right-aligned cell: narrower
+    /// than it, the cell cut the leading sign. The minimum is the glyph's
+    /// own width plus the chrome on the rem scale; a text column keeps the
+    /// registry's floor.
+    #[gpui::test]
+    fn a_glyph_column_is_never_narrower_than_its_glyph_and_the_chrome(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let mut d = GridDelegate::new(Paints::from_theme(&Theme::default()));
+        let cols = Rc::new(columns(View::Changes, &order_tenors(None)));
+        let chip = cols
+            .iter()
+            .position(|c| matches!(c.kind, ColumnKind::Change { .. }))
+            .expect("Changes has a chip column");
+        let text = cols
+            .iter()
+            .position(|c| c.kind == ColumnKind::Underlying)
+            .expect("the Underlying column");
+        let chip_id = cols[chip].id.clone();
+        let prepared = Rc::new(Prepared {
+            rows: Vec::new(),
+            widths: vec![60.0; cols.len()],
+        });
+        d.set_model(prepared, cols, None, View::Changes);
+        d.set_rem(12.0);
+        let chrome = chrome_px();
+        let floor = TableColumn::default().min_width;
+        let chip_min = geode_widgets::cell::widths::chip(0.0) + chrome;
+        assert_eq!(
+            cx.read(|cx| d.column(chip, cx).min_width),
+            px(chip_min),
+            "the chip's own width plus the chrome"
+        );
+        assert_eq!(
+            cx.read(|cx| d.column(text, cx).min_width),
+            floor,
+            "a text column keeps the registry's floor"
+        );
+        // A restored (or dragged) width below the minimum lays out at it.
+        d.set_fitted(FittedWidths::from([(
+            sized_key(View::Changes, &chip_id),
+            20.0,
+        )]));
+        assert_eq!(
+            d.width(chip),
+            px(chip_min),
+            "a sized width stops at the minimum"
+        );
+        assert_eq!(cx.read(|cx| d.column(chip, cx).width), px(chip_min));
+        // The minimum follows the rem: the glyph scales, the chrome is fixed.
+        d.set_rem(24.0);
+        assert_eq!(
+            cx.read(|cx| d.column(chip, cx).min_width),
+            px(2.0 * geode_widgets::cell::widths::chip(0.0) + chrome)
+        );
     }
 }

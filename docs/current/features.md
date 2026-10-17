@@ -3703,7 +3703,8 @@ cannot enumerate leaves the conventional tenors `1M 2M 3M 6M 1Y 18M 2Y 3Y`.
 
 **Views.** Five, on `1`–`5`, `tab` stepping forward and `shift+tab`
 back, both wrapping, and the view strip under the header (a press
-switches; both step keys are named at its right):
+switches; each bound step key is named at its right, `next view` and
+`previous view`):
 
 1. **Changes**: the 1M forward's change in percent, ATFM vol and its Δ at
    `1M 3M 6M 1Y 2Y`, the 3M 25Δ skew and the 1Y−1M slope with their Δ, a
@@ -3732,10 +3733,12 @@ reference name is in the readout. Column heads group under a shared header
 row (`ATFM 3M` over `vol` and `Δ`) painted at the heads' text size, so a view
 with groups is no larger than one without; Levels has no groups. A column's
 width is its glyph's minimum plus the widest text, head included, the sort
-mark on a sortable head and the table's cell padding; a group label wider
-than its columns widens them, the deficit shared across the run; a column
-narrower than its text ends it in an ellipsis, never cutting a number's
-leading digits. Widths belong to a view: `:autosize` (the shell's verb,
+mark on a sortable head and the table's cell padding; at prepared widths a
+group label wider than its columns widens them, the deficit shared across
+the run (`:autosize` does not share it); a column narrower than its text
+ends it in an ellipsis, never cutting a number's leading digits, and no
+column, dragged or restored, goes narrower than its glyph's own width plus
+the padding, so a chip keeps its sign. Widths belong to a view: `:autosize` (the shell's verb,
 also in the palette) fits the shown view's columns in the real mono
 metrics and refuses before a board lands, `:autosize reset` returns that
 view to its prepared widths, and a header drag sets one column's width in
@@ -3769,8 +3772,8 @@ chart tokens. A Δ from a board asked under another lookback than the one
 shown paints muted (after `d`, until the new board lands); a rank over
 fewer than 60 observations paints muted with its count in the readout; a
 row older than `[volwatch] stale_after` (a day) shows its name in the
-muted tone and its numbers as they are, since they are still that row's
-numbers; the header's surface time turns stale with the oldest row. `p` drops
+muted tone, in the grid and in the band, and its numbers as they are,
+since they are still that row's numbers; the header's surface time turns stale with the oldest row. `p` drops
 every tint, slider and bar and keeps the numbers, without a requery. A
 theme change rebuilds the paints.
 
@@ -3869,6 +3872,8 @@ Known limitations:
   `DataTable`'s hover fill.
 - Sized widths (fitted or dragged) do not rescale with the rem until the
   next `:autosize` or drag.
+- `stale_after` is wall-clock: under the day default every name is muted
+  on a Monday morning and after a holiday, until the next publish.
 - In a narrow tile the band's three blocks clip rather than wrap.
 - A same-members reorder of the list requeries.
 - A spark column cuts its tail from the board's sparkline by proportion of
