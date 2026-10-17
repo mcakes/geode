@@ -217,7 +217,8 @@ pub(crate) fn sized_key(view: View, id: &str) -> String {
 /// written before widths were keyed by view holds bare column ids: an
 /// autosize in Skew once wrote `skew-3M-level = 30`, which Levels then
 /// applied to a column whose head needs 60 px. An entry without a known
-/// view prefix is dropped, as every malformed session value is.
+/// view prefix is dropped silently: it is an old record, not a malformed
+/// value, so it earns no notice.
 pub(crate) fn restored_widths(record: Option<&toml::Table>) -> FittedWidths {
     let mut fitted = widths_from_record(record);
     fitted.retain(|k, _| {

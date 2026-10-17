@@ -1318,9 +1318,10 @@ core that decides the numbers and a painter that draws them from the host's
 preformatted text and a paint struct of theme colors the host builds. The
 change chip paints the signed number in its sign's color on a tint of that
 color, alpha by the move's size over the column's largest finite move, up to a
-ceiling the host sets (the vol watchlist's is a quarter: the number carries the
-sign, the tint only says how big). The percentile slider fills a track to the rank with quartile ticks; its
-marker takes the warning color at or beyond 0.10 and 0.90. The bar from zero
+ceiling the host sets (the vol watchlist's is a quarter: the number carries
+the sign, the tint only says how big). The percentile slider fills a track to
+the rank with quartile ticks; its marker takes the warning color at or beyond
+0.10 and 0.90. The bar from zero
 grows from a center axis on the value's sign side, its length the value's
 share of the column's largest magnitude. The heat tint puts one hue behind the
 number, alpha by its position in the grid's range, and no tint at all when the
@@ -3756,9 +3757,11 @@ chip names the column and the direction (`vol 3M ↑`, `|Δ 3M| ↓`), and
 
 **Glyphs.** The cells paint through the shared
 [cell glyphs](#cell-glyphs): a Δ is a delta chip scaled to the column's
-largest magnitude, a rank a percent slider, IV−RV and the varswap spread
-zero bars, Levels and Term levels a heat tint on one range across the
-grid, the spark column a 30-day sparkline with an end dot. Every host
+largest magnitude, its tint capped at a quarter so the chip stays a tint
+under a colored number rather than a filled pill, a rank a percent
+slider, IV−RV and the varswap spread zero bars, Levels and Term levels a
+heat tint on one range across the grid, the spark column a 30-day
+sparkline with an end dot. Every host
 passes the sign of the displayed text, so a change shown as `0.0` takes no
 fill, and the rank at display precision, so a rank shown as `90` takes the
 slider's warning tone. Sign colors are the theme's bullish and bearish
@@ -3766,7 +3769,7 @@ chart tokens. A Δ from a board asked under another lookback than the one
 shown paints muted (after `d`, until the new board lands); a rank over
 fewer than 60 observations paints muted with its count in the readout; a
 row older than `[volwatch] stale_after` (a day) shows its name in the
-stale tone and its numbers as they are, since they are still that row's
+muted tone and its numbers as they are, since they are still that row's
 numbers; the header's surface time turns stale with the oldest row. `p` drops
 every tint, slider and bar and keeps the numbers, without a requery. A
 theme change rebuilds the paints.
@@ -3830,7 +3833,7 @@ board); a restored open band puts its measures into the first ask.
 **Failures.** A refused submission is a warning (`the data service is busy
 — shift+r retries`) and nothing retries by itself, except that a refused
 timer refresh asks again at the next interval. A surface failure keeps the
-last board, marks every present row stale (its name in the stale tone, its
+last board, marks every present row stale (its name in the muted tone, its
 numbers as they are) and stands
 `surface: <error> — shift+r retries`; the next good board clears it. A
 failed realized or varswap dataset blanks its columns and shows its danger

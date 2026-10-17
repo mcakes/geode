@@ -832,7 +832,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The realized and varswap header times' stale path (per-dataset time
   runs armed on the shared stale timer) has no test.
 - In a narrow tile the band's three blocks clip rather than wrap (display
-  check below).
+  check below); the band's right edge clips in a tile narrower than about
+  1020 design px.
+- A five-character vol level (`100.0`) clips in the band's heat slot.
+- `fit_columns` does not share a group label across its run and the
+  group cell has no ellipsis, so a fitted group head can cut.
 - Sized widths (fitted or dragged) do not rescale with the rem until the
   next `:autosize` or drag.
 - Request: a same-members reorder of the list requeries (comparing sets
@@ -875,14 +879,17 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 - The view strip and its lit chip, and the lit lookback chip, on light and
   dark themes.
-- The change chip's tint ceiling against its text.
+- The change chip's tint ceiling (0.25, a tint under a colored number)
+  against its text awaits the owner's eye.
 - The percent slider's marker in the warning tone.
 - The heat tint in Term (and Levels).
 - The band at narrow tile widths, and whether docking under the grid
-  reads as "in place".
+  reads as "in place"; the band at a narrow tile and a real pointer drag
+  on the fixed-left Underlying column are owed a real-window check.
 - The sparkline end dot and its ring over the cursor row's tint, and the
   hovered row's ring.
-- The stale tone per row, and the header's dataset times turning stale.
+- A stale row's muted name over its still-colored numbers, and the
+  header's dataset times turning stale.
 - The `not in surface` rows at the foot, muted.
 - `Vol: Split` in the tile picker and the palette.
 - The demo's `EU50X` row in `europe_risk` (`--demo 1000`).

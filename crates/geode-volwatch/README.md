@@ -32,7 +32,8 @@ scales and ranges). Behaviour and limits are in the features guide's
     change names the board's note for its dataset), `sort_value`,
     `prepare_band` (`BandModel`) and `header` (`HeaderModel`).
   - `session.rs`: the session table (list, view, lookback, sort, cursor,
-    band); an unreadable key drops alone with a notice.
+    band, the sized widths keyed `view:id`); an unreadable key drops alone
+    with a notice.
   - `commands.rs`: the `:sort` grammar and its completions; an
     unsortable column refuses as `s` does.
 - `tile/`: the hosted entity.
@@ -49,11 +50,10 @@ scales and ranges). Behaviour and limits are in the features guide's
     the cursor border, `chrome_px`) to a prepared width and truncates a
     cut cell or head with a trailing ellipsis, and sizes a group head to
     the heads' text (the table leaves it to the delegate). Sized widths (an
-    `:autosize`
-    fit, a header drag through `record_widths`) are keyed `view:id`
-    (`sized_key`): a column id is shared across views whose heads and
-    glyphs differ. `restored_widths` drops a session entry without a view
-    prefix.
+    `:autosize` fit, a header drag through `record_widths`) are keyed
+    `view:id` (`sized_key`): a column id is shared across views whose heads
+    and glyphs differ. `restored_widths` drops a session entry without a
+    view prefix silently.
   - `header.rs`: the header, the view strip, the band's slot and the
     footer.
   - `band.rs`: the inspection band's paint, docked between the grid and
