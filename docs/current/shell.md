@@ -26,7 +26,10 @@ them through `services(cx)`, `workspaces(cx)`, `workspace(cx)` and
 `config(cx)` and writes them only inside `with_services`, `with_workspaces`
 and `with_workspace`, so a second window sees the same config revision and
 the same tile allocator as the first. Render reads through the `&App`
-accessors and never updates the app entity.
+accessors and never updates the app entity: the session-restore inputs
+(`restored_tiles`, `restored_pages`) are taken into the view at construction,
+and the rosters hand out shared factory handles, so creating an occupant or a
+page holds no borrow of the services while `create` runs.
 
 State with a narrower owner stays outside `ShellView`:
 

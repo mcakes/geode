@@ -3016,8 +3016,8 @@ run_mutation "tips: chord_for ignores a none shadow" \
 # startup keymap for the rest of the session.
 run_mutation "tips: a keymap reload republishes Chords" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                self.services.keymap.bindings().to_vec(),' \
-  '                Vec::new(),' \
+  '            let bindings = self.services(cx).keymap.bindings().to_vec();' \
+  '            let bindings = Vec::new();' \
   geode-shell \
   a_keymap_reload_refreshes_the_chords_global
 
@@ -3249,8 +3249,8 @@ run_mutation "field chords: an unbind swallows the chord rather than falling thr
 
 run_mutation "field chords: the last matching layer wins, so a user unbind shadows the builtin" \
   crates/geode-shell/src/shell/input.rs \
-  '        self.services.keymap.bindings().iter().rfind(|binding| {' \
-  '        self.services.keymap.bindings().iter().find(|binding| {' \
+  '        self.services(cx).keymap.bindings().iter().rfind(|binding| {' \
+  '        self.services(cx).keymap.bindings().iter().find(|binding| {' \
   geode-shell \
   an_unbound_chord_typed_into_the_field_is_swallowed
 
@@ -3373,7 +3373,7 @@ run_mutation "object stack: a color refresh leaves the baseline behind" \
 
 run_mutation "object stack: a reload never refreshes covered color choices" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '            super::objectdialog::render::refresh_color_choices(self);' \
+  '            super::objectdialog::render::refresh_color_choices(self, cx);' \
   '            {}' \
   geode-shell \
   a_color_created_in_a_stacked_dialog_is_offered_to_the_covered_column
@@ -3738,14 +3738,13 @@ run_mutation "hosting: a restored record only ever matches a factory of its own 
   crates/geode-shell/src/shell/occupants.rs \
   '            let matched = restored
                 .as_ref()
-                .and_then(|r| self.services.roster.factory(&r.kind));' \
+                .and_then(|r| self.services(cx).roster.factory(&r.kind));' \
   '            let matched = restored.as_ref().and_then(|_| {
-                self.services
-                    .roster
+                self.services(cx).roster
                     .kinds()
                     .first()
                     .copied()
-                    .and_then(|k| self.services.roster.factory(k))
+                    .and_then(|k| self.services(cx).roster.factory(k))
             });' \
   geode-shell \
   a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_survives
@@ -3803,12 +3802,12 @@ run_mutation "page: tiles beneath an open page are hidden" \
   '        if self.page_open() {
             return;
         }
-        let ws = self.services.workspaces.active();
+        let ws = self.workspace(cx);
         out.extend(ws.tree().visible_tiles());' \
   '        if false {
             return;
         }
-        let ws = self.services.workspaces.active();
+        let ws = self.workspace(cx);
         out.extend(ws.tree().visible_tiles());' \
   geode-shell \
   tiles_beneath_are_hidden_on_open_and_shown_on_close
@@ -3959,7 +3958,7 @@ run_mutation "tile chrome: the unfocused tile pads the pixel its thinner ring gi
 
 run_mutation "commandline: switching workspaces cancels an open line (I1, final review)" \
   crates/geode-shell/src/shell/render.rs \
-  '            self.services.workspaces.active().focused_tile() != Some(line.tile)' \
+  '            self.workspace(cx).focused_tile() != Some(line.tile)' \
   '            false' \
   geode-shell \
   switching_workspaces_cancels_an_open_command_line
@@ -4043,60 +4042,8 @@ run_mutation "frame: restart_required clears once sources/datasets match the bas
 
 run_mutation "reload: ConfigReloaded is queued before ANY frame.update, including groupings_changed's and scopes_changed's (I2, residual fix)" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '            if views_changed {
-                cx.emit(ShellEvent::ConfigReloaded);
-            }
-            if app_changed {
-                cx.emit(ShellEvent::AppSettingsReloaded);
-            }
-            if groupings_changed {
-                let slots = rebuild_slots(&self.services.config);
-                // The same inputs decide what an ad hoc chain may name. A
-                // chain left naming a removed column would be refused by
-                // every following tile'"'"'s query with no way to see why.
-                let groupable = groupable_names(&self.services.config);
-                self.frame.update(cx, |f, cx| {
-                    let replaced = f.replace_slots(slots);
-                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
-                    for column in &dropped {
-                        tracing::warn!(
-                            target: "geode::config",
-                            "ad hoc grouping dropped: '"'"'{column}'"'"' is no longer a groupable column"
-                        );
-                    }
-                    if replaced || !dropped.is_empty() {
-                        cx.notify();
-                    }
-                });
-            }
-' \
-  '            if app_changed {
-                cx.emit(ShellEvent::AppSettingsReloaded);
-            }
-            if groupings_changed {
-                let slots = rebuild_slots(&self.services.config);
-                // The same inputs decide what an ad hoc chain may name. A
-                // chain left naming a removed column would be refused by
-                // every following tile'"'"'s query with no way to see why.
-                let groupable = groupable_names(&self.services.config);
-                self.frame.update(cx, |f, cx| {
-                    let replaced = f.replace_slots(slots);
-                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
-                    for column in &dropped {
-                        tracing::warn!(
-                            target: "geode::config",
-                            "ad hoc grouping dropped: '"'"'{column}'"'"' is no longer a groupable column"
-                        );
-                    }
-                    if replaced || !dropped.is_empty() {
-                        cx.notify();
-                    }
-                });
-            }
-            if views_changed {
-                cx.emit(ShellEvent::ConfigReloaded);
-            }
-' \
+  $'            if views_changed {\n                cx.emit(ShellEvent::ConfigReloaded);\n            }\n            if app_changed {\n                cx.emit(ShellEvent::AppSettingsReloaded);\n            }\n            if groupings_changed {\n                let slots = rebuild_slots(&self.services(cx).config);\n                // The same inputs decide what an ad hoc chain may name. A\n                // chain left naming a removed column would be refused by\n                // every following tile\'s query with no way to see why.\n                let groupable = groupable_names(&self.services(cx).config);\n                self.frame.update(cx, |f, cx| {\n                    let replaced = f.replace_slots(slots);\n                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));\n                    for column in &dropped {\n                        tracing::warn!(\n                            target: "geode::config",\n                            "ad hoc grouping dropped: \'{column}\' is no longer a groupable column"\n                        );\n                    }\n                    if replaced || !dropped.is_empty() {\n                        cx.notify();\n                    }\n                });\n            }\n' \
+  $'            if app_changed {\n                cx.emit(ShellEvent::AppSettingsReloaded);\n            }\n            if groupings_changed {\n                let slots = rebuild_slots(&self.services(cx).config);\n                // The same inputs decide what an ad hoc chain may name. A\n                // chain left naming a removed column would be refused by\n                // every following tile\'s query with no way to see why.\n                let groupable = groupable_names(&self.services(cx).config);\n                self.frame.update(cx, |f, cx| {\n                    let replaced = f.replace_slots(slots);\n                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));\n                    for column in &dropped {\n                        tracing::warn!(\n                            target: "geode::config",\n                            "ad hoc grouping dropped: \'{column}\' is no longer a groupable column"\n                        );\n                    }\n                    if replaced || !dropped.is_empty() {\n                        cx.notify();\n                    }\n                });\n            }\n            if views_changed {\n                cx.emit(ShellEvent::ConfigReloaded);\n            }\n' \
   geode-shell \
   a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded_before_the_frame_notifies
 
@@ -5747,7 +5694,7 @@ run_mutation "toolbar: the chip body click never opens the picker" \
 
 run_mutation "as-of: the stripe is painted only when historical" \
   crates/geode-shell/src/shell/render.rs \
-  '        let is_historical = matches!(self.target_frame().read(cx).as_of(), AsOf::At(_));' \
+  '        let is_historical = matches!(self.target_frame(cx).read(cx).as_of(), AsOf::At(_));' \
   '        let is_historical = true;' \
   geode-shell typing_eod_and_enter_commits_eod_t_minus_one
 
@@ -6205,14 +6152,14 @@ run_mutation "objectdialog: validation runs against the merged doc, not the draf
 # so equal eventual values cannot hide the wrong application path.
 run_mutation "objectdialog: an edit round-trips through disk instead of merging in memory" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    let mut docs = shell.services.config.all_docs();
+  '    let mut docs = shell.services(cx).config.all_docs();
     for ((doc, object), value) in edits {
         docs = docs_with_object(docs, user_dir, doc, object, value.clone());
     }
     let config = Config::from_docs(docs);' \
   '    let _ = edits;
     let config = Config::load(&geode_core::config::ConfigSources {
-        builtin: shell.services.builtin.clone(),
+        builtin: shell.services(cx).builtin.clone(),
         desk: None,
         user: Some(user_dir.to_path_buf()),
     });' \
@@ -6326,8 +6273,8 @@ run_mutation "objectdialog: a user doc created in memory carries no config_versi
 # written value, so the test checks the announcement itself.
 run_mutation "objectdialog: a fork says nothing" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let fork =
-        super::apply::would_fork(shell, domain).then(|| super::apply::fork_notice(shell, domain));' \
+  '    let fork = super::apply::would_fork(shell, domain, cx)
+        .then(|| super::apply::fork_notice(shell, domain, cx));' \
   '    let fork: Option<String> = None;' \
   geode-shell \
   a_definitional_change_to_a_desk_view_forks_and_says_so
@@ -6376,13 +6323,13 @@ run_mutation "objectdialog: a warning blocks the batch as if it were an error" \
 # queue_batch tail.
 run_mutation "objectdialog: a removal bypasses the batch again" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    let Some(user_dir) = shell.user_dir.clone() else {
+  '    let Some(user_dir) = shell.user_dir(cx) else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
     queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);
     None
 }' \
-  '    let Some(user_dir) = shell.user_dir.clone() else {
+  '    let Some(user_dir) = shell.user_dir(cx) else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
     cx.background_executor()
@@ -7297,7 +7244,7 @@ run_mutation "diagnostics: MIN-5 — set_catalog keeps a dataset missing from a 
 run_mutation "hot_reload: MIN-9 — set_levels guarded behind LogServices too" \
   crates/geode-shell/src/shell/hot_reload.rs \
   '                if new_levels != self.diagnostics.read(cx).levels {
-                    if let Some(log) = &self.services.log
+                    if let Some(log) = &self.services(cx).log
                         && let Err(e) = log.control.set(&new_levels)
                     {
                         tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
@@ -7308,7 +7255,7 @@ run_mutation "hot_reload: MIN-9 — set_levels guarded behind LogServices too" \
                         }
                     });
                 }' \
-  '                if let Some(log) = &self.services.log
+  '                if let Some(log) = &self.services(cx).log
                     && new_levels != self.diagnostics.read(cx).levels
                 {
                     if let Err(e) = log.control.set(&new_levels) {
@@ -7537,14 +7484,14 @@ run_mutation "shell page: focus_home is the shell root even over a page" \
 
 run_mutation "shell page: a restored table never reaches create" \
   crates/geode-shell/src/shell/page.rs \
-  '            let restored = self.services.restored_pages.remove(kind);' \
+  '            let restored = self.restored_pages.remove(kind);' \
   '            let restored: Option<toml::Table> = None;' \
   geode-shell \
   a_restored_pages_table_reaches_the_factory_create
 
 run_mutation "shell page: a replaced page loses its state" \
   crates/geode-shell/src/shell/page.rs \
-  '            self.services.restored_pages.insert(
+  '            self.restored_pages.insert(
                 page.occupant.kind.to_string(),
                 page.occupant.content.serialize(cx),
             );' \
@@ -8406,7 +8353,7 @@ run_mutation "diagnostics levels: a longer name inherits from a shorter prefix" 
 
 run_mutation "shell: open_module never finds an existing occupant, so a second call re-opens a second tile" \
   crates/geode-shell/src/shell/add_tile.rs \
-  '        let ws = self.services.workspaces.active();
+  '        let ws = self.workspace(cx);
         let found: Option<(TileId, Option<DockSide>)> = ws
             .tree()
             .tiles()
@@ -8551,12 +8498,12 @@ run_mutation "crash file: the log ring's records are dropped from write_crash_fi
 
 run_mutation "shell: dispatch never records the dispatched action into the tail" \
   crates/geode-shell/src/shell/input.rs \
-  '        self.services
+  '        self.services(cx)
             .action_tail
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .record(id);' \
-  '        let _ = id;' \
+  '        let _ = (id, cx);' \
   geode-shell dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order
 
 run_mutation "trim_log_files keeps one file more than asked (keep + 1, not keep)" \
@@ -9045,7 +8992,7 @@ run_mutation "fullscreen segment: hidden docks do not count" \
 
 run_mutation "fullscreen segment: paints while a tile is fullscreen" \
   crates/geode-shell/src/shell/render.rs \
-  '        let fullscreen_hidden = self.services.workspaces.active().fullscreen_hidden();' \
+  '        let fullscreen_hidden = self.workspace(cx).fullscreen_hidden();' \
   '        let fullscreen_hidden: Option<usize> = None;' \
   geode-shell the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores
 
@@ -9448,12 +9395,12 @@ run_mutation "objectdialog: a shell with nowhere to write still marks the draft 
   crates/geode-shell/src/shell/objectdialog/apply.rs \
   '    // Do not advance the baseline until there is somewhere to persist the edit. An
     // unqueued change must remain dirty for a later attempt.
-    let Some(user_dir) = shell.user_dir.clone() else {
+    let Some(user_dir) = shell.user_dir(cx) else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };' \
   '    // Do not advance the baseline until there is somewhere to persist the edit. An
     // unqueued change must remain dirty for a later attempt.
-    let user_dir = match shell.user_dir.clone() {
+    let user_dir = match shell.user_dir(cx) {
         Some(dir) => dir,
         None => {
             if let Some(draft) = shell
@@ -9474,11 +9421,11 @@ run_mutation "objectdialog: a shell with nowhere to write still marks the draft 
 # from the identical queue call in `commit_create`.
 run_mutation "objectdialog: a removal waits on the write debounce" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    let Some(user_dir) = shell.user_dir.clone() else {
+  '    let Some(user_dir) = shell.user_dir(cx) else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
     queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);' \
-  '    let Some(user_dir) = shell.user_dir.clone() else {
+  '    let Some(user_dir) = shell.user_dir(cx) else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
     queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, origin, cx);' \
@@ -9752,16 +9699,20 @@ run_mutation "focus: the drag grab re-arms the focus restore" \
 # and mod+double-click is two drag arms.
 run_mutation "fullscreen: mod+double-click on a tile toggles fullscreen" \
   crates/geode-shell/src/shell/drag.rs \
-  '        if event.click_count != 2 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
-  '        if event.click_count != 3 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
+  '        if event.click_count != 2 || !mod_alias_held(self.services(cx).mod_alias, &event.modifiers)
+        {' \
+  '        if event.click_count != 3 || !mod_alias_held(self.services(cx).mod_alias, &event.modifiers)
+        {' \
   geode-shell mod_double_click_toggles_fullscreen_on_that_tile
 
 # The mod key is the gate. Mutated out, a plain double-click on any tile
 # throws it fullscreen.
 run_mutation "fullscreen: a plain double-click does not fullscreen" \
   crates/geode-shell/src/shell/drag.rs \
-  '        if event.click_count != 2 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {' \
-  '        if event.click_count != 2 {' \
+  '        if event.click_count != 2 || !mod_alias_held(self.services(cx).mod_alias, &event.modifiers)
+        {' \
+  '        if event.click_count != 2
+        {' \
   geode-shell a_plain_double_click_does_not_fullscreen
 
 # A docked tile is refused through `focus_main_tile`'s own membership
@@ -9769,11 +9720,11 @@ run_mutation "fullscreen: a plain double-click does not fullscreen" \
 # MAIN tile is focused — a different tile from the one under the mouse.
 run_mutation "fullscreen: a docked tile is refused, not redirected to the main tree" \
   crates/geode-shell/src/shell/drag.rs \
-  '        if !self.services.workspaces.active_mut().focus_main_tile(id) {
+  '        if !self.with_workspace(cx, |ws| ws.focus_main_tile(id)) {
             return false;
         }
         self.session_dirty = true;' \
-  '        let _ = self.services.workspaces.active_mut().focus_main_tile(id);
+  '        let _ = self.with_workspace(cx, |ws| ws.focus_main_tile(id));
         self.session_dirty = true;' \
   geode-shell mod_double_click_on_a_docked_tile_changes_nothing
 
@@ -9890,7 +9841,7 @@ run_mutation "diagnostics: the startup seeding carries build_keymap's own diagno
 # fork the desk's view under a verb that never said so.
 run_mutation "objectdialog: n refuses an existing name" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    if domain.name_taken(&shell.services.config, &name) {' \
+  '    if domain.name_taken(&shell.services(cx).config, &name) {' \
   '    if false {' \
   geode-shell \
   n_refuses_a_name_any_layer_already_holds
@@ -10190,12 +10141,12 @@ run_mutation "objectdialog: an edit-stage click takes the keyboard off the filte
 run_mutation "objectdialog: a step moves the cursor off screen and leaves it there" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '        Some(Step::Changed) => {
-            maybe_refresh_available(shell);
-            revalidate(shell);
+            maybe_refresh_available(shell, cx);
+            revalidate(shell, cx);
             scroll_to_cursor(shell);' \
   '        Some(Step::Changed) => {
-            maybe_refresh_available(shell);
-            revalidate(shell);' \
+            maybe_refresh_available(shell, cx);
+            revalidate(shell, cx);' \
   geode-shell \
   space_scrolls_the_next_row_into_view
 
@@ -10402,10 +10353,10 @@ run_mutation "objectdialog: the chain field paints as the filter row" \
 # this fold from the same operation in `maybe_refresh_available`.
 run_mutation "objectdialog: the edit stage ignores the pending batch" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let folded = apply::config_with_pending(shell);
-    if let Some(state) = shell.object_dialog.as_mut() {' \
-  '    let folded = apply::config_with_pending(shell).filter(|_| false);
-    if let Some(state) = shell.object_dialog.as_mut() {' \
+  '    let folded = apply::config_with_pending(shell, cx);
+    let live = &shell.services(cx).config;' \
+  '    let folded = apply::config_with_pending(shell, cx).filter(|_| false);
+    let live = &shell.services(cx).config;' \
   geode-shell \
   jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick
 
@@ -10711,10 +10662,10 @@ run_mutation "choice: a row click completes that row" \
 # showing columns from the previous dataset.
 run_mutation "choice: a picked dataset rebuilds the available catalogue" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '                        maybe_refresh_available(shell);
-                        revalidate(shell);
+  '                        maybe_refresh_available(shell, cx);
+                        revalidate(shell, cx);
                         commit_change(shell, cx);' \
-  '                        revalidate(shell);
+  '                        revalidate(shell, cx);
                         commit_change(shell, cx);' \
   geode-shell a_picked_dataset_rebuilds_the_available_catalogue
 
@@ -11956,7 +11907,7 @@ run_mutation "objectdialog: an unmatched diagnostic stays on the header" \
 # `removal_edits`, independently of the fork path that inserts it.
 run_mutation "objectdialog: revert removes the overrides entry" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        for okey in super::override_keys_of(&shell.services.config, domain.doc(), &name) {' \
+  '        for okey in super::override_keys_of(&shell.services(cx).config, domain.doc(), &name) {' \
   '        for okey in Vec::<String>::new() {' \
   geode-shell \
   a_fork_records_an_override_entry_and_revert_removes_it
@@ -11968,7 +11919,7 @@ run_mutation "objectdialog: revert removes the overrides entry" \
 run_mutation "objectdialog: the fork's own entry wins over its stale twin" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
   '        let key = super::override_key(domain.doc(), &draft.name);
-        for stale in super::stale_override_keys(&shell.services.config) {
+        for stale in super::stale_override_keys(&shell.services(cx).config) {
             edits.insert((super::OVERRIDES_DOC, stale), None);
         }
         edits.insert(
@@ -11980,7 +11931,7 @@ run_mutation "objectdialog: the fork's own entry wins over its stale twin" \
             (super::OVERRIDES_DOC, key),
             Some(super::override_entry(layer, &draft.name, &value)),
         );
-        for stale in super::stale_override_keys(&shell.services.config) {
+        for stale in super::stale_override_keys(&shell.services(cx).config) {
             edits.insert((super::OVERRIDES_DOC, stale), None);
         }' \
   geode-shell \
@@ -13393,10 +13344,10 @@ run_mutation "view: an unknown key inside a dataset-presentation column table wa
 # window and gives promoted columns stale baselines.
 run_mutation "objectdialog: the refreshed catalogue reads the pending config" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let folded = apply::config_with_pending(shell);
-    let config = folded.as_ref().unwrap_or(&shell.services.config);' \
+  '    let folded = apply::config_with_pending(shell, cx);
+    let config = folded.as_ref().unwrap_or(&shell.services(cx).config);' \
   '    let folded: Option<geode_core::config::Config> = None;
-    let config = folded.as_ref().unwrap_or(&shell.services.config);' \
+    let config = folded.as_ref().unwrap_or(&shell.services(cx).config);' \
   geode-shell \
   a_dataset_switch_inside_the_debounce_seeds_the_catalogue_from_the_pending_write
 
@@ -13487,7 +13438,7 @@ run_mutation "fragments: a hot reload rebuilds the keymap without the modules' f
   crates/geode-shell/src/shell/hot_reload.rs \
   '        let layered = fragments::splice(
             new_config.layered_docs("keymap"),
-            &self.services.keymap_fragments,
+            &self.services(cx).keymap_fragments,
         );' \
   '        let layered = fragments::splice(new_config.layered_docs("keymap"), &[]);' \
   geode-shell a_reload_keeps_the_modules_fragment_bindings
@@ -13509,7 +13460,12 @@ run_mutation "fragments: refuses || in a fragment predicate" \
 
 run_mutation "fragments: a reload re-states the fragment diagnostics in the config section" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '        config_section.extend(self.services.keymap_fragment_diagnostics.iter().cloned());
+  '        config_section.extend(
+            self.services(cx)
+                .keymap_fragment_diagnostics
+                .iter()
+                .cloned(),
+        );
 ' \
   '' \
   geode-shell a_dropped_fragment_bindings_diagnostic_survives_a_reload
@@ -13533,7 +13489,7 @@ run_mutation "insert: the insert branch runs even while a shell surface holds fo
 # module's escape and enter bindings can win.
 run_mutation "insert: single-keystroke bindings resolve against workspace alone, not the tile's stack" \
   crates/geode-shell/src/shell/input.rs \
-  '                self.single_keystroke_binding(ks, &insert_contexts(&stack, ks))' \
+  '                self.single_keystroke_binding(ks, &insert_contexts(&stack, ks), cx)' \
   '                self.single_keystroke_binding(ks, &[KeyContext::new("workspace")])' \
   geode-shell typed_keys_reach_a_tiles_focused_input_in_insert_mode
 
@@ -17846,36 +17802,26 @@ run_mutation "stack pull: each action names its own direction" \
 run_mutation "stack split: takes the add direction" \
   crates/geode-shell/src/shell/input.rs \
   '            let orientation = self.add_direction.resolve(None, rect);
-            if self
-                .services
-                .workspaces
-                .active_mut()
-                .split_stack(orientation)' \
+            if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {' \
   '            let _ = rect;
             let orientation = crate::tiling::Orientation::Horizontal;
-            if self
-                .services
-                .workspaces
-                .active_mut()
-                .split_stack(orientation)' \
+            if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {' \
   geode-shell \
   mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
 
 run_mutation "stack split: dirties the session" \
   crates/geode-shell/src/shell/input.rs \
-  '                .split_stack(orientation)
-            {
+  '            if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {
                 self.session_dirty = true;' \
-  '                .split_stack(orientation)
-            {' \
+  '            if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {' \
   geode-shell \
   mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
 
 run_mutation "stack pull: dirties the session" \
   crates/geode-shell/src/shell/input.rs \
-  '            if self.services.workspaces.active_mut().pull(dir) {
+  '            if self.with_workspace(cx, |ws| ws.pull(dir)) {
                 self.session_dirty = true;' \
-  '            if self.services.workspaces.active_mut().pull(dir) {' \
+  '            if self.with_workspace(cx, |ws| ws.pull(dir)) {' \
   geode-shell \
   mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
 
@@ -18399,8 +18345,8 @@ run_mutation "grouping dialog: saving over a user-owned slot asks" \
 # forked a moment ago is the user's, and a save over it asks.
 run_mutation "grouping dialog: a save target ignores the pending batch" \
   crates/geode-shell/src/shell/objectdialog/grouping_list.rs \
-  '    let target = match super::apply::config_with_pending(shell) {' \
-  '    let target = match super::apply::config_with_pending(shell).filter(|_| false) {' \
+  '    let target = match super::apply::config_with_pending(shell, cx) {' \
+  '    let target = match super::apply::config_with_pending(shell, cx).filter(|_| false) {' \
   geode-shell \
   saving_over_a_slot_the_pending_batch_just_forked_asks
 
@@ -19161,7 +19107,7 @@ run_mutation "scope dialog: every re-derive follows the cursor" \
 # owner writes at once.
 run_mutation "scope dialog: saving over a user scope asks first" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
-  '    match apply::definition_owner(shell, SCOPES_DOC, &name) {' \
+  '    match apply::definition_owner(shell, SCOPES_DOC, &name, cx) {' \
   '    match Owner::Absent {' \
   geode-shell \
   s_seeds_the_source_and_enter_on_a_user_scope_asks_then_overwrites
@@ -19338,7 +19284,7 @@ run_mutation "scope dialog: an empty definition refuses" \
 run_mutation "scope dialog: a new expression refuses a taken name" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
   '    let doc = geode_core::config::EXPRESSIONS_DOC;
-    if apply::definition_owner(shell, doc, &name) != Owner::Absent {' \
+    if apply::definition_owner(shell, doc, &name, cx) != Owner::Absent {' \
   '    let doc = geode_core::config::EXPRESSIONS_DOC;
     if false {' \
   geode-shell \
@@ -19489,8 +19435,8 @@ run_mutation "scope dialog: delete asks only over the user's own definition" \
 # Revert asks only when the user's copy shadows a lower one.
 run_mutation "scope dialog: revert needs a lower copy" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
-  '    let Owner::User { over: Some(_) } = apply::definition_owner(shell, doc, name) else {' \
-  '    let Owner::User { .. } = apply::definition_owner(shell, doc, name) else {' \
+  '    let Owner::User { over: Some(_) } = apply::definition_owner(shell, doc, name, cx) else {' \
+  '    let Owner::User { .. } = apply::definition_owner(shell, doc, name, cx) else {' \
   geode-shell \
   r_without_changes_refuses
 
@@ -19544,10 +19490,7 @@ run_mutation "scope dialog: yes to a delete removes it" \
 # A copy takes a name no layer holds: it never forks.
 run_mutation "scope dialog: a copy refuses a taken name" \
   crates/geode-shell/src/shell/scopedialog/prompt.rs \
-  '    if apply::definition_owner(shell, doc, &name) != Owner::Absent {
-        return set_prompt_error(shell, format!("'"'"'{name}'"'"' already exists"));
-    }
-    // Re-read' \
+  $'    if apply::definition_owner(shell, doc, &name, cx) != Owner::Absent {\n        return set_prompt_error(shell, format!("\'{name}\' already exists"));\n    }\n    // Re-read' \
   '    // Re-read' \
   geode-shell \
   c_copies_a_scope_under_a_new_name
@@ -19631,8 +19574,8 @@ run_mutation "scope dialog: s on a saved row pushes the save prompt" \
 # expression and freeze it against the lower layer's later updates.
 run_mutation "scope dialog: an unchanged definition writes nothing" \
   crates/geode-shell/src/shell/scopedialog/definition.rs \
-  '    if current_text(shell, &name).as_deref() == Some(text.as_str()) {' \
-  '    if current_text(shell, &name).as_deref() == Some("") {' \
+  '    if current_text(shell, &name, cx).as_deref() == Some(text.as_str()) {' \
+  '    if current_text(shell, &name, cx).as_deref() == Some("") {' \
   geode-shell \
   an_unchanged_definition_enter_writes_nothing
 
@@ -19659,8 +19602,8 @@ run_mutation "scope dialog: an unchanged save asks nothing" \
 # enter; writing would bring it back.
 run_mutation "scope dialog: a definition deleted under the step refuses" \
   crates/geode-shell/src/shell/scopedialog/definition.rs \
-  '    if apply::definition_owner(shell, doc, &name) == apply::Owner::Absent {' \
-  '    if false && apply::definition_owner(shell, doc, &name) == apply::Owner::Absent {' \
+  '    if apply::definition_owner(shell, doc, &name, cx) == apply::Owner::Absent {' \
+  '    if false && apply::definition_owner(shell, doc, &name, cx) == apply::Owner::Absent {' \
   geode-shell \
   a_definition_deleted_under_the_step_refuses_and_writes_nothing
 
@@ -19892,7 +19835,7 @@ run_mutation "tilepicker: a kind pick adds the tile" \
 # tile to whichever region is focused.
 run_mutation "tilepicker: the door requires the placeholder to be focused" \
   crates/geode-shell/src/shell/drag.rs \
-  '            || self.services.workspaces.active().focused_tile() != Some(id)' \
+  '            || self.workspace(cx).focused_tile() != Some(id)' \
   '            || false' \
   geode-shell \
   a_second_click_on_an_unfocused_placeholder_is_a_plain_click
@@ -20196,7 +20139,7 @@ run_mutation "core: an out-of-range window is accepted silently" \
 # the picker. Otherwise the new tile lands in the previously focused region.
 run_mutation "tilepicker: a click on an empty dock focuses it" \
   crates/geode-shell/src/shell/drag.rs \
-  '        if self.services.workspaces.active_mut().focus_empty_dock(side) {' \
+  '        if self.with_workspace(cx, |ws| ws.focus_empty_dock(side)) {' \
   '        if false {' \
   geode-shell \
   clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it
@@ -21376,7 +21319,7 @@ run_mutation "pricer commands: completions offer the word under the cursor as a 
 run_mutation "hosting: a key-less delivery reaches only the visible occupants" \
   crates/geode-shell/src/shell/occupants.rs \
   '                let mut keys = Vec::new();
-                self.visible_tile_keys(&mut keys);' \
+                self.visible_tile_keys(&mut keys, cx);' \
   '                let mut keys: Vec<QueryKey> =
                     self.occupants.keys().map(|t| QueryKey(t.0)).collect();
                 keys.sort();' \
@@ -24987,7 +24930,7 @@ run_mutation "timeseries triggers: the editor keeps the range trigger open" \
 # keyboard actions.
 run_mutation "shell: a right press focuses the tile" \
   crates/geode-shell/src/shell/render.rs \
-  $'                                    return;\n                                }\n                                view.leave_command_line(window, cx);\n                                if view.services.workspaces.active_mut().focus_main_tile(id) {' \
+  $'                                    return;\n                                }\n                                view.leave_command_line(window, cx);\n                                if view.with_workspace(cx, |ws| ws.focus_main_tile(id)) {' \
   $'                                    return;\n                                }\n                                view.leave_command_line(window, cx);\n                                if false {' \
   geode-shell a_right_click_focuses_the_tile_and_never_arms_a_drag
 
@@ -27025,8 +26968,8 @@ run_mutation "scope expr: the refresh replaces the frame's named expressions" \
 # Saving under a defined name would overwrite that definition.
 run_mutation "scope expr: saving refuses a taken name" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
-  '    if apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name)' \
-  '    if false && apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name)' \
+  '    if apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name, cx)' \
+  '    if false && apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name, cx)' \
   geode-shell \
   mod_s_refuses_a_taken_name
 
@@ -27044,12 +26987,12 @@ run_mutation "scope expr: mod+s on an empty field opens the name entry" \
 run_mutation "scope expr: naming a changed term writes the definition anyway" \
   crates/geode-shell/src/shell/scope_expr_view.rs \
   '        && !shell
-            .target_frame()
+            .target_frame(cx)
             .read(cx)
             .expression_term_is(*index, seeded)' \
   '        && (false
             && !shell
-                .target_frame()
+                .target_frame(cx)
                 .read(cx)
                 .expression_term_is(*index, seeded))' \
   geode-shell \
@@ -28970,7 +28913,7 @@ run_mutation "autosize: the trait default accepts a fit" \
 # numbers and opens a barrier for a change nobody made.
 run_mutation "pin: a switch re-seeds the flip baseline" \
   crates/geode-shell/src/shell/pin.rs \
-  '        self.last_flip_versions = self.active_frame().read(cx).versions();' \
+  '        self.last_flip_versions = self.active_frame(cx).read(cx).versions();' \
   '        {}' \
   geode-shell switching_workspace_reseeds_the_barrier_without_opening_one
 
@@ -31885,7 +31828,7 @@ run_mutation "panels: a panels edit asks for a restart" \
 # re-derive it.
 run_mutation "panels: composition diagnostics survive a reload" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '        config_section.extend(self.services.composition_diagnostics.iter().cloned());' \
+  '        config_section.extend(self.services(cx).composition_diagnostics.iter().cloned());' \
   '' \
   geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
 
@@ -32293,7 +32236,7 @@ run_mutation "tile header: the blotter re-prepares its times on a clock change" 
 # stays up over the page it opened and the crash tail misses the open.
 run_mutation "tile header: a queued page open expires the notice" \
   crates/geode-shell/src/shell/page.rs \
-  '        self.begin_action(&format!("page::toggle_{kind}"));' \
+  '        self.begin_action(&format!("page::toggle_{kind}"), cx);' \
   '' \
   geode-shell a_queued_page_open_clears_the_notice_and_records_the_action
 
@@ -33451,8 +33394,8 @@ run_mutation "link: a group change is flipped once" \
 # notification is still pending would be taken for already seen.
 run_mutation "link: a workspace switch keeps the group baseline" \
   crates/geode-shell/src/shell/pin.rs \
-  '        self.last_flip_versions = self.active_frame().read(cx).versions();' \
-  '        self.last_flip_versions = self.active_frame().read(cx).versions();
+  '        self.last_flip_versions = self.active_frame(cx).read(cx).versions();' \
+  '        self.last_flip_versions = self.active_frame(cx).read(cx).versions();
         self.last_flip_groups = self.frame.read(cx).group_scope_gens();' \
   geode-shell a_group_change_pending_across_a_workspace_switch_still_flips
 
@@ -33617,14 +33560,14 @@ run_mutation "link: an unplaced record keeps its membership" \
 # first query is already scoped by the group it follows.
 run_mutation "link: a restored follow is applied before the first frame" \
   crates/geode-shell/src/shell/mod.rs \
-  '                        f.follow(tile, record.link.follow);' \
+  '                        f.follow(tile, link.follow);' \
   '                        f.follow(tile, None);' \
   geode-shell a_restored_follower_reads_its_group_on_its_first_frame
 
 run_mutation "link: a restored emit is applied" \
   crates/geode-shell/src/shell/mod.rs \
-  '                        f.emit(tile, record.link.emit);' \
-  '                        f.emit(tile, None);' \
+  '                            f.emit(tile, link.emit);' \
+  '                            f.emit(tile, None);' \
   geode-shell a_restored_emitter_subscribes_and_posts_without_a_key_press
 
 # Restore links only a tile that will have a module occupant to end the
@@ -33632,18 +33575,16 @@ run_mutation "link: a restored emit is applied" \
 # workspace.
 run_mutation "link: restore links only placed tiles" \
   crates/geode-shell/src/shell/mod.rs \
-  '                        && services.workspaces.workspace_of(tile).is_some()
-                    {
-                        f.follow(tile, record.link.follow);' \
-  '                    {
-                        f.follow(tile, record.link.follow);' \
+  '                        services.roster.factory(&record.kind).is_some()
+                            && services.workspaces.workspace_of(TileId(**id)).is_some()' \
+  '                        services.roster.factory(&record.kind).is_some()' \
   geode-shell a_record_for_a_tile_in_no_workspace_restores_no_membership
 
 run_mutation "link: restore links only a tile whose module exists" \
   crates/geode-shell/src/shell/mod.rs \
-  '                    if services.roster.factory(&record.kind).is_some()
-                        && services.workspaces.workspace_of(tile).is_some()' \
-  '                    if services.workspaces.workspace_of(tile).is_some()' \
+  '                        services.roster.factory(&record.kind).is_some()
+                            && services.workspaces.workspace_of(TileId(**id)).is_some()' \
+  '                        services.workspaces.workspace_of(TileId(**id)).is_some()' \
   geode-shell a_saved_membership_survives_a_build_without_the_module
 
 # A group's scope advances the generation the session writer polls; a
@@ -33977,7 +33918,7 @@ run_mutation "link: the frame observer drains a chip request" \
 
 run_mutation "link: a chip request focuses its tile" \
   crates/geode-shell/src/shell/occupants.rs \
-  '        if !self.focus_pressed_tile(tile) {
+  '        if !self.focus_pressed_tile(tile, cx) {
             return;
         }
         self.leave_command_line(window, cx);' \
@@ -35865,8 +35806,8 @@ run_mutation "link: the follow door refuses a loop" \
 # A session holding a loop restores without the later tile's emit.
 run_mutation "link: a restored loop drops the later emit" \
   crates/geode-shell/src/shell/mod.rs \
-  '                            f.closing_cycle(tile, record.link.follow, record.link.emit)' \
-  '                            None::<(geode_core::link::Group, geode_core::link::Group)>' \
+  'f.closing_cycle(tile, link.follow, link.emit)' \
+  'None::<(geode_core::link::Group, geode_core::link::Group)>' \
   geode-shell a_restored_cycle_drops_the_later_emit
 
 # The chooser refuses a loop before it closes, so the list stays open for
@@ -35923,7 +35864,7 @@ run_mutation "link: the filter setting persists to the user layer" \
 
 run_mutation "link: the filter setting is seeded from config" \
   crates/geode-shell/src/shell/mod.rs \
-  '        let link_include_tile_filter = crate::linkfilter::from_config(&services.config);' \
+  '        let link_include_tile_filter = crate::linkfilter::from_config(app.read(cx).config());' \
   '        let link_include_tile_filter = true;' \
   geode-shell a_configured_filter_setting_off_holds_from_startup
 
@@ -37633,22 +37574,22 @@ run_mutation "close: the pointer route shares the refusals" \
 run_mutation "close: the pointer route leaves the command line" \
   crates/geode-shell/src/shell/occupants.rs \
   '        self.leave_command_line(window, cx);
-        self.begin_action(crate::module::CLOSE_ACTION);' \
-  '        self.begin_action(crate::module::CLOSE_ACTION);' \
+        self.begin_action(crate::module::CLOSE_ACTION, cx);' \
+  '        self.begin_action(crate::module::CLOSE_ACTION, cx);' \
   geode-shell the_close_button_leaves_an_open_command_line
 
 run_mutation "close: the pointer route records the action" \
   crates/geode-shell/src/shell/occupants.rs \
-  '        self.begin_action(crate::module::CLOSE_ACTION);
+  '        self.begin_action(crate::module::CLOSE_ACTION, cx);
         tracing::debug!(target: "geode::shell", tile = tile.0, "close by pointer");' \
   '        tracing::debug!(target: "geode::shell", tile = tile.0, "close by pointer");' \
   geode-shell the_close_button_records_the_close_action
 
 run_mutation "close: a pointer close dirties the session" \
   crates/geode-shell/src/shell/occupants.rs \
-  '        if self.services.workspaces.active_mut().close_tile_id(tile) {
+  '        if self.with_workspace(cx, |ws| ws.close_tile_id(tile)) {
             self.session_dirty = true;' \
-  '        if self.services.workspaces.active_mut().close_tile_id(tile) {' \
+  '        if self.with_workspace(cx, |ws| ws.close_tile_id(tile)) {' \
   geode-shell the_close_button_closes_its_own_tile_and_keeps_focus
 
 run_mutation "close: the placeholder paints the ×" \
@@ -39000,16 +38941,16 @@ run_mutation "row menu: the clicked text dimension takes Color" \
 # The shell's open path hands the menu its cached text dimensions.
 run_mutation "row menu: the open path offers Color from the shell's text dimensions" \
   crates/geode-shell/src/shell/row_menu.rs \
-  '        let rows = menu_rows(&context, &self.services.roster, &self.text_dims);' \
-  '        let rows = menu_rows(&context, &self.services.roster, &Default::default());' \
+  '        let rows = menu_rows(&context, &self.services(cx).roster, &self.text_dims);' \
+  '        let rows = menu_rows(&context, &self.services(cx).roster, &Default::default());' \
   geode-shell \
   g_dot_offers_color_for_the_rows_own_text_dimension
 
 # A reload that changes the datasets rebuilds the text dimensions.
 run_mutation "row menu: a reload rebuilds the text dimensions" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                self.text_dims = text_dimension_names(&self.services.config);' \
-  '                let _ = text_dimension_names(&self.services.config);' \
+  '                self.text_dims = text_dimension_names(&self.services(cx).config);' \
+  '                let _ = text_dimension_names(&self.services(cx).config);' \
   geode-shell \
   a_reload_that_removes_a_column_rebuilds_the_text_dimensions
 
@@ -40301,9 +40242,10 @@ run_mutation "scope writes: a fork records the sidecar" \
 # delete/revert gate or an overwrite question would answer wrongly.
 run_mutation "scope writes: the pending batch counts as the user's" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+  '    let config =
+        config_with_pending(shell, cx).unwrap_or_else(|| shell.services(cx).config.clone());
     owner_in(&config, doc, name)' \
-  '    let config = shell.services.config.clone();
+  '    let config = shell.services(cx).config.clone();
     owner_in(&config, doc, name)' \
   geode-shell \
   definition_owner_counts_the_pending_batch

@@ -663,6 +663,14 @@ pub struct ShellView {
     /// by `add_tile`. `ensure_occupants` consumes each request at that tile on
     /// the next render; simultaneous requests cannot replace one another.
     pending_tiles: BTreeMap<TileId, PendingTile>,
+    /// Session tile records not yet consumed by an occupant, taken out of
+    /// the services at construction: a restore input, not a shared
+    /// service, so creating an occupant during render reads nothing
+    /// through the app entity's writer.
+    restored_tiles: crate::session::TileRecords,
+    /// Likewise for `[pages.<kind>]` tables; a replaced page's last state
+    /// goes back in here so the next save still writes it.
+    restored_pages: crate::session::PageRecords,
     /// Restored records whose module factory is unavailable. `current_tiles`
     /// writes them back unchanged, preserving sessions from builds with more
     /// modules. Closing or filling their tile removes them.
@@ -1517,17 +1525,23 @@ impl ShellView {
         // the layout's healing left behind gets no occupant at all.
         // Nothing is notified. A membership moves no lane version and no
         // group's scope generation, so it is not a flip either.
+        // The restore inputs become this view's own (see the fields' docs);
+        // the services keep none of them after this.
+        let (restored_tiles, restored_pages) = app.update(cx, |app, _| {
+            (
+                std::mem::take(&mut app.services.restored_tiles),
+                std::mem::take(&mut app.services.restored_pages),
+            )
+        });
         // Gathered before the frame update: the record checks read the
         // services, which the frame's writer cannot hold beside.
         let restored_memberships: Vec<(u64, geode_core::link::Membership)> = {
             let services = app.read(cx).services();
-            if services
-                .restored_tiles
+            if restored_tiles
                 .values()
                 .any(|record| !record.link.is_empty())
             {
-                services
-                    .restored_tiles
+                restored_tiles
                     .iter()
                     .filter(|(id, record)| {
                         services.roster.factory(&record.kind).is_some()
@@ -1649,6 +1663,8 @@ impl ShellView {
             frame,
             diagnostics,
             pending_tiles: BTreeMap::new(),
+            restored_tiles,
+            restored_pages,
             unplaced_records: crate::session::TileRecords::new(),
             add_direction,
             line_numbers,

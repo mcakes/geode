@@ -70,35 +70,35 @@ impl ShellView {
             // Its last state goes back to the restored map, so the next flush
             // still writes `[pages.<old kind>]` and a later reopen restores
             // it; dropping the page alone would lose it from the file.
-            let old_kind = page.occupant.kind.to_string();
-            let state = page.occupant.content.serialize(cx);
-            self.with_services(cx, |s| {
-                s.restored_pages.insert(old_kind, state);
-            });
+            self.restored_pages.insert(
+                page.occupant.kind.to_string(),
+                page.occupant.content.serialize(cx),
+            );
             page.occupant.content.set_visible(false, cx);
             self.page = None;
         }
         if self.page.is_none() {
+            // The roster's own handle, cloned out of a read, so `create`
+            // runs with the context free.
+            let Some(factory) = self.services(cx).pages.factory(kind) else {
+                tracing::warn!(target: "geode::shell", "no page registered as '{kind}'");
+                return;
+            };
+            let restored = self.restored_pages.remove(kind);
             let actions = self.shell_actions(cx);
             // The page's frame handle is bound to the workspace it is first
             // opened over, as a tile's is to its own. Every unpinned
             // workspace resolves to the shared lane; a page retained from
             // one workspace and reopened over a pinned one reads its first
             // workspace's lane.
-            let frame = self.frame_at(self.active_ix(cx));
-            let diagnostics = self.diagnostics.clone();
-            // Under the app's writer: the factory is the roster's, the
-            // restored state is consumed here, and `create` needs the
-            // context mutably, which a read of the services would hold.
-            let created = self.app.update(cx, |app, cx| {
-                let factory = app.services.pages.factory(kind)?;
-                let restored = app.services.restored_pages.remove(kind);
-                Some(factory.create(restored.as_ref(), frame, diagnostics, actions, window, cx))
-            });
-            let Some(occupant) = created else {
-                tracing::warn!(target: "geode::shell", "no page registered as '{kind}'");
-                return;
-            };
+            let occupant = factory.create(
+                restored.as_ref(),
+                self.frame_at(self.active_ix(cx)),
+                self.diagnostics.clone(),
+                actions,
+                window,
+                cx,
+            );
             self.page = Some(OpenPage {
                 occupant,
                 open: false,

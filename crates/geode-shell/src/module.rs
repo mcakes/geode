@@ -26,6 +26,7 @@ use geode_core::tile_columns::TileColumns;
 use geode_core::vol::VolSliceOutcome;
 use gpui::{AnyView, App, Entity, SharedString, Window};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Changes, commits, and cancellation from the tile's `/` find line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -624,7 +625,9 @@ impl<F: ModuleFactory + ?Sized> ModuleFactory for Rc<F> {
 /// [`placeholder`] with a recovery hint instead of selecting another module.
 #[derive(Default)]
 pub struct ModuleRoster {
-    factories: Vec<Box<dyn ModuleFactory>>,
+    /// Shared handles, so a caller can look a factory up, drop the roster
+    /// borrow and call `create` with the context free.
+    factories: Vec<Arc<dyn ModuleFactory>>,
     actions: Vec<Rc<dyn DimensionAction>>,
 }
 
@@ -634,7 +637,7 @@ impl ModuleRoster {
     }
 
     pub fn add(&mut self, factory: Box<dyn ModuleFactory>) {
-        self.factories.push(factory);
+        self.factories.push(Arc::from(factory));
     }
 
     /// Register a row menu action; the menu lists them in this order.
@@ -654,11 +657,8 @@ impl ModuleRoster {
         }
     }
 
-    pub fn factory(&self, kind: &str) -> Option<&dyn ModuleFactory> {
-        self.factories
-            .iter()
-            .find(|f| f.kind() == kind)
-            .map(|f| f.as_ref())
+    pub fn factory(&self, kind: &str) -> Option<Arc<dyn ModuleFactory>> {
+        self.factories.iter().find(|f| f.kind() == kind).cloned()
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {
@@ -868,7 +868,8 @@ pub struct PageEntry {
 /// [`PageRoster::add`] so [`PageRoster::entries`] never allocates: the
 /// sidebar paints from it on every render.
 struct RegisteredPage {
-    factory: Box<dyn PageFactory>,
+    /// Shared like `ModuleRoster`'s, for the same reason.
+    factory: Arc<dyn PageFactory>,
     toggle_action: &'static str,
     selector: &'static str,
     tip_selector: &'static str,
@@ -889,18 +890,18 @@ impl PageRoster {
         let kind = factory.kind();
         let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
         self.pages.push(RegisteredPage {
-            factory,
+            factory: Arc::from(factory),
             toggle_action: leak(format!("page::toggle_{kind}")),
             selector: leak(format!("sidebar-page-{kind}")),
             tip_selector: leak(format!("tip-sidebar-page-{kind}")),
         });
     }
 
-    pub fn factory(&self, kind: &str) -> Option<&dyn PageFactory> {
+    pub fn factory(&self, kind: &str) -> Option<Arc<dyn PageFactory>> {
         self.pages
             .iter()
             .find(|p| p.factory.kind() == kind)
-            .map(|p| p.factory.as_ref())
+            .map(|p| p.factory.clone())
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {

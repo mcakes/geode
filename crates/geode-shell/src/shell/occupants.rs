@@ -58,7 +58,7 @@ impl ShellView {
     /// `restored_pages`: kinds never opened, unknown kinds, and the last
     /// state of a page another kind replaced. All of them survive a save.
     pub(super) fn current_pages(&self, cx: &App) -> session::PageRecords {
-        let mut pages: session::PageRecords = self.services(cx).restored_pages.clone();
+        let mut pages: session::PageRecords = self.restored_pages.clone();
         if let Some(page) = &self.page {
             pages.insert(
                 page.occupant.kind.to_string(),
@@ -267,82 +267,85 @@ impl ShellView {
             if self.occupants.contains_key(id) {
                 continue;
             }
-            // Under the app's writer: the factory is the roster's, the
-            // restored record is consumed here, and `create` needs the
-            // context mutably, which a read of the services would hold.
-            let diagnostics = self.diagnostics.clone();
-            let (occupant, from_add, from_restore) = self.app.update(cx, |app, cx| {
-                let services = &mut app.services;
-                let restored = services.restored_tiles.remove(&id.0);
-                let pending = self.pending_tiles.remove(id);
-                // Only the factory registered for this record's kind receives its state.
-                // A matched restored record takes precedence over a pending add request.
-                let matched = restored
-                    .as_ref()
-                    .and_then(|r| services.roster.factory(&r.kind));
-                let restored_state = matched.and(restored.as_ref()).map(|r| &r.state);
-                let pending_factory = pending.as_ref().and_then(|p| {
-                    let f = services.roster.factory(&p.kind);
-                    if f.is_none() {
-                        tracing::warn!(
-                            target: "geode::shell",
-                            "add_tile asked for kind '{}', which has no registered factory — painting a placeholder",
-                            p.kind
-                        );
-                    }
-                    f
-                });
-                let pending_state = pending_factory
-                    .and(pending.as_ref())
-                    .and_then(|p| p.state.as_ref());
-                // Use a matching restored factory, then a pending factory, then a
-                // placeholder. Preserve unmatched restored records for later saves.
-                // Restore and add-tile allocation normally use disjoint IDs.
-                if let (Some(record), None) = (&restored, matched) {
+            let restored = self.restored_tiles.remove(&id.0);
+            let pending = self.pending_tiles.remove(id);
+            // Only the factory registered for this record's kind receives its state.
+            // A matched restored record takes precedence over a pending add request.
+            // The handles are the roster's own, cloned out of a read, so
+            // `create` below runs with the context free: render never
+            // holds the app entity's writer.
+            let matched = restored
+                .as_ref()
+                .and_then(|r| self.services(cx).roster.factory(&r.kind));
+            let restored_state = matched.as_ref().and(restored.as_ref()).map(|r| &r.state);
+            let pending_factory = pending.as_ref().and_then(|p| {
+                let f = self.services(cx).roster.factory(&p.kind);
+                if f.is_none() {
                     tracing::warn!(
-                        target: "geode::session",
-                        "tile {} was saved as '{}', which this build has no module for — painting a placeholder and keeping the record",
-                        id.0, record.kind
+                        target: "geode::shell",
+                        "add_tile asked for kind '{}', which has no registered factory — painting a placeholder",
+                        p.kind
                     );
-                    self.unplaced_records.insert(id.0, record.clone());
                 }
-                let (factory, state) = match (matched, pending_factory) {
-                    (Some(f), _) => (Some(f), restored_state),
-                    (None, Some(f)) => (Some(f), pending_state),
-                    (None, None) => (None, None),
-                };
-                // Only an `add_tile` request (no matching restored record) may be
-                // told it was launched: a restore must never take focus.
-                let from_add = matched.is_none() && pending_factory.is_some();
-                let from_restore = matched.is_some();
-                // The tile's own workspace, not the active one: an occupant
-                // restored into a hidden workspace reads that workspace's lane.
-                // Every tile reaching here is placed in some workspace's tree;
-                // the active fallback only keeps a release build running.
-                debug_assert!(
-                    services.workspaces.workspace_of(*id).is_some(),
-                    "occupant for unplaced tile {id:?}"
-                );
-                let ws = services
-                    .workspaces
-                    .workspace_of(*id)
-                    .unwrap_or_else(|| services.workspaces.active_ix());
-                // Bound to the tile as well, so the link group it follows
-                // decides the scope it reads.
-                let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);
-                let occupant = match factory {
-                    Some(f) => f.create(*id, state, frame, diagnostics, window, cx),
-                    None => crate::module::placeholder::PlaceholderFactory.create(
-                        *id,
-                        None,
-                        frame,
-                        diagnostics,
-                        window,
-                        cx,
-                    ),
-                };
-                (occupant, from_add, from_restore)
+                f
             });
+            let pending_state = pending_factory
+                .as_ref()
+                .and(pending.as_ref())
+                .and_then(|p| p.state.as_ref());
+            // Use a matching restored factory, then a pending factory, then a
+            // placeholder. Preserve unmatched restored records for later saves.
+            // Restore and add-tile allocation normally use disjoint IDs.
+            if let (Some(record), None) = (&restored, &matched) {
+                tracing::warn!(
+                    target: "geode::session",
+                    "tile {} was saved as '{}', which this build has no module for — painting a placeholder and keeping the record",
+                    id.0, record.kind
+                );
+                self.unplaced_records.insert(id.0, record.clone());
+            }
+            // Only an `add_tile` request (no matching restored record) may be
+            // told it was launched: a restore must never take focus.
+            let from_add = matched.is_none() && pending_factory.is_some();
+            let from_restore = matched.is_some();
+            let (factory, state) = match (matched, pending_factory) {
+                (Some(f), _) => (Some(f), restored_state),
+                (None, Some(f)) => (Some(f), pending_state),
+                (None, None) => (None, None),
+            };
+            // The tile's own workspace, not the active one: an occupant
+            // restored into a hidden workspace reads that workspace's lane.
+            // Every tile reaching here is placed in some workspace's tree;
+            // the active fallback only keeps a release build running.
+            debug_assert!(
+                self.workspaces(cx).workspace_of(*id).is_some(),
+                "occupant for unplaced tile {id:?}"
+            );
+            let ws = self
+                .workspaces(cx)
+                .workspace_of(*id)
+                .unwrap_or_else(|| self.workspaces(cx).active_ix());
+            // Bound to the tile as well, so the link group it follows
+            // decides the scope it reads.
+            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);
+            let occupant = match factory {
+                Some(f) => f.create(
+                    *id,
+                    state,
+                    frame.clone(),
+                    self.diagnostics.clone(),
+                    window,
+                    cx,
+                ),
+                None => crate::module::placeholder::PlaceholderFactory.create(
+                    *id,
+                    None,
+                    frame.clone(),
+                    self.diagnostics.clone(),
+                    window,
+                    cx,
+                ),
+            };
             // Announce initial visibility, including for occupants in hidden docks
             // or inactive workspaces that the later visibility diff cannot see.
             occupant.content.set_visible(active.contains(id), cx);
