@@ -42448,6 +42448,35 @@ run_mutation "volwatch: the chip ceiling is a tint, not a fill" \
   geode-volwatch \
   the_chip_ceiling_is_a_tint_not_a_fill
 
+# A stale row's numbers are still its numbers: muting every cell on stale
+# painted the whole board grey from 17:15, once a day's surface aged past
+# the old threshold. Staleness is the name's tone and the header run.
+run_mutation "volwatch: a stale row keeps its cells' tone" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                    let px = cell.text.chars().count() as f32 * i.mono_advance_px;' \
+  '                    cell.muted |= stale;
+                    let px = cell.text.chars().count() as f32 * i.mono_advance_px;' \
+  geode-volwatch \
+  a_stale_row_keeps_its_cells_tone_and_mutes_only_its_flag
+
+# The tile reads its own [volwatch] stale_after; reading the blotter's
+# 15-minute key marks a daily surface stale every evening.
+run_mutation "volwatch: stale_after is the tile's own key" \
+  crates/geode-app/src/bridge.rs \
+  '    if let Some(value) = config.get("app", "volwatch.stale_after") {' \
+  '    if let Some(value) = config.get("app", "blotter.stale_after") {' \
+  geode-app \
+  volwatch_reads_its_own_stale_after_and_not_the_blotters
+
+# A surface publishes once a day; a shorter default stales every row
+# before the next publish.
+run_mutation "volwatch: the default stale threshold is a day" \
+  crates/geode-volwatch/src/content.rs \
+  'pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);' \
+  'pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(15 * 60);' \
+  geode-volwatch \
+  the_default_stale_threshold_is_a_day
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

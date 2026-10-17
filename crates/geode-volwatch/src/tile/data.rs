@@ -180,8 +180,9 @@ impl VolwatchTile {
     }
 
     /// Re-prepare the model and the header from the rows, the columns and
-    /// the board's ask. A failed last board paints every present row
-    /// stale, as does a row whose stale wake-up fired.
+    /// the board's ask. A failed last board marks every present row
+    /// stale, as does a row whose stale wake-up fired; the cells keep
+    /// their tone (the table paints a stale row's name muted).
     pub(crate) fn prepare(&mut self) {
         let stale_after = self.shared.settings.borrow().stale_after;
         let empty = Ask::default();
@@ -194,9 +195,6 @@ impl VolwatchTile {
                 .is_some_and(|at| self.stale_timer.fired_for(at, stale_after));
             if p.present && !p.stale && (failed || fired) {
                 p.stale = true;
-                for c in &mut p.cells {
-                    c.muted = true;
-                }
             }
         }
         let runs = time_runs(&TimeInputs {

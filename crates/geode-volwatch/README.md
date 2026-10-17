@@ -11,7 +11,8 @@ scales and ranges). Behaviour and limits are in the features guide's
 
 - `content.rs`: `VolwatchFactory` (kind `volwatch`, title `Vol`, accepts
   no dimension), `VolwatchSettings` (`refresh` clamped to `MIN_REFRESH`,
-  `vega`, `stale_after`, pushed whole by the app on a reload), the tile's
+  `vega`, the tile's own `stale_after`, a day by default since a surface
+  publishes daily; pushed whole by the app on a reload), the tile's
   `TileContent` door (`emits()` is `true`, `follows()` is not; `deliver`
   matches every `Delivery` variant with no wildcard: `VolBoard`,
   `HistoryKeys` and the vega `Query`), `ACTIONS` and the `DEFAULT_KEYMAP`

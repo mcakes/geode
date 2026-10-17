@@ -10,6 +10,7 @@ use geode_widgets::cell::widths;
 use super::harness::*;
 use crate::content::VolwatchSettings;
 use crate::core::views::View;
+use crate::tile::table::td_muted;
 
 #[gpui::test]
 fn the_header_names_the_list_count_lookback_sort_and_the_missing(cx: &mut gpui::TestAppContext) {
@@ -121,6 +122,26 @@ fn a_stale_after_reload_rearms_the_row_wake_ups(cx: &mut gpui::TestAppContext) {
         h.tile.read_with(&vcx, |t, _| t.prepared.rows[0].stale),
         "the row turns stale at the reloaded threshold"
     );
+    // A stale row keeps its numbers' tone and colors: only its name paints
+    // muted, beside the header's stale surface run.
+    h.tile.read_with(&vcx, |t, _| {
+        let row = &t.prepared.rows[0];
+        assert!(
+            row.cells.iter().all(|c| !c.muted),
+            "the wake-up mutes no cell"
+        );
+        let muted: Vec<bool> = t
+            .columns
+            .iter()
+            .zip(&row.cells)
+            .map(|(column, cell)| td_muted(row, cell, column))
+            .collect();
+        assert!(muted[0], "the Underlying cell paints muted");
+        assert!(
+            muted[1..].iter().all(|m| !m),
+            "every other cell paints as it is: {muted:?}"
+        );
+    });
 }
 
 #[gpui::test]

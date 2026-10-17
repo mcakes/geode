@@ -28,9 +28,10 @@ use crate::tile::VolwatchTile;
 pub const DEFAULT_REFRESH: Duration = Duration::from_secs(60);
 /// The shortest refresh interval: a shorter one is raised to this.
 pub const MIN_REFRESH: Duration = Duration::from_secs(10);
-/// How old a row's surface time may be before it paints stale, when the
-/// app supplies none.
-pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(15 * 60);
+/// How old a row's surface time may be before it is stale, when the app
+/// supplies none: a surface publishes once a day; a row is stale when a
+/// day has passed without one.
+pub const DEFAULT_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// What the tile reads from the configuration, pushed whole by the app.
 #[derive(Debug, Clone, PartialEq)]

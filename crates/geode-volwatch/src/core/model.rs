@@ -426,7 +426,6 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
                         }
                         _ => {}
                     }
-                    cell.muted |= stale;
                     let px = cell.text.chars().count() as f32 * i.mono_advance_px;
                     col_px[ci] = col_px[ci].max(glyph_width(&column.kind, px));
                     cell.id = format!("{}-{}-{}", i.tile, row.name, column.id).into();
@@ -1324,12 +1323,58 @@ mod tests {
     }
 
     #[test]
-    fn a_row_older_than_stale_after_paints_stale_and_muted() {
+    fn a_stale_row_keeps_its_cells_tone_and_mutes_only_its_flag() {
         let mut i = inputs(rows_with_changes(&[1.0]), View::Changes);
         i.stale_after = Duration::from_secs(60);
         let p = prepare(&i);
         assert!(p.rows[0].stale);
-        assert!(p.rows[0].cells[column_index("atfm-3M-level")].muted);
+        // A blank cell is muted in every row; the valued ones keep their tone.
+        assert!(
+            p.rows[0]
+                .cells
+                .iter()
+                .skip(1)
+                .filter(|c| c.value.is_some())
+                .all(|c| !c.muted),
+            "stale does not mute the cells"
+        );
+        assert!(!p.rows[0].cells[column_index("atfm-3M-level")].muted);
+        assert!(!p.rows[0].cells[column_index("atfm-3M-change")].muted);
+        assert!(!p.rows[0].cells[0].muted, "the model leaves the name too");
+    }
+
+    /// A surface publishes once a day: last evening's row is fresh this
+    /// afternoon, and only a row a day old is stale.
+    #[test]
+    fn the_default_stale_threshold_is_a_day() {
+        assert_eq!(
+            crate::content::DEFAULT_STALE_AFTER,
+            Duration::from_secs(24 * 60 * 60)
+        );
+        let aged = |hours: i64| -> &'static [Row] {
+            let asked = ask_of(View::Changes);
+            let atfm3m = Measure::atfm("3M");
+            let mut row = row_of(&asked, "U0", true, &|m| {
+                (*m == atfm3m).then(|| (Some(15.0), Some(change(1.0, 14.0)), None))
+            });
+            row.as_of = Some(now() - chrono::Duration::hours(hours));
+            rows_from(VolBoard {
+                rows: vec![row],
+                ..VolBoard::default()
+            })
+        };
+        let mut i = inputs(aged(16), View::Changes);
+        i.stale_after = crate::content::DEFAULT_STALE_AFTER;
+        assert!(
+            !prepare(&i).rows[0].stale,
+            "yesterday's 17:00 publish is fresh at 09:00"
+        );
+        let mut i = inputs(aged(25), View::Changes);
+        i.stale_after = crate::content::DEFAULT_STALE_AFTER;
+        assert!(
+            prepare(&i).rows[0].stale,
+            "a day without a publish is stale"
+        );
     }
 
     #[test]

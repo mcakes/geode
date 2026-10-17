@@ -827,7 +827,7 @@ Accepted candidates update runtime state according to their inputs:
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, colors, value colors, watchlists, scopes, or expressions | Emit `ConfigReloaded` for the app bridge |
 | `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter, panel and scenario factories |
-| `app.volwatch` (`refresh`, `vega`) or `blotter.stale_after` | The vol watchlist's own revision observer re-reads `[volwatch]` and pushes it to the factory; an unchanged key neither pushes nor repeats a warning |
+| `app.volwatch` (`refresh`, `vega`, `stale_after`) | The vol watchlist's own revision observer re-reads `[volwatch]` and pushes it to the factory; an unchanged key neither pushes nor repeats a warning |
 | Sources, datasets, egress, positions, panels, scenarios, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
@@ -1082,9 +1082,10 @@ slice answers with that reason. Changing `model` marks restart required, as `[pr
 ## Vol watchlist
 
 `[volwatch]` in `app.toml` configures the vol watchlist tile (see
-[Vol watchlist](features.md#vol-watchlist)). Both keys are hot: a reload that changes either (or `[blotter] stale_after`, which the tile
-shares) pushes the new settings to the factory and the open tiles; a
-`stale_after` change re-arms each tile's stale wake-ups.
+[Vol watchlist](features.md#vol-watchlist)). All three keys are hot: a
+reload that changes any of them pushes the new settings to the factory and
+the open tiles; a `stale_after` change re-arms each tile's stale wake-ups.
+The tile does not read `[blotter] stale_after`.
 
 The tile reads three history datasets by fixed name: `vol_surface`,
 `realized_vol` and `varswap`. A deployment that shows the tile declares
@@ -1101,6 +1102,13 @@ the tile shows `surface: <error>`. There is no setting to rename them.
   setting. A view that later fails to load or lacks the column drops the
   column with a standing warning naming the setting; the board keeps
   painting.
+- `stale_after` is a non-zero duration; the default is `"24h"`. A surface
+  publishes once a day, so a row is stale when a day has passed without
+  one; the blotter's 15-minute threshold would mark every row stale each
+  evening. A value that is not a duration, or is zero, warns
+  (`[volwatch] stale_after = … is not a duration; using 24h`) and uses the
+  default. A stale row keeps its numbers' colors and shows its name in the
+  muted tone; the header's surface time turns stale with the oldest row.
 
 ## Maintaining configuration
 

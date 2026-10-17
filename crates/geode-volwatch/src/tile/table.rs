@@ -28,8 +28,19 @@ use gpui_component::table::{
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme};
 
-use crate::core::model::{BAR_ALPHA, Glyph, Prepared, SORT_MARK_DESIGN_PX, glyph_width};
+use crate::core::model::{
+    BAR_ALPHA, Glyph, Prepared, PreparedCell, PreparedRow, SORT_MARK_DESIGN_PX, glyph_width,
+};
 use crate::core::views::{Column, ColumnKind, View};
+
+/// Whether a cell paints in the muted tone: its own flag (a lookback
+/// mismatch, a short rank), an absent row, or, in the Underlying column
+/// only, a stale row. A stale row's numbers are still its numbers and keep
+/// their sign colors; its name and the header's surface run carry the
+/// staleness, as the blotter marks age in its header.
+pub(crate) fn td_muted(row: &PreparedRow, cell: &PreparedCell, column: &Column) -> bool {
+    cell.muted || !row.present || (column.kind == ColumnKind::Underlying && row.stale)
+}
 
 /// Whether alternate rows are striped. Every geode grid paints unstriped;
 /// the ring choice follows this, so flipping it keeps sparkline rings true.
@@ -665,7 +676,7 @@ impl TableDelegate for GridDelegate {
             return div();
         };
         let at_cursor = self.cursor == Some((row_ix, col_ix));
-        let muted = cell.muted || !row.present;
+        let muted = td_muted(row, cell, column);
         let tone = if muted {
             theme.muted_foreground
         } else {

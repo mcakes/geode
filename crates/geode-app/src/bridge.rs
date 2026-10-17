@@ -74,7 +74,7 @@ pub struct DataSetup {
     /// What the pricer read out of this config (`pricer_config_key`), so
     /// the reload observer can tell a reload that changed none of it.
     pub pricer_key: PricerConfigKey,
-    /// `[volwatch]` as read at startup; `stale_after` is filled by `start`.
+    /// `[volwatch]` as read at startup, pushed whole to the factory.
     pub volwatch_settings: VolwatchSettings,
     /// The accepted market-data panels in `panels` document order, and an
     /// Error per refused panel for the shell's config section.
@@ -417,12 +417,15 @@ pub fn stale_after_from_config(config: &Config) -> Duration {
         .unwrap_or(geode_blotter::tile::DEFAULT_STALE_AFTER)
 }
 
-/// What the vol watchlist reads from `[volwatch]` and the shared
-/// `[blotter] stale_after`. `refresh` is `"off"` or a duration, raised to the
-/// tile's minimum with a warning; `vega` needs `view` and `column` strings,
-/// else it is ignored with a warning. Absent keys use the defaults silently.
+/// What the vol watchlist reads from `[volwatch]`. `refresh` is `"off"` or
+/// a duration, raised to the tile's minimum with a warning; `vega` needs
+/// `view` and `column` strings, else it is ignored with a warning;
+/// `stale_after` is a non-zero duration, else it warns and uses the tile's
+/// own one-day default (a daily surface is not the blotter's feed, so the
+/// tile does not read `[blotter] stale_after`). Absent keys use the
+/// defaults silently.
 pub fn volwatch_settings_from_config(config: &Config) -> (VolwatchSettings, Vec<Diagnostic>) {
-    use geode_volwatch::content::{DEFAULT_REFRESH, MIN_REFRESH};
+    use geode_volwatch::content::{DEFAULT_REFRESH, DEFAULT_STALE_AFTER, MIN_REFRESH};
     let warn = |key: &str, message: String| Diagnostic {
         severity: Severity::Warning,
         layer: config.explain("app", key),
@@ -431,10 +434,26 @@ pub fn volwatch_settings_from_config(config: &Config) -> (VolwatchSettings, Vec<
         path: Some(format!("app.{key}")),
     };
     let mut diags = Vec::new();
-    let mut settings = VolwatchSettings {
-        stale_after: stale_after_from_config(config),
-        ..VolwatchSettings::default()
-    };
+    let mut settings = VolwatchSettings::default();
+    if let Some(value) = config.get("app", "volwatch.stale_after") {
+        match value
+            .as_str()
+            .and_then(parse_duration)
+            .filter(|d| !d.is_zero())
+        {
+            Some(d) => settings.stale_after = d,
+            None => {
+                settings.stale_after = DEFAULT_STALE_AFTER;
+                diags.push(warn(
+                    "volwatch.stale_after",
+                    format!(
+                        "[volwatch] stale_after = {value} is not a duration; using {}h",
+                        DEFAULT_STALE_AFTER.as_secs() / 3600
+                    ),
+                ));
+            }
+        }
+    }
     if let Some(value) = config.get("app", "volwatch.refresh") {
         if value.as_str() == Some("off") {
             settings.refresh = None;
@@ -485,14 +504,14 @@ pub fn volwatch_settings_from_config(config: &Config) -> (VolwatchSettings, Vec<
 pub struct VolwatchConfigKey {
     refresh: Option<toml::Value>,
     vega: Option<toml::Value>,
-    stale_after: Duration,
+    stale_after: Option<toml::Value>,
 }
 
 pub fn volwatch_config_key(config: &Config) -> VolwatchConfigKey {
     VolwatchConfigKey {
         refresh: config.get("app", "volwatch.refresh").cloned(),
         vega: config.get("app", "volwatch.vega").cloned(),
-        stale_after: stale_after_from_config(config),
+        stale_after: config.get("app", "volwatch.stale_after").cloned(),
     }
 }
 
@@ -977,11 +996,10 @@ pub fn start(
         setup.colours.clone(),
     ));
     let volslice = Rc::new(geode_volslice::VolsliceFactory::new(handle.clone()));
-    let volwatch = {
-        let mut settings = setup.volwatch_settings.clone();
-        settings.stale_after = stale_after;
-        Rc::new(VolwatchFactory::new(handle.clone(), settings))
-    };
+    let volwatch = Rc::new(VolwatchFactory::new(
+        handle.clone(),
+        setup.volwatch_settings.clone(),
+    ));
     // Pushed its startup snapshot now, before any tile is restored; every
     // reload pushes the next one.
     let classifications = Rc::new(geode_classifications::ClassificationsFactory::new(
@@ -2758,12 +2776,43 @@ role = "key"
             base,
             volwatch_config_key(&app_config("[volwatch]\nrefresh = \"30s\"\n"))
         );
-        assert_ne!(
+        assert_eq!(
             base,
             volwatch_config_key(&app_config(
                 "[volwatch]\nrefresh = \"60s\"\n[blotter]\nstale_after = \"5m\"\n"
+            )),
+            "the blotter's stale_after is not the tile's"
+        );
+        assert_ne!(
+            base,
+            volwatch_config_key(&app_config(
+                "[volwatch]\nrefresh = \"60s\"\nstale_after = \"5m\"\n"
             ))
         );
+    }
+
+    #[test]
+    fn volwatch_reads_its_own_stale_after_and_not_the_blotters() {
+        let (s, diags) =
+            volwatch_settings_from_config(&app_config("[blotter]\nstale_after = \"5m\"\n"));
+        assert!(diags.is_empty());
+        assert_eq!(s.stale_after, geode_volwatch::content::DEFAULT_STALE_AFTER);
+        let (s, _) =
+            volwatch_settings_from_config(&app_config("[volwatch]\nstale_after = \"2h\"\n"));
+        assert_eq!(s.stale_after, Duration::from_secs(2 * 3600));
+        let (s, diags) =
+            volwatch_settings_from_config(&app_config("[volwatch]\nstale_after = \"soon\"\n"));
+        assert_eq!(s.stale_after, geode_volwatch::content::DEFAULT_STALE_AFTER);
+        assert_eq!(diags.len(), 1);
+        assert_eq!(
+            diags[0].message,
+            "[volwatch] stale_after = \"soon\" is not a duration; using 24h"
+        );
+        assert_eq!(diags[0].path.as_deref(), Some("app.volwatch.stale_after"));
+        let (s, diags) =
+            volwatch_settings_from_config(&app_config("[volwatch]\nstale_after = \"0s\"\n"));
+        assert_eq!(s.stale_after, geode_volwatch::content::DEFAULT_STALE_AFTER);
+        assert_eq!(diags.len(), 1, "a zero threshold is refused");
     }
 
     /// A schema whose `underlyings` reference dataset is keyed by

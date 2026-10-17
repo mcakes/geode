@@ -3765,7 +3765,9 @@ slider's warning tone. Sign colors are the theme's bullish and bearish
 chart tokens. A Δ from a board asked under another lookback than the one
 shown paints muted (after `d`, until the new board lands); a rank over
 fewer than 60 observations paints muted with its count in the readout; a
-row older than `stale_after` paints muted in the stale tone. `p` drops
+row older than `[volwatch] stale_after` (a day) shows its name in the
+stale tone and its numbers as they are, since they are still that row's
+numbers; the header's surface time turns stale with the oldest row. `p` drops
 every tint, slider and bar and keeps the numbers, without a requery. A
 theme change rebuilds the paints.
 
@@ -3808,7 +3810,7 @@ force lit as `Δ 1d`; a press sets it), the sort chip, `<n> not in surface`
 in the warning tone, a danger chip per failed dataset, then the shared
 cluster: `…` while a board is in flight, one time per dataset (`surface`
 from the stalest present row, `realized` and `varswap` when the view reads
-them), each in the stale tone once past `stale_after`, link chips, the
+them), each in the stale tone once past `[volwatch] stale_after`, link chips, the
 health of the three history datasets, `⋯` and ×. The footer shows the
 first notice and the cursor readout
 (`SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · 1Y pctl 91 of 251`).
@@ -3828,13 +3830,14 @@ board); a restored open band puts its measures into the first ask.
 **Failures.** A refused submission is a warning (`the data service is busy
 — shift+r retries`) and nothing retries by itself, except that a refused
 timer refresh asks again at the next interval. A surface failure keeps the
-last board, marks every present row stale and stands
+last board, marks every present row stale (its name in the stale tone, its
+numbers as they are) and stands
 `surface: <error> — shift+r retries`; the next good board clears it. A
 failed realized or varswap dataset blanks its columns and shows its danger
 chip while the rest of the board paints. The refresh timer
 (`[volwatch] refresh`, never below 10 s) runs only while the tile is shown,
 and a timer that fires while a board is in flight asks nothing. A
-`[blotter] stale_after` reload re-arms the rows' stale wake-ups at the new
+`[volwatch] stale_after` reload re-arms the rows' stale wake-ups at the new
 threshold.
 
 The tile asks for the history datasets `vol_surface`, `realized_vol` and
