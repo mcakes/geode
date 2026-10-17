@@ -18,7 +18,8 @@ scales and ranges). Behaviour and limits are in the features guide's
   fragment.
 - `core/`: pure state, tested without gpui.
   - `views.rs`: the five views (Changes, Levels, Rich / cheap, Term, Skew)
-    as column tables, `order_tenors`, the board `Ask` each view implies
+    as column tables with `next`/`prev` stepping (`tab`/`shift+tab`,
+    wrapping), `order_tenors`, the board `Ask` each view implies
     (the union of its columns' measures, plus the band's while open),
     `needs_requery`, which asks again only for something the last ask
     lacked, and `sortable`, the one test `s`, a head press and `:sort`

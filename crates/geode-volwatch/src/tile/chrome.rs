@@ -12,7 +12,8 @@ use gpui::{App, Context, SharedString, Window};
 use super::table::sortable;
 use super::{
     INSPECT_ACTION, LOOKBACK_ACTION, PAINT_ACTION, REFRESH_ACTION, SORT_ACTION, SWITCH_ACTION,
-    TIMESERIES_ACTION, VIEW_ACTIONS, VIEW_NEXT_ACTION, VolwatchTile, YANK_ACTION, snapshot,
+    TIMESERIES_ACTION, VIEW_ACTIONS, VIEW_NEXT_ACTION, VIEW_PREV_ACTION, VolwatchTile, YANK_ACTION,
+    snapshot,
 };
 use crate::core::model::header;
 use crate::core::views::View;
@@ -313,7 +314,8 @@ impl VolwatchTile {
     pub(crate) fn rebuild_chrome(&mut self, cx: &App) {
         self.rebuild_header();
         self.refresh_actions();
-        self.strip_keys = tips::chord_for(&self.chords, VIEW_NEXT_ACTION);
+        self.strip_keys = tips::chord_for(&self.chords, VIEW_NEXT_ACTION)
+            .zip(tips::chord_for(&self.chords, VIEW_PREV_ACTION));
         let snapshot = snapshot(cx);
         let list = self.state.list.as_deref();
         let state = list.and_then(|n| snapshot.lists.get(n));

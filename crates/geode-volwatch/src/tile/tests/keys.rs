@@ -23,6 +23,7 @@ fn every_key_reaches_its_action(cx: &mut gpui::TestAppContext) {
         ("h", "volwatch::left"),
         ("2", "volwatch::view_2"),
         ("tab", "volwatch::view_next"),
+        ("shift-tab", "volwatch::view_prev"),
         ("d", "volwatch::lookback"),
         ("p", "volwatch::paint"),
         ("s", "volwatch::sort"),
@@ -80,6 +81,16 @@ fn digits_switch_views_and_requery_only_when_the_ask_grows(cx: &mut gpui::TestAp
     assert_eq!(Harness::boards(&h.requests()).len(), 1);
     h.press(&mut vcx, "tab");
     assert_eq!(h.view(&vcx), View::Levels);
+}
+
+#[gpui::test]
+fn shift_tab_steps_views_backwards_and_wraps(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    assert_eq!(h.view(&vcx), View::Changes);
+    h.press(&mut vcx, "shift-tab");
+    assert_eq!(h.view(&vcx), View::Skew);
+    h.press(&mut vcx, "tab");
+    assert_eq!(h.view(&vcx), View::Changes);
 }
 
 #[gpui::test]

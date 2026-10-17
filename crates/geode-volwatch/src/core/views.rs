@@ -53,6 +53,12 @@ impl View {
         Self::ALL[usize::from(self.digit()) % Self::ALL.len()]
     }
 
+    /// The previous view in `ALL` order (shift+tab), wrapping.
+    pub fn prev(self) -> View {
+        let n = Self::ALL.len();
+        Self::ALL[(usize::from(self.digit()) + n - 2) % n]
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             View::Changes => "Changes",
@@ -600,6 +606,16 @@ mod tests {
         assert_eq!(View::from_digit(6), None);
         assert_eq!(View::Skew.next(), View::Changes);
         assert_eq!(View::parse("richcheap"), Some(View::RichCheap));
+    }
+
+    #[test]
+    fn prev_is_the_inverse_of_next_and_wraps() {
+        for v in View::ALL {
+            assert_eq!(v.next().prev(), v);
+            assert_eq!(v.prev().next(), v);
+        }
+        assert_eq!(View::Changes.prev(), View::Skew);
+        assert_eq!(View::Skew.next(), View::Changes);
     }
 
     #[test]

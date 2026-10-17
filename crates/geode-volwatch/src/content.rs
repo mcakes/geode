@@ -75,6 +75,7 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("volwatch::view_4", "Vol: Term view"),
     ("volwatch::view_5", "Vol: Skew view"),
     ("volwatch::view_next", "Vol: Next view"),
+    ("volwatch::view_prev", "Vol: Previous view"),
     ("volwatch::lookback", "Vol: Cycle lookback"),
     ("volwatch::paint", "Vol: Toggle paint"),
     ("volwatch::sort", "Vol: Sort by column"),
@@ -109,6 +110,7 @@ context = "volwatch && mode == normal"
 "4" = "volwatch::view_4"
 "5" = "volwatch::view_5"
 "tab" = "volwatch::view_next"
+"shift+tab" = "volwatch::view_prev"
 "d" = "volwatch::lookback"
 "p" = "volwatch::paint"
 "s" = "volwatch::sort"
@@ -381,7 +383,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 28 + 5 + 3);
+        assert_eq!(count, 29 + 5 + 3);
         let mut registry = ActionRegistry::default();
         geode_shell::defaults::register_builtin_actions(&mut registry);
         let (data, _rx) = DataHandle::for_tests();

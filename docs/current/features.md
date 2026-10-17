@@ -3699,8 +3699,9 @@ Skew lay out the tenors it lists (ordered by `tenor_days`, unparsable
 labels last), and a tenor the last ask lacked asks again. A source that
 cannot enumerate leaves the conventional tenors `1M 2M 3M 6M 1Y 18M 2Y 3Y`.
 
-**Views.** Five, on `1`–`5`, `tab` stepping and wrapping, and the view
-strip under the header (a press switches):
+**Views.** Five, on `1`–`5`, `tab` stepping forward and `shift+tab`
+back, both wrapping, and the view strip under the header (a press
+switches; both step keys are named at its right):
 
 1. **Changes**: the 1M forward's change in percent, ATFM vol and its Δ at
    `1M 3M 6M 1Y 2Y`, the 3M 25Δ skew and the 1Y−1M slope with their Δ, a
@@ -3781,12 +3782,12 @@ asks vega alone. A query that is refused, or a view that fails or lacks the
 column, drops the column with a standing warning `[volwatch] vega: <reason>`
 and the board keeps painting; the next answer restores it.
 
-**Keys.** Normal mode: `1`–`5` and `tab` views, `d` the lookback
-(`1d → 1w → 1m`), `p` paint, `s` sort, `enter` the band, `t` the
-timeseries refusal (below), `y` yank, `shift+r` refresh now, `g w` the
-switcher, `.` the action menu, `v`/`shift+v` a row selection, motions and
-`escape`. A right press on a row moves the cursor there (unless inside a
-selection) and opens the action menu at the pointer; `⋯` opens it under
+**Keys.** Normal mode: `1`–`5`, `tab` and `shift+tab` views, `d` the
+lookback (`1d → 1w → 1m`), `p` paint, `s` sort, `enter` the band, `t`
+the timeseries refusal (below), `y` yank, `shift+r` refresh now, `g w`
+the switcher, `.` the action menu, `v`/`shift+v` a row selection, motions
+and `escape`. A right press on a row moves the cursor there (unless inside
+a selection) and opens the action menu at the pointer; `⋯` opens it under
 the header. The menu lists every verb with its chord, the view and paint
 ticks, and a disabled row's reason. `escape` peels one layer at a time:
 the menu, the band, a selection, a `/` narrowing, then the notices.

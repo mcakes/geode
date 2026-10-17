@@ -75,6 +75,7 @@ const VIEW_ACTIONS: [&str; 5] = [
     "volwatch::view_5",
 ];
 const VIEW_NEXT_ACTION: &str = "volwatch::view_next";
+const VIEW_PREV_ACTION: &str = "volwatch::view_prev";
 const LOOKBACK_ACTION: &str = "volwatch::lookback";
 const REFRESH_ACTION: &str = "volwatch::refresh";
 pub(super) const SWITCH_ACTION: &str = "volwatch::switch";
@@ -208,8 +209,9 @@ pub struct VolwatchTile {
     /// time for the stale wake-ups.
     pub(crate) times: Vec<TimeRun>,
     times_at: Vec<Option<DateTime<Utc>>>,
-    /// The view strip's step key, resolved when the chords change.
-    strip_keys: Option<Vec<Keystroke>>,
+    /// The view strip's step keys (next, previous), resolved when the
+    /// chords change.
+    strip_keys: Option<(Vec<Keystroke>, Vec<Keystroke>)>,
     /// The display clock the readout's dates and the times' labels read.
     clock: Clock,
     /// The body's empty state; `None` while a list is shown.
@@ -794,6 +796,7 @@ impl VolwatchTile {
                 cx.notify();
             }
             VIEW_NEXT_ACTION => self.set_view(self.state.view.next(), cx),
+            VIEW_PREV_ACTION => self.set_view(self.state.view.prev(), cx),
             LOOKBACK_ACTION => self.cycle_lookback(cx),
             REFRESH_ACTION => {
                 self.resubmit(true, cx);

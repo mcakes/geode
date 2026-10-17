@@ -4,7 +4,7 @@
 //! sort chip, the members not in the surface in the warning tone, one chip
 //! per failed dataset in the danger tone; in the cluster the mode, the
 //! in-flight `…`, the per-dataset source times, link chips, health, `⋯`
-//! and ×), the view strip (`1`–`5`, the active view lit, the step key at
+//! and ×), the view strip (`1`–`5`, the active view lit, the step keys at
 //! the right), the grid or the empty state, and the footer (the first
 //! reported notice on the left, the cursor readout on the right).
 //!
@@ -447,12 +447,14 @@ fn render_strip(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTil
                 .overflow_hidden()
                 .children(views),
         )
-        .when_some(tile.strip_keys.as_ref(), |el, keys| {
+        .when_some(tile.strip_keys.as_ref(), |el, (next, prev)| {
             el.child(
-                div()
+                h_flex()
                     .flex_none()
+                    .gap_2()
                     .text_color(muted)
-                    .child(kbd::hint(keys, "next view")),
+                    .child(kbd::hint(next, "next view"))
+                    .child(kbd::hint(prev, "previous")),
             )
         })
 }
