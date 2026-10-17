@@ -427,7 +427,9 @@ fn a_reload_under_a_covering_object_dialog_repaints_the_revealed_list(
     .unwrap();
     let builtin = shell.read_with(&cx, |s, cx| s.services(cx).builtin.clone());
     let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut cx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert_eq!(

@@ -295,7 +295,11 @@ fn a_log_table_change_on_reload_applies_it_through_level_control_once(
         builtin: vec![LayerDoc::builtin("app", "[log]\ningest = \"debug\"\n").unwrap()],
         ..ConfigSources::default()
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
     cx.run_until_parked();
 
     let calls = control.calls.lock().unwrap();
@@ -321,7 +325,11 @@ fn a_log_table_change_on_reload_applies_it_through_level_control_once(
         builtin: vec![LayerDoc::builtin("app", "[log]\ningest = \"debug\"\n").unwrap()],
         ..ConfigSources::default()
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(same_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(same_config, cx))
+    });
     cx.run_until_parked();
     assert_eq!(
         control.calls.lock().unwrap().len(),
@@ -342,7 +350,11 @@ fn a_log_table_change_updates_the_entity_even_without_log_services(cx: &mut gpui
         builtin: vec![LayerDoc::builtin("app", "[log]\ningest = \"debug\"\n").unwrap()],
         ..ConfigSources::default()
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
     assert_eq!(
@@ -540,7 +552,11 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
         Some(desk_path.clone()),
         Some(user_path.clone()),
     );
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
     cx.run_until_parked();
 
     assert_eq!(error_count(&cx), before, "the error count must not inflate");

@@ -1237,7 +1237,9 @@ impl ReferenceCache {
 /// Route mailbox events through the window and forward reloads. Awaiting the
 /// receiver wakes the foreground task on arrival; scheduling and UI work still
 /// determine delivery latency. The task checks window liveness on each event.
-pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
+/// Reloads are heard from `app`, the one emitter of `ShellEvent`; the window
+/// stays for delivery.
+pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root>, cx: &mut App) {
     let rx = bridge.events.clone();
     let dropped = bridge.dropped.clone();
     let handle = bridge.handle.clone();
@@ -1439,7 +1441,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     }));
 
     // Reloads: new views to the data thread and to the factory.
-    cx.subscribe(&shell, {
+    cx.subscribe(app, {
         let handle = handle.clone();
         let factory = factory.clone();
         let panels = panels.clone();
@@ -1452,9 +1454,10 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let scenarios = bridge.scenarios.clone();
         let scenario_views = bridge.scenario_views.clone();
         let scenario_cells = bridge.scenario_cells.clone();
-        move |shell, event: &ShellEvent, cx| match event {
+        let shell = shell.clone();
+        move |app, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
-                let config = shell.read(cx).config(cx);
+                let config = app.read(cx).config();
                 if config.doc("views").is_none() {
                     return;
                 }
@@ -1600,7 +1603,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // threshold is in the shared cell when each tile's flip re-arms
             // its stale wake-up.
             ShellEvent::AppSettingsReloaded => {
-                let stale_after = stale_after_from_config(shell.read(cx).config(cx));
+                let stale_after = stale_after_from_config(app.read(cx).config());
                 factory.set_stale_after(stale_after);
                 // Every panel shares the one stale threshold.
                 for panel in &panels {
@@ -1613,6 +1616,8 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             ShellEvent::RestartRequired(_) => {}
             // The shell already logged and installed the rejected reload's diagnostics.
             ShellEvent::ReloadRejected(_) => {}
+            // Each window's own reactions (`ShellView::on_app_event`).
+            ShellEvent::Reloaded { .. } | ShellEvent::DayChanged | ShellEvent::Park { .. } => {}
         }
     })
     .detach();
@@ -3065,7 +3070,8 @@ role = "attribute"
             bridge.pricer.dims().get("region").is_none(),
             "fixture: built with no dimensions"
         );
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3103,7 +3109,8 @@ role = "attribute"
             vec!["barrier", "vanilla"],
             "fixture: built with the bundled views"
         );
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3152,12 +3159,17 @@ role = "attribute"
             bridge.factory.colours().values().is_empty(),
             "fixture: built with no value mapping"
         );
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
         assert_eq!(
@@ -3235,12 +3247,17 @@ role = "attribute"
             bridge.watchlist.config().is_none(),
             "fixture: built with nothing pushed"
         );
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
         let config = bridge.watchlist.config().expect("the reload pushed one");
@@ -3350,12 +3367,17 @@ role = "attribute"
             bridge.classifications.config().is_none(),
             "fixture: built with no snapshot"
         );
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
         let snapshot = bridge.classifications.config().expect("pushed on reload");
@@ -3522,7 +3544,8 @@ grain = "underlying"
                     })
                 })
                 .unwrap();
-            cx.update(|cx| attach(&bridge, window, cx));
+            let app = app_of(window, cx);
+            cx.update(|cx| attach(&bridge, &app, window, cx));
             let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
             let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
                 root.view().clone().downcast::<ShellView>().unwrap()
@@ -3894,7 +3917,8 @@ grain = "underlying"
             !bridge.pricer.template_names().contains(&"CONDOR".into()),
             "fixture: built with the builtin set"
         );
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3942,7 +3966,8 @@ grain = "underlying"
             );
             source.revision(cx)
         });
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3983,7 +4008,8 @@ grain = "underlying"
         let mut bridge = test_bridge(handle);
         bridge.schema = Rc::new(underlyings_schema());
         assert_eq!(bridge.pricer.settings().payout, None, "fixture");
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -4073,7 +4099,8 @@ grain = "underlying"
         let bridge = test_bridge(handle);
         bridge.underlyings.set(&["SPX".to_string()]);
         let source = bridge.pricer.underlying_source();
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -4170,7 +4197,8 @@ grain = "underlying"
         });
         let (handle, _rx) = DataHandle::for_tests();
         let bridge = test_bridge(handle);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -4235,7 +4263,8 @@ grain = "underlying"
         let (handle, _rx) = DataHandle::for_tests();
         let mut bridge = test_bridge(handle);
         bridge.pricer_key = Some(vcx.update(|_, cx| pricer_config_key(shell.read(cx).config(cx))));
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         vcx.update(|_, cx| {
             let frame = shell.read(cx).frame().clone();
             frame.update(cx, |f, cx| {
@@ -5857,7 +5886,8 @@ grain = "underlying"
         cx.update(geode_blotter::init);
         cx.update(geode_pricer::init);
         let window = open_shell_window(cx, services);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let draw = |vcx: &mut gpui::VisualTestContext| {
             vcx.run_until_parked();
@@ -6242,7 +6272,8 @@ grain = "underlying"
 
         init_grid_modules(cx);
         let window = open_shell_window(cx, services);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let draw = |vcx: &mut gpui::VisualTestContext| {
             vcx.run_until_parked();
@@ -6426,7 +6457,8 @@ grain = "underlying"
         let bridge = test_bridge(f.handle.clone());
         let window = f.window;
         // Outside the window's update: `attach` reads the window's root.
-        gpui::TestAppContext::update(&f.vcx, |cx| attach(&bridge, window, cx));
+        let app = gpui::TestAppContext::update(&f.vcx, |cx| f.shell.read(cx).app().clone());
+        gpui::TestAppContext::update(&f.vcx, |cx| attach(&bridge, &app, window, cx));
         f.type_keys("j j j shift-v k");
         f.right_press("blotter-cell-3-2");
         f.type_keys("j enter");
@@ -6531,7 +6563,8 @@ grain = "underlying"
         let (tx, rx) = crate::events::channel();
         let mut bridge = test_bridge(handle);
         bridge.events = rx;
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -6612,7 +6645,8 @@ grain = "underlying"
         let (services, tiles) = with_a_pricer_tile_on(test_shell_services(), pricer.clone(), "a");
         let window = open_pricer_test_window(cx, services);
         let (bridge, tx) = test_bridge_with_pricer(handle, pricer);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -6807,7 +6841,8 @@ grain = "underlying"
             sheet,
         );
         let window = open_pricer_test_window(cx, services);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         (bridge, window, tiles)
     }
 
@@ -7340,7 +7375,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -7456,7 +7492,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         RecordingTile {
             vcx,
             log,
@@ -7565,7 +7602,8 @@ grain = "underlying"
             underlyings: Default::default(),
         };
 
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         // This test's own `dropped`, `bridge.dropped`, and the drain
         // task's own clone (captured at `attach` time) — three, while
@@ -7691,7 +7729,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         tx.try_send(DataEvent::SeriesFetched {
             source: "demo_kdb".into(),
@@ -7760,7 +7799,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         // The restored workspace's one tile is id 1, so that is the key
         // this outcome is addressed to.
@@ -7835,7 +7875,8 @@ grain = "underlying"
             sources: Vec::new(),
             local_datasets: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         // The restored workspace's one tile is id 1, so that is the key
         // this outcome is addressed to.
@@ -7904,7 +7945,8 @@ grain = "underlying"
             underlyings: Default::default(),
         };
 
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
@@ -8004,7 +8046,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8059,12 +8102,17 @@ grain = "underlying"
             scenario_views: vec![derived],
             ..test_bridge(handle.clone())
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
 
@@ -8134,12 +8182,17 @@ grain = "underlying"
         });
         let (handle, _rx) = DataHandle::for_tests();
         let bridge = test_bridge(handle);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
         assert!(
@@ -8213,12 +8266,17 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
@@ -8296,7 +8354,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8312,7 +8371,9 @@ grain = "underlying"
             desk: None,
             user: Some(user.path().to_path_buf()),
         });
-        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        shell
+            .read_with(&vcx, |s, _| s.app().clone())
+            .update(&mut vcx, |a, cx| a.apply_reload_for_test(candidate, cx));
         vcx.run_until_parked();
         assert_eq!(
             factory.stale_after(),
@@ -8381,7 +8442,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8390,7 +8452,11 @@ grain = "underlying"
             "fixture: the factory starts with no colours at all"
         );
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
         assert!(
@@ -8419,7 +8485,8 @@ grain = "underlying"
         });
         let (handle, _rx) = DataHandle::for_tests();
         let bridge = test_bridge(handle);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8489,7 +8556,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8593,7 +8661,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8664,7 +8733,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8820,7 +8890,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8893,7 +8964,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8940,7 +9012,8 @@ grain = "underlying"
             },
             SourceShape::Subscribed,
         )];
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -9137,12 +9210,17 @@ grain = "underlying"
         });
         let (handle, _rx) = DataHandle::for_tests();
         let bridge = test_bridge(handle);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
@@ -9568,7 +9646,8 @@ grain = "underlying"
             schema: Default::default(),
             underlyings: Default::default(),
         };
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
 
         CatalogFixture {
             window,
@@ -10452,12 +10531,17 @@ grain = "underlying"
         let (handle, _rx) = DataHandle::for_tests();
         handle.shutdown();
         let bridge = test_bridge(handle);
-        cx.update(|cx| attach(&bridge, window, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
         vcx.update(|_, cx| {
-            shell.update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
         });
         vcx.run_until_parked();
         let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
@@ -11656,7 +11740,8 @@ grain = "underlying"
                 local_datasets: Rc::new(["sheets".to_string()].into_iter().collect()),
                 ..test_bridge(handle)
             };
-            cx.update(|cx| attach(&bridge, window, cx));
+            let app = app_of(window, cx);
+            cx.update(|cx| attach(&bridge, &app, window, cx));
             let shell = cx.update(|cx| {
                 window
                     .read(cx)
@@ -11799,7 +11884,11 @@ grain = "underlying"
                 "{EUROPE}[desk]\nfrom = \"book\"\n[desk.values]\nFlow = [\"BK000\"]\n"
             )));
             vcx.update(|_, cx| {
-                shell.update(cx, |s, cx| s.apply_reload_for_test(reloaded, cx));
+                shell
+                    .read(cx)
+                    .app()
+                    .clone()
+                    .update(cx, |a, cx| a.apply_reload_for_test(reloaded, cx));
             });
             vcx.run_until_parked();
             assert!(
@@ -11811,7 +11900,11 @@ grain = "underlying"
                 "[region]\nfrom = \"underlying_ref\"\n[region.values]\nEurope = [\"DAX\", \"SMI\"]\n",
             ));
             vcx.update(|_, cx| {
-                shell.update(cx, |s, cx| s.apply_reload_for_test(reloaded, cx));
+                shell
+                    .read(cx)
+                    .app()
+                    .clone()
+                    .update(cx, |a, cx| a.apply_reload_for_test(reloaded, cx));
             });
             vcx.run_until_parked();
             let again = next_watchlist(&f).expect("the changed mapping");
@@ -11840,7 +11933,11 @@ grain = "underlying"
                  [c]\ninclude = [\"NDX\"]\n",
             ));
             vcx.update(|_, cx| {
-                shell.update(cx, |s, cx| s.apply_reload_for_test(reloaded, cx));
+                shell
+                    .read(cx)
+                    .app()
+                    .clone()
+                    .update(cx, |a, cx| a.apply_reload_for_test(reloaded, cx));
             });
             vcx.run_until_parked();
             let first = next_watchlist(&f).expect("a changed list");
@@ -11871,7 +11968,11 @@ grain = "underlying"
                 "[b]\n[[b.rules]]\ndataset = \"risk\"\nexpression = \"npv > 2\"\n",
             ));
             vcx.update(|_, cx| {
-                shell.update(cx, |s, cx| s.apply_reload_for_test(reloaded, cx));
+                shell
+                    .read(cx)
+                    .app()
+                    .clone()
+                    .update(cx, |a, cx| a.apply_reload_for_test(reloaded, cx));
             });
             vcx.run_until_parked();
             assert!(next_watchlist(&f).is_none(), "b did not change");

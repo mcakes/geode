@@ -9,7 +9,9 @@ fn fzf_tab_folds_a_branch_without_changing_input_or_committing(cx: &mut gpui::Te
     let (services, _) = services_with_recorder();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Fzf)
+    });
     cx.simulate_keystrokes("ctrl-v /");
     let results = shell.read_with(&cx, |s, _| s.fuzzy_find.clone().unwrap());
     results.update(&mut cx, |r, cx| {
@@ -56,7 +58,9 @@ fn fzf_ranks_picks_and_cancels_without_moving_the_tree(cx: &mut gpui::TestAppCon
     services.roster = roster;
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Fzf)
+    });
     cx.simulate_keystrokes("ctrl-v /");
     cx.simulate_input("split");
     cx.run_until_parked();
@@ -120,7 +124,9 @@ fn fzf_ranks_picks_and_cancels_without_moving_the_tree(cx: &mut gpui::TestAppCon
     cx.simulate_keystrokes("escape");
 
     // The setting takes effect on the next prompt; Vim still receives incremental events.
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Vim);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Vim)
+    });
     cx.simulate_keystrokes("/");
     cx.simulate_input("split");
     cx.run_until_parked();
@@ -142,7 +148,9 @@ fn fzf_scrolls_to_keyboard_selection_and_accepts_pointer_picks(cx: &mut gpui::Te
     services.roster = roster;
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Fzf)
+    });
     cx.simulate_keystrokes("ctrl-v / ctrl-f ctrl-f ctrl-f ctrl-f");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -838,7 +846,9 @@ fn fzf_table_reports_the_painted_rows_after_every_result_change(cx: &mut gpui::T
     services.roster = roster;
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Fzf)
+    });
     cx.simulate_keystrokes("ctrl-v /");
     cx.run_until_parked();
 

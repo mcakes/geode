@@ -77,12 +77,13 @@ impl ShellView {
         };
         // The rect is only computed when the setting actually needs it —
         // a layout pass on dispatch is cheap but not free.
-        let rect = if direction.is_none() && self.add_direction == AddDirection::Auto {
+        let add_direction = self.app.read(cx).add_direction();
+        let rect = if direction.is_none() && add_direction == AddDirection::Auto {
             focused.and_then(|_| self.workspace(cx).focused_tile_rect(content_area(window)))
         } else {
             None
         };
-        let orientation = self.add_direction.resolve(direction, rect);
+        let orientation = add_direction.resolve(direction, rect);
         let id = self.with_workspaces(cx, |w| w.split_active(orientation));
         self.pending_tiles.insert(
             id,

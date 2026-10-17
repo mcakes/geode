@@ -304,14 +304,17 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
             return;
         }
     };
-    cx.emit(ShellEvent::DistinctRequested(DistinctParams {
+    // The app emits for the bridge; this window only asks.
+    let params = DistinctParams {
         key: PICKER_KEY,
         tag,
         column: column.to_string(),
         scope: minus_own,
         as_of,
         dataset: None,
-    }));
+    };
+    view.app
+        .update(cx, |_, cx| cx.emit(ShellEvent::DistinctRequested(params)));
 }
 
 /// Move from `Columns` to `Values` on the column at filtered position

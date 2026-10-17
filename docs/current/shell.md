@@ -48,6 +48,31 @@ workspace switch hid its boundary, defers the mark to the effects that flush
 after the draw. The palette records a chosen row the same way
 (`ShellApp::note_palette_use`).
 
+`ShellApp` also owns the app-wide settings a reload or a settings row changes
+(`font_size`, `find_style`, `add_direction`, `line_numbers`, `default_source`,
+`link_include_tile_filter`), the reload state (`config_revision`, the last
+outcome and its status text, the restart notice and the startup baselines it
+compares against) and the cached date, each behind a read accessor the status
+bar, the settings rows and the prepared dialog rows use; a settings row writes
+them through `ShellView::with_app` on its dispatch path. The watcher loop is
+the app's too, started once by `ShellApp::new` (`spawn_watcher`) and ended
+once every registered view's window has closed (the bridge's closures and
+the quit hooks hold a view or the app past its window, so the window
+decides): every tick sweeps the flip barrier,
+refreshes the diagnostics histogram (every live window's, summed) and the
+memory sample, refreshes the date, writes a dirty session and scans config,
+applying a changed candidate through `ShellApp::apply_reload`. `ShellApp` is
+the one emitter of `ShellEvent`: the bridge subscribes to it for
+`ConfigReloaded`, `AppSettingsReloaded` and `DistinctRequested` (a window's
+picker emits through the app), and each window subscribes in its constructor
+(`on_app_event`) for `Reloaded`, which carries the reload's "changed" flags so
+the window rebuilds only what the reload touched (its picker vocabulary, an
+open palette, its emitters' composition rule, an open expression dialog's
+offers, every open dialog's rows), for `ReloadRejected` (repaint the status)
+and for `DayChanged` (repaint the scope bar). `Reloaded` is queued after the
+bridge's events and before the frame's notifications, so a window sees a
+revision only after the bridge refreshed its views.
+
 `ShellApp` also creates the shared `Frame` and the `Diagnostics` entities
 (`frame()`, `diagnostics()`) and applies the session's restored frame state to
 the frame once, before any window exists: the `[frame]` record to the shared
@@ -80,7 +105,9 @@ New state belongs in the narrowest owner that can keep it correct. A global is
 appropriate only when independently hosted modules must observe the same
 application setting.
 
-The shell writes the first four. It installs `ReferenceGlobal` and
+`ShellApp::new` installs all six, before any window, so a second window
+opening resets none of them; the app writes the first four on a reload or a
+settings change. It installs `ReferenceGlobal` and
 `WatchlistGlobal` empty, and the app's bridge alone replaces them; modules
 only read and observe them (the watchlist tile observes both: its lists
 from `WatchlistGlobal`, the reference name beside each member from

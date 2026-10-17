@@ -205,8 +205,10 @@ fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::T
     // A fixed add direction makes the orientation independent of the
     // test window's shape.
     shell.update(&mut cx, |shell, cx| {
-        shell.app().update(cx, |a, _| a.session_dirty = false);
-        shell.add_direction = crate::tileadd::AddDirection::Vertical;
+        shell.app().update(cx, |a, _| {
+            a.session_dirty = false;
+            a.add_direction = crate::tileadd::AddDirection::Vertical;
+        });
     });
     cx.simulate_keystrokes("alt-s");
     cx.update(|window, cx| {

@@ -3016,7 +3016,7 @@ run_mutation "tips: chord_for ignores a none shadow" \
 # startup keymap for the rest of the session.
 run_mutation "tips: a keymap reload republishes Chords" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '            let bindings = self.services(cx).keymap.bindings().to_vec();' \
+  '            let bindings = self.services.keymap.bindings().to_vec();' \
   '            let bindings = Vec::new();' \
   geode-shell \
   a_keymap_reload_refreshes_the_chords_global
@@ -4042,8 +4042,8 @@ run_mutation "frame: restart_required clears once sources/datasets match the bas
 
 run_mutation "reload: ConfigReloaded is queued before ANY frame.update, including groupings_changed's and scopes_changed's (I2, residual fix)" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  $'            if views_changed {\n                cx.emit(ShellEvent::ConfigReloaded);\n            }\n            if app_changed {\n                cx.emit(ShellEvent::AppSettingsReloaded);\n            }\n            if groupings_changed {\n                let slots = rebuild_slots(&self.services(cx).config);\n                // The same inputs decide what an ad hoc chain may name. A\n                // chain left naming a removed column would be refused by\n                // every following tile\'s query with no way to see why.\n                let groupable = groupable_names(&self.services(cx).config);\n                self.frame.update(cx, |f, cx| {\n                    let replaced = f.replace_slots(slots);\n                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));\n                    for column in &dropped {\n                        tracing::warn!(\n                            target: "geode::config",\n                            "ad hoc grouping dropped: \'{column}\' is no longer a groupable column"\n                        );\n                    }\n                    if replaced || !dropped.is_empty() {\n                        cx.notify();\n                    }\n                });\n            }\n' \
-  $'            if app_changed {\n                cx.emit(ShellEvent::AppSettingsReloaded);\n            }\n            if groupings_changed {\n                let slots = rebuild_slots(&self.services(cx).config);\n                // The same inputs decide what an ad hoc chain may name. A\n                // chain left naming a removed column would be refused by\n                // every following tile\'s query with no way to see why.\n                let groupable = groupable_names(&self.services(cx).config);\n                self.frame.update(cx, |f, cx| {\n                    let replaced = f.replace_slots(slots);\n                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));\n                    for column in &dropped {\n                        tracing::warn!(\n                            target: "geode::config",\n                            "ad hoc grouping dropped: \'{column}\' is no longer a groupable column"\n                        );\n                    }\n                    if replaced || !dropped.is_empty() {\n                        cx.notify();\n                    }\n                });\n            }\n            if views_changed {\n                cx.emit(ShellEvent::ConfigReloaded);\n            }\n' \
+  $'            if views_changed {\n                cx.emit(ShellEvent::ConfigReloaded);\n            }\n            if app_changed {\n                cx.emit(ShellEvent::AppSettingsReloaded);\n            }\n            // Every window\'s own reload work (`ShellView::on_app_event`),\n            // queued after the bridge\'s events: a window sees the new\n            // revision only once the bridge has refreshed its views.\n            cx.emit(ShellEvent::Reloaded {\n                revision: self.config_revision,\n                pickable_changed,\n                palette_snapshot_changed,\n                link_filter_changed,\n                named_changed,\n            });\n            if groupings_changed {\n                let slots = rebuild_slots(&self.services.config);\n                // The same inputs decide what an ad hoc chain may name. A\n                // chain left naming a removed column would be refused by\n                // every following tile\'s query with no way to see why.\n                let groupable = groupable_names(&self.services.config);\n                self.frame.update(cx, |f, cx| {\n                    let replaced = f.replace_slots(slots);\n                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));\n                    for column in &dropped {\n                        tracing::warn!(\n                            target: "geode::config",\n                            "ad hoc grouping dropped: \'{column}\' is no longer a groupable column"\n                        );\n                    }\n                    if replaced || !dropped.is_empty() {\n                        cx.notify();\n                    }\n                });\n            }\n' \
+  $'            if app_changed {\n                cx.emit(ShellEvent::AppSettingsReloaded);\n            }\n            // Every window\'s own reload work (`ShellView::on_app_event`),\n            // queued after the bridge\'s events: a window sees the new\n            // revision only once the bridge has refreshed its views.\n            cx.emit(ShellEvent::Reloaded {\n                revision: self.config_revision,\n                pickable_changed,\n                palette_snapshot_changed,\n                link_filter_changed,\n                named_changed,\n            });\n            if groupings_changed {\n                let slots = rebuild_slots(&self.services.config);\n                // The same inputs decide what an ad hoc chain may name. A\n                // chain left naming a removed column would be refused by\n                // every following tile\'s query with no way to see why.\n                let groupable = groupable_names(&self.services.config);\n                self.frame.update(cx, |f, cx| {\n                    let replaced = f.replace_slots(slots);\n                    let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));\n                    for column in &dropped {\n                        tracing::warn!(\n                            target: "geode::config",\n                            "ad hoc grouping dropped: \'{column}\' is no longer a groupable column"\n                        );\n                    }\n                    if replaced || !dropped.is_empty() {\n                        cx.notify();\n                    }\n                });\n            }\n            if views_changed {\n                cx.emit(ShellEvent::ConfigReloaded);\n            }\n' \
   geode-shell \
   a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded_before_the_frame_notifies
 
@@ -4930,7 +4930,7 @@ run_mutation "reference global: a run of failures warns once" \
   geode-app a_failure_warns_once_until_a_read_succeeds
 
 run_mutation "reference global: the shell installs an empty global" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/app.rs \
   '        cx.set_global(crate::reference::ReferenceGlobal::default());' \
   '' \
   geode-shell the_reference_global_starts_empty
@@ -6171,8 +6171,8 @@ run_mutation "objectdialog: an edit round-trips through disk instead of merging 
 # directly repaints the dialog but leaves blotter queries using old views.
 run_mutation "objectdialog: an edit assigns the config instead of going through apply_reload" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    shell.apply_reload(config, cx);' \
-  '    shell.services.config = config;' \
+  '    shell.app.update(cx, |app, cx| app.apply_reload(config, cx));' \
+  '    shell.app.update(cx, |app, _| app.services.config = config);' \
   geode-shell \
   the_config_fan_out_is_debounced_and_goes_through_the_one_applier
 
@@ -6205,10 +6205,10 @@ run_mutation "objectdialog: a stale write completion clears a newer edit's batch
 run_mutation "objectdialog: an edit carries the previous config's diagnostics forward" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
   '    let config = Config::from_docs(docs);
-    shell.apply_reload(config, cx);' \
+    shell.app.update(cx, |app, cx| app.apply_reload(config, cx));' \
   '    let mut config = Config::from_docs(docs);
-    config.diagnostics = shell.services.config.diagnostics.clone();
-    shell.apply_reload(config, cx);' \
+    config.diagnostics = shell.services(cx).config.diagnostics.clone();
+    shell.app.update(cx, |app, cx| app.apply_reload(config, cx));' \
   geode-shell \
   an_edit_applies_even_when_another_config_file_is_broken
 
@@ -6465,9 +6465,9 @@ run_mutation "M5: the picker's tag is session-wide, not per-open" \
   geode-shell a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first
 
 run_mutation "M7: the flip barrier is swept on the reload-poll tick" \
-  crates/geode-shell/src/shell/mod.rs \
-  '                let Ok(frame) = this.update(cx, |view, _cx| view.frame.clone()) else {
-                    return; // window/entity gone; stop polling
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                let Ok(frame) = this.update(cx, |app, _cx| app.frame.clone()) else {
+                    return; // app gone; stop polling
                 };
                 frame.update(cx, |f, cx| {
                     if f.sweep(Instant::now()) {
@@ -7087,13 +7087,13 @@ run_mutation "perf model: a limit just under a petabyte reads as unlimited" \
   geode-diagnostics perf_model_formats_process_memory_and_duckdb_memory_detail
 
 run_mutation "shell: the reload poll never copies process memory into diagnostics" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/hot_reload.rs \
   '                                if d.refresh_memory(&reading) {' \
   '                                if false {' \
   geode-shell the_reload_poll_copies_process_memory_only_while_watched
 
 run_mutation "shell: the reload poll logs process memory only while watched" \
-  crates/geode-shell/src/shell/mod.rs \
+  crates/geode-shell/src/shell/hot_reload.rs \
   '                        crate::memory::emit(log, &reading);' \
   '                        if watched { crate::memory::emit(log, &reading); }' \
   geode-shell the_reload_poll_copies_process_memory_only_while_watched
@@ -7101,11 +7101,11 @@ run_mutation "shell: the reload poll logs process memory only while watched" \
 # The bridge holds the shell entity past its window, so only the window
 # check ends the poll: a surviving poll copied real (nondeterministic)
 # memory readings into diagnostics after the window closed.
-run_mutation "shell: the reload poll ends when its window closes" \
-  crates/geode-shell/src/shell/mod.rs \
-  '                if cx.update_window(poll_window, |_, _, _| ()).is_err() {' \
-  '                if false && cx.update_window(poll_window, |_, _, _| ()).is_err() {' \
-  geode-shell the_reload_poll_ends_when_its_window_closes
+run_mutation "shell: the watcher ends when the last window closes" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                let Ok(runs) = this.update(cx, |app, cx| app.watcher_runs(cx)) else {' \
+  '                let Ok(runs) = this.update(cx, |app, cx| app.watcher_runs(cx) || true) else {' \
+  geode-shell the_watcher_ends_when_the_last_window_closes
 
 run_mutation "catalog: a GiB memory limit reads as GB" \
   crates/geode-data/src/query/catalog.rs \
@@ -7244,7 +7244,7 @@ run_mutation "diagnostics: MIN-5 — set_catalog keeps a dataset missing from a 
 run_mutation "hot_reload: MIN-9 — set_levels guarded behind LogServices too" \
   crates/geode-shell/src/shell/hot_reload.rs \
   '                if new_levels != self.diagnostics.read(cx).levels {
-                    if let Some(log) = &self.services(cx).log
+                    if let Some(log) = &self.services.log
                         && let Err(e) = log.control.set(&new_levels)
                     {
                         tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
@@ -7255,7 +7255,7 @@ run_mutation "hot_reload: MIN-9 — set_levels guarded behind LogServices too" \
                         }
                     });
                 }' \
-  '                if let Some(log) = &self.services(cx).log
+  '                if let Some(log) = &self.services.log
                     && new_levels != self.diagnostics.read(cx).levels
                 {
                     if let Err(e) = log.control.set(&new_levels) {
@@ -13438,7 +13438,7 @@ run_mutation "fragments: a hot reload rebuilds the keymap without the modules' f
   crates/geode-shell/src/shell/hot_reload.rs \
   '        let layered = fragments::splice(
             new_config.layered_docs("keymap"),
-            &self.services(cx).keymap_fragments,
+            &self.services.keymap_fragments,
         );' \
   '        let layered = fragments::splice(new_config.layered_docs("keymap"), &[]);' \
   geode-shell a_reload_keeps_the_modules_fragment_bindings
@@ -13460,12 +13460,7 @@ run_mutation "fragments: refuses || in a fragment predicate" \
 
 run_mutation "fragments: a reload re-states the fragment diagnostics in the config section" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '        config_section.extend(
-            self.services(cx)
-                .keymap_fragment_diagnostics
-                .iter()
-                .cloned(),
-        );
+  '        config_section.extend(self.services.keymap_fragment_diagnostics.iter().cloned());
 ' \
   '' \
   geode-shell a_dropped_fragment_bindings_diagnostic_survives_a_reload
@@ -17801,7 +17796,7 @@ run_mutation "stack pull: each action names its own direction" \
 
 run_mutation "stack split: takes the add direction" \
   crates/geode-shell/src/shell/input.rs \
-  '            let orientation = self.add_direction.resolve(None, rect);
+  '            let orientation = self.app.read(cx).add_direction().resolve(None, rect);
             if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {' \
   '            let _ = rect;
             let orientation = crate::tiling::Orientation::Horizontal;
@@ -18235,7 +18230,9 @@ run_mutation "grouping dialog: a failed slot write unstages an empty slot" \
 run_mutation "grouping dialog: a failed save over an inherited slot restores its chain" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
   '    let restored = Config::from_docs(pending.revert);
-    shell.apply_reload(restored, cx);' \
+    shell
+        .app
+        .update(cx, |app, cx| app.apply_reload(restored, cx));' \
   '    let restored = Config::from_docs(pending.revert);
     let _ = restored;' \
   geode-shell \
@@ -31828,7 +31825,7 @@ run_mutation "panels: a panels edit asks for a restart" \
 # re-derive it.
 run_mutation "panels: composition diagnostics survive a reload" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '        config_section.extend(self.services(cx).composition_diagnostics.iter().cloned());' \
+  '        config_section.extend(self.services.composition_diagnostics.iter().cloned());' \
   '' \
   geode-shell a_composition_diagnostic_stays_in_the_config_section_across_a_reload
 
@@ -35337,8 +35334,8 @@ run_mutation "chrome rows: a reload leaves the config revision" \
 # The reload re-derives every open dialog's rows before anything paints.
 run_mutation "chrome rows: the reload applier leaves dialog rows unrefreshed" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  $'        // Every open dialog re-derives against what this reload applied.\n        self.refresh_dialog_rows(cx);' \
-  '        // Every open dialog re-derives against what this reload applied.' \
+  $'                // Every open dialog re-derives against what this reload applied.\n                self.refresh_dialog_rows(cx);' \
+  '                // Every open dialog re-derives against what this reload applied.' \
   geode-shell \
   a_keymap_reload_repaints_the_keybinding_rows
 
@@ -35863,8 +35860,8 @@ run_mutation "link: the filter setting persists to the user layer" \
   geode-shell setting_the_filter_off_persists_it_to_the_user_layer
 
 run_mutation "link: the filter setting is seeded from config" \
-  crates/geode-shell/src/shell/mod.rs \
-  '        let link_include_tile_filter = crate::linkfilter::from_config(app.read(cx).config());' \
+  crates/geode-shell/src/shell/app.rs \
+  '        let link_include_tile_filter = crate::linkfilter::from_config(config);' \
   '        let link_include_tile_filter = true;' \
   geode-shell a_configured_filter_setting_off_holds_from_startup
 

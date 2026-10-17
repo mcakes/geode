@@ -164,11 +164,14 @@ fn requests(
     let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     vcx.update(|_, cx| {
         let seen = seen.clone();
-        cx.subscribe(shell, move |_, e: &ShellEvent, _| {
-            if let ShellEvent::DistinctRequested(p) = e {
-                seen.borrow_mut().push(p.clone());
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| {
+                if let ShellEvent::DistinctRequested(p) = e {
+                    seen.borrow_mut().push(p.clone());
+                }
+            },
+        )
         .detach();
     });
     seen
@@ -439,7 +442,9 @@ fn a_reload_rebuilds_the_vocab_under_an_open_dialog(cx: &mut gpui::TestAppContex
         desk: None,
         user: None,
     });
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("scope-expr-row-region").is_some());
 }
@@ -667,7 +672,10 @@ fn a_reload_offers_a_new_named_expression_under_an_open_dialog(cx: &mut gpui::Te
         )
         .unwrap(),
     ]);
-    shell.update(&mut vcx, |s, cx| s.apply_reload(reloaded.config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app()
+            .update(cx, |a, cx| a.apply_reload(reloaded.config, cx))
+    });
     vcx.run_until_parked();
     assert!(vcx.debug_bounds("scope-expr-named-row-fresh").is_some());
     assert!(
@@ -725,7 +733,9 @@ fn unstaging_a_missing_name_clears_its_values_error(cx: &mut gpui::TestAppContex
     vcx.run_until_parked();
     stage(&mut vcx, &["liq"]);
     shell.update(&mut vcx, |s, cx| {
-        s.apply_reload(services_with_schema().config, cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(services_with_schema().config, cx)
+        })
     });
     vcx.run_until_parked();
     let seen = requests(&shell, &mut vcx);

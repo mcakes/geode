@@ -280,7 +280,7 @@ impl ShellView {
             let rect = self
                 .workspace(cx)
                 .focused_tile_rect(super::render::content_area(window));
-            let orientation = self.add_direction.resolve(None, rect);
+            let orientation = self.app.read(cx).add_direction().resolve(None, rect);
             if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {
                 self.mark_session_dirty(cx);
                 self.note_keyboard_focus_move(window, cx);
@@ -303,7 +303,7 @@ impl ShellView {
             let rect = self
                 .workspace(cx)
                 .focused_tile_rect(super::render::content_area(window));
-            let orientation = self.add_direction.resolve(None, rect);
+            let orientation = self.app.read(cx).add_direction().resolve(None, rect);
             if self.with_workspace(cx, |ws| ws.unstack_focused(orientation)) {
                 self.mark_session_dirty(cx);
                 self.note_keyboard_focus_move(window, cx);
@@ -371,16 +371,18 @@ impl ShellView {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's
             // set_font_size path.
-            self.font_size = self.font_size.larger();
+            let larger = self.app.read(cx).font_size().larger();
+            self.with_app(cx, |app| app.font_size = larger);
             self.persist_font_size(cx);
         } else if action.0 == "fontsize::decrease" {
-            self.font_size = self.font_size.smaller();
+            let smaller = self.app.read(cx).font_size().smaller();
+            self.with_app(cx, |app| app.font_size = smaller);
             self.persist_font_size(cx);
         } else if action.0 == "config::open_directory" {
             self.open_config_directory(cx);
         } else if action.0 == "ui::line_numbers_cycle" {
             // Cycle off → on → relative → off through the same setter as Settings.
-            self.set_line_numbers(self.line_numbers.next(), cx);
+            self.set_line_numbers(self.app.read(cx).line_numbers().next(), cx);
         } else if action.0 == "perf::toggle_overlay" {
             // Toggle the readout only; frame-time recording continues while hidden.
             let next = !self.perf_overlay;
@@ -669,7 +671,7 @@ impl ShellView {
         let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let size = self.font_size;
+        let size = self.app.read(cx).font_size();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
                 // Include the setting in the warning: font size and find style share
@@ -726,7 +728,7 @@ impl ShellView {
         let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let style = self.find_style;
+        let style = self.app.read(cx).find_style();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
                 // Identify the setting so a shared `app.toml` parse error is actionable.
@@ -747,7 +749,7 @@ impl ShellView {
         mode: crate::linenumbers::LineNumbers,
         cx: &mut Context<Self>,
     ) {
-        self.line_numbers = mode;
+        self.with_app(cx, |app| app.line_numbers = mode);
         cx.set_global(crate::linenumbers::UiSettings { line_numbers: mode });
         self.persist_line_numbers(cx);
         cx.notify();
@@ -759,7 +761,7 @@ impl ShellView {
         let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let mode = self.line_numbers;
+        let mode = self.app.read(cx).line_numbers();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = crate::linenumbers::persist_to_user_config(&dir, mode) {
                 tracing::warn!(target: "geode::config", "line numbers not saved: {e}");
@@ -773,7 +775,7 @@ impl ShellView {
     /// the field and re-pulls itself, since it must not persist what it
     /// just read.
     pub(crate) fn set_link_filter(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.link_include_tile_filter = on;
+        self.with_app(cx, |app| app.link_include_tile_filter = on);
         if let Some(dir) = self.user_dir(cx) {
             crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
                 if let Err(e) = crate::linkfilter::persist_to_user_config(&dir, on) {
@@ -793,7 +795,7 @@ impl ShellView {
     /// one setter; a hot reload writes the field and the global itself,
     /// since it must not persist what it just read.
     pub(crate) fn set_default_source(&mut self, source: Option<String>, cx: &mut Context<Self>) {
-        self.default_source = source.clone();
+        self.with_app(cx, |app| app.default_source = source.clone());
         let mut series = crate::series::SeriesSettings::from_config(&self.services(cx).config);
         series.default_source = source;
         cx.set_global(series);
@@ -808,7 +810,7 @@ impl ShellView {
         let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let source = self.default_source.clone();
+        let source = self.app.read(cx).default_source().map(str::to_string);
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = crate::series::persist_to_user_config(&dir, source.as_deref()) {
                 tracing::warn!(target: "geode::config", "default source not saved: {e}");
@@ -823,7 +825,7 @@ impl ShellView {
         let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let direction = self.add_direction;
+        let direction = self.app.read(cx).add_direction();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = crate::tileadd::persist_to_user_config(&dir, direction) {
                 tracing::warn!(target: "geode::config", "add direction not saved: {e}");

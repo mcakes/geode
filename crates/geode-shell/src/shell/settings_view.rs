@@ -501,7 +501,7 @@ fn set_theme_on(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>) 
 /// Store and persist font size, then notify. The next shell render applies its rem size
 /// to the window.
 fn set_font_size_on(shell: &mut ShellView, size: FontSize, cx: &mut Context<ShellView>) {
-    shell.font_size = size;
+    shell.with_app(cx, |app| app.font_size = size);
     shell.persist_font_size(cx);
     cx.notify();
 }
@@ -509,14 +509,14 @@ fn set_font_size_on(shell: &mut ShellView, size: FontSize, cx: &mut Context<Shel
 /// Store and persist find style, then notify. This setter updates the shell's
 /// preference; feature-specific consumers receive configuration separately.
 fn set_find_style_on(shell: &mut ShellView, style: FindStyle, cx: &mut Context<ShellView>) {
-    shell.find_style = style;
+    shell.with_app(cx, |app| app.find_style = style);
     shell.persist_find_style(cx);
     cx.notify();
 }
 
 /// Store and persist the add direction, used by the next `ShellView::add_tile`.
 fn set_add_direction_on(shell: &mut ShellView, d: AddDirection, cx: &mut Context<ShellView>) {
-    shell.add_direction = d;
+    shell.with_app(cx, |app| app.add_direction = d);
     shell.persist_add_direction(cx);
     cx.notify();
 }
@@ -579,16 +579,17 @@ const WIDTH: f32 = 640.0;
 /// Fetch-source options come from `SeriesSettings`, shared with timeseries
 /// tiles. This is the configured source list, not adapter startup status.
 fn rows_for(shell: &ShellView, cx: &App) -> Vec<SettingRow> {
+    let app = shell.app.read(cx);
     derive_rows(
-        &shell.services(cx).theme.names(),
-        shell.services(cx).theme.active_name(),
-        shell.font_size,
-        shell.find_style,
-        shell.line_numbers,
-        shell.add_direction,
-        shell.default_source.as_deref(),
+        &app.services().theme.names(),
+        app.services().theme.active_name(),
+        app.font_size(),
+        app.find_style(),
+        app.line_numbers(),
+        app.add_direction(),
+        app.default_source(),
         &fetch_source_names(cx),
-        shell.link_include_tile_filter,
+        app.link_include_tile_filter(),
     )
 }
 

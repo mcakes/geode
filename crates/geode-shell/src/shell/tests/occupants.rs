@@ -1185,7 +1185,7 @@ fn auto_splits_a_wide_tile_to_the_right_and_a_tall_one_below(cx: &mut gpui::Test
     let viewport = cx.update(|window, _| window.viewport_size());
     assert_eq!(viewport.width, px(1500.0), "sanity: the resize took");
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.add_direction),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).add_direction()),
         crate::tileadd::AddDirection::Auto
     );
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");

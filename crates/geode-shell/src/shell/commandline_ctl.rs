@@ -35,7 +35,9 @@ impl ShellView {
             results.update(cx, |results, cx| results.close(cx));
         }
         self.fuzzy_find_subscriptions.clear();
-        if prompt == Prompt::Find && self.find_style == crate::vimfind::FindStyle::Fzf {
+        if prompt == Prompt::Find
+            && self.app.read(cx).find_style() == crate::vimfind::FindStyle::Fzf
+        {
             let results = cx.new(|_| crate::fuzzyfind::FuzzyFind::default());
             if self.occupants[&tile]
                 .content

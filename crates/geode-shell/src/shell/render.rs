@@ -199,7 +199,7 @@ impl Render for ShellView {
         // makes (`content_area`, `sidebar::width`, `status::height`,
         // `rem_size` below) must sit AFTER this line, and nothing rendered
         // between `Root`'s set and this one may read the rem.
-        let rem = gpui::px(self.font_size.rem_px());
+        let rem = gpui::px(self.app.read(cx).font_size().rem_px());
         if window.rem_size() != rem {
             window.set_rem_size(rem);
         }
@@ -283,7 +283,7 @@ impl Render for ShellView {
         let bar_model = self
             .target_frame(cx)
             .read(cx)
-            .bar_model(self.clock(cx), self.today);
+            .bar_model(self.clock(cx), self.app.read(cx).today());
         // Read the cached diagnostics summary. Cloning its shared string
         // increments a reference count without copying its buffer.
         let diagnostics_read = self.diagnostics.read(cx);
@@ -342,12 +342,14 @@ impl Render for ShellView {
                 cx.notify();
             });
         };
+        // The reload state is the app's; read, never updated, from here.
+        let app = self.app.read(cx);
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count_label(),
-            self.reload_status.as_ref(),
+            app.reload_status(),
             self.config_write_error.as_ref(),
-            self.restart_required.as_ref(),
+            app.restart_required(),
             self.notice.as_ref(),
             stopped,
             store_waiting,

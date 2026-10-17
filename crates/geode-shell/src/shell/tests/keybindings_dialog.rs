@@ -2824,7 +2824,9 @@ fn a_keymap_reload_repaints_the_keybinding_rows(cx: &mut gpui::TestAppContext) {
     .unwrap();
     let builtin = shell.read_with(&vcx, |s, cx| s.services(cx).builtin.clone());
     let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     vcx.run_until_parked();
     assert_keybinding_rows_are_fresh(&shell, &mut vcx);
     let rebound = shell.read_with(&vcx, |s, _| {
@@ -2852,7 +2854,7 @@ fn a_keymap_reload_repaints_the_keybinding_rows(cx: &mut gpui::TestAppContext) {
 #[should_panic(expected = "prepared rows are stale")]
 fn render_refuses_keybinding_rows_a_refresh_missed(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "keybindings::open");
-    shell.update(&mut cx, |s, _| s.config_revision += 1);
+    shell.update(&mut cx, |s, cx| s.with_app(cx, |a| a.config_revision += 1));
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
@@ -2870,7 +2872,7 @@ fn a_rebind_inside_the_dialog_repaints_its_row_on_the_reload(cx: &mut gpui::Test
     select_the_palette_row(&mut cx);
     let (action, _) = selected_row(&shell, &cx);
     assert_eq!(action.0, "palette::toggle");
-    let revision = shell.read_with(&cx, |s, _| s.config_revision);
+    let revision = shell.read_with(&cx, |s, cx| s.app().read(cx).config_revision());
     cx.simulate_keystrokes("enter ctrl-alt-q enter");
     cx.run_until_parked();
     assert!(
@@ -2880,14 +2882,16 @@ fn a_rebind_inside_the_dialog_repaints_its_row_on_the_reload(cx: &mut gpui::Test
         "the rebind went through the writer"
     );
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.config_revision),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).config_revision()),
         revision,
         "a write changes nothing in memory until its reload"
     );
     // The reload the watcher runs once it sees the write.
     let builtin = shell.read_with(&cx, |s, cx| s.services(cx).builtin.clone());
     let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut cx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     assert_keybinding_rows_are_fresh(&shell, &mut cx);
     let shown = shell.read_with(&cx, |s, _| {
         let state = s.keybindings.as_ref().unwrap();

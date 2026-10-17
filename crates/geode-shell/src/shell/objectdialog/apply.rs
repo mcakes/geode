@@ -758,7 +758,7 @@ fn apply_in_memory(
         docs = docs_with_object(docs, user_dir, doc, object, value.clone());
     }
     let config = Config::from_docs(docs);
-    shell.apply_reload(config, cx);
+    shell.app.update(cx, |app, cx| app.apply_reload(config, cx));
 }
 
 /// Active documents with the pending batch folded in, without applying or writing them.
@@ -856,7 +856,7 @@ fn promote(
     let user_dir = pending.user_dir.clone();
     let edits = pending.edits.clone();
     apply_in_memory(shell, &user_dir, &edits, cx);
-    let rejected = match &shell.last_reload {
+    let rejected = match shell.app.read(cx).last_reload() {
         crate::reload::ReloadOutcome::KeptLastGood { errors } => Some(errors.len()),
         _ => None,
     };
@@ -967,7 +967,9 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
     };
     // Re-derive diagnostics from the restored documents, as in `apply_in_memory`.
     let restored = Config::from_docs(pending.revert);
-    shell.apply_reload(restored, cx);
+    shell
+        .app
+        .update(cx, |app, cx| app.apply_reload(restored, cx));
     // Keep the failure visible even when the dialog that queued the write is closed.
     let failure = format!("config not saved — reverted: {message}");
     shell.config_write_error = Some(failure.clone().into());

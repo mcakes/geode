@@ -135,14 +135,17 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
             return;
         }
     };
-    cx.emit(ShellEvent::DistinctRequested(DistinctParams {
+    // The app emits for the bridge; this window only asks.
+    let params = DistinctParams {
         key: EXPR_KEY,
         tag,
         column,
         scope,
         as_of,
         dataset: None,
-    }));
+    };
+    view.app
+        .update(cx, |_, cx| cx.emit(ShellEvent::DistinctRequested(params)));
 }
 
 /// An `EXPR_KEY` reply. A covered dialog's field still owns its outstanding

@@ -166,7 +166,9 @@ fn a_reload_that_removes_a_column_drops_the_chain_naming_it(cx: &mut gpui::TestA
     let before = frame.read_with(&vcx, |f, _| f.shared().versions());
 
     let (config, _) = ShellServices::config_and_builtin(sources(DATASETS_WITHOUT_LHU));
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     vcx.run_until_parked();
 
     assert_eq!(
@@ -196,7 +198,9 @@ fn a_reload_that_removes_a_column_rebuilds_the_text_dimensions(cx: &mut gpui::Te
     assert_eq!(names(&shell, &vcx), chain(&["book", "lhu", "position_ref"]));
 
     let (config, _) = ShellServices::config_and_builtin(sources(DATASETS_WITHOUT_LHU));
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     vcx.run_until_parked();
 
     assert_eq!(names(&shell, &vcx), chain(&["book", "position_ref"]));
@@ -212,7 +216,9 @@ fn a_reload_that_keeps_every_column_keeps_the_chain(cx: &mut gpui::TestAppContex
         cx.notify();
     });
     let (config, _) = ShellServices::config_and_builtin(sources(DATASETS_WITHOUT_LHU));
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     vcx.run_until_parked();
     assert_eq!(
         frame.read_with(&vcx, |f, _| f

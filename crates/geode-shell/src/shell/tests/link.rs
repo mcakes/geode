@@ -3233,13 +3233,17 @@ fn a_reload_that_turns_the_filter_off_repulls_without_the_layer(cx: &mut gpui::T
         })
     };
     let unchanged = reload_with("[links]\ninclude_tile_filter = true\n");
-    shell.update(&mut vcx, |s, cx| s.apply_reload(unchanged, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(unchanged, cx))
+    });
     vcx.run_until_parked();
     assert_eq!(group_region(&frame, &vcx).as_deref(), Some("EU"));
     let off = reload_with("[links]\ninclude_tile_filter = false\n");
-    shell.update(&mut vcx, |s, cx| s.apply_reload(off, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(off, cx))
+    });
     vcx.run_until_parked();
-    assert!(!shell.read_with(&vcx, |s, _| s.link_include_tile_filter));
+    assert!(!shell.read_with(&vcx, |s, cx| s.app().read(cx).link_include_tile_filter()));
     assert_eq!(group_region(&frame, &vcx), None);
 }
 
@@ -3274,7 +3278,7 @@ fn a_configured_filter_setting_off_holds_from_startup(cx: &mut gpui::TestAppCont
         user: None,
     });
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
-    assert!(!shell.read_with(&vcx, |s, _| s.link_include_tile_filter));
+    assert!(!shell.read_with(&vcx, |s, cx| s.app().read(cx).link_include_tile_filter()));
     set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
     assert_eq!(
         group_underlying(&frame, &vcx, Group::A).as_deref(),

@@ -519,13 +519,13 @@ fn slash_enters_settings_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppCo
         let rows = settings_view::derive_rows(
             &s.services(cx).theme.names(),
             s.services(cx).theme.active_name(),
-            s.font_size,
-            s.find_style,
-            s.line_numbers,
-            s.add_direction,
-            s.default_source.as_deref(),
+            s.app().read(cx).font_size(),
+            s.app().read(cx).find_style(),
+            s.app().read(cx).line_numbers(),
+            s.app().read(cx).add_direction(),
+            s.app().read(cx).default_source(),
             &cx.global::<crate::series::SeriesSettings>().names(),
-            s.link_include_tile_filter,
+            s.app().read(cx).link_include_tile_filter(),
         );
         (
             state.query.clone(),
@@ -698,21 +698,21 @@ fn space_and_shift_space_step_the_selected_value_in_normal_mode(cx: &mut gpui::T
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("j");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Medium,
         "sanity: the test shell starts at the Medium default"
     );
 
     cx.simulate_keystrokes("space");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Large,
         "space should step Font size forward, Medium -> Large"
     );
 
     cx.simulate_keystrokes("shift-space");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Medium,
         "shift+space should step it back, Large -> Medium"
     );
@@ -918,7 +918,7 @@ fn a_double_click_on_a_settings_row_opens_its_typeahead(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn escape_cancels_a_settings_choice_field_untouched(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    let before = shell.read_with(&cx, |s, _| s.font_size);
+    let before = shell.read_with(&cx, |s, cx| s.app().read(cx).font_size());
     cx.simulate_keystrokes("j enter"); // Font size, enter opens too
     cx.run_until_parked();
     assert!(shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
@@ -926,7 +926,10 @@ fn escape_cancels_a_settings_choice_field_untouched(cx: &mut gpui::TestAppContex
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(!shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
-    assert_eq!(shell.read_with(&cx, |s, _| s.font_size), before);
+    assert_eq!(
+        shell.read_with(&cx, |s, cx| s.app().read(cx).font_size()),
+        before
+    );
     assert!(
         !dialog_filter_is_focused(&shell, &mut cx),
         "back in normal mode"
@@ -945,11 +948,11 @@ fn space_types_in_settings_filter_mode_rather_than_stepping(cx: &mut gpui::TestA
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("/ f o n t");
     cx.run_until_parked();
-    let before = shell.read_with(&cx, |shell, _| shell.font_size);
+    let before = shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size());
     cx.simulate_keystrokes("space");
     cx.run_until_parked();
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         before,
         "space in filter mode must not step the value"
     );
@@ -968,13 +971,13 @@ fn tab_still_steps_in_settings_normal_mode(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("j tab");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Large,
         "tab should step Font size forward in normal mode"
     );
     cx.simulate_keystrokes("shift-tab");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Medium,
     );
 }
@@ -987,13 +990,13 @@ fn l_and_h_step_the_selected_value_in_settings_normal_mode(cx: &mut gpui::TestAp
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("j l");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Large,
         "l should step Font size forward, Medium -> Large"
     );
     cx.simulate_keystrokes("h");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Medium,
         "h should step it back, Large -> Medium"
     );
@@ -1101,7 +1104,8 @@ fn a_settings_row_click_keeps_focus_where_the_mode_says(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn the_settings_value_chip_steps_and_a_row_click_only_selects(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    let font = |cx: &gpui::VisualTestContext| shell.read_with(cx, |s, _| s.font_size);
+    let font =
+        |cx: &gpui::VisualTestContext| shell.read_with(cx, |s, cx| s.app().read(cx).font_size());
     assert_eq!(font(&cx), crate::fontsize::FontSize::Medium);
 
     // Row 1 is Font size. Its chip:
@@ -1164,7 +1168,7 @@ fn the_settings_value_chip_steps_and_a_row_click_only_selects(cx: &mut gpui::Tes
 #[gpui::test]
 fn typing_filters_the_settings_rows(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    let before = shell.read_with(&cx, |shell, _| shell.font_size);
+    let before = shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size());
     cx.simulate_keystrokes("/");
     cx.simulate_input("font");
     let (query, selected) = shell.read_with(&cx, |shell, _| {
@@ -1174,7 +1178,7 @@ fn typing_filters_the_settings_rows(cx: &mut gpui::TestAppContext) {
     assert_eq!(query, "font");
     assert_eq!(selected, 0, "a query selects the top match");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         before,
         "typing must never apply a setting — the old h/l/enter stepping \
          keys are plain text now"
@@ -1198,21 +1202,21 @@ fn tab_and_shift_tab_step_the_selected_value(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("/");
     cx.simulate_input("font");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Medium,
         "sanity: the test shell starts at the Medium default"
     );
 
     cx.simulate_keystrokes("tab");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Large,
         "tab should step Font size forward, Medium -> Large"
     );
 
     cx.simulate_keystrokes("shift-tab");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Medium,
         "shift+tab should step it back, Large -> Medium"
     );
@@ -1242,11 +1246,11 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
 
     {
         let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-        let before = shell.read_with(&cx, |shell, _| shell.find_style);
+        let before = shell.read_with(&cx, |shell, cx| shell.app().read(cx).find_style());
         cx.simulate_keystrokes("/");
         cx.simulate_input("keyboard");
         cx.simulate_keystrokes("tab");
-        let after = shell.read_with(&cx, |shell, _| shell.find_style);
+        let after = shell.read_with(&cx, |shell, cx| shell.app().read(cx).find_style());
         assert_ne!(
             after, before,
             "tab on the Find style row should flip vim/fzf"
@@ -1261,12 +1265,13 @@ fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
 fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     cx.simulate_keystrokes("j");
-    let before = shell.read_with(&cx, |shell, _| shell.font_size);
+    let before = shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size());
 
     cx.simulate_keystrokes("s");
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.font_size, before,
+            shell.app().read(cx).font_size(),
+            before,
             "an unclaimed key must not step the value in normal mode"
         );
         assert!(shell.modal_open(), "and must not close the dialog");
@@ -1275,9 +1280,10 @@ fn enter_does_nothing_in_the_settings_dialog(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("/");
     cx.simulate_input("font");
     cx.simulate_keystrokes("enter");
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.font_size, before,
+            shell.app().read(cx).font_size(),
+            before,
             "enter must not step the value in filter mode"
         );
         assert!(shell.modal_open(), "and must not close the dialog");
@@ -1299,16 +1305,16 @@ fn enter_is_reserved_and_leaves_the_settings_dialog_untouched(cx: &mut gpui::Tes
         selected_before, 2,
         "sanity: two downs land on the third row"
     );
-    let style_before = shell.read_with(&cx, |shell, _| shell.find_style);
+    let style_before = shell.read_with(&cx, |shell, cx| shell.app().read(cx).find_style());
 
     cx.simulate_keystrokes("enter");
 
-    let (query, selected, style_after, open) = shell.read_with(&cx, |shell, _| {
+    let (query, selected, style_after, open) = shell.read_with(&cx, |shell, cx| {
         let state = shell.settings.as_ref().unwrap();
         (
             state.query.clone(),
             state.selected,
-            shell.find_style,
+            shell.app().read(cx).find_style(),
             shell.modal_open(),
         )
     });
@@ -1629,7 +1635,7 @@ fn set_font_size_applies_the_rem_size_on_the_next_render(cx: &mut gpui::TestAppC
         settings_view::set_font_size(&shell, crate::fontsize::FontSize::Large, cx)
     });
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.font_size),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).font_size()),
         crate::fontsize::FontSize::Large,
         "set_font_size should update the shell's state immediately"
     );
@@ -1673,7 +1679,9 @@ fn ctrl_equals_and_minus_step_the_font_size_with_clamping(cx: &mut gpui::TestApp
             .downcast::<ShellView>()
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
-    let font_size = |cx: &gpui::VisualTestContext| shell.read_with(cx, |shell, _| shell.font_size);
+    let font_size = |cx: &gpui::VisualTestContext| {
+        shell.read_with(cx, |shell, cx| shell.app().read(cx).font_size())
+    };
 
     assert_eq!(font_size(&cx), crate::fontsize::FontSize::Medium);
 
@@ -1786,14 +1794,14 @@ fn set_find_style_updates_the_shell_state(cx: &mut gpui::TestAppContext) {
     });
 
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.find_style),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).find_style()),
         FindStyle::Vim,
         "sanity: with no [ui] find_style configured, vim is the default"
     );
 
     cx.update(|_window, cx| settings_view::set_find_style(&shell, FindStyle::Fzf, cx));
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.find_style),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).find_style()),
         FindStyle::Fzf,
         "set_find_style should update the shell's state immediately"
     );
@@ -1839,7 +1847,7 @@ fn a_configured_find_style_resolves_at_startup_and_on_reload(cx: &mut gpui::Test
     });
 
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.find_style),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).find_style()),
         FindStyle::Fzf,
         "[ui] find_style = \"fzf\" should resolve at startup"
     );
@@ -1847,9 +1855,13 @@ fn a_configured_find_style_resolves_at_startup_and_on_reload(cx: &mut gpui::Test
     // A reload whose config lacks the key falls back to vim — the
     // same lenient re-derive `font_size` gets in `apply_reload`.
     let new_config = config_with_mod("alt");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.find_style),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).find_style()),
         FindStyle::Vim,
         "a reload without [ui] find_style should re-resolve to the default"
     );
@@ -1868,7 +1880,9 @@ fn a_modules_default_key_produces_a_warning_on_reload(cx: &mut gpui::TestAppCont
         desk: None,
         user: None,
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(cfg, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, cx| a.apply_reload(cfg, cx))
+    });
 
     let diagnostics = shell.read_with(&cx, |shell, _| shell.diagnostics().clone());
     let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
@@ -1882,7 +1896,7 @@ fn a_modules_default_key_produces_a_warning_on_reload(cx: &mut gpui::TestAppCont
         "the key is dead config, not invalid config: {hit:?}"
     );
 
-    shell.read_with(&cx, |shell, _| match &shell.last_reload {
+    shell.read_with(&cx, |shell, cx| match shell.app().read(cx).last_reload() {
         crate::reload::ReloadOutcome::Applied { warnings } => assert!(
             warnings.iter().any(|w| w.contains("modules.default")),
             "a warning must not reject the reload, and must be reported: {warnings:?}"
@@ -1954,10 +1968,16 @@ fn a_stale_default_source_warns_at_startup_and_clears_on_reload(cx: &mut gpui::T
     );
 
     shell.update(&mut cx, |shell, cx| {
-        shell.apply_reload(config("[timeseries]\ndefault_source = \"demo_kdb\"\n"), cx)
+        shell.app().update(cx, |a, cx| {
+            a.apply_reload(config("[timeseries]\ndefault_source = \"demo_kdb\"\n"), cx)
+        })
     });
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.default_source.clone()),
+        shell.read_with(&cx, |shell, cx| shell
+            .app()
+            .read(cx)
+            .default_source()
+            .map(str::to_string)),
         Some("demo_kdb".to_string()),
         "the reload re-resolves the field"
     );
@@ -1978,7 +1998,9 @@ fn a_stale_default_source_warns_at_startup_and_clears_on_reload(cx: &mut gpui::T
     // ever inheriting one from startup: a reload INTO a stale default
     // warns again.
     shell.update(&mut cx, |shell, cx| {
-        shell.apply_reload(config("[timeseries]\ndefault_source = \"gone\"\n"), cx)
+        shell.app().update(cx, |a, cx| {
+            a.apply_reload(config("[timeseries]\ndefault_source = \"gone\"\n"), cx)
+        })
     });
     let config_diags = diagnostics.read_with(&cx, |d, _| d.config.clone());
     assert!(
@@ -2071,12 +2093,12 @@ fn set_add_direction_updates_the_shell_state_and_persists(cx: &mut gpui::TestApp
     let (window, mut cx) = open_shell_with_user_dir(cx, test_services(), dir.path());
     let shell = shell_of(&window, &mut cx);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.add_direction),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).add_direction()),
         AddDirection::Auto
     );
     cx.update(|_window, cx| settings_view::set_add_direction(&shell, AddDirection::Vertical, cx));
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.add_direction),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).add_direction()),
         AddDirection::Vertical
     );
     cx.run_until_parked();
@@ -2101,14 +2123,18 @@ fn a_configured_add_direction_resolves_at_startup_and_on_reload(cx: &mut gpui::T
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.add_direction),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).add_direction()),
         AddDirection::Horizontal,
         "[tiles] add = \"horizontal\" should resolve at startup"
     );
     let new_config = config_with_mod("alt");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.add_direction),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).add_direction()),
         AddDirection::Auto,
         "a reload without [tiles] add should re-resolve to the default"
     );
@@ -2126,7 +2152,7 @@ fn tab_steps_the_add_direction_row_and_wraps(cx: &mut gpui::TestAppContext) {
     use crate::tileadd::AddDirection;
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.add_direction),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).add_direction()),
         AddDirection::Auto,
         "sanity: Auto is the default"
     );
@@ -2138,7 +2164,7 @@ fn tab_steps_the_add_direction_row_and_wraps(cx: &mut gpui::TestAppContext) {
     );
     cx.simulate_keystrokes("tab");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.add_direction),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).add_direction()),
         AddDirection::Horizontal,
         "tab on the Add tile row should wrap Auto -> Horizontal"
     );
@@ -2163,7 +2189,7 @@ fn tab_steps_the_line_numbers_row_and_publishes_the_global(cx: &mut gpui::TestAp
     );
     cx.simulate_keystrokes("tab");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.line_numbers),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).line_numbers()),
         LineNumbers::On
     );
     assert_eq!(
@@ -2191,7 +2217,10 @@ fn tab_steps_the_line_numbers_row_and_publishes_the_global(cx: &mut gpui::TestAp
 fn tab_steps_the_link_filter_row(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
     assert!(
-        shell.read_with(&cx, |shell, _| shell.link_include_tile_filter),
+        shell.read_with(&cx, |shell, cx| shell
+            .app()
+            .read(cx)
+            .link_include_tile_filter()),
         "sanity: the filter is included by default"
     );
     cx.simulate_keystrokes("down down down down down down");
@@ -2201,10 +2230,15 @@ fn tab_steps_the_link_filter_row(cx: &mut gpui::TestAppContext) {
         "sanity: six downs land on the Links row"
     );
     cx.simulate_keystrokes("tab");
-    assert!(!shell.read_with(&cx, |shell, _| shell.link_include_tile_filter));
+    assert!(!shell.read_with(&cx, |shell, cx| {
+        shell.app().read(cx).link_include_tile_filter()
+    }));
     cx.simulate_keystrokes("tab");
     assert!(
-        shell.read_with(&cx, |shell, _| shell.link_include_tile_filter),
+        shell.read_with(&cx, |shell, cx| shell
+            .app()
+            .read(cx)
+            .link_include_tile_filter()),
         "the row wraps"
     );
 }
@@ -2261,7 +2295,11 @@ fn the_default_source_row_steps_over_the_fetch_sources_and_publishes_the_global(
 
     cx.simulate_keystrokes("space");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.default_source.clone()),
+        shell.read_with(&cx, |shell, cx| shell
+            .app()
+            .read(cx)
+            .default_source()
+            .map(str::to_string)),
         Some("demo_kdb".to_string())
     );
     assert_eq!(
@@ -2281,7 +2319,11 @@ fn the_default_source_row_steps_over_the_fetch_sources_and_publishes_the_global(
         "the row wraps back to (none)"
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.default_source.clone()),
+        shell.read_with(&cx, |shell, cx| shell
+            .app()
+            .read(cx)
+            .default_source()
+            .map(str::to_string)),
         None,
         "and the view's own field with it"
     );
@@ -2318,7 +2360,7 @@ fn the_line_numbers_cycle_action_steps_the_setting_once(cx: &mut gpui::TestAppCo
     );
     cycle(&mut cx);
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.line_numbers),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).line_numbers()),
         LineNumbers::Relative
     );
 }

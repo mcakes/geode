@@ -85,11 +85,14 @@ fn the_picker_requests_values_minus_its_own_selection_and_applies_ticks_as_one_s
     let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     vcx.update(|_, cx| {
         let requested = requested.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            if let ShellEvent::DistinctRequested(p) = e {
-                requested.borrow_mut().push(p.clone());
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| {
+                if let ShellEvent::DistinctRequested(p) = e {
+                    requested.borrow_mut().push(p.clone());
+                }
+            },
+        )
         .detach();
     });
 
@@ -200,11 +203,14 @@ fn the_picker_shows_an_unresolved_named_expression_instead_of_requesting(
     let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     vcx.update(|_, cx| {
         let requested = requested.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            if let ShellEvent::DistinctRequested(p) = e {
-                requested.borrow_mut().push(p.clone());
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| {
+                if let ShellEvent::DistinctRequested(p) = e {
+                    requested.borrow_mut().push(p.clone());
+                }
+            },
+        )
         .detach();
     });
 
@@ -246,11 +252,14 @@ fn clicking_a_scope_chips_body_opens_the_picker_on_that_column(cx: &mut gpui::Te
     let requested = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     vcx.update(|_, cx| {
         let requested = requested.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            if let ShellEvent::DistinctRequested(p) = e {
-                requested.borrow_mut().push(p.clone());
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| {
+                if let ShellEvent::DistinctRequested(p) = e {
+                    requested.borrow_mut().push(p.clone());
+                }
+            },
+        )
         .detach();
     });
 

@@ -7,9 +7,11 @@ use crate::defaults::{
     BUILTIN_KEYMAP, default_mod, register_builtin_actions, register_pick_actions,
     register_scope_actions,
 };
+use crate::fontsize::FontSize;
 use crate::keymap::build_keymap;
 use crate::module::recording::RecordingPageFactory;
 use crate::tiling::{DockSide, Rect};
+use crate::vimfind::FindStyle;
 use geode_core::config::{ConfigSources, Layer, LayerDoc};
 use gpui::{MouseButton, MouseDownEvent, MouseUpEvent, div, px};
 use gpui_component::{Root, TITLE_BAR_HEIGHT};

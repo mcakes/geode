@@ -255,9 +255,12 @@ fn a_dialog_chord_pushes_over_an_open_dialog(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn a_non_dialog_chord_is_inert_behind_a_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
-    let before = shell.read_with(&vcx, |s, _| s.font_size);
+    let before = shell.read_with(&vcx, |s, cx| s.app().read(cx).font_size());
     vcx.simulate_keystrokes("ctrl-=");
-    assert_eq!(shell.read_with(&vcx, |s, _| s.font_size), before);
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.app().read(cx).font_size()),
+        before
+    );
     assert_eq!(kinds(&shell, &mut vcx), vec![DialogKind::Object]);
 }
 
@@ -458,7 +461,7 @@ fn a_palette_dialog_entry_pushes(cx: &mut gpui::TestAppContext) {
 fn a_palette_action_behind_the_stack_leaves_focus_on_the_top_dialog(cx: &mut gpui::TestAppContext) {
     let (shell, mut vcx) = dialog_test_shell(cx, "config::views");
     vcx.simulate_keystrokes("/ a b");
-    let before = shell.read_with(&vcx, |s, _| s.line_numbers);
+    let before = shell.read_with(&vcx, |s, cx| s.app().read(cx).line_numbers());
     vcx.simulate_keystrokes("ctrl-k");
     vcx.simulate_input("line numbers");
     let selected = shell.read_with(&vcx, |s, _| s.palette.as_ref().unwrap().selected_item());
@@ -469,7 +472,7 @@ fn a_palette_action_behind_the_stack_leaves_focus_on_the_top_dialog(cx: &mut gpu
     vcx.simulate_keystrokes("enter");
     draw(&mut vcx);
     assert_ne!(
-        shell.read_with(&vcx, |s, _| s.line_numbers),
+        shell.read_with(&vcx, |s, cx| s.app().read(cx).line_numbers()),
         before,
         "the action ran"
     );
@@ -530,7 +533,10 @@ fn a_reload_closing_a_palette_over_the_stack_refocuses_the_top_dialog(
     vcx.simulate_keystrokes("ctrl-k");
     assert!(shell.read_with(&vcx, |s, _| s.palette.is_some()));
 
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config_with_mod("cmd"), cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app()
+            .update(cx, |a, cx| a.apply_reload(config_with_mod("cmd"), cx))
+    });
     assert!(shell.read_with(&vcx, |s, _| s.palette.is_none()));
     draw(&mut vcx);
     draw(&mut vcx);
@@ -792,7 +798,9 @@ fn a_reload_refreshes_a_covered_expression_dialogs_suggestions(cx: &mut gpui::Te
     );
 
     shell.update(&mut vcx, |s, cx| {
-        s.apply_reload(config_with_a_second_dataset_column(), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(config_with_a_second_dataset_column(), cx)
+        })
     });
     // Still covered by Settings: the fix rebuilds it at reload time, not at
     // reveal, so the warning must already be gone here.

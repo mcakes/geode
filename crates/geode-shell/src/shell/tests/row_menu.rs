@@ -771,11 +771,14 @@ fn moving_unopened(cx: &mut gpui::TestAppContext) -> Moving {
     let requested = Rc::new(std::cell::RefCell::new(Vec::new()));
     vcx.update(|_, cx| {
         let requested = requested.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            if let ShellEvent::DistinctRequested(p) = e {
-                requested.borrow_mut().push(p.clone());
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| {
+                if let ShellEvent::DistinctRequested(p) = e {
+                    requested.borrow_mut().push(p.clone());
+                }
+            },
+        )
         .detach();
     });
     vcx.simulate_keystrokes("ctrl-v");

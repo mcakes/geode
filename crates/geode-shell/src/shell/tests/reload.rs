@@ -80,7 +80,11 @@ fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
 
     let builtin = shell.read_with(&vcx, |shell, cx| shell.services(cx).builtin.clone());
     let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut vcx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     shell.read_with(&vcx, |shell, cx| {
         assert!(
@@ -131,7 +135,11 @@ fn a_keymap_reload_refreshes_the_chords_global(cx: &mut gpui::TestAppContext) {
 
     let builtin = shell.read_with(&vcx, |shell, cx| shell.services(cx).builtin.clone());
     let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut vcx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     let after = vcx.update(|_, cx| {
         crate::tips::chord_for(&cx.global::<crate::tips::Chords>().0, "palette::toggle")
@@ -166,9 +174,10 @@ fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let sink = events.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            sink.borrow_mut().push(e.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| sink.borrow_mut().push(e.clone()),
+        )
         .detach();
     });
 
@@ -181,7 +190,11 @@ fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
         desk: None,
         user: None,
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     assert!(
         events
@@ -216,9 +229,10 @@ fn a_value_colors_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppConte
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let sink = events.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            sink.borrow_mut().push(e.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| sink.borrow_mut().push(e.clone()),
+        )
         .detach();
     });
 
@@ -235,7 +249,11 @@ fn a_value_colors_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppConte
         desk: None,
         user: None,
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     assert!(
         events
@@ -270,9 +288,10 @@ fn a_watchlists_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppContext
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let sink = events.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            sink.borrow_mut().push(e.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| sink.borrow_mut().push(e.clone()),
+        )
         .detach();
     });
 
@@ -289,7 +308,11 @@ fn a_watchlists_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppContext
         desk: None,
         user: None,
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     assert!(
         events
@@ -324,9 +347,10 @@ fn a_scopes_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppContext) {
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let sink = events.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            sink.borrow_mut().push(e.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| sink.borrow_mut().push(e.clone()),
+        )
         .detach();
     });
 
@@ -339,7 +363,11 @@ fn a_scopes_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppContext) {
         desk: None,
         user: None,
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     assert!(
         events
@@ -375,9 +403,10 @@ fn a_colors_file_on_disk_reloads_under_either_name(cx: &mut gpui::TestAppContext
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let sink = events.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            sink.borrow_mut().push(e.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| sink.borrow_mut().push(e.clone()),
+        )
         .detach();
     });
 
@@ -394,7 +423,11 @@ fn a_colors_file_on_disk_reloads_under_either_name(cx: &mut gpui::TestAppContext
         events.borrow_mut().clear();
         let new_config =
             crate::reload::load_config(Vec::new(), None, Some(user.path().to_path_buf()));
-        shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+        shell.update(&mut cx, |shell, cx| {
+            shell
+                .app()
+                .update(cx, |a, cx| a.apply_reload(new_config, cx))
+        });
         assert!(
             events
                 .borrow()
@@ -438,9 +471,10 @@ fn a_dataset_presentation_change_fires_config_reloaded(cx: &mut gpui::TestAppCon
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let sink = events.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            sink.borrow_mut().push(e.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| sink.borrow_mut().push(e.clone()),
+        )
         .detach();
     });
 
@@ -456,7 +490,11 @@ fn a_dataset_presentation_change_fires_config_reloaded(cx: &mut gpui::TestAppCon
         desk: None,
         user: None,
     });
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     assert!(
         events
@@ -504,7 +542,11 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
 
     // Use the nondefault `cmd` alias; `ctrl` is invalid configuration.
     let new_config = config_with_mod("cmd");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     shell.read_with(&cx, |shell, cx| {
         assert_eq!(
@@ -517,7 +559,7 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
             "a successful reload must close an open palette"
         );
         assert_eq!(
-            shell.last_reload,
+            *shell.app().read(cx).last_reload(),
             reload::ReloadOutcome::Applied { warnings: vec![] },
             "a clean reload with no diagnostics should record Applied with no warnings"
         );
@@ -552,7 +594,11 @@ fn a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_versi
 
     let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().versions());
     let new_config = config_with_mod("cmd");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
     let v1 = shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().versions());
     assert!(
         v1.config > v0.config,
@@ -646,7 +692,11 @@ fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::T
 
     let original_mod_alias = shell.read_with(&cx, |shell, cx| shell.services(cx).mod_alias);
 
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(bad_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(bad_config, cx))
+    });
 
     shell.read_with(&cx, |shell, cx| {
         assert_eq!(
@@ -658,7 +708,7 @@ fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::T
             shell.palette.is_some(),
             "a rejected reload must not close the palette"
         );
-        match &shell.last_reload {
+        match shell.app().read(cx).last_reload() {
             reload::ReloadOutcome::KeptLastGood { errors } => {
                 assert_eq!(errors.len(), 1);
                 assert!(errors[0].contains("config_version"));
@@ -677,13 +727,18 @@ fn a_rejected_reload_emits_reload_rejected_with_the_errors(cx: &mut gpui::TestAp
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     cx.update(|_, cx| {
         let sink = events.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            sink.borrow_mut().push(e.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| sink.borrow_mut().push(e.clone()),
+        )
         .detach();
     });
 
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(bad_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(bad_config, cx))
+    });
 
     // The fixture contains both an unknown-action warning and a config error. Confirm
     // both enter the diagnostics batch so the event's error filtering is observable.
@@ -722,11 +777,12 @@ fn a_rejected_reload_emits_reload_rejected_with_the_errors(cx: &mut gpui::TestAp
 fn a_rejected_reload_prepares_its_status_text(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
-    assert!(shell.read_with(&vcx, |s, _| s.reload_status.is_none()));
+    assert!(shell.read_with(&vcx, |s, cx| s.app().read(cx).reload_status().is_none()));
     shell.update(&mut vcx, |s, cx| {
-        s.apply_reload(config_with_mod("ctrl"), cx)
+        s.app()
+            .update(cx, |a, cx| a.apply_reload(config_with_mod("ctrl"), cx))
     });
-    let status = shell.read_with(&vcx, |s, _| s.reload_status.clone());
+    let status = shell.read_with(&vcx, |s, cx| s.app().read(cx).reload_status().cloned());
     assert_eq!(
         status.as_deref(),
         Some("config: 1 error(s) — keeping last good")
@@ -737,14 +793,19 @@ fn a_rejected_reload_prepares_its_status_text(cx: &mut gpui::TestAppContext) {
     std::fs::write(user.path().join("first.toml"), "this is [not toml").unwrap();
     std::fs::write(user.path().join("second.toml"), "also [not toml").unwrap();
     let two_errors = reload::load_config(Vec::new(), None, Some(user.path().to_path_buf()));
-    shell.update(&mut vcx, |s, cx| s.apply_reload(two_errors, cx));
-    let status = shell.read_with(&vcx, |s, _| s.reload_status.clone());
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(two_errors, cx))
+    });
+    let status = shell.read_with(&vcx, |s, cx| s.app().read(cx).reload_status().cloned());
     assert_eq!(
         status.as_deref(),
         Some("config: 2 error(s) — keeping last good")
     );
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config_with_mod("alt"), cx));
-    assert!(shell.read_with(&vcx, |s, _| s.reload_status.is_none()));
+    shell.update(&mut vcx, |s, cx| {
+        s.app()
+            .update(cx, |a, cx| a.apply_reload(config_with_mod("alt"), cx))
+    });
+    assert!(shell.read_with(&vcx, |s, cx| s.app().read(cx).reload_status().is_none()));
 }
 
 /// `keymap.mod = "ctrl"` produces an error and rejects the reload, preserving the
@@ -786,7 +847,11 @@ fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_i
     );
 
     let ctrl_config = config_with_mod("ctrl");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(ctrl_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(ctrl_config, cx))
+    });
 
     shell.read_with(&cx, |shell, cx| {
         assert_eq!(
@@ -795,14 +860,16 @@ fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_i
             "keymap.mod = \"ctrl\" must be refused: the previous alias stands"
         );
         let message = shell
-            .last_reload
+            .app()
+            .read(cx)
+            .last_reload()
             .status_message()
             .expect("a refused keymap.mod = \"ctrl\" reload must surface a status message");
         assert!(
             message.contains("1 error"),
             "expected the one mod-alias error to be counted: {message}"
         );
-        match &shell.last_reload {
+        match shell.app().read(cx).last_reload() {
             reload::ReloadOutcome::KeptLastGood { errors } => {
                 assert_eq!(errors.len(), 1);
                 assert!(errors[0].contains("keymap.mod"), "{}", errors[0]);
@@ -814,12 +881,16 @@ fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_i
 
     // A later reload back to a real alias clears the error.
     let good_config = config_with_mod("alt");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(good_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(good_config, cx))
+    });
 
     shell.read_with(&cx, |shell, cx| {
         assert_eq!(shell.services(cx).mod_alias, Modifiers::ALT);
         assert_eq!(
-            shell.last_reload.status_message(),
+            shell.app().read(cx).last_reload().status_message(),
             None,
             "a later clean reload must clear the error status"
         );
@@ -889,7 +960,11 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
     );
 
     let new_config = config_with_theme("Default Dark");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     shell.read_with(&cx, |shell, cx| {
         assert_eq!(
@@ -964,7 +1039,11 @@ fn apply_reload_preserves_a_runtime_theme_pick_when_theme_table_is_unchanged(
     // Same [theme] table as the config already applied — a reload
     // triggered by, say, an unrelated keymap.toml edit.
     let new_config = config_with_theme("Gruvbox Dark");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     shell.read_with(&cx, |shell, cx| {
         assert_eq!(
@@ -974,7 +1053,7 @@ fn apply_reload_preserves_a_runtime_theme_pick_when_theme_table_is_unchanged(
              runtime pick above would be silently reverted"
         );
         assert_eq!(
-            shell.last_reload,
+            *shell.app().read(cx).last_reload(),
             reload::ReloadOutcome::Applied { warnings: vec![] },
             "the reload itself still succeeds — only the theme re-apply is guarded"
         );
@@ -1021,7 +1100,11 @@ fn apply_reload_leaves_an_open_palette_open_when_only_the_theme_table_differs(
     // config's `layered_docs("keymap")` is just as empty as the
     // starting one's, and neither sets `[keymap] mod`).
     let new_config = config_with_theme("Gruvbox Dark");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     shell.read_with(&cx, |shell, cx| {
         assert_eq!(
@@ -1072,7 +1155,11 @@ fn apply_reload_closes_an_open_palette_when_the_keymap_docs_differ(cx: &mut gpui
 
     // Use the nondefault `cmd` alias; `ctrl` is invalid configuration.
     let new_config = config_with_mod("cmd");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     shell.read_with(&cx, |shell, cx| {
         assert_eq!(
@@ -1135,7 +1222,11 @@ fn apply_reload_closing_a_focused_palette_restores_focus_to_the_shell_root(
     // has no Window to redirect focus immediately, so the next render must recover it.
     // Use `cmd` as the valid nondefault alias.
     let new_config = config_with_mod("cmd");
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     assert!(
         shell.read_with(&cx, |shell, _| shell.palette.is_none()),
@@ -1226,9 +1317,10 @@ fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_r
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            sink.borrow_mut().push(event.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| sink.borrow_mut().push(event.clone()),
+        )
         .detach();
     });
 
@@ -1243,7 +1335,9 @@ fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_r
     });
     let v0 = shell.read_with(&cx, |s, cx| s.frame.read(cx).shared().versions());
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut new_config), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut new_config), cx)
+        })
     });
     let (slots, versions) = shell.read_with(&cx, |s, cx| {
         (
@@ -1272,7 +1366,9 @@ fn a_reloaded_groupings_doc_replaces_the_slots_and_a_sources_change_asks_for_a_r
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_sources), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_sources), cx)
+        })
     });
     assert!(
         events
@@ -1319,12 +1415,16 @@ fn an_expressions_reload_redefines_the_frames_named_expressions(cx: &mut gpui::T
     assert_eq!(liq_text(&mut cx), None);
 
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(config("[liq]\nexpression = \"npv > 0\"\n"), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(config("[liq]\nexpression = \"npv > 0\"\n"), cx)
+        })
     });
     assert_eq!(liq_text(&mut cx).as_deref(), Some("npv > 0"));
 
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(config("[liq]\nexpression = \"npv > 5\"\n"), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(config("[liq]\nexpression = \"npv > 5\"\n"), cx)
+        })
     });
     assert_eq!(liq_text(&mut cx).as_deref(), Some("npv > 5"));
 }
@@ -1352,10 +1452,12 @@ fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_sources), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_sources), cx)
+        })
     });
     assert!(
-        shell.read_with(&cx, |s, _| s.restart_required.is_some()),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().is_some()),
         "a sources doc appearing where the baseline (from `test_services`, \
          which loads `ConfigSources::default()`) had none asks for a restart"
     );
@@ -1368,10 +1470,12 @@ fn reverting_a_sources_edit_back_to_the_baseline_clears_restart_required(
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut reverted), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut reverted), cx)
+        })
     });
     assert!(
-        shell.read_with(&cx, |s, _| s.restart_required.is_none()),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().is_none()),
         "reverting sources.toml back to the baseline clears the message"
     );
 }
@@ -1386,9 +1490,10 @@ fn an_egress_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            sink.borrow_mut().push(event.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| sink.borrow_mut().push(event.clone()),
+        )
         .detach();
     });
 
@@ -1404,7 +1509,9 @@ fn an_egress_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_egress), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_egress), cx)
+        })
     });
     assert!(
         events
@@ -1427,9 +1534,10 @@ fn positions_toml_is_restart_required(cx: &mut gpui::TestAppContext) {
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            sink.borrow_mut().push(event.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| sink.borrow_mut().push(event.clone()),
+        )
         .detach();
     });
 
@@ -1441,7 +1549,9 @@ fn positions_toml_is_restart_required(cx: &mut gpui::TestAppContext) {
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_positions), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_positions), cx)
+        })
     });
     assert!(
         events
@@ -1457,10 +1567,12 @@ fn positions_toml_is_restart_required(cx: &mut gpui::TestAppContext) {
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut reverted), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut reverted), cx)
+        })
     });
     assert!(
-        shell.read_with(&cx, |s, _| s.restart_required.is_none()),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().is_none()),
         "reverting positions.toml back to the baseline clears the message"
     );
 }
@@ -1475,9 +1587,10 @@ fn a_pricing_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::Tes
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            sink.borrow_mut().push(event.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| sink.borrow_mut().push(event.clone()),
+        )
         .detach();
     });
 
@@ -1489,7 +1602,9 @@ fn a_pricing_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::Tes
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_pricing), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_pricing), cx)
+        })
     });
     assert!(
         events
@@ -1506,7 +1621,9 @@ fn a_pricing_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::Tes
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut reverted), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut reverted), cx)
+        })
     });
     assert!(
         !events
@@ -1516,7 +1633,7 @@ fn a_pricing_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::Tes
         "back at the baseline: {:?}",
         events.borrow()
     );
-    assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
+    assert!(shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().is_none()));
 }
 
 /// The vol model is selected at startup exactly as the pricing adapter is.
@@ -1530,9 +1647,10 @@ fn a_vol_model_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::T
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            sink.borrow_mut().push(event.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| sink.borrow_mut().push(event.clone()),
+        )
         .detach();
     });
 
@@ -1544,7 +1662,9 @@ fn a_vol_model_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::T
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_vol), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_vol), cx)
+        })
     });
     assert!(
         events
@@ -1561,7 +1681,9 @@ fn a_vol_model_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::T
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut reverted), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut reverted), cx)
+        })
     });
     assert!(
         !events
@@ -1571,7 +1693,7 @@ fn a_vol_model_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::T
         "back at the baseline: {:?}",
         events.borrow()
     );
-    assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
+    assert!(shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().is_none()));
 }
 
 /// Of `[pricing]`, only `adapter` belongs to the restart baseline (beside
@@ -1584,9 +1706,10 @@ fn a_pricing_refresh_change_needs_no_restart(cx: &mut gpui::TestAppContext) {
     let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = events.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            sink.borrow_mut().push(event.clone())
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| sink.borrow_mut().push(event.clone()),
+        )
         .detach();
     });
 
@@ -1598,7 +1721,9 @@ fn a_pricing_refresh_change_needs_no_restart(cx: &mut gpui::TestAppContext) {
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_refresh), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_refresh), cx)
+        })
     });
     assert!(
         !events
@@ -1608,7 +1733,7 @@ fn a_pricing_refresh_change_needs_no_restart(cx: &mut gpui::TestAppContext) {
         "no adapter key changed: {:?}",
         events.borrow()
     );
-    assert!(shell.read_with(&cx, |s, _| s.restart_required.is_none()));
+    assert!(shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().is_none()));
 }
 
 /// View presentation changes resolved `ViewSpec`s and must participate in
@@ -1641,23 +1766,30 @@ fn a_view_presentation_only_change_emits_config_reloaded(cx: &mut gpui::TestAppC
     // Baseline: `views` is now present in the shell's own config.
     let mut baseline = config_with(None);
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut baseline), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut baseline), cx)
+        })
     });
 
     let fired = std::rc::Rc::new(std::cell::RefCell::new(0usize));
     let f = fired.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            if matches!(event, ShellEvent::ConfigReloaded) {
-                *f.borrow_mut() += 1;
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| {
+                if matches!(event, ShellEvent::ConfigReloaded) {
+                    *f.borrow_mut() += 1;
+                }
+            },
+        )
         .detach();
     });
 
     let mut with_presentation = config_with(Some("[v]\norder = [\"book\"]\n"));
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_presentation), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_presentation), cx)
+        })
     });
 
     assert_eq!(
@@ -1683,11 +1815,14 @@ fn a_views_change_emits_config_reloaded_before_the_frame_notifies_its_observers(
     let order = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let o1 = order.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            if matches!(event, ShellEvent::ConfigReloaded) {
-                o1.borrow_mut().push("event");
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| {
+                if matches!(event, ShellEvent::ConfigReloaded) {
+                    o1.borrow_mut().push("event");
+                }
+            },
+        )
         .detach();
     });
     let o2 = order.clone();
@@ -1711,7 +1846,9 @@ fn a_views_change_emits_config_reloaded_before_the_frame_notifies_its_observers(
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut new_config), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut new_config), cx)
+        })
     });
 
     assert_eq!(
@@ -1760,11 +1897,14 @@ fn a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded
     let order = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let o1 = order.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            if matches!(event, ShellEvent::ConfigReloaded) {
-                o1.borrow_mut().push("event");
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| {
+                if matches!(event, ShellEvent::ConfigReloaded) {
+                    o1.borrow_mut().push("event");
+                }
+            },
+        )
         .detach();
     });
     let o2 = order.clone();
@@ -1793,7 +1933,9 @@ fn a_dimensions_change_that_resolves_a_grouping_slot_still_emits_config_reloaded
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut new_config), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut new_config), cx)
+        })
     });
 
     assert_eq!(
@@ -1846,7 +1988,7 @@ fn rebuild_saved_scopes_prints_only_when_asked() {
     );
 }
 
-/// The reload-poll tick refreshes `ShellView::today` from `AppClock`. Seed a stale date
+/// The watcher's tick refreshes `ShellApp::today` from `AppClock`. Seed a stale date
 /// and advance the executor clock to prove the poll corrects it. The virtual executor
 /// clock does not move the application clock, so this verifies refresh rather than a
 /// real midnight rollover.
@@ -1858,8 +2000,11 @@ fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
 
     let real_today = shell.read_with(&vcx, |s, cx| s.clock(cx).today(chrono::Utc::now()));
     let stale = real_today - chrono::Duration::days(1);
-    shell.update(&mut vcx, |s, _cx| s.today = stale);
-    assert_eq!(shell.read_with(&vcx, |s, _| s.today), stale);
+    shell.update(&mut vcx, |s, cx| s.with_app(cx, |a| a.today = stale));
+    assert_eq!(
+        shell.read_with(&vcx, |s, cx| s.app().read(cx).today()),
+        stale
+    );
 
     vcx.run_until_parked();
     vcx.executor().advance_clock(
@@ -1868,28 +2013,34 @@ fn the_reload_poll_tick_refreshes_today(cx: &mut gpui::TestAppContext) {
     vcx.run_until_parked();
 
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.today),
+        shell.read_with(&vcx, |s, cx| s.app().read(cx).today()),
         real_today,
         "one reload-poll tick must refresh `today` from the clock"
     );
 }
 
-/// The reload poll ends with its window even while a host still holds the
-/// shell entity, as the app's bridge observers do. A poll outliving the
-/// window kept sampling memory into diagnostics, writing the session and
-/// scanning config, and its notifies drove the bridge to submit data
-/// requests for a window nobody could see. `today` stands for every step of
-/// the tick: a stale date that stays stale proves no tick ran.
+/// The watcher is the app's and ends with its last window, not with the
+/// app entity, which the quit hooks hold past every window, nor with the
+/// window's view, which the bridge's closures hold. A loop outliving the
+/// windows would keep sampling memory into diagnostics, writing the session
+/// and scanning config for nobody, its notifies driving the bridge to
+/// submit data requests. `today` stands for every step of the tick: a
+/// stale date that stays stale proves no tick ran.
 #[gpui::test]
-fn the_reload_poll_ends_when_its_window_closes(cx: &mut gpui::TestAppContext) {
+fn the_watcher_ends_when_the_last_window_closes(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
-    let (window, mut vcx) = open_shell(cx, services);
-    // Held past the window's removal, as the bridge's observers hold it.
-    let shell = shell_of(&window, &mut vcx);
+    // Both held past the window's removal, as the hooks and the bridge hold them.
+    let app = test_app(cx, services, None);
+    let (window, mut vcx) = open_shell_on(cx, app.clone());
+    let _shell = shell_of(&window, &mut vcx);
     vcx.run_until_parked();
-    let real_today = shell.read_with(&vcx, |s, cx| s.clock(cx).today(chrono::Utc::now()));
+    let real_today = vcx.update(|_, cx| {
+        cx.global::<crate::clock::AppClock>()
+            .0
+            .today(chrono::Utc::now())
+    });
     let stale = real_today - chrono::Duration::days(1);
-    shell.update(&mut vcx, |s, _cx| s.today = stale);
+    app.update(&mut vcx, |a, _| a.today = stale);
     vcx.update(|window, _| window.remove_window());
     vcx.run_until_parked();
     vcx.executor().advance_clock(
@@ -1897,9 +2048,9 @@ fn the_reload_poll_ends_when_its_window_closes(cx: &mut gpui::TestAppContext) {
     );
     vcx.run_until_parked();
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.today),
+        app.read_with(&vcx, |a, _| a.today),
         stale,
-        "no reload-poll tick may run after the window closed"
+        "no watcher tick may run once the last window closed"
     );
 }
 
@@ -1913,7 +2064,9 @@ fn a_reload_keeps_the_modules_fragment_bindings(cx: &mut gpui::TestAppContext) {
     vcx.simulate_keystrokes("ctrl-v");
 
     shell.update(&mut vcx, |shell, cx| {
-        shell.apply_reload(config_with_theme("Gruvbox Dark"), cx)
+        shell.app().update(cx, |a, cx| {
+            a.apply_reload(config_with_theme("Gruvbox Dark"), cx)
+        })
     });
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -1951,7 +2104,9 @@ fn a_dropped_fragment_bindings_diagnostic_survives_a_reload(cx: &mut gpui::TestA
     let diagnostics = shell.read_with(&vcx, |s, _| s.diagnostics().clone());
 
     shell.update(&mut vcx, |shell, cx| {
-        shell.apply_reload(config_with_theme("Gruvbox Dark"), cx)
+        shell.app().update(cx, |a, cx| {
+            a.apply_reload(config_with_theme("Gruvbox Dark"), cx)
+        })
     });
 
     assert_eq!(
@@ -1990,13 +2145,17 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
     .unwrap();
     let builtin = shell.read_with(&vcx, |shell, cx| shell.services(cx).builtin.clone());
     let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
+    shell.update(&mut vcx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(new_config, cx))
+    });
 
     let after = vcx.update(|_w, cx| cx.global::<crate::clock::AppClock>().0);
     assert_ne!(before, after);
     assert_eq!(after.zone_name(), target);
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.today),
+        shell.read_with(&vcx, |s, cx| s.app().read(cx).today()),
         after.today(chrono::Utc::now())
     );
     let versions_after = shell.read_with(&vcx, |s, cx| s.frame().read(cx).shared().versions());
@@ -2019,9 +2178,11 @@ fn a_panels_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_panels), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_panels), cx)
+        })
     });
-    let message = shell.read_with(&cx, |s, _| s.restart_required.clone());
+    let message = shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().cloned());
     assert!(
         message.as_deref().is_some_and(|m| m.contains("panels")),
         "{message:?}"
@@ -2044,9 +2205,11 @@ fn a_scenarios_change_asks_for_a_restart(cx: &mut gpui::TestAppContext) {
         ..ConfigSources::default()
     });
     shell.update(&mut cx, |s, cx| {
-        s.apply_reload(std::mem::take(&mut with_shapes), cx)
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_shapes), cx)
+        })
     });
-    let message = shell.read_with(&cx, |s, _| s.restart_required.clone());
+    let message = shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().cloned());
     assert!(
         message.as_deref().is_some_and(|m| m.contains("scenarios")),
         "{message:?}"
@@ -2084,7 +2247,7 @@ fn a_composition_diagnostic_stays_in_the_config_section_across_a_reload(
             builtin: vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
             ..ConfigSources::default()
         });
-        s.apply_reload(again, cx)
+        s.app().update(cx, |a, cx| a.apply_reload(again, cx))
     });
     assert!(
         summary(&mut cx).contains("config 1 error"),
@@ -2099,4 +2262,71 @@ fn a_composition_diagnostic_stays_in_the_config_section_across_a_reload(
             .contains(&refused)),
         "the diagnostics tile still names the refused panel"
     );
+}
+
+/// One reload for every window: the app applies it once and both windows
+/// read the same revision and modifier alias from the owner.
+#[gpui::test]
+fn a_reload_applies_once_for_two_windows(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx) = open_shell_on(cx, app.clone());
+    let (w2, _) = open_shell_on(cx, app.clone());
+    let (s1, s2) = (shell_of(&w1, &mut vcx), shell_of(&w2, &mut vcx));
+    let before = vcx.update(|_, cx| app.read(cx).config_revision());
+    // The nondefault `cmd` alias: a clean reload (`ctrl` is refused).
+    let config = config_with_mod("cmd");
+    vcx.update(|_, cx| app.update(cx, |a, cx| a.apply_reload_for_test(config, cx)));
+    vcx.update(|_, cx| {
+        assert_eq!(app.read(cx).config_revision(), before + 1);
+        assert_eq!(
+            s1.read(cx).services(cx).mod_alias,
+            s2.read(cx).services(cx).mod_alias
+        );
+    });
+}
+
+/// A keymap reload invalidates the palette's snapshot in every window, not
+/// only the one that would have run the watcher: both palettes close and
+/// both windows arm focus restoration for their next render.
+#[gpui::test]
+fn a_keymap_reload_closes_the_palette_in_every_window(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let s2 = shell_of(&w2, &mut vcx2);
+    dispatch_action(&s1, "palette::toggle", &mut vcx1);
+    dispatch_action(&s2, "palette::toggle", &mut vcx2);
+    for (shell, vcx) in [(&s1, &mut vcx1), (&s2, &mut vcx2)] {
+        assert!(shell.read_with(vcx, |s, _| s.palette.is_some()));
+        let input = shell.read_with(vcx, |s, cx| s.palette_input.read(cx).focus_handle(cx));
+        assert!(
+            vcx.update(|window, _| input.is_focused(window)),
+            "sanity: the open palette holds its window's focus"
+        );
+    }
+
+    // Use the nondefault `cmd` alias; the keymap docs differ from the
+    // running ones through the alias alone. Applied outside either
+    // window's update, as the watcher applies it, so no draw consumes
+    // the focus-restoration flag before it is read.
+    let config = config_with_mod("cmd");
+    app.update(&mut vcx1, |a, cx| a.apply_reload_for_test(config, cx));
+
+    for (shell, vcx) in [(&s1, &mut vcx1), (&s2, &mut vcx2)] {
+        assert!(
+            shell.read_with(vcx, |s, _| s.palette.is_none()),
+            "a keymap reload closes the palette in every window"
+        );
+        // The flag the reload arms is consumed by the next render, which the
+        // notify already scheduled; what is observable is its effect.
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let root = shell.read_with(vcx, |s, _| s.focus_handle.clone());
+        assert!(
+            vcx.update(|window, _| root.is_focused(window)),
+            "every window restores focus to its shell root after its palette closed"
+        );
+    }
 }

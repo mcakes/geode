@@ -237,25 +237,21 @@ fn main() {
                 // Route service outcomes into the shell and forward configuration
                 // changes once the window exists.
                 if let Some(bridge) = &bridge {
-                    cx.update(|cx| bridge::attach(bridge, window, cx));
+                    cx.update(|cx| bridge::attach(bridge, &app, window, cx));
                 }
 
                 // Save the session and unsaved sheets when the window closes,
                 // while it still exists; the quit hooks above cover an
                 // explicit application quit (Dock Quit, logout).
-                cx.update(|cx| bridge::save_on_close(window, app, bridge.as_ref(), cx));
+                cx.update(|cx| bridge::save_on_close(window, app.clone(), bridge.as_ref(), cx));
 
                 // Refresh diagnostic configuration independently of the data bridge.
                 // The frame's config counter changes on every applied reload, including
                 // log, theme, and keymap edits that do not emit ConfigReloaded. Other
                 // frame changes must not clone configuration or trigger this refresh.
+                // The config is read from the app, the one owner every window shares.
                 cx.update(|cx| {
-                    let shell = window
-                        .read(cx)
-                        .ok()
-                        .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
-                        .expect("the window's root view is the shell");
-                    let frame = shell.read(cx).frame().clone();
+                    let frame = app.read(cx).frame().clone();
                     let last_config_version =
                         std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).config_version()));
                     // Register this observer before the diagnostics page registers its
@@ -266,7 +262,7 @@ fn main() {
                         let now = frame.read(cx).config_version();
                         if now != last_config_version.get() {
                             last_config_version.set(now);
-                            diagnostics_factory.set_config(shell.read(cx).config(cx).clone());
+                            diagnostics_factory.set_config(app.read(cx).config().clone());
                         }
                     })
                     .detach();
@@ -1418,7 +1414,9 @@ label = "skew"
             desk: None,
             user: Some(user.path().to_path_buf()),
         });
-        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        shell
+            .read_with(&vcx, |s, _| s.app().clone())
+            .update(&mut vcx, |a, cx| a.apply_reload_for_test(candidate, cx));
         vcx.run_until_parked();
         let restart = shell.read_with(&vcx, |s, cx| {
             s.diagnostics().read(cx).restart_required.clone()
@@ -2186,7 +2184,9 @@ label = "skew"
             desk: None,
             user: Some(user.path().to_path_buf()),
         });
-        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        shell
+            .read_with(&vcx, |s, _| s.app().clone())
+            .update(&mut vcx, |a, cx| a.apply_reload_for_test(candidate, cx));
         vcx.run_until_parked();
         let restart = shell.read_with(&vcx, |s, cx| {
             s.diagnostics().read(cx).restart_required.clone()

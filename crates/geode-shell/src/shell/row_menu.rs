@@ -109,14 +109,18 @@ impl ActionCx<'_, '_> {
             self.cx,
         );
         if opened {
-            self.cx.emit(ShellEvent::DistinctRequested(DistinctParams {
+            // The app emits for the bridge; this window only asks.
+            let params = DistinctParams {
                 key: ACTION_KEY,
                 tag,
                 column: column.to_string(),
                 scope: Scope::default(),
                 as_of: AsOf::Live,
                 dataset: None,
-            }));
+            };
+            self.shell.app.update(self.cx, |_, cx| {
+                cx.emit(ShellEvent::DistinctRequested(params))
+            });
         }
     }
 

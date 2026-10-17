@@ -543,7 +543,9 @@ fn the_reload_an_edit_triggers_leaves_the_views_and_the_hidden_column_intact(
 
     let builtin = shell.read_with(&cx, |shell, cx| shell.services(cx).builtin.clone());
     let reloaded = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(reloaded, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, cx| a.apply_reload(reloaded, cx))
+    });
 
     // Back to the browse list: the view the trader just edited is still
     // listed, from the same layer as before.
@@ -597,7 +599,9 @@ fn the_watchers_reload_of_our_own_write_changes_nothing(cx: &mut gpui::TestAppCo
     let before = layered_fingerprint(&shell, &cx);
     let builtin = shell.read_with(&cx, |shell, cx| shell.services(cx).builtin.clone());
     let reloaded = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut cx, |shell, cx| shell.apply_reload(reloaded, cx));
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, cx| a.apply_reload(reloaded, cx))
+    });
     let after = layered_fingerprint(&shell, &cx);
 
     assert_eq!(
@@ -1033,11 +1037,14 @@ fn the_config_fan_out_is_debounced_and_goes_through_the_one_applier(cx: &mut gpu
     let fired = std::rc::Rc::new(std::cell::RefCell::new(0usize));
     let f = fired.clone();
     cx.update(|_, cx| {
-        cx.subscribe(&shell, move |_, event: &ShellEvent, _| {
-            if matches!(event, ShellEvent::ConfigReloaded) {
-                *f.borrow_mut() += 1;
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| {
+                if matches!(event, ShellEvent::ConfigReloaded) {
+                    *f.borrow_mut() += 1;
+                }
+            },
+        )
         .detach();
     });
 
@@ -5012,7 +5019,7 @@ fn sources_rows_are_dataset_first_and_i_types_a_duration(cx: &mut gpui::TestAppC
     // source baseline as restart-required.
     assert!(
         shell
-            .read_with(&cx, |s, _| s.restart_required.clone())
+            .read_with(&cx, |s, cx| s.app().read(cx).restart_required().cloned())
             .is_some_and(|m| m.contains("sources")),
         "a sources write raises the restart-required stripe"
     );
@@ -7494,7 +7501,9 @@ fn a_reload_under_an_armed_confirm_refuses_the_answer(cx: &mut gpui::TestAppCont
     let reloaded = services_with_user_sources(&[("mina", "risk"), ("mine", "risk")]);
     shell.update(&mut cx, |shell, cx| {
         shell.with_services(cx, |s| s.builtin = reloaded.builtin);
-        shell.apply_reload(reloaded.config, cx);
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(reloaded.config, cx));
     });
     cx.run_until_parked();
 
@@ -7660,7 +7669,9 @@ fn the_armed_prompt_names_the_recorded_target(cx: &mut gpui::TestAppContext) {
     let reloaded = services_with_user_sources(&[("mina", "risk"), ("mine", "risk")]);
     shell.update(&mut cx, |shell, cx| {
         shell.with_services(cx, |s| s.builtin = reloaded.builtin);
-        shell.apply_reload(reloaded.config, cx);
+        shell
+            .app()
+            .update(cx, |a, cx| a.apply_reload(reloaded.config, cx));
     });
     cx.run_until_parked();
     assert!(
@@ -8400,7 +8411,9 @@ fn a_reload_adding_a_view_repaints_the_browse_list(cx: &mut gpui::TestAppContext
     .unwrap();
     let builtin = shell.read_with(&cx, |s, cx| s.services(cx).builtin.clone());
     let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
-    shell.update(&mut cx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     cx.run_until_parked();
     assert!(fresh_browse_names(&shell, &cx).contains(&"wider".to_string()));
     assert_browse_rows_are_fresh(&shell, &mut cx);
@@ -8446,12 +8459,13 @@ fn a_filtered_row_click_opens_it_and_the_rows_stay_fresh(cx: &mut gpui::TestAppC
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         objectdialog::Stage::Edit { .. }
     ));
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         let state = s.object_dialog.as_ref().unwrap();
         assert!(
-            state
-                .rows
-                .is_current(&state.rows_key(s.config_revision, 0), &state.query),
+            state.rows.is_current(
+                &state.rows_key(s.app().read(cx).config_revision(), 0),
+                &state.query
+            ),
             "the click re-keyed the browse list for the cleared query"
         );
     });

@@ -12,7 +12,7 @@ impl ShellView {
     /// Refresh every open dialog's prepared rows against its current inputs,
     /// covered dialogs included, except a parked object dialog (see below).
     pub(crate) fn refresh_dialog_rows(&mut self, cx: &App) {
-        let revision = self.config_revision;
+        let revision = self.app.read(cx).config_revision();
         // Read once, up front: the reference borrows `cx`, not `self`, so
         // it stays usable beside the dialogs' own mutable borrows below.
         let services = self.services(cx);
@@ -80,7 +80,9 @@ impl ShellView {
     pub(crate) fn assert_rows_current(&self, cx: &App) {
         if let Some(state) = self.keybindings.as_ref() {
             assert!(
-                state.rows.is_current(&self.config_revision, &state.query),
+                state
+                    .rows
+                    .is_current(&self.app.read(cx).config_revision(), &state.query),
                 "prepared rows are stale: keybindings changed an input without refresh_dialog_rows"
             );
         }
@@ -88,7 +90,7 @@ impl ShellView {
             let (generation, _) = self.object_rows_inputs(state.domain, cx);
             assert!(
                 state.rows.is_current(
-                    &state.rows_key(self.config_revision, generation),
+                    &state.rows_key(self.app.read(cx).config_revision(), generation),
                     &state.query
                 ),
                 "prepared rows are stale: the object dialog changed an input without refresh_dialog_rows"

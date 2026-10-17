@@ -1749,7 +1749,9 @@ impl SaveFixture {
                     d
                 })
                 .collect();
-            s.apply_reload(geode_core::config::Config::from_docs(docs), cx);
+            s.app().update(cx, |a, cx| {
+                a.apply_reload(geode_core::config::Config::from_docs(docs), cx)
+            });
         });
         self.vcx.run_until_parked();
         draw(&mut self.vcx);

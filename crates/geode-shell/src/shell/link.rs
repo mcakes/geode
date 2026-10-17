@@ -252,7 +252,7 @@ impl ShellView {
             .workspaces(cx)
             .workspace_of(tile)
             .unwrap_or_else(|| self.active_ix(cx));
-        let include_layer = self.link_include_tile_filter;
+        let include_layer = self.app.read(cx).link_include_tile_filter();
         self.frame.update(cx, |f, cx| {
             let base = f.emit_base(ws, tile);
             let (posting, refused) = geode_core::link::compose(emission, &base, include_layer);
