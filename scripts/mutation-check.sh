@@ -42441,6 +42441,13 @@ run_mutation "volwatch: a group head paints at the grid's text size" \
   geode-volwatch \
   group_heads_and_the_band_paint_at_the_grids_text_size
 
+run_mutation "volwatch: the chip ceiling is a tint, not a fill" \
+  crates/geode-volwatch/src/core/model.rs \
+  'pub const CHIP_CEILING: f32 = 0.25;' \
+  'pub const CHIP_CEILING: f32 = 0.55;' \
+  geode-volwatch \
+  the_chip_ceiling_is_a_tint_not_a_fill
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -13,7 +13,7 @@ Current architecture:
 |---|---|
 | `datefield` | `DateTimeField` state, date/date-time precision, segment navigation and entry, and shared key routing. |
 | `datefield::paint` | Stateless GPUI painter using prepared segment text and host-supplied colors, radius, and padding policy. |
-| `cell` | Stateless cell glyphs for dense grids, each a pure core plus a painter: `delta_chip` (the signed number on its sign's color, alpha by magnitude over the column scale up to a host ceiling), `percent_slider` (track filled to the rank, quartile ticks, warning marker at or beyond 0.10 / 0.90), `zero_bar` (a bar from a center axis on the sign's side, length by magnitude over the column scale), `heat` (one hue behind the number, alpha by position in the grid's range). `column_scale` and `heat::range` give the host its scales; `cell::widths` exports each painter's minimum width (the painters read the same constants) and the missing-value `DASH`, for sizing columns. |
+| `cell` | Stateless cell glyphs for dense grids, each a pure core plus a painter: `delta_chip` (the signed number in its sign's color on a tint of that color, alpha by magnitude over the column scale up to a host ceiling), `percent_slider` (track filled to the rank, quartile ticks, warning marker at or beyond 0.10 / 0.90), `zero_bar` (a bar from a center axis on the sign's side, length by magnitude over the column scale), `heat` (one hue behind the number, alpha by position in the grid's range). `column_scale` and `heat::range` give the host its scales; `cell::widths` exports each painter's minimum width (the painters read the same constants) and the missing-value `DASH`, for sizing columns. |
 
 ## Commands
 

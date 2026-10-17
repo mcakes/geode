@@ -1,6 +1,7 @@
-//! The change chip: the signed number on a fill in its sign's color whose
-//! alpha grows with the move's size relative to the column's largest move,
-//! up to a host ceiling.
+//! The change chip: the signed number in its sign's color on a tint of the
+//! same color whose alpha grows with the move's size relative to the
+//! column's largest move, up to a host ceiling. The number carries the
+//! sign; the tint only says how big.
 
 use geode_core::format::Sign;
 use gpui::prelude::FluentBuilder as _;
@@ -43,6 +44,8 @@ pub struct ChipPaint {
     pub positive: Hsla,
     pub negative: Hsla,
     pub zero: Hsla,
+    /// The color of a value with no chip: a missing or non-finite one. A
+    /// signed number never takes it; see [`ChipPaint::text_color`].
     pub text: Hsla,
     pub radius: Pixels,
 }
@@ -55,6 +58,12 @@ impl ChipPaint {
             Sign::Zero => self.zero,
         }
     }
+
+    /// The text color for a displayed `sign`: always the sign's color, so a
+    /// chip and a plain signed number read alike; the fill only says how big.
+    pub fn text_color(&self, sign: Sign) -> Hsla {
+        self.color(sign)
+    }
 }
 
 /// Minimum chip width at the design rem (the mockup's 44 px at a 13 px
@@ -64,7 +73,10 @@ pub(crate) const MIN_WIDTH: f32 = super::widths::CHIP_MIN;
 pub(crate) const INSET: f32 = super::widths::CHIP_INSET;
 
 /// The chip, right-aligned text inside. `text` is the host's formatted
-/// number; with no chip it is painted in the plain text color.
+/// number, painted in its sign's color ([`ChipPaint::text_color`]) over a
+/// fill of that color at the chip's alpha; an alpha of zero draws no fill.
+/// With no chip (a missing or non-finite value) the text is painted alone,
+/// in `ChipPaint::text`, and carries the chip's inset so it lines up.
 pub fn paint(text: SharedString, chip: Option<Chip>, paint: ChipPaint, id: SharedString) -> Div {
     let text_sel = id.clone();
     // The wrapper right-aligns the chip, so it keeps its own width in any
@@ -80,7 +92,8 @@ pub fn paint(text: SharedString, chip: Option<Chip>, paint: ChipPaint, id: Share
             ),
         );
     };
-    let color = paint.color(chip.sign);
+    let fill = paint.color(chip.sign);
+    let text_color = paint.text_color(chip.sign);
     div().flex().justify_end().child(
         div()
             .flex_none()
@@ -89,11 +102,11 @@ pub fn paint(text: SharedString, chip: Option<Chip>, paint: ChipPaint, id: Share
             .rounded(paint.radius)
             .flex()
             .justify_end()
-            .when(chip.alpha > 0.0, |d| d.bg(color.opacity(chip.alpha)))
+            .when(chip.alpha > 0.0, |d| d.bg(fill.opacity(chip.alpha)))
             .debug_selector(move || format!("{id}-chip"))
             .child(
                 div()
-                    .text_color(color)
+                    .text_color(text_color)
                     .debug_selector(move || format!("{text_sel}-text"))
                     .child(text),
             ),
@@ -192,6 +205,19 @@ mod tests {
             text: hsla(0.0, 0.0, 0.9, 1.0),
             radius: px(3.0),
         }
+    }
+
+    #[test]
+    fn text_is_the_sign_color_with_or_without_a_fill() {
+        let p = test_paint();
+        assert_eq!(p.text_color(Sign::Positive), p.positive);
+        assert_eq!(p.text_color(Sign::Negative), p.negative);
+        assert_eq!(p.text_color(Sign::Zero), p.zero);
+        assert_ne!(
+            p.text_color(Sign::Positive),
+            p.text,
+            "the plain text color is for a value with no chip"
+        );
     }
 
     struct Probe(Option<Chip>);

@@ -30,8 +30,10 @@ use super::views::{
     Ask, Column, ColumnKind, PCTL_MIN_COUNT, REALIZED, SURFACE, TITLE, VARSWAP, WINDOW_1Y, sortable,
 };
 
-/// Fill alpha of a change chip at the column's largest move.
-pub const CHIP_CEILING: f32 = 0.55;
+/// Fill alpha of a change chip at the column's largest move: a tint under a
+/// colored number; at 0.55 the chips read as filled pills and hid the grid's
+/// rhythm.
+pub const CHIP_CEILING: f32 = 0.25;
 /// Heat tint alpha at the top of the grid's range.
 pub const HEAT_CEILING: f32 = 0.40;
 /// Zero bar fill alpha over its sign color.
@@ -1252,6 +1254,20 @@ mod tests {
             matches!(b.glyph, Glyph::Chip(Some(Chip { alpha, .. })) if (alpha - CHIP_CEILING).abs() < 1e-6)
         );
         assert_eq!(b.text.as_ref(), "-2.0");
+    }
+
+    #[test]
+    fn the_chip_ceiling_is_a_tint_not_a_fill() {
+        // The column's largest move takes the ceiling itself.
+        let p = prepare(&inputs(rows_with_changes(&[-2.0, 0.5]), View::Changes));
+        let col = column_index("atfm-3M-change");
+        let Glyph::Chip(Some(Chip { alpha, .. })) = p.rows[0].cells[col].glyph else {
+            panic!("the largest move has a chip");
+        };
+        assert!(
+            alpha <= 0.25,
+            "a chip's fill is a hint of magnitude; the number carries the sign: {alpha}"
+        );
     }
 
     #[test]

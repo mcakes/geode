@@ -1316,9 +1316,10 @@ committing and report its segment error. Segment display text is allocated by
 `geode-widgets::cell` holds four stateless glyphs for dense grids, each a pure
 core that decides the numbers and a painter that draws them from the host's
 preformatted text and a paint struct of theme colors the host builds. The
-change chip tints the signed number's background in its sign's color, alpha by
-the move's size over the column's largest finite move, up to a ceiling the host
-sets. The percentile slider fills a track to the rank with quartile ticks; its
+change chip paints the signed number in its sign's color on a tint of that
+color, alpha by the move's size over the column's largest finite move, up to a
+ceiling the host sets (the vol watchlist's is a quarter: the number carries the
+sign, the tint only says how big). The percentile slider fills a track to the rank with quartile ticks; its
 marker takes the warning color at or beyond 0.10 and 0.90. The bar from zero
 grows from a center axis on the value's sign side, its length the value's
 share of the column's largest magnitude. The heat tint puts one hue behind the
