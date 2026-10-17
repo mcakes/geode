@@ -13490,7 +13490,7 @@ run_mutation "insert: the insert branch runs even while a shell surface holds fo
 run_mutation "insert: single-keystroke bindings resolve against workspace alone, not the tile's stack" \
   crates/geode-shell/src/shell/input.rs \
   '                self.single_keystroke_binding(ks, &insert_contexts(&stack, ks), cx)' \
-  '                self.single_keystroke_binding(ks, &[KeyContext::new("workspace")])' \
+  '                self.single_keystroke_binding(ks, &[KeyContext::new("workspace")], cx)' \
   geode-shell typed_keys_reach_a_tiles_focused_input_in_insert_mode
 
 # After insert routing, an unclaimed key must not reach the normal matcher.
