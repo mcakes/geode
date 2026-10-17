@@ -58,7 +58,7 @@ impl ShellView {
     /// `restored_pages`: kinds never opened, unknown kinds, and the last
     /// state of a page another kind replaced. All of them survive a save.
     pub(super) fn current_pages(&self, cx: &App) -> session::PageRecords {
-        let mut pages: session::PageRecords = self.services.restored_pages.clone();
+        let mut pages: session::PageRecords = self.services(cx).restored_pages.clone();
         if let Some(page) = &self.page {
             pages.insert(
                 page.occupant.kind.to_string(),
@@ -93,7 +93,7 @@ impl ShellView {
                 // covers visible docks — the same visible set the flip
                 // barrier waits on.
                 let mut keys = Vec::new();
-                self.visible_tile_keys(&mut keys);
+                self.visible_tile_keys(&mut keys, cx);
                 for key in keys {
                     if let Some(o) = self.occupants.get(&TileId(key.0)) {
                         o.content.deliver(
@@ -130,9 +130,9 @@ impl ShellView {
     /// into `out` (cleared first). A method rather than a `HashSet`
     /// return so `ensure_occupants` can reuse a scratch allocation across
     /// frames instead of allocating one every render.
-    fn fill_all_tiles(&self, out: &mut HashSet<TileId>) {
+    fn fill_all_tiles(&self, out: &mut HashSet<TileId>, cx: &App) {
         out.clear();
-        for (_, ws) in self.services.workspaces.spaces() {
+        for (_, ws) in self.workspaces(cx).spaces() {
             out.extend(ws.tree().tiles());
             for (_, dock) in ws.docks().iter() {
                 out.extend(dock.tree().tiles());
@@ -143,14 +143,14 @@ impl ShellView {
     /// Fill `out` with tiles on screen in the active workspace, clearing it
     /// first. Hidden stack members and hidden docks are excluded. Reusing the
     /// set avoids a fresh allocation each frame.
-    fn fill_active_tiles(&self, out: &mut HashSet<TileId>) {
+    fn fill_active_tiles(&self, out: &mut HashSet<TileId>, cx: &App) {
         out.clear();
         // A page covers the tile surface: nothing beneath is visible, so no tile
         // is announced shown and no flip barrier waits on one.
         if self.page_open() {
             return;
         }
-        let ws = self.services.workspaces.active();
+        let ws = self.workspace(cx);
         out.extend(ws.tree().visible_tiles());
         for (_, dock) in ws.docks().iter() {
             if dock.visible() {
@@ -163,7 +163,7 @@ impl ShellView {
     /// workspace, including docks. Frame flips wait on this set; tiles without
     /// an occupant cannot query or arrive. The caller retains the vector's
     /// allocation between uses.
-    pub(super) fn visible_tile_keys(&self, out: &mut Vec<QueryKey>) {
+    pub(super) fn visible_tile_keys(&self, out: &mut Vec<QueryKey>, cx: &App) {
         out.clear();
         // A page covers the tile surface: nothing beneath is visible, so no tile
         // is announced shown and no flip barrier waits on one.
@@ -177,7 +177,7 @@ impl ShellView {
                 .get(id)
                 .is_some_and(|o| o.kind != PLACEHOLDER_KIND)
         };
-        let ws = self.services.workspaces.active();
+        let ws = self.workspace(cx);
         out.extend(
             ws.tree()
                 .visible_tiles()
@@ -210,7 +210,7 @@ impl ShellView {
     /// that does not follow) is deferred until the render is over.
     pub(super) fn ensure_occupants(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mut all = std::mem::take(&mut self.scratch_all_tiles);
-        self.fill_all_tiles(&mut all);
+        self.fill_all_tiles(&mut all, cx);
         // Tell removed occupants they are hidden and then closed before
         // dropping them, so they can release subscriptions and cancel their
         // queries with a live GPUI context. The visibility diff below can only
@@ -250,7 +250,7 @@ impl ShellView {
         // ones receive their state. Newly visible occupants may receive `true`
         // here and again in the diff; visibility setters must be idempotent.
         let mut active = std::mem::take(&mut self.scratch_active_tiles);
-        self.fill_active_tiles(&mut active);
+        self.fill_active_tiles(&mut active, cx);
 
         // `all` is a `HashSet<TileId>`, so its iteration order is not
         // deterministic. Sorting makes the order tiles are created in
@@ -267,82 +267,82 @@ impl ShellView {
             if self.occupants.contains_key(id) {
                 continue;
             }
-            let restored = self.services.restored_tiles.remove(&id.0);
-            let pending = self.pending_tiles.remove(id);
-            // Only the factory registered for this record's kind receives its state.
-            // A matched restored record takes precedence over a pending add request.
-            let matched = restored
-                .as_ref()
-                .and_then(|r| self.services.roster.factory(&r.kind));
-            let restored_state = matched.and(restored.as_ref()).map(|r| &r.state);
-            let pending_factory = pending.as_ref().and_then(|p| {
-                let f = self.services.roster.factory(&p.kind);
-                if f.is_none() {
+            // Under the app's writer: the factory is the roster's, the
+            // restored record is consumed here, and `create` needs the
+            // context mutably, which a read of the services would hold.
+            let diagnostics = self.diagnostics.clone();
+            let (occupant, from_add, from_restore) = self.app.update(cx, |app, cx| {
+                let services = &mut app.services;
+                let restored = services.restored_tiles.remove(&id.0);
+                let pending = self.pending_tiles.remove(id);
+                // Only the factory registered for this record's kind receives its state.
+                // A matched restored record takes precedence over a pending add request.
+                let matched = restored
+                    .as_ref()
+                    .and_then(|r| services.roster.factory(&r.kind));
+                let restored_state = matched.and(restored.as_ref()).map(|r| &r.state);
+                let pending_factory = pending.as_ref().and_then(|p| {
+                    let f = services.roster.factory(&p.kind);
+                    if f.is_none() {
+                        tracing::warn!(
+                            target: "geode::shell",
+                            "add_tile asked for kind '{}', which has no registered factory — painting a placeholder",
+                            p.kind
+                        );
+                    }
+                    f
+                });
+                let pending_state = pending_factory
+                    .and(pending.as_ref())
+                    .and_then(|p| p.state.as_ref());
+                // Use a matching restored factory, then a pending factory, then a
+                // placeholder. Preserve unmatched restored records for later saves.
+                // Restore and add-tile allocation normally use disjoint IDs.
+                if let (Some(record), None) = (&restored, matched) {
                     tracing::warn!(
-                        target: "geode::shell",
-                        "add_tile asked for kind '{}', which has no registered factory — painting a placeholder",
-                        p.kind
+                        target: "geode::session",
+                        "tile {} was saved as '{}', which this build has no module for — painting a placeholder and keeping the record",
+                        id.0, record.kind
                     );
+                    self.unplaced_records.insert(id.0, record.clone());
                 }
-                f
-            });
-            let pending_state = pending_factory
-                .and(pending.as_ref())
-                .and_then(|p| p.state.as_ref());
-            // Use a matching restored factory, then a pending factory, then a
-            // placeholder. Preserve unmatched restored records for later saves.
-            // Restore and add-tile allocation normally use disjoint IDs.
-            if let (Some(record), None) = (&restored, matched) {
-                tracing::warn!(
-                    target: "geode::session",
-                    "tile {} was saved as '{}', which this build has no module for — painting a placeholder and keeping the record",
-                    id.0, record.kind
+                let (factory, state) = match (matched, pending_factory) {
+                    (Some(f), _) => (Some(f), restored_state),
+                    (None, Some(f)) => (Some(f), pending_state),
+                    (None, None) => (None, None),
+                };
+                // Only an `add_tile` request (no matching restored record) may be
+                // told it was launched: a restore must never take focus.
+                let from_add = matched.is_none() && pending_factory.is_some();
+                let from_restore = matched.is_some();
+                // The tile's own workspace, not the active one: an occupant
+                // restored into a hidden workspace reads that workspace's lane.
+                // Every tile reaching here is placed in some workspace's tree;
+                // the active fallback only keeps a release build running.
+                debug_assert!(
+                    services.workspaces.workspace_of(*id).is_some(),
+                    "occupant for unplaced tile {id:?}"
                 );
-                self.unplaced_records.insert(id.0, record.clone());
-            }
-            let (factory, state) = match (matched, pending_factory) {
-                (Some(f), _) => (Some(f), restored_state),
-                (None, Some(f)) => (Some(f), pending_state),
-                (None, None) => (None, None),
-            };
-            // Only an `add_tile` request (no matching restored record) may be
-            // told it was launched: a restore must never take focus.
-            let from_add = matched.is_none() && pending_factory.is_some();
-            let from_restore = matched.is_some();
-            // The tile's own workspace, not the active one: an occupant
-            // restored into a hidden workspace reads that workspace's lane.
-            // Every tile reaching here is placed in some workspace's tree;
-            // the active fallback only keeps a release build running.
-            debug_assert!(
-                self.services.workspaces.workspace_of(*id).is_some(),
-                "occupant for unplaced tile {id:?}"
-            );
-            let ws = self
-                .services
-                .workspaces
-                .workspace_of(*id)
-                .unwrap_or_else(|| self.services.workspaces.active_ix());
-            // Bound to the tile as well, so the link group it follows
-            // decides the scope it reads.
-            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);
-            let occupant = match factory {
-                Some(f) => f.create(
-                    *id,
-                    state,
-                    frame.clone(),
-                    self.diagnostics.clone(),
-                    window,
-                    cx,
-                ),
-                None => crate::module::placeholder::PlaceholderFactory.create(
-                    *id,
-                    None,
-                    frame.clone(),
-                    self.diagnostics.clone(),
-                    window,
-                    cx,
-                ),
-            };
+                let ws = services
+                    .workspaces
+                    .workspace_of(*id)
+                    .unwrap_or_else(|| services.workspaces.active_ix());
+                // Bound to the tile as well, so the link group it follows
+                // decides the scope it reads.
+                let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);
+                let occupant = match factory {
+                    Some(f) => f.create(*id, state, frame, diagnostics, window, cx),
+                    None => crate::module::placeholder::PlaceholderFactory.create(
+                        *id,
+                        None,
+                        frame,
+                        diagnostics,
+                        window,
+                        cx,
+                    ),
+                };
+                (occupant, from_add, from_restore)
+            });
             // Announce initial visibility, including for occupants in hidden docks
             // or inactive workspaces that the later visibility diff cannot see.
             occupant.content.set_visible(active.contains(id), cx);
@@ -442,9 +442,7 @@ impl ShellView {
         // longer is. In render, before the tiles' own renders, so the flag
         // is read in this same frame and nothing needs notifying.
         let focused_now = self
-            .services
-            .workspaces
-            .active()
+            .workspace(cx)
             .focused_tile()
             .filter(|id| active.contains(id));
         if focused_now != self.focused_sent {
@@ -462,7 +460,7 @@ impl ShellView {
         // inside render, and `launched` may move focus (the market-data
         // panel opens its picker), which must follow any modal focus return
         // the add itself came from.
-        let focused_tile = self.services.workspaces.active().focused_tile();
+        let focused_tile = self.workspace(cx).focused_tile();
         for id in fresh {
             if active.contains(&id) && focused_tile == Some(id) {
                 cx.defer_in(window, move |view, window, cx| {
@@ -477,7 +475,7 @@ impl ShellView {
         // Record the value only after reaching an occupant, so missing
         // occupants can receive it on a later reconciliation.
         for id in &creation_order {
-            let now = self.services.workspaces.stack_position(*id);
+            let now = self.workspaces(cx).stack_position(*id);
             if self.stack_sent.get(id) == Some(&now) {
                 continue;
             }
@@ -547,14 +545,14 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) {
         self.leave_command_line(window, cx);
-        self.begin_action(crate::module::CLOSE_ACTION);
+        self.begin_action(crate::module::CLOSE_ACTION, cx);
         tracing::debug!(target: "geode::shell", tile = tile.0, "close by pointer");
         if let Some(refusal) = self.action_refusal(crate::module::CLOSE_ACTION) {
             self.notice = Some(refusal.into());
             cx.notify();
             return;
         }
-        if self.services.workspaces.active_mut().close_tile_id(tile) {
+        if self.with_workspace(cx, |ws| ws.close_tile_id(tile)) {
             self.session_dirty = true;
             self.swallow_double_click_followup = true;
             self.note_keyboard_focus_move(window, cx);
@@ -566,13 +564,17 @@ impl ShellView {
     /// in the active workspace. `false` when the workspace has no such tile.
     /// Only a change of focused tile dirties the session: the focus methods
     /// report success even when the requested tile was already focused.
-    fn focus_pressed_tile(&mut self, tile: TileId) -> bool {
-        let ws = self.services.workspaces.active_mut();
-        let was_focused = ws.focused_tile();
-        let moved = match ws.region_of(tile) {
-            Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(tile),
-            Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, tile),
-            None => return false,
+    fn focus_pressed_tile(&mut self, tile: TileId, cx: &mut App) -> bool {
+        let Some((was_focused, moved)) = self.with_workspace(cx, |ws| {
+            let was_focused = ws.focused_tile();
+            let moved = match ws.region_of(tile) {
+                Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(tile),
+                Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, tile),
+                None => return None,
+            };
+            Some((was_focused, moved))
+        }) else {
+            return false;
         };
         if moved && was_focused != Some(tile) {
             self.session_dirty = true;
@@ -592,7 +594,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.focus_pressed_tile(tile) {
+        if !self.focus_pressed_tile(tile, cx) {
             return;
         }
         self.leave_command_line(window, cx);
@@ -616,15 +618,15 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.focus_pressed_tile(tile) {
+        if !self.focus_pressed_tile(tile, cx) {
             return;
         }
-        let Some((index, _)) = self.services.workspaces.active().stack_position(tile) else {
+        let Some((index, _)) = self.workspace(cx).stack_position(tile) else {
             self.notice = Some(super::input::NOT_IN_A_STACK.into());
             cx.notify();
             return;
         };
-        let members = self.stack_members_of(tile);
+        let members = self.stack_members_of(tile, cx);
         self.close_palette(window, cx);
         self.leave_command_line(window, cx);
         self.stack_list = Some(super::stacklist::StackList {
@@ -647,12 +649,8 @@ impl ShellView {
 
     /// The members of `tile`'s stack in stack order (`Tree::stack_members`
     /// over `Workspace::stack_members`).
-    fn stack_members_of(&self, tile: TileId) -> Vec<TileId> {
-        self.services
-            .workspaces
-            .active()
-            .stack_members(tile)
-            .unwrap_or_default()
+    fn stack_members_of(&self, tile: TileId, cx: &App) -> Vec<TileId> {
+        self.workspace(cx).stack_members(tile).unwrap_or_default()
     }
 
     /// Close the member list. Escape, outside clicks, dispatch, and palette
@@ -670,12 +668,11 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let ws = self.services.workspaces.active_mut();
-        let moved = match ws.region_of(id) {
+        let moved = self.with_workspace(cx, |ws| match ws.region_of(id) {
             Some(crate::tiling::FocusRegion::Main) => ws.focus_main_tile(id),
             Some(crate::tiling::FocusRegion::Dock(side)) => ws.focus_dock_tile(side, id),
             None => false,
-        };
+        });
         if moved {
             self.session_dirty = true;
             self.note_keyboard_focus_move(window, cx);
@@ -724,7 +721,7 @@ impl ShellView {
             }
             return Some(self.context_stack(cx));
         }
-        let tile = self.services.workspaces.active().focused_tile()?;
+        let tile = self.workspace(cx).focused_tile()?;
         if !self.occupants.get(&tile)?.content.holds_focus(window, cx) {
             return None;
         }

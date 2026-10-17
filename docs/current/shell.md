@@ -18,6 +18,16 @@ palette, modal, command line, drag state, and session dirt. Its `render`
 method describes the current frame; it must not become a second domain model
 or perform blocking work.
 
+`ShellApp` is the one app-level entity behind every window. It owns
+`ShellServices` (config, the action registry, the keymap, the theme, the
+module roster, and `Workspaces`) and the desk and user config directories,
+and issues each window a `WindowKey` as it registers. A `ShellView` reads
+them through `services(cx)`, `workspaces(cx)`, `workspace(cx)` and
+`config(cx)` and writes them only inside `with_services`, `with_workspaces`
+and `with_workspace`, so a second window sees the same config revision and
+the same tile allocator as the first. Render reads through the `&App`
+accessors and never updates the app entity.
+
 State with a narrower owner stays outside `ShellView`:
 
 - `Workspaces` and the tiling tree own layout and structural focus.

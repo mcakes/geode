@@ -16,7 +16,7 @@ fn keybindings_open_paints_the_modal_with_rows(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -297,8 +297,9 @@ fn typing_a_query_narrows_the_rows_that_paint(cx: &mut gpui::TestAppContext) {
         let _ = window.draw(cx);
     });
 
-    let (visible, row_count) = shell.read_with(&cx, |shell, _| {
-        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+    let (visible, row_count) = shell.read_with(&cx, |shell, cx| {
+        let rows =
+            keybindings_view::derive_rows(&shell.services(cx).registry, &shell.services(cx).keymap);
         let state = shell.keybindings.as_ref().expect("dialog open");
         let visible: Vec<usize> = keybindings_view::visible_rows(state, &rows)
             .iter()
@@ -347,9 +348,7 @@ fn listening_then_enter_persists_the_new_binding_to_the_user_keymap_file(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(test_services(), None, Some(user_dir.clone()), window, cx)
-                });
+                let view = view_for_test(test_services(), Some(user_dir.clone()), window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -376,8 +375,8 @@ fn listening_then_enter_persists_the_new_binding_to_the_user_keymap_file(
 
     // The action bound at row 0 (top of sort order) at the moment the
     // dialog opened — what the capture below should end up bound to.
-    let target_action = shell.read_with(&cx, |shell, _| {
-        keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap)[0]
+    let target_action = shell.read_with(&cx, |shell, cx| {
+        keybindings_view::derive_rows(&shell.services(cx).registry, &shell.services(cx).keymap)[0]
             .action
             .clone()
     });
@@ -451,9 +450,7 @@ fn capturing_a_key_the_parser_cannot_read_writes_nothing_and_says_so(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(test_services(), None, Some(user_dir.clone()), window, cx)
-                });
+                let view = view_for_test(test_services(), Some(user_dir.clone()), window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -530,7 +527,7 @@ fn a_single_click_on_a_row_starts_listening(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -960,8 +957,9 @@ fn clearing_the_query_scrolls_back_to_the_top(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("/");
     cx.simulate_input("e");
     cx.run_until_parked();
-    let matches = shell.read_with(&cx, |shell, _| {
-        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+    let matches = shell.read_with(&cx, |shell, cx| {
+        let rows =
+            keybindings_view::derive_rows(&shell.services(cx).registry, &shell.services(cx).keymap);
         let state = shell.keybindings.as_ref().expect("dialog open");
         keybindings_view::visible_rows(state, &rows).len()
     });
@@ -1083,8 +1081,9 @@ fn selected_row(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
 ) -> (ActionId, Option<(String, Layer)>) {
-    shell.read_with(cx, |shell, _| {
-        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+    shell.read_with(cx, |shell, cx| {
+        let rows =
+            keybindings_view::derive_rows(&shell.services(cx).registry, &shell.services(cx).keymap);
         let state = shell.keybindings.as_ref().expect("dialog open");
         let visible = keybindings_view::visible_rows(state, &rows);
         let row = &rows[visible[state.selected].row];
@@ -1132,8 +1131,9 @@ fn top_match_bounds(
     shell: &Entity<ShellView>,
     cx: &mut gpui::VisualTestContext,
 ) -> gpui::Bounds<gpui::Pixels> {
-    let ix = shell.read_with(cx, |shell, _| {
-        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+    let ix = shell.read_with(cx, |shell, cx| {
+        let rows =
+            keybindings_view::derive_rows(&shell.services(cx).registry, &shell.services(cx).keymap);
         let state = shell.keybindings.as_ref().expect("dialog open");
         keybindings_view::visible_rows(state, &rows)
             .first()
@@ -1320,8 +1320,9 @@ fn d_on_an_unbound_row_says_so_and_writes_nothing(cx: &mut gpui::TestAppContext)
     open_keybindings(&shell, &mut vcx);
 
     // Walk to a row that is genuinely unbound rather than assuming one.
-    let target = shell.read_with(&vcx, |shell, _| {
-        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+    let target = shell.read_with(&vcx, |shell, cx| {
+        let rows =
+            keybindings_view::derive_rows(&shell.services(cx).registry, &shell.services(cx).keymap);
         rows.iter()
             .position(|r| r.current.is_none())
             .expect("the builtin keymap leaves plenty of actions unbound")
@@ -1519,8 +1520,8 @@ fn r_on_a_rebound_builtin_removes_the_new_key_and_lifts_the_shadow(cx: &mut gpui
         Some(Some(keybindings_view::KeybindingConfirm::Reset)),
         "r arms the reset question"
     );
-    let question = shell.read_with(&vcx, |s, _| {
-        let rows = keybindings_view::derive_rows(&s.services.registry, &s.services.keymap);
+    let question = shell.read_with(&vcx, |s, cx| {
+        let rows = keybindings_view::derive_rows(&s.services(cx).registry, &s.services(cx).keymap);
         let state = s.keybindings.as_ref().unwrap();
         let visible = keybindings_view::visible_rows(state, &rows);
         keybindings_view::confirm_prompt(
@@ -2410,8 +2411,8 @@ fn a_row_click_while_a_confirm_is_armed_is_dropped(cx: &mut gpui::TestAppContext
     // position under the "palette" filter — so the row to click is the
     // one actually visible under that filter (the selected row itself,
     // per this test's own doc comment), not literally row 0.
-    let row_ix = shell.read_with(&vcx, |s, _| {
-        let rows = keybindings_view::derive_rows(&s.services.registry, &s.services.keymap);
+    let row_ix = shell.read_with(&vcx, |s, cx| {
+        let rows = keybindings_view::derive_rows(&s.services(cx).registry, &s.services(cx).keymap);
         let state = s.keybindings.as_ref().unwrap();
         let visible = keybindings_view::visible_rows(state, &rows);
         visible[state.selected].row
@@ -2760,8 +2761,9 @@ fn fresh_keybinding_rows(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
 ) -> (Vec<usize>, Vec<keybindings_view::KeybindingRow>) {
-    shell.read_with(cx, |shell, _| {
-        let rows = keybindings_view::derive_rows(&shell.services.registry, &shell.services.keymap);
+    shell.read_with(cx, |shell, cx| {
+        let rows =
+            keybindings_view::derive_rows(&shell.services(cx).registry, &shell.services(cx).keymap);
         let state = shell.keybindings.as_ref().expect("dialog open");
         let visible = keybindings_view::visible_rows(state, &rows);
         (visible.iter().map(|m| m.row).collect(), rows)
@@ -2820,7 +2822,7 @@ fn a_keymap_reload_repaints_the_keybinding_rows(cx: &mut gpui::TestAppContext) {
         "config_version = 1\n[[bindings]]\ncontext = \"workspace\"\n[bindings.keys]\n\"mod+shift+z\" = \"palette::toggle\"\n",
     )
     .unwrap();
-    let builtin = shell.read_with(&vcx, |s, _| s.services.builtin.clone());
+    let builtin = shell.read_with(&vcx, |s, cx| s.services(cx).builtin.clone());
     let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
     shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
     vcx.run_until_parked();
@@ -2883,7 +2885,7 @@ fn a_rebind_inside_the_dialog_repaints_its_row_on_the_reload(cx: &mut gpui::Test
         "a write changes nothing in memory until its reload"
     );
     // The reload the watcher runs once it sees the write.
-    let builtin = shell.read_with(&cx, |s, _| s.services.builtin.clone());
+    let builtin = shell.read_with(&cx, |s, cx| s.services(cx).builtin.clone());
     let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
     shell.update(&mut cx, |s, cx| s.apply_reload(config, cx));
     assert_keybinding_rows_are_fresh(&shell, &mut cx);

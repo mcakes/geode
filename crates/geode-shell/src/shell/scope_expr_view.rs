@@ -340,7 +340,7 @@ pub fn open_term(
 ) {
     let Some(mode) = Mode::term(
         index,
-        view.target_frame().read(cx).scope().expression.as_ref(),
+        view.target_frame(cx).read(cx).scope().expression.as_ref(),
     ) else {
         return;
     };
@@ -390,7 +390,7 @@ pub fn open(view: &mut ShellView, mode: Mode, window: &mut Window, cx: &mut Cont
 /// its chip is gone.
 pub(crate) fn sync_named_offers(view: &mut ShellView, cx: &mut Context<ShellView>) {
     let vocab = view.expr_vocab.clone();
-    let frame = view.target_frame();
+    let frame = view.target_frame(cx);
     let Some(state) = view.scope_expr_dialog.as_mut() else {
         return;
     };
@@ -474,7 +474,7 @@ fn handle_key(
     {
         return naming_key(shell, ks, window, cx);
     }
-    if is_mod_s(shell, ks) {
+    if is_mod_s(shell, ks, cx) {
         begin_naming(shell, window, cx);
         return true;
     }
@@ -497,7 +497,7 @@ fn handle_key(
     };
     let text = shell.dialog_input.read(cx).value().to_string();
     let vocab = shell.expr_vocab.clone();
-    let outcome = shell.target_frame().update(cx, |f, cx| {
+    let outcome = shell.target_frame(cx).update(cx, |f, cx| {
         let outcome = apply(f, &mode, &text, &staged, &vocab);
         if outcome == Ok(true) {
             cx.notify();
@@ -517,8 +517,8 @@ fn handle_key(
 }
 
 /// `mod+s` as the user's alias spells it.
-fn is_mod_s(shell: &ShellView, ks: &Keystroke) -> bool {
-    ks.key == "s" && ks.mods == shell.services.mod_alias
+fn is_mod_s(shell: &ShellView, ks: &Keystroke, cx: &App) -> bool {
+    ks.key == "s" && ks.mods == shell.services(cx).mod_alias
 }
 
 /// Keys while the field takes a name. Enter saves and Escape goes back,
@@ -531,7 +531,7 @@ fn naming_key(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
-    if is_mod_s(shell, ks) {
+    if is_mod_s(shell, ks, cx) {
         return true;
     }
     if ks.key == "tab" && !ks.mods.is_chord() {
@@ -641,7 +641,7 @@ fn save_named(
         return Err(format!("'{name}' is reserved"));
     }
     // Pending-aware: a name queued a moment ago is already taken.
-    if apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name)
+    if apply::definition_owner(shell, geode_core::config::EXPRESSIONS_DOC, &name, cx)
         != apply::Owner::Absent
     {
         return Err(format!("'{name}' already exists"));
@@ -663,7 +663,7 @@ fn save_named(
     };
     if let Some((index, seeded)) = &term
         && !shell
-            .target_frame()
+            .target_frame(cx)
             .read(cx)
             .expression_term_is(*index, seeded)
     {
@@ -683,7 +683,7 @@ fn save_named(
         // The term was checked above and nothing between changes the
         // frame's scope, so the swap cannot refuse here; a refusal would
         // close with the definition written and the term left in place.
-        shell.target_frame().update(cx, |f, cx| {
+        shell.target_frame(cx).update(cx, |f, cx| {
             let swapped = f.name_expression_term(index, &seeded, &name);
             debug_assert_eq!(swapped, Ok(true), "the term was checked before the write");
             cx.notify();
@@ -761,7 +761,7 @@ fn build(
         // than as a `Hint::Key`, which parses with none.
         let ks = Keystroke {
             key: "s".to_string(),
-            mods: shell.services.mod_alias,
+            mods: shell.services(cx).mod_alias,
         };
         let extra = vec![
             div().child("·").into_any_element(),

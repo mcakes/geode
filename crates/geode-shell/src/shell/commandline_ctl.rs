@@ -20,7 +20,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tile) = self.services.workspaces.active().focused_tile() else {
+        let Some(tile) = self.workspace(cx).focused_tile() else {
             return;
         };
         if !self.occupants.contains_key(&tile) {

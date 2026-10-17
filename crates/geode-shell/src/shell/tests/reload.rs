@@ -51,8 +51,8 @@ fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
         open_shell_with_user_dir(cx, services_with_a_builtin_views_doc(), dir.path());
     let shell = shell_of(&window, &mut vcx);
     assert!(
-        shell.read_with(&vcx, |shell, _| shell
-            .services
+        shell.read_with(&vcx, |shell, cx| shell
+            .services(cx)
             .config
             .doc("views")
             .is_some()),
@@ -63,7 +63,11 @@ fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
     // the user config dir off the UI thread.
     vcx.update(|_window, cx| {
         shell.update(cx, |shell, cx| {
-            assert!(shell.services.theme.apply("Gruvbox Light", cx));
+            assert!(
+                shell
+                    .app()
+                    .update(cx, |a, cx| a.services.theme.apply("Gruvbox Light", cx))
+            );
             shell.persist_theme(cx);
         });
     });
@@ -74,13 +78,17 @@ fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
          write there is no reload to test"
     );
 
-    let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
+    let builtin = shell.read_with(&vcx, |shell, cx| shell.services(cx).builtin.clone());
     let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
     shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
 
-    shell.read_with(&vcx, |shell, _| {
+    shell.read_with(&vcx, |shell, cx| {
         assert!(
-            shell.services.config.get("views", "risk.columns").is_some(),
+            shell
+                .services(cx)
+                .config
+                .get("views", "risk.columns")
+                .is_some(),
             "the reload triggered by the app's own config write dropped the \
              builtin views — every module reading views sees an empty desk \
              until restart"
@@ -90,7 +98,7 @@ fn a_config_write_and_the_reload_it_triggers_keep_the_apps_builtin_views(
 
 /// `tips::Chords` (the workspace's second gpui global — see its own doc
 /// comment) is written at startup and refreshed on every reload
-/// (`hot_reload::apply_reload`, right after `self.services.keymap =
+/// (`hot_reload::apply_reload`, right after `self.services(cx).keymap =
 /// keymap;`); this is the reload half of that pair. Same fixture and
 /// drive as the test above — a real user config dir, `reload::
 /// load_config` off the live `services.builtin`, then `apply_reload`
@@ -121,7 +129,7 @@ fn a_keymap_reload_refreshes_the_chords_global(cx: &mut gpui::TestAppContext) {
     )
     .unwrap();
 
-    let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
+    let builtin = shell.read_with(&vcx, |shell, cx| shell.services(cx).builtin.clone());
     let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
     shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
 
@@ -144,7 +152,7 @@ fn a_colours_change_fires_config_reloaded(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -194,7 +202,7 @@ fn a_value_colors_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppConte
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -248,7 +256,7 @@ fn a_watchlists_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppContext
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -302,7 +310,7 @@ fn a_scopes_change_alone_emits_config_reloaded(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -353,7 +361,7 @@ fn a_colors_file_on_disk_reloads_under_either_name(cx: &mut gpui::TestAppContext
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -395,9 +403,9 @@ fn a_colors_file_on_disk_reloads_under_either_name(cx: &mut gpui::TestAppContext
             "{file}: a colors reload must fire ConfigReloaded: {:?}",
             events.borrow()
         );
-        let hue_now = shell.read_with(&cx, |shell, _| {
+        let hue_now = shell.read_with(&cx, |shell, cx| {
             shell
-                .services
+                .services(cx)
                 .config
                 .get(geode_core::config::COLORS_DOC, "delta.hue")
                 .and_then(toml::Value::as_integer)
@@ -416,7 +424,7 @@ fn a_dataset_presentation_change_fires_config_reloaded(cx: &mut gpui::TestAppCon
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -471,7 +479,7 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -498,9 +506,9 @@ fn apply_reload_with_a_clean_config_applies_it_and_closes_the_palette(
     let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.services.mod_alias,
+            shell.services(cx).mod_alias,
             Modifiers::CMD,
             "a clean reload should rebuild the mod alias from the new config"
         );
@@ -528,7 +536,7 @@ fn a_reload_that_does_not_touch_views_or_dimensions_still_bumps_the_config_versi
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -569,7 +577,7 @@ fn bad_config_and_shell(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -636,13 +644,14 @@ fn bad_config_and_shell(
 fn apply_reload_with_an_error_diagnostic_keeps_last_good_config(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx, bad_config) = bad_config_and_shell(cx);
 
-    let original_mod_alias = shell.read_with(&cx, |shell, _| shell.services.mod_alias);
+    let original_mod_alias = shell.read_with(&cx, |shell, cx| shell.services(cx).mod_alias);
 
     shell.update(&mut cx, |shell, cx| shell.apply_reload(bad_config, cx));
 
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.services.mod_alias, original_mod_alias,
+            shell.services(cx).mod_alias,
+            original_mod_alias,
             "an error diagnostic must keep the previous mod alias/keymap untouched"
         );
         assert!(
@@ -750,7 +759,7 @@ fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_i
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -769,7 +778,7 @@ fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_i
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    let original_mod_alias = shell.read_with(&cx, |shell, _| shell.services.mod_alias);
+    let original_mod_alias = shell.read_with(&cx, |shell, cx| shell.services(cx).mod_alias);
     assert_eq!(
         original_mod_alias,
         Modifiers::ALT,
@@ -779,9 +788,10 @@ fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_i
     let ctrl_config = config_with_mod("ctrl");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(ctrl_config, cx));
 
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.services.mod_alias, original_mod_alias,
+            shell.services(cx).mod_alias,
+            original_mod_alias,
             "keymap.mod = \"ctrl\" must be refused: the previous alias stands"
         );
         let message = shell
@@ -806,8 +816,8 @@ fn apply_reload_with_keymap_mod_ctrl_keeps_last_good_and_a_later_reload_clears_i
     let good_config = config_with_mod("alt");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(good_config, cx));
 
-    shell.read_with(&cx, |shell, _| {
-        assert_eq!(shell.services.mod_alias, Modifiers::ALT);
+    shell.read_with(&cx, |shell, cx| {
+        assert_eq!(shell.services(cx).mod_alias, Modifiers::ALT);
         assert_eq!(
             shell.last_reload.status_message(),
             None,
@@ -839,19 +849,17 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
                 // `builtin` deliberately left at `test_services()`'s
                 // empty vec: this test drives `apply_reload` directly
                 // (below and via `new_config`), which only ever assigns
-                // `self.services.config` and never reads `builtin` — see
+                // `ShellServices::config` and never reads `builtin` — see
                 // `test_services`'s own comment.
                 services.config = config_with_theme("Gruvbox Dark");
-                let view = cx.new(|cx| {
-                    // Mirrors what main.rs does before opening the
-                    // window: apply the theme the starting config
-                    // actually names, so this test's "old" state is a
-                    // real (config, active theme) pair, not just a
-                    // Default-Light service that happens to hold a
-                    // Gruvbox config it never applied.
-                    services.theme.apply_from_config(&services.config, cx);
-                    ShellView::new(services, None, None, window, cx)
-                });
+                // Mirrors what main.rs does before opening the
+                // window: apply the theme the starting config
+                // actually names, so this test's "old" state is a
+                // real (config, active theme) pair, not just a
+                // Default-Light service that happens to hold a
+                // Gruvbox config it never applied.
+                services.theme.apply_from_config(&services.config, cx);
+                let view = view_for_test(services, None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -871,8 +879,8 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
     });
 
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
+        shell.read_with(&cx, |shell, cx| shell
+            .services(cx)
             .theme
             .active_name()
             .to_string()),
@@ -883,9 +891,9 @@ fn apply_reload_reapplies_the_theme_when_theme_table_changed(cx: &mut gpui::Test
     let new_config = config_with_theme("Default Dark");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.services.theme.active_name(),
+            shell.services(cx).theme.active_name(),
             "Default Dark",
             "a genuinely different [theme] table must be re-applied on reload"
         );
@@ -911,13 +919,11 @@ fn apply_reload_preserves_a_runtime_theme_pick_when_theme_table_is_unchanged(
                 // `builtin` deliberately left at `test_services()`'s
                 // empty vec: this test drives `apply_reload` directly
                 // (below and via `new_config`), which only ever assigns
-                // `self.services.config` and never reads `builtin` — see
+                // `ShellServices::config` and never reads `builtin` — see
                 // `test_services`'s own comment.
                 services.config = config_with_theme("Gruvbox Dark");
-                let view = cx.new(|cx| {
-                    services.theme.apply_from_config(&services.config, cx);
-                    ShellView::new(services, None, None, window, cx)
-                });
+                services.theme.apply_from_config(&services.config, cx);
+                let view = view_for_test(services, None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -939,11 +945,15 @@ fn apply_reload_preserves_a_runtime_theme_pick_when_theme_table_is_unchanged(
     // A runtime pick (palette or settings dialog), independent of
     // config, before any reload happens.
     shell.update(&mut cx, |shell, cx| {
-        assert!(shell.services.theme.apply("Gruvbox Light", cx));
+        assert!(
+            shell
+                .app()
+                .update(cx, |a, cx| a.services.theme.apply("Gruvbox Light", cx))
+        );
     });
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
+        shell.read_with(&cx, |shell, cx| shell
+            .services(cx)
             .theme
             .active_name()
             .to_string()),
@@ -956,9 +966,9 @@ fn apply_reload_preserves_a_runtime_theme_pick_when_theme_table_is_unchanged(
     let new_config = config_with_theme("Gruvbox Dark");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.services.theme.active_name(),
+            shell.services(cx).theme.active_name(),
             "Gruvbox Light",
             "an unchanged [theme] table must not re-apply the theme, or the \
              runtime pick above would be silently reverted"
@@ -983,7 +993,7 @@ fn apply_reload_leaves_an_open_palette_open_when_only_the_theme_table_differs(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1013,9 +1023,9 @@ fn apply_reload_leaves_an_open_palette_open_when_only_the_theme_table_differs(
     let new_config = config_with_theme("Gruvbox Dark");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.services.theme.active_name(),
+            shell.services(cx).theme.active_name(),
             "Gruvbox Dark",
             "sanity: the theme-only change must still have been applied"
         );
@@ -1038,7 +1048,7 @@ fn apply_reload_closes_an_open_palette_when_the_keymap_docs_differ(cx: &mut gpui
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1064,9 +1074,9 @@ fn apply_reload_closes_an_open_palette_when_the_keymap_docs_differ(cx: &mut gpui
     let new_config = config_with_mod("cmd");
     shell.update(&mut cx, |shell, cx| shell.apply_reload(new_config, cx));
 
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         assert_eq!(
-            shell.services.mod_alias,
+            shell.services(cx).mod_alias,
             Modifiers::CMD,
             "sanity: the mod alias must actually have changed"
         );
@@ -1089,7 +1099,7 @@ fn apply_reload_closing_a_focused_palette_restores_focus_to_the_shell_root(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1908,9 +1918,9 @@ fn a_reload_keeps_the_modules_fragment_bindings(cx: &mut gpui::TestAppContext) {
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.read_with(&vcx, |shell, _| {
+    shell.read_with(&vcx, |shell, cx| {
         assert_eq!(
-            shell.services.theme.active_name(),
+            shell.services(cx).theme.active_name(),
             "Gruvbox Dark",
             "fixture check: the reload really was applied"
         );
@@ -1945,7 +1955,7 @@ fn a_dropped_fragment_bindings_diagnostic_survives_a_reload(cx: &mut gpui::TestA
     });
 
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.services.theme.active_name().to_string()),
+        shell.read_with(&vcx, |s, cx| s.services(cx).theme.active_name().to_string()),
         "Gruvbox Dark",
         "a fragment's own error must not reject the trader's reload"
     );
@@ -1978,7 +1988,7 @@ fn a_time_zone_reload_republishes_the_clock_without_a_requery(cx: &mut gpui::Tes
         format!("config_version = 1\n[time]\nzone = \"{target}\"\n"),
     )
     .unwrap();
-    let builtin = shell.read_with(&vcx, |shell, _| shell.services.builtin.clone());
+    let builtin = shell.read_with(&vcx, |shell, cx| shell.services(cx).builtin.clone());
     let new_config = reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
     shell.update(&mut vcx, |shell, cx| shell.apply_reload(new_config, cx));
 

@@ -207,8 +207,7 @@ fn a_placeholder_occupant_is_excluded_from_the_barriers_key_set(cx: &mut gpui::T
         let _ = window.draw(cx);
     });
 
-    let tiles: Vec<TileId> =
-        shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles: Vec<TileId> = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 2, "one split makes two tiles");
 
     // Downgrade the second tile's occupant to "placeholder" in place —
@@ -221,7 +220,7 @@ fn a_placeholder_occupant_is_excluded_from_the_barriers_key_set(cx: &mut gpui::T
     });
 
     let mut keys = Vec::new();
-    shell.read_with(&vcx, |s, _| s.visible_tile_keys(&mut keys));
+    shell.read_with(&vcx, |s, cx| s.visible_tile_keys(&mut keys, cx));
     assert_eq!(
         keys,
         vec![QueryKey(tiles[0].0)],
@@ -248,9 +247,7 @@ fn a_placeholder_occupant_in_a_visible_dock_is_excluded_from_the_barriers_key_se
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let main_tile = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().tree().tiles()[0]
-    });
+    let main_tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles()[0]);
 
     // Park the (focused, second) tile in the left dock — `dock::
     // move_left` shows the dock and moves the focused tile into it in
@@ -265,8 +262,8 @@ fn a_placeholder_occupant_in_a_visible_dock_is_excluded_from_the_barriers_key_se
         let _ = window.draw(cx);
     });
 
-    let (dock_visible, dock_tile) = shell.read_with(&vcx, |s, _| {
-        let ws = s.services.workspaces.active();
+    let (dock_visible, dock_tile) = shell.read_with(&vcx, |s, cx| {
+        let ws = s.workspace(cx);
         let dock = ws.docks().get(DockSide::Left);
         (dock.visible(), dock.tree().tiles()[0])
     });
@@ -279,7 +276,7 @@ fn a_placeholder_occupant_in_a_visible_dock_is_excluded_from_the_barriers_key_se
     });
 
     let mut keys = Vec::new();
-    shell.read_with(&vcx, |s, _| s.visible_tile_keys(&mut keys));
+    shell.read_with(&vcx, |s, cx| s.visible_tile_keys(&mut keys, cx));
     assert_eq!(
         keys,
         vec![QueryKey(main_tile.0)],

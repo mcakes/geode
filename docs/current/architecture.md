@@ -113,8 +113,10 @@ calculator into the process does not let a module call it directly.
 
 The UI thread owns GPUI entities, rendering, input dispatch, and prepared
 presentation. It reads immutable or retained values and never performs data
-I/O. The main window contains one `ShellView`, wrapped by gpui-component's
-`Root` for window-level component facilities.
+I/O. One `ShellApp` entity owns `ShellServices` and the config directories
+for the process; each window contains one `ShellView`, wrapped by
+gpui-component's `Root` for window-level component facilities, which reads
+the services through its app entity and its own `WindowKey`.
 
 `DataService` runs on its own thread and accepts bounded, nonblocking requests
 through `DataHandle`. One ingest runner owns the DuckDB writer. A read pool

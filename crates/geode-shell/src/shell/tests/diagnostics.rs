@@ -130,7 +130,7 @@ fn clicking_the_diagnostics_summary_opens_the_page(cx: &mut gpui::TestAppContext
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().is_empty()));
+    assert!(shell.read_with(&cx, |s, cx| s.workspace(cx).tree().is_empty()));
 
     let bounds = cx.debug_bounds("diagnostics-summary").unwrap();
     cx.simulate_mouse_down(
@@ -147,13 +147,10 @@ fn clicking_the_diagnostics_summary_opens_the_page(cx: &mut gpui::TestAppContext
         let _ = window.draw(cx);
     });
 
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert!(s.page_open(), "the click opened the page");
         assert_eq!(s.open_page_kind(), Some("diagnostics"));
-        assert!(
-            s.services.workspaces.active().tree().is_empty(),
-            "no tile was split open"
-        );
+        assert!(s.workspace(cx).tree().is_empty(), "no tile was split open");
     });
 }
 
@@ -251,13 +248,10 @@ fn clicking_the_stopped_segment_opens_the_diagnostics_page(cx: &mut gpui::TestAp
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert!(s.page_open(), "the click opened the page");
         assert_eq!(s.open_page_kind(), Some("diagnostics"));
-        assert!(
-            s.services.workspaces.active().tree().is_empty(),
-            "no tile was split open"
-        );
+        assert!(s.workspace(cx).tree().is_empty(), "no tile was split open");
     });
 }
 
@@ -286,8 +280,7 @@ fn a_log_table_change_on_reload_applies_it_through_level_control_once(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view =
-                    cx.new(|cx| ShellView::new(services, None, Some(user_dir.clone()), window, cx));
+                let view = view_for_test(services, Some(user_dir.clone()), window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -410,9 +403,7 @@ fn request_level_persists_into_the_tempdirs_app_toml(cx: &mut gpui::TestAppConte
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(test_services(), None, Some(user_dir.clone()), window, cx)
-                });
+                let view = view_for_test(test_services(), Some(user_dir.clone()), window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -502,15 +493,16 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(
+                let app = cx.new(|cx| {
+                    ShellApp::new(
                         services,
                         Some(desk_path.clone()),
                         Some(user_path.clone()),
-                        window,
                         cx,
                     )
                 });
+                let key = app.update(cx, |a, _| a.register_window());
+                let view = cx.new(|cx| ShellView::new(app, key, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })

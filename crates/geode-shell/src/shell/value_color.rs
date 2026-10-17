@@ -132,7 +132,7 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) {
         let mut state = value_color_state(
-            self.services.config.layered_docs(VALUE_COLORS_DOC),
+            self.services(cx).config.layered_docs(VALUE_COLORS_DOC),
             &dimension,
             &value,
         );
@@ -143,7 +143,7 @@ impl ShellView {
         // is no change. Without this an untouched
         // enter would write `none` over a desk entry, masking it even after
         // the desk defines the name again.
-        let (named, _) = NamedColours::from_config(&self.services.config);
+        let (named, _) = NamedColours::from_config(&self.services(cx).config);
         state.effective = state.effective.filter(|entry| match entry {
             ValueEntry::Named(name) => named.get(name).is_some(),
             ValueEntry::Inline(_) => true,
@@ -152,7 +152,7 @@ impl ShellView {
         if write == ValueWrite::Nothing {
             return;
         }
-        let Some(dir) = self.user_dir.clone() else {
+        let Some(dir) = self.user_dir(cx) else {
             self.notice = Some(NO_USER_DIR.into());
             cx.notify();
             return;

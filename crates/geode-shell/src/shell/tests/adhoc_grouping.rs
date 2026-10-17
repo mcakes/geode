@@ -270,8 +270,8 @@ fn the_ad_hoc_action_with_nothing_stored_says_so(cx: &mut gpui::TestAppContext) 
 fn the_ad_hoc_action_is_in_the_palette_under_frame(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services());
     let shell = shell_of(&window, &mut vcx);
-    let title = shell.read_with(&vcx, |s, _| {
-        s.services
+    let title = shell.read_with(&vcx, |s, cx| {
+        s.services(cx)
             .registry
             .iter()
             .find(|d| d.id.0 == "frame::grouping_adhoc")

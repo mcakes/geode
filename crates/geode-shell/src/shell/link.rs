@@ -43,7 +43,7 @@ impl ShellView {
         let focused = if self.page_open() {
             None
         } else {
-            self.services.workspaces.active().focused_tile()
+            self.workspace(cx).focused_tile()
         };
         let key: Option<LinkLabelKey> = focused.and_then(|tile| {
             let group = frame.membership(tile).follow?;
@@ -111,10 +111,9 @@ impl ShellView {
         // The tile's own workspace, the one its frame handle was bound to
         // at creation: that lane supplies the rest of its identity.
         let ws = self
-            .services
-            .workspaces
+            .workspaces(cx)
             .workspace_of(tile)
-            .unwrap_or_else(|| self.active_ix());
+            .unwrap_or_else(|| self.active_ix(cx));
         let changed = self.frame.update(cx, |f, cx| {
             let changed = f.follow(tile, group);
             if changed {
@@ -250,10 +249,9 @@ impl ShellView {
         };
         let emission = o.content.emission(cx);
         let ws = self
-            .services
-            .workspaces
+            .workspaces(cx)
             .workspace_of(tile)
-            .unwrap_or_else(|| self.active_ix());
+            .unwrap_or_else(|| self.active_ix(cx));
         let include_layer = self.link_include_tile_filter;
         self.frame.update(cx, |f, cx| {
             let base = f.emit_base(ws, tile);

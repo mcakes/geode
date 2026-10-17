@@ -45,7 +45,7 @@ fn queue_from(
     edits: Vec<ConfigEdit>,
     cx: &mut gpui::VisualTestContext,
 ) {
-    let frame = shell.read_with(cx, |s, _| s.active_frame());
+    let frame = shell.read_with(cx, |s, cx| s.active_frame(cx));
     let handle = match tile {
         Some(tile) => FrameRef::for_tile(frame.entity().clone(), frame.workspace(), tile),
         None => frame,
@@ -83,8 +83,8 @@ fn queued_config_edits_reach_the_user_layer_through_the_batch(cx: &mut gpui::Tes
     let text = std::fs::read_to_string(dir.path().join("dimensions.toml")).unwrap();
     assert!(text.contains("Index") && !text.contains("Tech"), "{text}");
     // Memory took the edit too: the reloaded config knows the dimension.
-    let known = shell.read_with(&cx, |s, _| {
-        s.services
+    let known = shell.read_with(&cx, |s, cx| {
+        s.services(cx)
             .config
             .doc("dimensions")
             .map(|d| DerivedDimensions::from_doc(d).0.get("sector").is_some())
@@ -215,7 +215,7 @@ fn sidecar_entry(dir: &std::path::Path) -> Option<toml::Value> {
 }
 
 fn take_notices(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) -> Vec<TileNotice> {
-    let frame = shell.read_with(cx, |s, _| s.active_frame());
+    let frame = shell.read_with(cx, |s, cx| s.active_frame(cx));
     cx.update(|_, cx| frame.update(cx, |f, _| f.take_tile_notices(TILE)))
 }
 

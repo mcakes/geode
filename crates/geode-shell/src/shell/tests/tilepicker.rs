@@ -19,15 +19,13 @@ fn shell_with_a_placeholder(
 ) -> (gpui::VisualTestContext, Entity<ShellView>, TileId) {
     let (mut cx, shell) = dock_test_shell(cx);
     shell.update(&mut cx, |s, cx| {
-        s.services.workspaces.split_active(Orientation::Horizontal);
+        s.with_workspaces(cx, |w| w.split_active(Orientation::Horizontal));
         cx.notify();
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some(PLACEHOLDER_KIND)
@@ -138,7 +136,7 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
     });
 
     assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles, vec![tile], "no split: the placeholder was filled");
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
@@ -155,7 +153,7 @@ fn mod_n_opens_the_picker_and_a_pick_from_a_real_tile_splits(cx: &mut gpui::Test
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let before = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let before = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(before.len(), 1);
 
     cx.simulate_keystrokes("alt-n");
@@ -167,7 +165,7 @@ fn mod_n_opens_the_picker_and_a_pick_from_a_real_tile_splits(cx: &mut gpui::Test
         let _ = window.draw(cx);
     });
 
-    let after = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let after = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(after.len(), 2, "a real focused tile is split");
     for t in &after {
         assert_eq!(
@@ -206,14 +204,8 @@ fn a_docked_placeholder_double_click_opens_the_picker_and_fills_it(cx: &mut gpui
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let docked = shell.read_with(&cx, |s, _| {
-        s.services
-            .workspaces
-            .active()
-            .docks()
-            .get(DockSide::Left)
-            .tree()
-            .tiles()
+    let docked = shell.read_with(&cx, |s, cx| {
+        s.workspace(cx).docks().get(DockSide::Left).tree().tiles()
     });
     assert_eq!(docked, vec![tile], "sanity: the placeholder is docked");
     assert_eq!(
@@ -238,14 +230,8 @@ fn a_docked_placeholder_double_click_opens_the_picker_and_fills_it(cx: &mut gpui
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some("rec")
     );
-    let docked = shell.read_with(&cx, |s, _| {
-        s.services
-            .workspaces
-            .active()
-            .docks()
-            .get(DockSide::Left)
-            .tree()
-            .tiles()
+    let docked = shell.read_with(&cx, |s, cx| {
+        s.workspace(cx).docks().get(DockSide::Left).tree().tiles()
     });
     assert_eq!(
         docked,
@@ -267,23 +253,19 @@ fn a_second_click_on_an_unfocused_placeholder_is_a_plain_click(cx: &mut gpui::Te
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let real = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let real = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     shell.update(&mut cx, |s, cx| {
-        s.services.workspaces.split_active(Orientation::Horizontal);
+        s.with_workspaces(cx, |w| w.split_active(Orientation::Horizontal));
         cx.notify();
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let placeholder = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let placeholder = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(real, placeholder);
     // Focus the real tile again, so the placeholder is unfocused.
     shell.update(&mut cx, |s, cx| {
-        assert!(s.services.workspaces.active_mut().focus_main_tile(real));
+        assert!(s.with_workspace(cx, |ws| ws.focus_main_tile(real)));
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -318,7 +300,7 @@ fn a_second_click_on_an_unfocused_placeholder_is_a_plain_click(cx: &mut gpui::Te
         "no picker: the placeholder was not the focused tile"
     );
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(placeholder),
         "the click was click-to-focus"
     );
@@ -384,13 +366,7 @@ fn double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tre
 ) {
     let (mut cx, shell) = dock_test_shell(cx);
     assert!(
-        shell.read_with(&cx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()
-            .is_empty()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles().is_empty()),
         "sanity: a fresh shell has no tile"
     );
     let hint = cx
@@ -411,7 +387,7 @@ fn double_clicking_the_empty_tree_hint_opens_the_picker_and_a_pick_fills_the_tre
     });
 
     assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 1, "the pick is the tree's root tile");
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tiles[0])),
@@ -441,9 +417,7 @@ fn a_single_or_modified_click_on_the_empty_tree_hint_opens_nothing(cx: &mut gpui
     );
     cx.run_until_parked();
     assert!(shell.read_with(&cx, |s, _| !s.modal_open()));
-    assert!(shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().tree().tiles().is_empty()
-    }));
+    assert!(shell.read_with(&cx, |s, cx| { s.workspace(cx).tree().tiles().is_empty() }));
 }
 
 /// Showing an empty dock focuses that region, so `mod+n` adds into the dock even when a
@@ -459,7 +433,7 @@ fn showing_an_empty_dock_focuses_it_and_mod_n_adds_into_it(cx: &mut gpui::TestAp
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let region = shell.read_with(&cx, |s, _| s.services.workspaces.active().region());
+    let region = shell.read_with(&cx, |s, cx| s.workspace(cx).region());
     assert_eq!(
         region,
         crate::tiling::FocusRegion::Dock(DockSide::Left),
@@ -473,17 +447,11 @@ fn showing_an_empty_dock_focuses_it_and_mod_n_adds_into_it(cx: &mut gpui::TestAp
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let docked = shell.read_with(&cx, |s, _| {
-        s.services
-            .workspaces
-            .active()
-            .docks()
-            .get(DockSide::Left)
-            .tree()
-            .tiles()
+    let docked = shell.read_with(&cx, |s, cx| {
+        s.workspace(cx).docks().get(DockSide::Left).tree().tiles()
     });
     assert_eq!(docked.len(), 1, "the pick landed in the dock");
-    let main = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let main = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(main.len(), 1, "main untouched");
 }
 
@@ -498,9 +466,7 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let main_tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let main_tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     cx.simulate_keystrokes("ctrl-["); // show the (empty) left dock
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -511,7 +477,7 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
     cx.simulate_click(at, gpui::Modifiers::none());
     cx.run_until_parked();
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().region()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).region()),
         crate::tiling::FocusRegion::Main
     );
     shell.update(&mut cx, |s, _| s.session_dirty = false);
@@ -522,7 +488,7 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
     cx.simulate_click(hint.center(), gpui::Modifiers::none());
     cx.run_until_parked();
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().region()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).region()),
         crate::tiling::FocusRegion::Dock(DockSide::Left),
         "a click on an empty dock focuses it"
     );
@@ -547,21 +513,15 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let docked = shell.read_with(&cx, |s, _| {
-        s.services
-            .workspaces
-            .active()
-            .docks()
-            .get(DockSide::Left)
-            .tree()
-            .tiles()
+    let docked = shell.read_with(&cx, |s, cx| {
+        s.workspace(cx).docks().get(DockSide::Left).tree().tiles()
     });
     assert_eq!(docked.len(), 1, "the pick landed in the dock");
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(docked[0])),
         Some("rec")
     );
-    let main = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let main = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(main, vec![main_tile], "main untouched");
     assert!(cx.debug_bounds("dock-empty-hint-left").is_none());
 }

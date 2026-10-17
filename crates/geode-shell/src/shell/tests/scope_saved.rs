@@ -1738,7 +1738,7 @@ impl SaveFixture {
         let (doc, name) = (doc.to_string(), name.to_string());
         self.shell.update(&mut self.vcx, |s, cx| {
             let docs = s
-                .services
+                .services(cx)
                 .config
                 .all_docs()
                 .into_iter()
@@ -2030,8 +2030,8 @@ fn a_question_over_saved_ignores_the_pointer(cx: &mut gpui::TestAppContext) {
 // ---- `s` on a saved row, unchanged writes, a definition deleted under its step --
 
 fn owner(f: &SaveFixture, doc: &str, name: &str) -> crate::shell::objectdialog::apply::Owner {
-    f.shell.read_with(&f.vcx, |s, _| {
-        crate::shell::objectdialog::apply::definition_owner(s, doc, name)
+    f.shell.read_with(&f.vcx, |s, cx| {
+        crate::shell::objectdialog::apply::definition_owner(s, doc, name, cx)
     })
 }
 

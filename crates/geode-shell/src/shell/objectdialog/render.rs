@@ -111,7 +111,7 @@ pub fn open(
     // The door above derived the rows, so the active row is already listed.
     if domain.applies_from_browse() {
         let active =
-            super::grouping_list::active_row(view.target_frame().read(cx).grouping_choice());
+            super::grouping_list::active_row(view.target_frame(cx).read(cx).grouping_choice());
         if let Some(state) = view.object_dialog.as_mut()
             && let Some(ix) = state.rows.position(|row| row.name == active)
         {
@@ -271,7 +271,7 @@ fn handle_browse_key(
     let seed = seed_dataset_under_cursor(shell);
     let seed_taken = seed
         .as_deref()
-        .is_some_and(|d| Domain::Sources.name_taken(&shell.services.config, d));
+        .is_some_and(|d| Domain::Sources.name_taken(&shell.services(cx).config, d));
     let Some(state) = shell.object_dialog.as_mut() else {
         return false;
     };
@@ -533,7 +533,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
             return;
         }
     };
-    if domain.name_taken(&shell.services.config, &name) {
+    if domain.name_taken(&shell.services(cx).config, &name) {
         // Reserved names, existing browse objects, and orphaned presentations need
         // different remedies. Only an existing object can be opened from this list.
         let notice = if domain.is_reserved(&name) {
@@ -553,7 +553,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         cx.notify();
         return;
     }
-    let mut draft = domain.new_draft(&shell.services.config, &name);
+    let mut draft = domain.new_draft(&shell.services(cx).config, &name);
     if domain == Domain::Sources
         && let Some(dataset) = shell
             .object_dialog
@@ -564,7 +564,7 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         // becomes the new source's own `dataset` field — revalidated so the idle-source
         // warning shows in the edit stage immediately rather than one debounce late.
         sources::seed_dataset(&mut draft, &dataset);
-        draft.diagnostics = domain.validate(&draft, &shell.services.config);
+        draft.diagnostics = domain.validate(&draft, &shell.services(cx).config);
     }
     // `n` leaves `naming_seed` at its default `Empty`, so `new_draft`'s own empty
     // object stands unchanged; the value-color list's door seeds a definition.
@@ -583,8 +583,8 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         NameSeed::Definition(definition) => {
             // The value-color list's seed: its color as a colors.toml entry, read
             // through the domain's own fields so the edit stage shows it.
-            let folded = apply::config_with_pending(shell);
-            let config = folded.as_ref().unwrap_or(&shell.services.config);
+            let folded = apply::config_with_pending(shell, cx);
+            let config = folded.as_ref().unwrap_or(&shell.services(cx).config);
             draft.source = definition.to_table();
             draft.fields = domain.fields_from_source(config, &draft.source);
             draft.diagnostics = domain.validate(&draft, config);
@@ -690,9 +690,9 @@ fn resolve_column_object(
 }
 
 /// The views and schema as the edit-column route reads them: pending edits folded in.
-fn views_and_schema(shell: &ShellView) -> (Vec<ViewSpec>, SchemaSpec) {
-    let pending = apply::config_with_pending(shell);
-    let config = pending.as_ref().unwrap_or(&shell.services.config);
+fn views_and_schema(shell: &ShellView, cx: &App) -> (Vec<ViewSpec>, SchemaSpec) {
+    let pending = apply::config_with_pending(shell, cx);
+    let config = pending.as_ref().unwrap_or(&shell.services(cx).config);
     let (views, _) = load_views(config);
     let schema = config
         .doc("datasets")
@@ -711,8 +711,9 @@ pub(in crate::shell) fn schema_declared<'a>(
     shell: &ShellView,
     view: &str,
     columns: impl IntoIterator<Item = &'a str>,
+    cx: &App,
 ) -> Option<Vec<bool>> {
-    let (views, schema) = views_and_schema(shell);
+    let (views, schema) = views_and_schema(shell, cx);
     let spec = views.iter().find(|v| v.name == view)?;
     Some(
         columns
@@ -742,7 +743,7 @@ pub(in crate::shell) fn open_column(
         return;
     }
     let object = {
-        let (views, schema) = views_and_schema(shell);
+        let (views, schema) = views_and_schema(shell, cx);
         resolve_column_object(domain, &views, &schema, view, column)
     };
     open(shell, domain, window, cx);
@@ -876,14 +877,12 @@ pub(super) fn enter_edit_stage(
     // object without it on the next one (`apply::config_with_pending`'s
     // own doc has the trace). This is the one door, so the digit jump,
     // `enter` from browse and `escape`-then-`enter` are all covered.
-    let folded = apply::config_with_pending(shell);
+    let folded = apply::config_with_pending(shell, cx);
+    let live = &shell.services(cx).config;
     if let Some(state) = shell.object_dialog.as_mut() {
         match new {
             Some(draft) => state.enter_edit_with(draft),
-            None => match folded.as_ref() {
-                Some(config) => state.enter_edit(config, name),
-                None => state.enter_edit(&shell.services.config, name),
-            },
+            None => state.enter_edit(folded.as_ref().unwrap_or(live), name),
         }
     }
     shell.object_dialog_scroll.scroll_to_item(0);
@@ -901,8 +900,8 @@ pub(super) fn enter_edit_stage(
 fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<ShellView>) -> bool {
     // Use pending edits for the named-color choices and presentation baselines. A
     // stage opened during debounce must not overwrite a value it cannot yet see.
-    let pending = apply::config_with_pending(shell);
-    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    let pending = apply::config_with_pending(shell, cx);
+    let config = pending.as_ref().unwrap_or(&shell.services(cx).config);
     let colours = colours::names(config);
     let Some(state) = shell.object_dialog.as_ref() else {
         return false;
@@ -1041,11 +1040,11 @@ fn leave_column_stage(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     // which is real work to do on a keystroke that, for Views, wants
     // nothing from it.
     let pending = (domain == Domain::Schema)
-        .then(|| apply::config_with_pending(shell))
+        .then(|| apply::config_with_pending(shell, cx))
         .flatten();
     let reseed = (domain == Domain::Schema).then(|| {
         schema::fields(
-            pending.as_ref().unwrap_or(&shell.services.config),
+            pending.as_ref().unwrap_or(&shell.services(cx).config),
             Some(&object),
         )
     });
@@ -1415,7 +1414,7 @@ fn handle_edit_key_inner(
         NormalCommand::Verb('x') if in_column_stage(shell) => not_a_column_verb(shell, "x"),
         NormalCommand::Verb('x') => match draft_mut(shell).map(Draft::remove_selected) {
             Some(Step::Changed) => {
-                revalidate(shell);
+                revalidate(shell, cx);
                 commit_change(shell, cx);
             }
             Some(Step::Refused(reason)) => set_notice(shell, reason),
@@ -1676,8 +1675,8 @@ fn handle_text_key(
                         // `maybe_refresh_available`'s dataset-row check keys on — the
                         // same reason `space` and the action bar's tick run it ahead of
                         // `revalidate`.
-                        maybe_refresh_available(shell);
-                        revalidate(shell);
+                        maybe_refresh_available(shell, cx);
+                        revalidate(shell, cx);
                         commit_change(shell, cx);
                     }
                     Some(Step::Inert) => {
@@ -1714,7 +1713,7 @@ fn handle_text_key(
         .object_dialog
         .as_ref()
         .is_some_and(|state| state.chain_from_list);
-    if from_list && ks.key == "s" && ks.mods == shell.services.mod_alias {
+    if from_list && ks.key == "s" && ks.mods == shell.services(cx).mod_alias {
         super::grouping_list::save_from_field(shell, cx);
         cx.notify();
         return true;
@@ -1778,7 +1777,7 @@ fn handle_text_key(
                 } else {
                     scroll_to_cursor(shell);
                 }
-                revalidate(shell);
+                revalidate(shell, cx);
                 commit_change(shell, cx);
             }
             Some(Step::Inert) => {
@@ -1842,8 +1841,8 @@ fn step_selected_row(
     });
     match stepped {
         Some(Step::Changed) => {
-            maybe_refresh_available(shell);
-            revalidate(shell);
+            maybe_refresh_available(shell, cx);
+            revalidate(shell, cx);
             scroll_to_cursor(shell);
             commit_change(shell, cx);
         }
@@ -1905,7 +1904,7 @@ fn draft_mut(shell: &mut ShellView) -> Option<&mut Draft> {
 /// without threading the answer through every caller. Every other
 /// domain's fields, and every other Views field, leave `views::
 /// refresh_available` untouched — it only ever rebuilds `columns`.
-fn maybe_refresh_available(shell: &mut ShellView) {
+fn maybe_refresh_available(shell: &mut ShellView, cx: &App) {
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
@@ -1929,8 +1928,8 @@ fn maybe_refresh_available(shell: &mut ShellView) {
     // keystroke, and a column promoted off that stale catalogue carries the stale layer
     // into the writer's comparison. Every other read of this layer on this branch is
     // folded.
-    let folded = apply::config_with_pending(shell);
-    let config = folded.as_ref().unwrap_or(&shell.services.config);
+    let folded = apply::config_with_pending(shell, cx);
+    let config = folded.as_ref().unwrap_or(&shell.services(cx).config);
     let Some(draft) = shell
         .object_dialog
         .as_mut()
@@ -2061,8 +2060,8 @@ fn commit_change(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     if super::grouping_list::commit_ad_hoc(shell, cx) {
         return;
     }
-    let fork =
-        super::apply::would_fork(shell, domain).then(|| super::apply::fork_notice(shell, domain));
+    let fork = super::apply::would_fork(shell, domain, cx)
+        .then(|| super::apply::fork_notice(shell, domain, cx));
     match super::apply::commit_edit(shell, cx) {
         Some(refusal) => set_notice(shell, refusal),
         None => {
@@ -2096,7 +2095,10 @@ fn scroll_to_cursor(shell: &mut ShellView) {
 /// tick click all call it, and none of them knows or should know that a
 /// projection is open. A fold anywhere else would be a fold each of those
 /// call sites had to remember.
-pub(super) fn revalidate(shell: &mut ShellView) {
+pub(super) fn revalidate(shell: &mut ShellView, cx: &App) {
+    // Read before the dialog's own mutable borrow: the reference borrows
+    // `cx`, not `shell`, so the two stay disjoint below.
+    let config = &shell.services(cx).config;
     let Some(state) = shell.object_dialog.as_mut() else {
         return;
     };
@@ -2112,9 +2114,8 @@ pub(super) fn revalidate(shell: &mut ShellView) {
         fold = draft.fold_column();
     }
     // Validated, then stored: `validate` needs the draft immutably and
-    // the config from a sibling field, which is exactly the disjoint
-    // borrow the compiler allows here and a `&mut self` method would not.
-    let diagnostics = domain.validate(draft, &shell.services.config);
+    // the config read above.
+    let diagnostics = domain.validate(draft, config);
     if let Some(draft) = draft_mut(shell) {
         draft.diagnostics = diagnostics;
     }
@@ -2140,7 +2141,7 @@ fn after_removal(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>)
         leave_edit(shell, cx);
         return;
     }
-    let rows = landing_rows(shell);
+    let rows = landing_rows(shell, cx);
     if let Some(state) = shell.object_dialog.as_mut() {
         let visible = super::visible_rows(state, &rows);
         // By name where the object survives (a revert — and on Sources
@@ -2161,11 +2162,11 @@ fn after_removal(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>)
 /// runs, `services.config` still lists the object just deleted, and a clamp against it
 /// is a no-op that leaves `selected` one past the end once the flush lands. The same
 /// fold `enter_edit_stage` derives its draft from, for the same reason.
-fn landing_rows(shell: &ShellView) -> Vec<ObjectRow> {
+fn landing_rows(shell: &ShellView, cx: &App) -> Vec<ObjectRow> {
     let Some(state) = shell.object_dialog.as_ref() else {
         return Vec::new();
     };
-    match apply::config_with_pending(shell) {
+    match apply::config_with_pending(shell, cx) {
         // The leading rows come from the frame, not the config: carry over
         // the ones already derived, so a position in this list is a position
         // in the painted one.
@@ -2189,7 +2190,7 @@ pub(super) fn leave_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     if let Some(state) = shell.object_dialog.as_mut() {
         state.leave_edit();
     }
-    let rows = landing_rows(shell);
+    let rows = landing_rows(shell, cx);
     // By name where the object survives; where it is gone (a delete,
     // whose name the pending-aware rows no longer hold) the neighbour —
     // its position in the rows as they still stand, clamped to the list
@@ -2280,6 +2281,7 @@ fn no_target_notice(shell: &ShellView) -> String {
 fn removal_edits(
     shell: &ShellView,
     docs: &[&'static str],
+    cx: &App,
 ) -> Result<Vec<(&'static str, String)>, String> {
     // Same rule `target_row` states: a removal armed from the column
     // stage removes the OBJECT, which is what `d`/`r` mean there too —
@@ -2292,7 +2294,7 @@ fn removal_edits(
         .copied()
         .filter(|doc| {
             shell
-                .services
+                .services(cx)
                 .config
                 .layered_docs(doc)
                 .iter()
@@ -2307,7 +2309,7 @@ fn removal_edits(
     // the sidecar entry rides the same removal — never created just to remove nothing,
     // hence only the keys the sidecar actually holds rather than an unconditional key.
     if let Some(domain) = shell.object_dialog.as_ref().map(|state| state.domain) {
-        for okey in super::override_keys_of(&shell.services.config, domain.doc(), &name) {
+        for okey in super::override_keys_of(&shell.services(cx).config, domain.doc(), &name) {
             keys.push((super::OVERRIDES_DOC, okey));
         }
     }
@@ -2366,7 +2368,7 @@ fn inherit_row(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
     match draft_mut(shell).map(Draft::inherit_selected) {
         Some(Ok(Fold { key, to })) => {
-            revalidate(shell);
+            revalidate(shell, cx);
             set_notice(shell, format!("{key} follows {} again", to.phrase()));
             commit_change(shell, cx);
         }
@@ -2383,7 +2385,7 @@ fn inherit_all_rows(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
     match draft_mut(shell).map(Draft::inherit_all) {
         Some(Ok(())) => {
-            revalidate(shell);
+            revalidate(shell, cx);
             set_notice(shell, "every field follows the layers below".to_string());
             commit_change(shell, cx);
         }
@@ -2476,7 +2478,7 @@ fn run_confirmed(
             if let Some(presentation) = domain.presentation_doc() {
                 docs.push(presentation);
             }
-            match removal_edits(shell, &docs) {
+            match removal_edits(shell, &docs, cx) {
                 Ok(keys) => {
                     // named in the notice only when `removal_edits` actually found an
                     // entry to remove — `keys` decides, same as every other doc in this
@@ -2632,11 +2634,12 @@ fn build(
         (ROW_HEIGHT, VISIBLE_ROWS)
     };
     // Read once per build: which row stands for the lane's choice.
-    let active_row = one_line
-        .then(|| super::grouping_list::active_row(shell.target_frame().read(cx).grouping_choice()));
+    let active_row = one_line.then(|| {
+        super::grouping_list::active_row(shell.target_frame(cx).read(cx).grouping_choice())
+    });
     // Which rows offer `save`: the frame's answer, as `s` reads it.
     let held = if one_line {
-        super::grouping_list::HeldChains::of(&shell.target_frame().read(cx))
+        super::grouping_list::HeldChains::of(&shell.target_frame(cx).read(cx))
     } else {
         super::grouping_list::HeldChains::default()
     };
@@ -2653,7 +2656,11 @@ fn build(
         geode_core::colour::Tokens,
     )> = (state.domain == Domain::Colors).then(|| {
         let empty = geode_core::config::MergedDoc::default();
-        let doc = shell.services.config.doc(colours::DOC).unwrap_or(&empty);
+        let doc = shell
+            .services(cx)
+            .config
+            .doc(colours::DOC)
+            .unwrap_or(&empty);
         (
             geode_core::colour::NamedColours::from_doc(doc).0,
             colour_theme::anchors_from_theme(theme),
@@ -3836,7 +3843,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                         HintRow::Go,
                         Keystroke {
                             key: "s".to_string(),
-                            mods: shell.services.mod_alias,
+                            mods: shell.services(cx).mod_alias,
                         },
                         "save to slot…",
                     ));
@@ -4231,7 +4238,7 @@ fn browse_action_bar(state: &ObjectDialogState, entity: &Entity<ShellView>) -> A
                                 // navigation may have changed the selected row.
                                 let seed = seed_dataset_under_cursor(shell);
                                 let seed_taken = seed.as_deref().is_some_and(|d| {
-                                    Domain::Sources.name_taken(&shell.services.config, d)
+                                    Domain::Sources.name_taken(&shell.services(cx).config, d)
                                 });
                                 begin_new_object(shell, seed, seed_taken);
                                 shell.refresh_dialog_rows(cx);
@@ -4739,7 +4746,7 @@ pub(in crate::shell) fn on_row_dropped(
     let resolves = draft.locate(src).is_some() && draft.locate(dst).is_some();
     match draft.drop_row(src, dst) {
         Step::Changed => {
-            revalidate(shell);
+            revalidate(shell, cx);
             scroll_to_cursor(shell);
             commit_change(shell, cx);
         }
@@ -4764,8 +4771,8 @@ pub(in crate::shell) fn on_row_dropped(
 /// After a reload, every open object dialog's `color` choices follow the configured
 /// named colors, including a dialog covered by the Colors dialog that just created
 /// one.
-pub(in crate::shell) fn refresh_color_choices(shell: &mut ShellView) {
-    let names = colours::names(&shell.services.config);
+pub(in crate::shell) fn refresh_color_choices(shell: &mut ShellView, cx: &App) {
+    let names = colours::names(&shell.services(cx).config);
     for state in shell
         .object_dialog
         .iter_mut()

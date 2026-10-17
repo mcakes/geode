@@ -97,7 +97,7 @@ fn queue_definition_creates_a_user_entry_and_refresh_resolves_it_at_once(
     let has_mine = f.cx.update(|_, cx| {
         f.shell
             .read(cx)
-            .target_frame()
+            .target_frame(cx)
             .read(cx)
             .saved_scopes()
             .contains_key("mine")
@@ -147,7 +147,7 @@ fn definition_owner_counts_the_pending_batch(cx: &mut gpui::TestAppContext) {
     let mut f = fixture(cx);
     let owner = |f: &mut Fixture, name: &str| {
         let name = name.to_string();
-        f.cx.update(|_, cx| apply::definition_owner(f.shell.read(cx), "scopes", &name))
+        f.cx.update(|_, cx| apply::definition_owner(f.shell.read(cx), "scopes", &name, cx))
     };
     assert_eq!(owner(&mut f, "mine"), Owner::Absent);
     assert_eq!(owner(&mut f, "desk_eu"), Owner::Inherited(Layer::Desk));
@@ -176,9 +176,9 @@ fn remove_definition_reverts_a_fork_to_the_lower_copy(cx: &mut gpui::TestAppCont
     });
     assert_eq!(removed, Ok(()));
     flush(&mut f.cx);
-    let books = f.shell.read_with(&f.cx, |shell, _| {
+    let books = f.shell.read_with(&f.cx, |shell, cx| {
         shell
-            .services
+            .services(cx)
             .config
             .doc("scopes")
             .and_then(|d| d.value.get("desk_eu"))
@@ -196,6 +196,6 @@ fn remove_definition_reverts_a_fork_to_the_lower_copy(cx: &mut gpui::TestAppCont
     let overrides = sidecar(&f);
     assert!(!overrides.contains("scopes.desk_eu"), "{overrides}");
     let owner =
-        f.cx.update(|_, cx| apply::definition_owner(f.shell.read(cx), "scopes", "desk_eu"));
+        f.cx.update(|_, cx| apply::definition_owner(f.shell.read(cx), "scopes", "desk_eu", cx));
     assert_eq!(owner, Owner::Inherited(Layer::Desk));
 }

@@ -29,7 +29,9 @@ use geode_shell::keymap::build_keymap;
 use geode_shell::keymap::fragments;
 use geode_shell::module::{ModuleRoster, PageRoster};
 use geode_shell::session;
-use geode_shell::shell::{LogServices, ShellServices, ShellView, pickable_columns, saved_scopes};
+use geode_shell::shell::{
+    LogServices, ShellApp, ShellServices, ShellView, pickable_columns, saved_scopes,
+};
 use geode_shell::theme;
 use geode_shell::tiling::Workspaces;
 use geode_shell::vimfind::FindStyle;
@@ -222,12 +224,16 @@ fn main() {
                 .detach();
             }
 
+            // The app-level owner of the services: built once, before any
+            // window, and read by every window's `ShellView` through its key.
+            let app = cx.new(|cx| ShellApp::new(services, desk, user, cx));
             cx.spawn(async move |cx| {
                 // The shell toolbar owns title-bar controls and drag gestures. Use the
                 // matching window options when creating its native window.
                 let window = cx
                     .open_window(TitleBar::window_options(), |window, cx| {
-                        let view = cx.new(|cx| ShellView::new(services, desk, user, window, cx));
+                        let key = app.update(cx, |app, _| app.register_window());
+                        let view = cx.new(|cx| ShellView::new(app, key, window, cx));
                         cx.new(|cx| Root::new(view, window, cx))
                     })
                     .expect("failed to open window");
@@ -264,7 +270,7 @@ fn main() {
                         let now = frame.read(cx).config_version();
                         if now != last_config_version.get() {
                             last_config_version.set(now);
-                            diagnostics_factory.set_config(shell.read(cx).config().clone());
+                            diagnostics_factory.set_config(shell.read(cx).config(cx).clone());
                         }
                     })
                     .detach();
@@ -1429,10 +1435,11 @@ label = "skew"
             shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
             Some("vega_kt")
         );
-        let (kinds, add_row) = shell.read_with(&vcx, |s, _| {
+        let (kinds, add_row) = shell.read_with(&vcx, |s, cx| {
+            let services = s.app().read(cx).services();
             (
-                s.services().roster.kinds(),
-                s.services()
+                services.roster.kinds(),
+                services
                     .registry
                     .get(&ActionId("tile::add_vega_new".into()))
                     .is_some(),
@@ -1855,7 +1862,11 @@ label = "skew"
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    let view = {
+                        let app = cx.new(|cx| ShellApp::new(services, None, None, cx));
+                        let key = app.update(cx, |a, _| a.register_window());
+                        cx.new(|cx| ShellView::new(app, key, window, cx))
+                    };
                     cx.new(|cx| Root::new(view, window, cx))
                 })
             })
@@ -2197,10 +2208,11 @@ label = "skew"
             Some("CVI (wide)"),
             "the open panel keeps its title, not the edited one"
         );
-        let (kinds, add_row, startup_row) = shell.read_with(&vcx, |s, _| {
-            let registry = &s.services().registry;
+        let (kinds, add_row, startup_row) = shell.read_with(&vcx, |s, cx| {
+            let services = s.app().read(cx).services();
+            let registry = &services.registry;
             (
-                s.services().roster.kinds(),
+                services.roster.kinds(),
                 registry
                     .get(&ActionId("tile::add_cvi_new".into()))
                     .is_some(),

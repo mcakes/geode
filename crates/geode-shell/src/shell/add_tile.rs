@@ -32,7 +32,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let focused = self.services.workspaces.active().focused_tile();
+        let focused = self.workspace(cx).focused_tile();
         if let Some(tile) = focused
             && self.occupant_kind(tile) == Some(PLACEHOLDER_KIND)
         {
@@ -58,7 +58,7 @@ impl ShellView {
             return;
         }
         if placement == AddPlacement::Stacked
-            && let Some(id) = self.services.workspaces.stack_active()
+            && let Some(id) = self.with_workspaces(cx, |w| w.stack_active())
         {
             self.pending_tiles.insert(
                 id,
@@ -78,17 +78,12 @@ impl ShellView {
         // The rect is only computed when the setting actually needs it —
         // a layout pass on dispatch is cheap but not free.
         let rect = if direction.is_none() && self.add_direction == AddDirection::Auto {
-            focused.and_then(|_| {
-                self.services
-                    .workspaces
-                    .active()
-                    .focused_tile_rect(content_area(window))
-            })
+            focused.and_then(|_| self.workspace(cx).focused_tile_rect(content_area(window)))
         } else {
             None
         };
         let orientation = self.add_direction.resolve(direction, rect);
-        let id = self.services.workspaces.split_active(orientation);
+        let id = self.with_workspaces(cx, |w| w.split_active(orientation));
         self.pending_tiles.insert(
             id,
             PendingTile {
@@ -110,7 +105,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(tile) = self.services.workspaces.active().focused_tile() else {
+        let Some(tile) = self.workspace(cx).focused_tile() else {
             return;
         };
         let Some(o) = self.occupants.get(&tile) else {
@@ -135,7 +130,7 @@ impl ShellView {
     /// configured direction. A pending request for `kind` also counts as open,
     /// so repeated requests before the next render create at most one tile.
     pub fn open_module(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let ws = self.services.workspaces.active();
+        let ws = self.workspace(cx);
         let found: Option<(TileId, Option<DockSide>)> = ws
             .tree()
             .tiles()
@@ -152,15 +147,14 @@ impl ShellView {
                 })
             });
         if let Some((tile, side)) = found {
-            let ws = self.services.workspaces.active_mut();
-            match side {
+            self.with_workspace(cx, |ws| match side {
                 Some(side) => {
                     ws.focus_dock_tile(side, tile);
                 }
                 None => {
                     ws.focus_main_tile(tile);
                 }
-            }
+            });
             self.session_dirty = true;
             // Release keyboard focus from an occupant when moving to the existing
             // tile, as for directional focus actions.

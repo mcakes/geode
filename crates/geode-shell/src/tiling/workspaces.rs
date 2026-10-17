@@ -772,6 +772,13 @@ impl Workspace {
     }
 }
 
+/// One window's identity within the app, handed out by `ShellApp` as each
+/// window registers. Distinct for the life of the process: a closed
+/// window's key is never reissued, so state keyed on it cannot be read
+/// by a later window by accident.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct WindowKey(pub u64);
+
 /// A workspace's index, 1–9. Frame lanes and tile frame handles key on it;
 /// the tiling layer keeps its own `u8` internally and hands this out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

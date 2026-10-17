@@ -31,11 +31,11 @@ impl ShellView {
         // Pending matcher state cannot survive an overlay with separate key
         // routing, or later shell keys could complete an abandoned sequence.
         self.matcher.cancel();
-        let bindings = palette::build_binding_index(&self.services.keymap);
+        let bindings = palette::build_binding_index(&self.services(cx).keymap);
         let saved = self.frame.read(cx).saved_scopes().clone();
         let items = palette::build_items(
-            &self.services.registry,
-            &self.services.theme,
+            &self.services(cx).registry,
+            &self.services(cx).theme,
             &bindings,
             &saved,
         );
@@ -112,7 +112,8 @@ impl ShellView {
             PaletteItem::Theme(name) => {
                 // The name is already fully qualified (e.g. "Gruvbox
                 // Dark"), which `ThemeService::resolve` matches outright.
-                self.services.theme.apply(name, cx);
+                self.app
+                    .update(cx, |app, cx| app.services.theme.apply(name, cx));
                 self.persist_theme(cx);
             }
             PaletteItem::Scope(name) => {

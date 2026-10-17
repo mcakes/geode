@@ -1315,7 +1315,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             };
             let tag = refresh.tag.get() + 1;
             refresh.tag.set(tag);
-            let as_of = shell.read(cx).active_frame().read(cx).as_of().clone();
+            let as_of = shell.read(cx).active_frame(cx).read(cx).as_of().clone();
             match handle.catalog(CatalogParams {
                 key: DIAGNOSTICS_KEY,
                 tag,
@@ -1353,7 +1353,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             if let Some(dataset) = diagnostics.update(cx, |d, _| d.take_reference_request()) {
                 let tag = refresh.tag.get() + 1;
                 refresh.tag.set(tag);
-                let as_of = shell.read(cx).active_frame().read(cx).as_of().clone();
+                let as_of = shell.read(cx).active_frame(cx).read(cx).as_of().clone();
                 if let Err(refusal) = handle.reference(ReferenceParams {
                     key: DIAGNOSTICS_KEY,
                     tag,
@@ -1411,7 +1411,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     // doc's, as the service read them.
     let watchlist_cache = Rc::new(WatchlistCache::new(handle.clone()));
     let (folded, watchlist_diags) = {
-        let config = shell.read(cx).config();
+        let config = shell.read(cx).config(cx);
         let (dims, _) = config
             .doc(DIMENSIONS_DOC)
             .map(DerivedDimensions::from_doc)
@@ -1455,7 +1455,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         let scenario_cells = bridge.scenario_cells.clone();
         move |shell, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
-                let config = shell.read(cx).config();
+                let config = shell.read(cx).config(cx);
                 if config.doc("views").is_none() {
                     return;
                 }
@@ -1601,7 +1601,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // threshold is in the shared cell when each tile's flip re-arms
             // its stale wake-up.
             ShellEvent::AppSettingsReloaded => {
-                let stale_after = stale_after_from_config(shell.read(cx).config());
+                let stale_after = stale_after_from_config(shell.read(cx).config(cx));
                 factory.set_stale_after(stale_after);
                 // Every panel shares the one stale threshold.
                 for panel in &panels {
@@ -1642,7 +1642,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
             // Read everything out of the config before the factory takes
             // `cx` mutably.
             let (views, templates, colours, dims, mut diags, refresh, stale_after, payout) = {
-                let config = shell.read(cx).config();
+                let config = shell.read(cx).config(cx);
                 let key = pricer_config_key(config);
                 if last_key.borrow().as_ref() == Some(&key) {
                     return;
@@ -1874,7 +1874,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                         catalog_refresh.in_flight.set(None);
                         match outcome.snapshot {
                             Ok(snapshot) => {
-                                let current_as_of = shell.read(cx).active_frame().read(cx).as_of().clone();
+                                let current_as_of = shell.read(cx).active_frame(cx).read(cx).as_of().clone();
                                 diagnostics.update(cx, |d, cx| {
                                     let before = d.version();
                                     // A publication while reading schedules another read, but
@@ -2106,7 +2106,7 @@ mod tests {
     use geode_shell::module::recording::{Recorded, RecordingFactory};
     use geode_shell::module::{ModuleFactory, ModuleRoster, PageFactory};
     use geode_shell::session::TileRecords;
-    use geode_shell::shell::ShellServices;
+    use geode_shell::shell::{ShellApp, ShellServices};
     use geode_shell::tiling::{TileId, Workspaces};
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
@@ -2397,7 +2397,11 @@ role = "key"
     ) -> WindowHandle<Root> {
         cx.update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                let view = {
+                    let app = cx.new(|cx| ShellApp::new(services, None, None, cx));
+                    let key = app.update(cx, |a, _| a.register_window());
+                    cx.new(|cx| ShellView::new(app, key, window, cx))
+                };
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -3496,8 +3500,12 @@ grain = "underlying"
             let window = cx
                 .update(|cx| {
                     cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                        let view =
-                            cx.new(|cx| ShellView::new(services, None, Some(user_dir), window, cx));
+                        let view = {
+                            let app =
+                                cx.new(|cx| ShellApp::new(services, None, Some(user_dir), cx));
+                            let key = app.update(cx, |a, _| a.register_window());
+                            cx.new(|cx| ShellView::new(app, key, window, cx))
+                        };
                         cx.new(|cx| Root::new(view, window, cx))
                     })
                 })
@@ -3565,8 +3573,13 @@ grain = "underlying"
         }
 
         fn focused(&self) -> Option<TileId> {
-            self.shell.read_with(&self.vcx, |s, _| {
-                s.services().workspaces.active().focused_tile()
+            self.shell.read_with(&self.vcx, |s, cx| {
+                s.app()
+                    .read(cx)
+                    .services()
+                    .workspaces
+                    .active()
+                    .focused_tile()
             })
         }
 
@@ -3718,8 +3731,8 @@ grain = "underlying"
             dims.get("region")
                 .and_then(|d| d.values.get(source).cloned())
         };
-        let shell_dims = s.shell.read_with(&s.vcx, |sh, _| {
-            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        let shell_dims = s.shell.read_with(&s.vcx, |sh, cx| {
+            DerivedDimensions::from_doc(sh.config(cx).doc(DIMENSIONS_DOC).unwrap()).0
         });
         assert_eq!(label(&shell_dims, "SMI").as_deref(), Some("Alpine"));
         assert_eq!(
@@ -3791,8 +3804,8 @@ grain = "underlying"
         s.vcx.simulate_new_path_selection(|_| Some(target));
         s.draw();
         assert_eq!(s.run_file_requests(), 1, "one write");
-        let region = s.shell.read_with(&s.vcx, |sh, _| {
-            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        let region = s.shell.read_with(&s.vcx, |sh, cx| {
+            DerivedDimensions::from_doc(sh.config(cx).doc(DIMENSIONS_DOC).unwrap()).0
         });
         let region = region.get("region").expect("fixture").clone();
         let written = std::fs::read_to_string(&path).unwrap();
@@ -3812,8 +3825,8 @@ grain = "underlying"
         s.vcx.executor().advance_clock(Duration::from_millis(300));
         s.draw();
 
-        let shell_dims = s.shell.read_with(&s.vcx, |sh, _| {
-            DerivedDimensions::from_doc(sh.config().doc(DIMENSIONS_DOC).unwrap()).0
+        let shell_dims = s.shell.read_with(&s.vcx, |sh, cx| {
+            DerivedDimensions::from_doc(sh.config(cx).doc(DIMENSIONS_DOC).unwrap()).0
         });
         let label = |source: &str| {
             shell_dims
@@ -4209,7 +4222,7 @@ grain = "underlying"
         });
         let (handle, _rx) = DataHandle::for_tests();
         let mut bridge = test_bridge(handle);
-        bridge.pricer_key = Some(vcx.update(|_, cx| pricer_config_key(shell.read(cx).config())));
+        bridge.pricer_key = Some(vcx.update(|_, cx| pricer_config_key(shell.read(cx).config(cx))));
         cx.update(|cx| attach(&bridge, window, cx));
         vcx.update(|_, cx| {
             let frame = shell.read(cx).frame().clone();
@@ -9627,7 +9640,7 @@ grain = "underlying"
         let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
         let (shell, diagnostics) = fixture_diagnostics(&f, &mut vcx);
         let at = chrono::Utc::now() - chrono::Duration::days(3);
-        let frame = shell.read_with(&vcx, |s, _| s.active_frame().clone());
+        let frame = shell.read_with(&vcx, |s, cx| s.active_frame(cx));
         frame.update(&mut vcx, |fr, cx| {
             fr.shared_mut().set_as_of(AsOf::At(at));
             cx.notify();

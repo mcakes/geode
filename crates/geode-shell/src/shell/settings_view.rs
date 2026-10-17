@@ -443,7 +443,7 @@ fn apply_setting(
 ) {
     match id {
         SettingId::Theme => {
-            let names = shell.services.theme.names();
+            let names = shell.services(cx).theme.names();
             if let Some(name) = names.get(value_ix) {
                 set_theme_on(shell, &name.clone(), cx);
             }
@@ -491,7 +491,9 @@ fn apply_setting(
 /// Apply the theme, request persistence, and notify. Keyboard and pointer paths use the
 /// existing shell borrow; the entity wrapper delegates to this same core.
 fn set_theme_on(shell: &mut ShellView, name: &str, cx: &mut Context<ShellView>) {
-    shell.services.theme.apply(name, cx);
+    shell
+        .app
+        .update(cx, |app, cx| app.services.theme.apply(name, cx));
     shell.persist_theme(cx);
     cx.notify();
 }
@@ -578,8 +580,8 @@ const WIDTH: f32 = 640.0;
 /// tiles. This is the configured source list, not adapter startup status.
 fn rows_for(shell: &ShellView, cx: &App) -> Vec<SettingRow> {
     derive_rows(
-        &shell.services.theme.names(),
-        shell.services.theme.active_name(),
+        &shell.services(cx).theme.names(),
+        shell.services(cx).theme.active_name(),
         shell.font_size,
         shell.find_style,
         shell.line_numbers,
@@ -1047,7 +1049,7 @@ fn build(
                 .text_color(theme.muted_foreground)
                 .child(format!(
                     "Mod key: {} — set via [keymap] mod in config",
-                    mod_alias_label(shell.services.mod_alias)
+                    mod_alias_label(shell.services(cx).mod_alias)
                 )),
         )
         .child(

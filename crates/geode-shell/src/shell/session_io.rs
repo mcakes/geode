@@ -92,10 +92,10 @@ impl ShellView {
             return None;
         }
         self.session_dirty = false;
-        let path = self.services.session_path.clone()?;
+        let path = self.services(cx).session_path.clone()?;
         let record = self.frame_record(cx);
         let mut table = session::to_toml(
-            &self.services.workspaces,
+            self.workspaces(cx),
             &tiles,
             Some(&record),
             &self.pinned_records(cx),
@@ -140,13 +140,13 @@ impl ShellView {
     /// failures are logged.
     /// It does not wait for an in-flight periodic write, which may rename last.
     pub fn save_session(&self, cx: &App) {
-        let Some(path) = self.services.session_path.as_ref() else {
+        let Some(path) = self.services(cx).session_path.as_ref() else {
             return;
         };
         let record = self.frame_record(cx);
         if let Err(e) = session::save(
             path,
-            &self.services.workspaces,
+            self.workspaces(cx),
             &self.current_tiles(cx),
             Some(&record),
             &self.pinned_records(cx),

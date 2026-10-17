@@ -26,8 +26,8 @@ fn the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores(
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    assert!(shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().tree().fullscreen().is_some()
+    assert!(shell.read_with(&cx, |s, cx| {
+        s.workspace(cx).tree().fullscreen().is_some()
     }));
     let seg = cx
         .debug_bounds("status-fullscreen")
@@ -68,12 +68,7 @@ fn the_fullscreen_segment_marks_a_maximised_tile_and_its_click_restores(
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .fullscreen()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().fullscreen()),
         None,
         "the click restores the layout"
     );
@@ -97,7 +92,7 @@ fn empty_workspace_paints_the_hint(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -114,9 +109,7 @@ fn empty_workspace_paints_the_hint(cx: &mut gpui::TestAppContext) {
             .downcast::<ShellView>()
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
             .read(cx)
-            .services
-            .workspaces
-            .active()
+            .workspace(cx)
             .tree()
             .tiles()
             .len()
@@ -148,7 +141,7 @@ fn a_test_layer_add_keystroke_creates_the_first_tile(cx: &mut gpui::TestAppConte
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -176,9 +169,7 @@ fn a_test_layer_add_keystroke_creates_the_first_tile(cx: &mut gpui::TestAppConte
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count, 1,
         "ctrl+v (the test layer's tile::add_rec_horizontal) should have \
@@ -210,7 +201,7 @@ fn add_then_mod_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -232,14 +223,10 @@ fn add_then_mod_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("ctrl-h");
     cx.simulate_keystrokes("ctrl-v");
 
-    let right_tile = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
+    let right_tile = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
 
     cx.simulate_keystrokes("alt-h");
-    let after_left = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
+    let after_left = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
     assert_ne!(
         after_left, right_tile,
         "mod+h (workspace::focus_left) should have moved focus off the right \
@@ -247,9 +234,7 @@ fn add_then_mod_hl_moves_focus_between_tiles(cx: &mut gpui::TestAppContext) {
     );
 
     cx.simulate_keystrokes("alt-l");
-    let after_right = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
+    let after_right = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
     assert_eq!(
         after_right, right_tile,
         "mod+l (workspace::focus_right) should have moved focus back to the \
@@ -278,13 +263,9 @@ fn moving_focus_does_not_shift_tile_content(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let right = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
-    let left = shell.read_with(&cx, |s, _| {
-        s.services
-            .workspaces
-            .active()
+    let right = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    let left = shell.read_with(&cx, |s, cx| {
+        s.workspace(cx)
             .tree()
             .layout(Rect {
                 x: 0.0,
@@ -309,7 +290,7 @@ fn moving_focus_does_not_shift_tile_content(cx: &mut gpui::TestAppContext) {
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile()),
         Some(left),
         "sanity: mod+h moved focus to the left tile"
     );
@@ -336,7 +317,7 @@ fn shift_left_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -362,8 +343,8 @@ fn shift_left_keystroke_moves_the_left_divider(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("shift-left");
 
-    let focused_width = shell.read_with(&cx, |shell, _| {
-        let tree = shell.services.workspaces.active().tree();
+    let focused_width = shell.read_with(&cx, |shell, cx| {
+        let tree = shell.workspace(cx).tree();
         let rects = tree.layout(Rect::UNIT);
         rects
             .into_iter()
@@ -390,7 +371,7 @@ fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -415,9 +396,7 @@ fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("alt-h");
 
-    let before_focus = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
+    let before_focus = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
 
     // Same layout math as `Render for ShellView`: the tile area is the
     // viewport minus the toolbar, sidebar, and status bar.
@@ -428,18 +407,12 @@ fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
         let content_height =
             (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
 
-        let rects = shell
-            .read(cx)
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .layout(Rect {
-                x: 0.0,
-                y: 0.0,
-                w: tile_width,
-                h: content_height,
-            });
+        let rects = shell.read(cx).workspace(cx).tree().layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: tile_width,
+            h: content_height,
+        });
         let (id, r) = rects
             .into_iter()
             .find(|(id, _)| Some(*id) != before_focus)
@@ -453,9 +426,7 @@ fn mouse_down_on_a_tile_focuses_it(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_mouse_down(click_point, MouseButton::Left, gpui::Modifiers::none());
 
-    let after_focus = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
+    let after_focus = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
     assert_eq!(
         after_focus,
         Some(target_id),
@@ -480,7 +451,7 @@ fn ctrl_alt_right_keystroke_swaps_the_focused_tile_with_its_right_neighbor(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -505,20 +476,16 @@ fn ctrl_alt_right_keystroke_swaps_the_focused_tile_with_its_right_neighbor(
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("alt-h");
 
-    let focused = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
-    let before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let focused = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
+    let before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
 
     cx.simulate_keystrokes("ctrl-alt-right");
 
-    let after_focused = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
-    let after = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let after_focused = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
+    let after = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
     assert_eq!(
         after_focused, focused,
@@ -539,7 +506,7 @@ fn ctrl_w_keystroke_closes_the_focused_tile(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -561,21 +528,13 @@ fn ctrl_w_keystroke_closes_the_focused_tile(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-v");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()
-            .len()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len()),
         2
     );
 
     cx.simulate_keystrokes("ctrl-w");
 
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count, 1,
         "ctrl+w (workspace::close_tile) should have closed the focused tile"
@@ -593,7 +552,7 @@ fn close_tile_focuses_adjacent_sibling(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -622,24 +581,18 @@ fn close_tile_focuses_adjacent_sibling(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("ctrl-v");
 
     // Verify we have three tiles.
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(tile_count, 3, "should have created three tiles");
 
     // Record the tile ids in tree order before focusing the middle one.
-    let tiles_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles()
-    });
+    let tiles_before = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles());
     assert_eq!(tiles_before.len(), 3);
 
     // After three splits, the focused tile is the last one (tiles_before[2]).
     // Focus the middle tile (at index 1) using focus_left (mod+h).
     cx.simulate_keystrokes("alt-h");
 
-    let focused_tile = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
+    let focused_tile = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
     assert_eq!(
         focused_tile,
         Some(tiles_before[1]),
@@ -650,21 +603,17 @@ fn close_tile_focuses_adjacent_sibling(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("ctrl-w");
 
     // Verify we have two tiles left.
-    let remaining_tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let remaining_tile_count =
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(remaining_tile_count, 2, "should have two tiles after close");
 
-    let tiles_after = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles()
-    });
+    let tiles_after = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles());
     // tiles_after should be [tiles_before[0], tiles_before[2]]
     assert_eq!(tiles_after, vec![tiles_before[0], tiles_before[2]]);
 
     // Assert that the focused tile is tiles_before[2] (the adjacent sibling in tree order).
-    let focused_after_close = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
-    });
+    let focused_after_close =
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
 
     assert_eq!(
         focused_after_close,
@@ -691,7 +640,7 @@ fn the_shipped_keymap_has_no_split_chord(cx: &mut gpui::TestAppContext) {
         let _ = window.draw(cx);
     });
     assert!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().is_empty()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).is_empty()),
         "neither key creates a tile any more"
     );
 }

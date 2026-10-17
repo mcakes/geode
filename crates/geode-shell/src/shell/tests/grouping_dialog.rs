@@ -882,7 +882,7 @@ fn the_dialog_edits_the_pinned_workspaces_own_ad_hoc_chain(cx: &mut gpui::TestAp
     let frame = frame_of(&shell, &vcx);
     dispatch_action(&shell, "frame::pin_workspace", &mut vcx);
     vcx.run_until_parked();
-    let ws = shell.read_with(&vcx, |s, _| s.target_frame().workspace());
+    let ws = shell.read_with(&vcx, |s, cx| s.target_frame(cx).workspace());
     assert!(frame.read_with(&vcx, |f, _| f.is_pinned(ws)));
 
     dispatch_action(&shell, DOOR, &mut vcx);

@@ -33,7 +33,7 @@ use std::time::Duration;
 
 use geode_core::colour::ValuePick;
 use geode_core::config::{CONFIG_VERSION, Config, Layer, LayerDoc, Severity};
-use gpui::Context;
+use gpui::{App, Context};
 
 use super::{Destination, Domain, Stage};
 use crate::config_write;
@@ -237,7 +237,7 @@ fn edits_for(shell: &ShellView) -> BTreeMap<(&'static str, String), ObjectEdit> 
 /// Reads the active config, which may trail the pending batch by the debounce interval.
 /// Multiple definition edits within that interval can therefore repeat the fork notice
 /// and sidecar entry.
-pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
+pub(super) fn would_fork(shell: &ShellView, domain: Domain, cx: &App) -> bool {
     let Some(draft) = shell
         .object_dialog
         .as_ref()
@@ -252,7 +252,7 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
         return false;
     }
     domain
-        .objects(&shell.services.config)
+        .objects(&shell.services(cx).config)
         .into_iter()
         .find(|row| row.name == draft.name)
         .is_some_and(|row| row.layer.is_some_and(|layer| layer != Layer::User))
@@ -260,7 +260,7 @@ pub(super) fn would_fork(shell: &ShellView, domain: Domain) -> bool {
 
 /// Announce the copy, its shadowed layer, and the revert verb. Read before
 /// `commit_edit` advances the draft baseline and empties its pending differences.
-pub(super) fn fork_notice(shell: &ShellView, domain: Domain) -> String {
+pub(super) fn fork_notice(shell: &ShellView, domain: Domain, cx: &App) -> String {
     let Some(name) = shell
         .object_dialog
         .as_ref()
@@ -269,7 +269,7 @@ pub(super) fn fork_notice(shell: &ShellView, domain: Domain) -> String {
     else {
         return String::new();
     };
-    fork_notice_of(&shell.services.config, domain.doc(), &name)
+    fork_notice_of(&shell.services(cx).config, domain.doc(), &name)
 }
 
 /// The fork announcement for `name` in `doc`, naming the layer the copy
@@ -326,13 +326,13 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
     // definition reaches the user layer, so the fresh entry must win.
     let domain = shell.object_dialog.as_ref().map(|s| s.domain);
     if let Some(domain) = domain
-        && would_fork(shell, domain)
+        && would_fork(shell, domain, cx)
         && let Some(draft) = shell.object_dialog.as_ref().and_then(|s| s.draft.as_ref())
         && let Some((layer, value)) =
-            super::shadow_of(&shell.services.config, domain.doc(), &draft.name)
+            super::shadow_of(&shell.services(cx).config, domain.doc(), &draft.name)
     {
         let key = super::override_key(domain.doc(), &draft.name);
-        for stale in super::stale_override_keys(&shell.services.config) {
+        for stale in super::stale_override_keys(&shell.services(cx).config) {
             edits.insert((super::OVERRIDES_DOC, stale), None);
         }
         edits.insert(
@@ -343,7 +343,7 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
 
     // Do not advance the baseline until there is somewhere to persist the edit. An
     // unqueued change must remain dirty for a later attempt.
-    let Some(user_dir) = shell.user_dir.clone() else {
+    let Some(user_dir) = shell.user_dir(cx) else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };
 
@@ -383,7 +383,7 @@ pub(super) fn commit_removal(
     if edits.is_empty() {
         return None;
     }
-    let Some(user_dir) = shell.user_dir.clone() else {
+    let Some(user_dir) = shell.user_dir(cx) else {
         return Some("no writable user config directory — nothing was removed".to_string());
     };
     queue_batch(shell, edits, user_dir, Duration::ZERO, origin, cx);
@@ -414,7 +414,7 @@ pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) 
             return Some("nothing to create — the object would be empty".to_string());
         }
     }
-    let Some(user_dir) = shell.user_dir.clone() else {
+    let Some(user_dir) = shell.user_dir(cx) else {
         return Some("no writable user config directory — nothing was changed".to_string());
     };
     if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
@@ -452,7 +452,7 @@ pub(crate) fn queue_object(
     value: toml::Value,
     cx: &mut Context<ShellView>,
 ) -> Result<(), String> {
-    let Some(user_dir) = shell.user_dir.clone() else {
+    let Some(user_dir) = shell.user_dir(cx) else {
         return Err("no writable user config directory — nothing was changed".to_string());
     };
     let edits = BTreeMap::from([((doc, name.to_string()), Some(value))]);
@@ -479,12 +479,13 @@ pub(crate) fn queue_edits(
     if edits.is_empty() {
         return Ok(Vec::new());
     }
-    let Some(user_dir) = shell.user_dir.clone() else {
+    let Some(user_dir) = shell.user_dir(cx) else {
         return Err("no writable user config directory — nothing was changed".to_string());
     };
     // Pending-aware: an object forked a moment ago is already the user's,
     // and forking it again would overwrite its recorded baseline.
-    let mut config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let mut config =
+        config_with_pending(shell, cx).unwrap_or_else(|| shell.services(cx).config.clone());
     let mut batch: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
     let mut notices = Vec::new();
     let origins: Vec<TileId> = edits.iter().filter_map(|e| e.origin).collect();
@@ -600,8 +601,9 @@ pub(crate) enum Owner {
 /// batch applied: a definition queued a moment ago is already the user's, so
 /// a caller gating delete, revert or an overwrite question sees it before the
 /// flush. The last layer defining the name wins, the merge's own rule.
-pub(crate) fn definition_owner(shell: &ShellView, doc: &str, name: &str) -> Owner {
-    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+pub(crate) fn definition_owner(shell: &ShellView, doc: &str, name: &str, cx: &App) -> Owner {
+    let config =
+        config_with_pending(shell, cx).unwrap_or_else(|| shell.services(cx).config.clone());
     owner_in(&config, doc, name)
 }
 
@@ -637,10 +639,11 @@ pub(crate) fn queue_definition(
     value: toml::Value,
     cx: &mut Context<ShellView>,
 ) -> Result<Option<String>, String> {
-    let Some(user_dir) = shell.user_dir.clone() else {
+    let Some(user_dir) = shell.user_dir(cx) else {
         return Err("no writable user config directory — nothing was changed".to_string());
     };
-    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let config =
+        config_with_pending(shell, cx).unwrap_or_else(|| shell.services(cx).config.clone());
     let mut edits: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
     let notice =
         fork_record(&config, doc, name, &mut edits).map(|_| fork_notice_of(&config, doc, name));
@@ -676,7 +679,8 @@ pub(crate) fn remove_definition(
     name: &str,
     cx: &mut Context<ShellView>,
 ) -> Result<(), String> {
-    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let config =
+        config_with_pending(shell, cx).unwrap_or_else(|| shell.services(cx).config.clone());
     let mut keys: Vec<(&'static str, String)> = Vec::new();
     if matches!(owner_in(&config, doc, name), Owner::User { .. }) {
         keys.push((doc, name.to_string()));
@@ -701,12 +705,12 @@ pub(crate) fn remove_definition(
 /// Saved-scope diagnostics are not reported here: the flush's reload reports
 /// them for the same documents, and reporting both would log each twice.
 pub(crate) fn refresh_definitions_now(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let Some(config) = config_with_pending(shell) else {
+    let Some(config) = config_with_pending(shell, cx) else {
         return;
     };
     let named = crate::shell::hot_reload::rebuild_named_expressions(&config);
     let saved = crate::shell::hot_reload::rebuild_saved_scopes(&config, false);
-    shell.target_frame().update(cx, |f, cx| {
+    shell.target_frame(cx).update(cx, |f, cx| {
         let named_changed = f.replace_named_expressions(named);
         let saved_changed = f.replace_saved_scopes(saved);
         if named_changed || saved_changed {
@@ -730,7 +734,7 @@ fn queue_batch(
     // restores the state the batch started from.
     let revert = match shell.pending_config_write.as_ref() {
         Some(pending) => pending.revert.clone(),
-        None => shell.services.config.all_docs(),
+        None => shell.services(cx).config.all_docs(),
     };
 
     schedule_flush(shell, user_dir, edits, revert, delay, origin, cx);
@@ -749,7 +753,7 @@ fn apply_in_memory(
     edits: &BTreeMap<(&'static str, String), ObjectEdit>,
     cx: &mut Context<ShellView>,
 ) {
-    let mut docs = shell.services.config.all_docs();
+    let mut docs = shell.services(cx).config.all_docs();
     for ((doc, object), value) in edits {
         docs = docs_with_object(docs, user_dir, doc, object, value.clone());
     }
@@ -763,9 +767,9 @@ fn apply_in_memory(
 /// Stage entry uses this snapshot so reopening an object during the debounce sees its
 /// latest edits. A stale draft would otherwise outlive the flush and overwrite those
 /// edits when it next renders the whole object.
-pub(crate) fn config_with_pending(shell: &ShellView) -> Option<Config> {
+pub(crate) fn config_with_pending(shell: &ShellView, cx: &App) -> Option<Config> {
     let pending = shell.pending_config_write.as_ref()?;
-    let mut docs = shell.services.config.all_docs();
+    let mut docs = shell.services(cx).config.all_docs();
     for ((doc, object), value) in &pending.edits {
         docs = docs_with_object(docs, &pending.user_dir, doc, object, value.clone());
     }
@@ -973,7 +977,7 @@ fn revert_failed_write(shell: &mut ShellView, message: String, cx: &mut Context<
     // Only the drafts that contributed to the batch show it reverted. A covered
     // dialog of another domain keeps its unsaved draft: nothing of it was in the
     // batch, and rebuilding it would throw away the trader's place.
-    let config = &shell.services.config;
+    let config = &shell.services(cx).config;
     for state in shell
         .object_dialog
         .iter_mut()

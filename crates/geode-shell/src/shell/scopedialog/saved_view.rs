@@ -488,7 +488,7 @@ fn row_verb(
             Ok(())
         }
         "d" => super::prompt::ask_delete(shell, row.id, cx),
-        _ => super::prompt::ask_revert(shell, row.id),
+        _ => super::prompt::ask_revert(shell, row.id, cx),
     };
     if let (Err(refusal), Some(state)) = (refused, shell.scope_dialog.as_mut()) {
         state.error = Some(refusal);
@@ -516,7 +516,7 @@ fn commit_cursor(shell: &mut ShellView, window: &mut Window, cx: &mut Context<Sh
         SavedId::Scope(name) => shell.load_saved_scope(name, cx).err().map(|_| SCOPE_GONE),
         SavedId::Expression(name) => {
             let defined = shell
-                .target_frame()
+                .target_frame(cx)
                 .read(cx)
                 .named_expressions()
                 .get(name)
@@ -840,8 +840,8 @@ pub(super) const SCOPES_DOC: &str = "scopes";
 /// scope the reader drops for some other fault still counts as a user.
 /// Deleting never edits these users; the sentence is what says so.
 pub(crate) fn named_expression_users(shell: &ShellView, name: &str, cx: &App) -> Option<String> {
-    let pending = crate::shell::objectdialog::apply::config_with_pending(shell);
-    let config = pending.as_ref().unwrap_or(&shell.services.config);
+    let pending = crate::shell::objectdialog::apply::config_with_pending(shell, cx);
+    let config = pending.as_ref().unwrap_or(&shell.services(cx).config);
     let users: Vec<String> = config
         .doc(SCOPES_DOC)
         .map(|doc| {
@@ -858,7 +858,7 @@ pub(crate) fn named_expression_users(shell: &ShellView, name: &str, cx: &App) ->
         })
         .unwrap_or_default();
     let frame = shell
-        .target_frame()
+        .target_frame(cx)
         .read(cx)
         .scope()
         .named

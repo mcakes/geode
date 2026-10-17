@@ -264,7 +264,7 @@ fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView
     // from matching a new request for the same column.
     view.next_picker_tag += 1;
     let tag = view.next_picker_tag;
-    let frame = view.target_frame();
+    let frame = view.target_frame(cx);
     let Some(p) = view.picker.as_mut() else {
         return;
     };
@@ -454,10 +454,10 @@ fn handle_values_key(
         return true;
     }
     if ks.mods == Modifiers::NONE && ks.key == "enter" {
-        let scope = shell.target_frame().read(cx).scope().clone();
+        let scope = shell.target_frame(cx).read(cx).scope().clone();
         let new_scope = shell.picker.as_ref().map(|p| p.apply(&scope));
         if let Some(new_scope) = new_scope {
-            shell.target_frame().update(cx, |f, cx| {
+            shell.target_frame(cx).update(cx, |f, cx| {
                 if f.set_scope(new_scope) {
                     cx.notify();
                 }
@@ -576,13 +576,14 @@ fn build_columns(
     row_paint: RowPaint,
     muted: Hsla,
     radius: Pixels,
+    cx: &App,
 ) -> AnyElement {
     let matches = PickerState::columns(&shell.pickable, &picker.query);
     if matches.is_empty() {
         return empty_row(
             columns_empty_message(
                 shell.pickable.is_empty(),
-                shell.services.config.doc("datasets").is_some(),
+                shell.services(cx).config.doc("datasets").is_some(),
             ),
             muted,
         );
@@ -764,7 +765,7 @@ fn build(
 
     let filter = dialog::filter_row(&shell.dialog_input, None, cx);
     let body = match &picker.stage {
-        Stage::Columns => build_columns(shell, picker, entity, row_paint, muted, radius),
+        Stage::Columns => build_columns(shell, picker, entity, row_paint, muted, radius, cx),
         Stage::Values { .. } => build_values(
             picker,
             entity,

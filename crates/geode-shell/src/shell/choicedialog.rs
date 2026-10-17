@@ -1236,7 +1236,7 @@ fn chrome(target: &Target) -> (&'static str, &'static str, &'static str, &'stati
 /// focused tile at COMMIT time: a focused placeholder is filled in place,
 /// a real tile is split in the `add` setting's direction.
 pub fn open_tile_kinds(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
-    let state = ChoiceDialogState::tile_kinds(view.services.roster.titled_kinds());
+    let state = ChoiceDialogState::tile_kinds(view.services(cx).roster.titled_kinds());
     open(view, state, window, cx);
 }
 
@@ -1251,7 +1251,7 @@ pub fn open_tile_kinds_with(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let roster = &view.services.roster;
+    let roster = &view.services(cx).roster;
     let titled: Vec<(&str, String)> = kinds
         .into_iter()
         .map(|k| {
@@ -1284,9 +1284,7 @@ pub fn open_columns(
     cx: &mut Context<ShellView>,
 ) {
     let tile = view
-        .services
-        .workspaces
-        .active()
+        .workspace(cx)
         .focused_tile()
         .and_then(|t| view.occupants.get(&t))
         .and_then(|o| o.content.tile_columns(cx));
@@ -1302,6 +1300,7 @@ pub fn open_columns(
             view,
             &tile.view,
             tile.columns.iter().map(|c| c.name.as_str()),
+            cx,
         )
     {
         let active = tile.active_column().map(|c| c.name.clone());
@@ -1337,9 +1336,7 @@ pub(crate) const NO_GROUP_TO_JOIN: &str = "this tile has no link group to join";
 /// `this tile has no link group to join` and no dialog.
 pub fn open_link_group(view: &mut ShellView, window: &mut Window, cx: &mut Context<ShellView>) {
     let focused = view
-        .services
-        .workspaces
-        .active()
+        .workspace(cx)
         .focused_tile()
         .and_then(|tile| view.occupants.get(&tile).map(|o| (tile, o)))
         .filter(|(_, o)| o.kind != PLACEHOLDER_KIND)
@@ -1374,9 +1371,9 @@ pub(crate) fn open_value_color(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let (named, _) = NamedColours::from_config(&view.services.config);
+    let (named, _) = NamedColours::from_config(&view.services(cx).config);
     let state = value_color_state(
-        view.services.config.layered_docs(VALUE_COLORS_DOC),
+        view.services(cx).config.layered_docs(VALUE_COLORS_DOC),
         &dimension,
         &value,
     );
@@ -2079,7 +2076,7 @@ fn commit(shell: &mut ShellView, pick: Pick, window: &mut Window, cx: &mut Conte
         Pick::KindWith(kind, context) => {
             shell.close_modal(window, cx);
             let state = shell
-                .services
+                .services(cx)
                 .roster
                 .factory(&kind)
                 .and_then(|f| f.launch_state(&context));

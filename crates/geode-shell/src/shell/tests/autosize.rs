@@ -34,8 +34,8 @@ fn the_autosize_action_reaches_only_the_focused_tile(cx: &mut gpui::TestAppConte
     draw(&mut vcx);
     vcx.simulate_keystrokes("ctrl-v");
     draw(&mut vcx);
-    let (tiles, focused) = shell.read_with(&vcx, |s, _| {
-        let ws = s.services.workspaces.active();
+    let (tiles, focused) = shell.read_with(&vcx, |s, cx| {
+        let ws = s.workspace(cx);
         (ws.tree().tiles(), ws.focused_tile().unwrap())
     });
     assert_eq!(tiles.len(), 2);
@@ -44,8 +44,8 @@ fn the_autosize_action_reaches_only_the_focused_tile(cx: &mut gpui::TestAppConte
     assert_eq!(shell.read_with(&vcx, |s, _| s.notice.clone()), None);
 
     let other = *tiles.iter().find(|t| **t != focused).unwrap();
-    shell.update(&mut vcx, |s, _| {
-        s.services.workspaces.active_mut().focus_main_tile(other);
+    shell.update(&mut vcx, |s, cx| {
+        s.with_workspace(cx, |ws| ws.focus_main_tile(other));
     });
     dispatch_action(&shell, "tile::autosize_columns", &mut vcx);
     assert_eq!(
@@ -66,8 +66,8 @@ fn autosize_on_a_tile_without_a_table_shows_the_refusal(cx: &mut gpui::TestAppCo
         })
     });
     draw(&mut vcx);
-    let kind = shell.read_with(&vcx, |s, _| {
-        let tile = s.services.workspaces.active().focused_tile().unwrap();
+    let kind = shell.read_with(&vcx, |s, cx| {
+        let tile = s.workspace(cx).focused_tile().unwrap();
         s.occupant_kind(tile)
     });
     assert_eq!(kind, Some(crate::module::placeholder::PLACEHOLDER_KIND));

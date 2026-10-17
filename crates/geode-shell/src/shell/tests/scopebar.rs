@@ -438,14 +438,12 @@ fn a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types(
         let _ = window.draw(cx);
     });
 
-    let tiles_before = shell.read_with(&vcx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tiles_before = shell.read_with(&vcx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(tiles_before, 1);
     vcx.simulate_keystrokes("shift-d");
     assert_eq!(
-        shell.read_with(&vcx, |shell, _| {
-            shell.services.workspaces.active().tree().tiles().len()
+        shell.read_with(&vcx, |shell, cx| {
+            shell.workspace(cx).tree().tiles().len()
         }),
         tiles_before,
         "shift+d in the field is typing, not duplicate_horizontal"

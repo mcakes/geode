@@ -417,9 +417,9 @@ fn presentation_of(
     cx: &gpui::VisualTestContext,
     object: &str,
 ) -> Option<toml::Value> {
-    shell.read_with(cx, |shell, _| {
+    shell.read_with(cx, |shell, cx| {
         shell
-            .services
+            .services(cx)
             .config
             .doc("view_presentation")
             .and_then(|doc| doc.value.get(object))
@@ -541,7 +541,7 @@ fn the_reload_an_edit_triggers_leaves_the_views_and_the_hidden_column_intact(
     cx.run_until_parked();
     flush_config_write(&mut cx);
 
-    let builtin = shell.read_with(&cx, |shell, _| shell.services.builtin.clone());
+    let builtin = shell.read_with(&cx, |shell, cx| shell.services(cx).builtin.clone());
     let reloaded = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
     shell.update(&mut cx, |shell, cx| shell.apply_reload(reloaded, cx));
 
@@ -549,8 +549,8 @@ fn the_reload_an_edit_triggers_leaves_the_views_and_the_hidden_column_intact(
     // listed, from the same layer as before.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    let rows = shell.read_with(&cx, |shell, _| {
-        objectdialog::Domain::Views.objects(&shell.services.config)
+    let rows = shell.read_with(&cx, |shell, cx| {
+        objectdialog::Domain::Views.objects(&shell.services(cx).config)
     });
     assert!(
         rows.iter().any(|row| row.name == "tree"),
@@ -595,7 +595,7 @@ fn the_watchers_reload_of_our_own_write_changes_nothing(cx: &mut gpui::TestAppCo
     flush_config_write(&mut cx);
 
     let before = layered_fingerprint(&shell, &cx);
-    let builtin = shell.read_with(&cx, |shell, _| shell.services.builtin.clone());
+    let builtin = shell.read_with(&cx, |shell, cx| shell.services(cx).builtin.clone());
     let reloaded = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
     shell.update(&mut cx, |shell, cx| shell.apply_reload(reloaded, cx));
     let after = layered_fingerprint(&shell, &cx);
@@ -614,10 +614,10 @@ fn layered_fingerprint(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
 ) -> Vec<(Layer, String, std::path::PathBuf, toml::Table)> {
-    shell.read_with(cx, |shell, _| {
+    shell.read_with(cx, |shell, cx| {
         ["views", "view_presentation"]
             .into_iter()
-            .flat_map(|name| shell.services.config.layered_docs(name))
+            .flat_map(|name| shell.services(cx).config.layered_docs(name))
             .map(|d| (d.layer, d.name.clone(), d.file.clone(), d.table.clone()))
             .collect()
     })
@@ -1088,9 +1088,9 @@ fn an_edit_merges_in_memory_without_reading_disk(cx: &mut gpui::TestAppContext) 
     // merged the documents in hand rather than re-reading the directory.
     flush_config_write(&mut cx);
 
-    let dataset = shell.read_with(&cx, |shell, _| {
+    let dataset = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
+            .services(cx)
             .config
             .get("views", "tree.dataset")
             .and_then(|v| v.as_str())
@@ -1905,9 +1905,9 @@ fn ticking_a_dimension_in_an_empty_slot_writes_it_without_asking(cx: &mut gpui::
         "slot 1 is queued on the keystroke, with nothing asked first"
     );
     flush_config_write(&mut cx);
-    let chain = shell.read_with(&cx, |shell, _| {
+    let chain = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
+            .services(cx)
             .config
             .doc("groupings")
             .and_then(|doc| doc.value.get("1"))
@@ -2182,7 +2182,7 @@ fn commit_create_writes_one_doc_entry_immediately(cx: &mut gpui::TestAppContext)
     let (shell, mut cx) =
         dialog_test_shell_in_dir(cx, services_with_a_desk_view(), dir.path(), "config::views");
     shell.update(&mut cx, |shell, cx| {
-        let draft = objectdialog::Domain::Views.new_draft(&shell.services.config, "mine");
+        let draft = objectdialog::Domain::Views.new_draft(&shell.services(cx).config, "mine");
         let state = shell.object_dialog.as_mut().unwrap();
         state.draft = Some(draft);
         state.stage = objectdialog::Stage::Edit {
@@ -2200,9 +2200,9 @@ fn commit_create_writes_one_doc_entry_immediately(cx: &mut gpui::TestAppContext)
         !dir.path().join("view_presentation.toml").exists(),
         "no overlay write for a new object"
     );
-    let in_config = shell.read_with(&cx, |shell, _| {
+    let in_config = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
+            .services(cx)
             .config
             .doc("views")
             .and_then(|d| d.value.get("mine"))
@@ -2893,12 +2893,12 @@ fn slash_filters_the_edit_stage_and_escape_walks_the_full_ladder(cx: &mut gpui::
         dialog_state(&shell, &cx, |s| s.query.clone()).is_empty(),
         "the browse query must not carry the edit stage's filter"
     );
-    shell.read_with(&cx, |shell, _| {
+    shell.read_with(&cx, |shell, cx| {
         let state = shell
             .object_dialog
             .as_ref()
             .expect("the object dialog should be open");
-        let rows = state.domain.objects(&shell.services.config);
+        let rows = state.domain.objects(&shell.services(cx).config);
         let visible = objectdialog::visible_rows(state, &rows);
         assert_eq!(
             visible.len(),
@@ -7493,7 +7493,7 @@ fn a_reload_under_an_armed_confirm_refuses_the_answer(cx: &mut gpui::TestAppCont
     // risk·mina, risk·mine — so the index now names `mina`.
     let reloaded = services_with_user_sources(&[("mina", "risk"), ("mine", "risk")]);
     shell.update(&mut cx, |shell, cx| {
-        shell.services.builtin = reloaded.builtin;
+        shell.with_services(cx, |s| s.builtin = reloaded.builtin);
         shell.apply_reload(reloaded.config, cx);
     });
     cx.run_until_parked();
@@ -7659,7 +7659,7 @@ fn the_armed_prompt_names_the_recorded_target(cx: &mut gpui::TestAppContext) {
 
     let reloaded = services_with_user_sources(&[("mina", "risk"), ("mine", "risk")]);
     shell.update(&mut cx, |shell, cx| {
-        shell.services.builtin = reloaded.builtin;
+        shell.with_services(cx, |s| s.builtin = reloaded.builtin);
         shell.apply_reload(reloaded.config, cx);
     });
     cx.run_until_parked();
@@ -8299,9 +8299,9 @@ fn fresh_browse_rows(
     shell: &Entity<ShellView>,
     cx: &gpui::VisualTestContext,
 ) -> Vec<objectdialog::ObjectRow> {
-    shell.read_with(cx, |shell, _| {
+    shell.read_with(cx, |shell, cx| {
         let state = shell.object_dialog.as_ref().unwrap();
-        let rows = state.domain.objects(&shell.services.config);
+        let rows = state.domain.objects(&shell.services(cx).config);
         objectdialog::visible_rows(state, &rows)
             .into_iter()
             .map(|m| rows[m.row].clone())
@@ -8355,11 +8355,11 @@ pub(super) fn assert_browse_rows_are_fresh(
         prepared, fresh,
         "the prepared browse rows are a fresh derivation"
     );
-    let all: Vec<String> = shell.read_with(cx, |s, _| {
+    let all: Vec<String> = shell.read_with(cx, |s, cx| {
         let state = s.object_dialog.as_ref().unwrap();
         state
             .domain
-            .objects(&s.services.config)
+            .objects(&s.services(cx).config)
             .into_iter()
             .map(|r| r.name)
             .collect()
@@ -8398,7 +8398,7 @@ fn a_reload_adding_a_view_repaints_the_browse_list(cx: &mut gpui::TestAppContext
         "config_version = 1\n[wider]\ndataset = \"risk\"\n[[wider.columns]]\nname = \"npv\"\n",
     )
     .unwrap();
-    let builtin = shell.read_with(&cx, |s, _| s.services.builtin.clone());
+    let builtin = shell.read_with(&cx, |s, cx| s.services(cx).builtin.clone());
     let config = crate::reload::load_config(builtin, None, Some(dir.path().to_path_buf()));
     shell.update(&mut cx, |s, cx| s.apply_reload(config, cx));
     cx.run_until_parked();

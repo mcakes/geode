@@ -136,9 +136,9 @@ impl ShellView {
         // Reuse the checked fragments so module bindings survive every reload.
         let layered = fragments::splice(
             new_config.layered_docs("keymap"),
-            &self.services.keymap_fragments,
+            &self.services(cx).keymap_fragments,
         );
-        let (keymap, keymap_diags) = build_keymap(&layered, mod_alias, &self.services.registry);
+        let (keymap, keymap_diags) = build_keymap(&layered, mod_alias, &self.services(cx).registry);
         // Modifier errors must reach the rejection decision.
         new_config.diagnostics.extend(mod_diags);
         // Warn when the candidate contains the unused `modules.default` key.
@@ -158,8 +158,13 @@ impl ShellView {
         // bindings were already dropped, and editing user config cannot fix them.
         // They must remain visible without blocking user reloads.
         let mut config_section = new_config.diagnostics.clone();
-        config_section.extend(self.services.keymap_fragment_diagnostics.iter().cloned());
-        config_section.extend(self.services.composition_diagnostics.iter().cloned());
+        config_section.extend(
+            self.services(cx)
+                .keymap_fragment_diagnostics
+                .iter()
+                .cloned(),
+        );
+        config_section.extend(self.services(cx).composition_diagnostics.iter().cloned());
         self.diagnostics.update(cx, |d, cx| {
             let before = d.version();
             d.note_config(config_section, SystemTime::now());
@@ -186,19 +191,19 @@ impl ShellView {
             }
 
             let theme_changed =
-                self.services.config.get("app", "theme") != new_config.get("app", "theme");
+                self.services(cx).config.get("app", "theme") != new_config.get("app", "theme");
             // Only bindings and the resolved modifier alias invalidate the palette's
             // snapshot. An unrelated edit, such as a theme change, leaves it open.
-            let palette_snapshot_changed = self.services.mod_alias != mod_alias
+            let palette_snapshot_changed = self.services(cx).mod_alias != mod_alias
                 || !docs_equal(
-                    self.services.config.layered_docs("keymap"),
+                    self.services(cx).config.layered_docs("keymap"),
                     new_config.layered_docs("keymap"),
                 );
 
             // Compare layered inputs with the active config before replacing it.
             let changed = |name: &str| {
                 !docs_equal(
-                    self.services.config.layered_docs(name),
+                    self.services(cx).config.layered_docs(name),
                     new_config.layered_docs(name),
                 )
             };
@@ -258,7 +263,7 @@ impl ShellView {
                 }
                 // Keep the diagnostics model current even without a log subscriber.
                 if new_levels != self.diagnostics.read(cx).levels {
-                    if let Some(log) = &self.services.log
+                    if let Some(log) = &self.services(cx).log
                         && let Err(e) = log.control.set(&new_levels)
                     {
                         tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
@@ -271,25 +276,28 @@ impl ShellView {
                 }
             }
 
-            self.services.config = new_config;
-            self.services.mod_alias = mod_alias;
-            self.services.keymap = keymap;
+            self.with_services(cx, |s| {
+                s.config = new_config;
+                s.mod_alias = mod_alias;
+                s.keymap = keymap;
+            });
             self.config_revision += 1;
-            cx.set_global(crate::tips::Chords(Arc::new(
-                self.services.keymap.bindings().to_vec(),
-            )));
+            let bindings = self.services(cx).keymap.bindings().to_vec();
+            cx.set_global(crate::tips::Chords(Arc::new(bindings)));
             // Cheap re-derive; `render` applies it only when it changed.
-            self.font_size = FontSize::from_config(&self.services.config);
-            self.find_style = FindStyle::from_config(&self.services.config);
-            self.add_direction = crate::tileadd::AddDirection::from_config(&self.services.config);
-            let line_numbers = crate::linenumbers::LineNumbers::from_config(&self.services.config);
+            self.font_size = FontSize::from_config(&self.services(cx).config);
+            self.find_style = FindStyle::from_config(&self.services(cx).config);
+            self.add_direction =
+                crate::tileadd::AddDirection::from_config(&self.services(cx).config);
+            let line_numbers =
+                crate::linenumbers::LineNumbers::from_config(&self.services(cx).config);
             if line_numbers != self.line_numbers {
                 self.line_numbers = line_numbers;
                 cx.set_global(crate::linenumbers::UiSettings { line_numbers });
             }
             // A changed composition rule moves no frame generation, so the
             // emitters are re-pulled here or the groups keep the old rule.
-            let link_filter = crate::linkfilter::from_config(&self.services.config);
+            let link_filter = crate::linkfilter::from_config(&self.services(cx).config);
             if link_filter != self.link_include_tile_filter {
                 self.link_include_tile_filter = link_filter;
                 self.force_repull_emitters(cx);
@@ -298,7 +306,7 @@ impl ShellView {
             // it, re-derived and republished only on a change — a
             // `set_global` on every reload poll would wake every
             // `observe_global` subscriber for nothing.
-            let series = crate::series::SeriesSettings::from_config(&self.services.config);
+            let series = crate::series::SeriesSettings::from_config(&self.services(cx).config);
             if cx
                 .try_global::<crate::series::SeriesSettings>()
                 .is_none_or(|global| *global != series)
@@ -315,15 +323,15 @@ impl ShellView {
             }
 
             if pickable_changed {
-                self.pickable = pickable_columns(&self.services.config);
-                self.text_dims = text_dimension_names(&self.services.config);
+                self.pickable = pickable_columns(&self.services(cx).config);
+                self.text_dims = text_dimension_names(&self.services(cx).config);
                 // The frame expression dialog re-ranks against the new columns
                 // at once, not at its next keystroke — including when another
                 // dialog covers it. `expr_suggest::completion_mut` reaches
                 // only `top_kind()`'s field, so a covered `ScopeExpr` dialog is
                 // rebuilt directly here instead, and shows fresh suggestions
                 // the moment it is revealed rather than at its own next edit.
-                self.expr_vocab = std::rc::Rc::new(super::expr_vocab(&self.services.config));
+                self.expr_vocab = std::rc::Rc::new(super::expr_vocab(&self.services(cx).config));
                 let vocab = self.expr_vocab.clone();
                 if let Some(state) = self.scope_expr_dialog.as_mut() {
                     state.completion.rebuild(&vocab);
@@ -332,12 +340,15 @@ impl ShellView {
 
             // Named colors may have changed; open column stages, covered or not,
             // offer the new set.
-            super::objectdialog::render::refresh_color_choices(self);
+            super::objectdialog::render::refresh_color_choices(self, cx);
 
             if theme_changed {
-                self.services
-                    .theme
-                    .apply_from_config(&self.services.config, cx);
+                // Under the app's writer: the theme reads the config beside
+                // it and needs the context mutably.
+                self.app.update(cx, |app, cx| {
+                    let services = &mut app.services;
+                    services.theme.apply_from_config(&services.config, cx);
+                });
             }
 
             if palette_snapshot_changed {
@@ -361,11 +372,11 @@ impl ShellView {
                 cx.emit(ShellEvent::AppSettingsReloaded);
             }
             if groupings_changed {
-                let slots = rebuild_slots(&self.services.config);
+                let slots = rebuild_slots(&self.services(cx).config);
                 // The same inputs decide what an ad hoc chain may name. A
                 // chain left naming a removed column would be refused by
                 // every following tile's query with no way to see why.
-                let groupable = groupable_names(&self.services.config);
+                let groupable = groupable_names(&self.services(cx).config);
                 self.frame.update(cx, |f, cx| {
                     let replaced = f.replace_slots(slots);
                     let dropped = f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column));
@@ -382,7 +393,7 @@ impl ShellView {
             }
             if scopes_changed {
                 // Report diagnostics for the newly loaded saved scopes.
-                let saved = rebuild_saved_scopes(&self.services.config, true);
+                let saved = rebuild_saved_scopes(&self.services(cx).config, true);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_saved_scopes(saved) {
                         cx.notify();
@@ -390,7 +401,7 @@ impl ShellView {
                 });
             }
             if named_changed {
-                let named = rebuild_named_expressions(&self.services.config);
+                let named = rebuild_named_expressions(&self.services(cx).config);
                 self.frame.update(cx, |f, cx| {
                     if f.replace_named_expressions(named) {
                         cx.notify();

@@ -25,9 +25,7 @@ pub(super) fn draw(cx: &mut gpui::VisualTestContext) {
 }
 
 pub(super) fn focused(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) -> TileId {
-    shell.read_with(cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    })
+    shell.read_with(cx, |s, cx| s.workspace(cx).focused_tile().unwrap())
 }
 
 /// An add through the real key route: the new tile is focused on its first
@@ -75,11 +73,11 @@ fn an_add_that_is_not_focused_on_its_first_render_is_not_launched(cx: &mut gpui:
     vcx.update(|window, cx| {
         shell.update(cx, |s, cx| {
             s.add_tile("rec", AddPlacement::Split(None), None, window, cx);
-            s.services.workspaces.active_mut().focus_main_tile(first);
+            s.with_workspace(cx, |ws| ws.focus_main_tile(first));
         })
     });
     draw(&mut vcx);
-    let tiles = shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 2);
     let second = *tiles.iter().find(|t| **t != first).unwrap();
     assert_eq!(launched(&log, second), 0, "{:?}", log.borrow());
@@ -118,7 +116,7 @@ fn the_focused_tile_hears_set_focused_on_each_change(cx: &mut gpui::TestAppConte
     assert_eq!(focus_told(&log).len(), 3, "an idle render tells nobody");
     vcx.update(|_, cx| {
         shell.update(cx, |s, cx| {
-            s.services.workspaces.active_mut().focus_main_tile(first);
+            s.with_workspace(cx, |ws| ws.focus_main_tile(first));
             cx.notify();
         })
     });
@@ -195,7 +193,7 @@ fn a_launched_tile_keeps_the_keyboard_it_takes(cx: &mut gpui::TestAppContext) {
     draw(&mut vcx);
     draw(&mut vcx);
     let new = focused(&shell, &vcx);
-    let tiles = shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 2, "the pick split");
     let held = vcx.update(|window, cx| {
         input
@@ -289,7 +287,7 @@ fn g_m_lists_the_accepting_kinds_and_a_pick_creates_with_the_context(
     );
     vcx.simulate_keystrokes("enter");
     draw(&mut vcx);
-    let tiles = shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 2, "a pick splits");
     let new = focused(&shell, &vcx);
     let expected = underlying_state("SPX");

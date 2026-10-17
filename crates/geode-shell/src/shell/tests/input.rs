@@ -32,8 +32,13 @@ fn dispatching_three_actions_leaves_their_hashes_in_the_tail_in_order(
         });
     });
 
-    let recorded: Vec<u64> = shell.read_with(&vcx, |s, _| {
-        s.services.action_tail.lock().unwrap().recent().collect()
+    let recorded: Vec<u64> = shell.read_with(&vcx, |s, cx| {
+        s.services(cx)
+            .action_tail
+            .lock()
+            .unwrap()
+            .recent()
+            .collect()
     });
     let expected: Vec<u64> = dispatched.iter().map(|id| fnv1a(id)).collect();
     assert_eq!(
@@ -144,13 +149,7 @@ fn a_pull_from_insert_mode_leaves_the_typing_tile_its_input(cx: &mut gpui::TestA
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .visible_tiles()
-            .len()),
+        shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().visible_tiles().len()),
         1,
         "fixture check: the left tile was pulled in"
     );
@@ -265,9 +264,7 @@ fn the_insert_branch_needs_the_tile_to_hold_focus_not_just_insert_mode(
 /// (a double-click opens the editor on the CLICK, after the mouse-down
 /// has already moved focus).
 fn mouse_down_on_the_rec_tile(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext) {
-    let tile = shell.read_with(vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap().0
-    });
+    let tile = shell.read_with(vcx, |s, cx| s.workspace(cx).focused_tile().unwrap().0);
     let selector: &'static str = Box::leak(format!("tile-content-{tile}").into_boxed_str());
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -372,13 +369,9 @@ fn an_abandoned_editor_in_the_focused_tile_does_not_keep_another_tiles_field_foc
     };
 
     vcx.simulate_keystrokes("ctrl-v");
-    let a = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let a = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     vcx.simulate_keystrokes("ctrl-v");
-    let b = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let b = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(a, b, "fixture check: two tiles");
 
     // `i` in A, `mod+l` (`alt+l` is `workspace::focus_right`), `i` in B.
@@ -399,7 +392,7 @@ fn an_abandoned_editor_in_the_focused_tile_does_not_keep_another_tiles_field_foc
         "fixture check: B's field holds the keyboard"
     );
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.services.workspaces.active().focused_tile()),
+        shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile()),
         Some(b)
     );
 
@@ -408,7 +401,7 @@ fn an_abandoned_editor_in_the_focused_tile_does_not_keep_another_tiles_field_foc
     vcx.simulate_keystrokes("alt-h");
     draw(&mut vcx);
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.services.workspaces.active().focused_tile()),
+        shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile()),
         Some(a),
         "fixture check: the ring moved to A"
     );
@@ -476,14 +469,13 @@ fn a_keyboard_focus_move_hands_the_keyboard_back_to_the_shell(cx: &mut gpui::Tes
     // `workspace::focus_left`, a chord, so it resolves against the whole
     // stack even from inside the editor. It moves focus to the FIRST
     // tile, which is in normal mode — the second one keeps its editor.
-    let editing_tile =
-        shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().focused());
+    let editing_tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().focused());
     vcx.simulate_keystrokes("alt-h");
     vcx.update(|window, cx| {
         let _ = window.draw(cx);
     });
     assert_ne!(
-        shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().focused()),
         editing_tile,
         "fixture check: the focused tile must really have moved"
     );
@@ -533,9 +525,7 @@ fn bare_shell_keys_are_text_in_insert_mode(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services);
     let (shell, _shell_focus) = enter_insert_mode(&window, &mut vcx);
     let tiles = |vcx: &gpui::VisualTestContext| {
-        shell.read_with(vcx, |s, _| {
-            s.services.workspaces.active().tree().tiles().len()
-        })
+        shell.read_with(vcx, |s, cx| s.workspace(cx).tree().tiles().len())
     };
     let before = tiles(&vcx);
 

@@ -52,7 +52,7 @@ fn two_tiles_in(
     let shell = shell_of(&window, &mut vcx);
     add_tile(&mut vcx);
     add_tile(&mut vcx);
-    let tiles = shell.read_with(&vcx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles, vec![TileId(1), TileId(2)]);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     frame.update(&mut vcx, |f, cx| {
@@ -251,9 +251,7 @@ fn a_lane_change_replaces_the_barrier_and_drops_the_keys_it_awaited(cx: &mut gpu
     let (_window, mut vcx, shell, frame) = two_tiles(cx);
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
     add_tile(&mut vcx);
-    let third = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().tree().tiles()[0]
-    });
+    let third = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles()[0]);
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
     settle(&frame, &mut vcx);
 
@@ -307,10 +305,8 @@ fn a_group_change_pending_across_a_workspace_switch_still_flips(cx: &mut gpui::T
     let (_window, mut vcx, shell, frame) = two_tiles(cx);
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
     add_tile(&mut vcx);
-    let hidden = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().tree().tiles()[0]
-    });
-    let ws2 = shell.read_with(&vcx, |s, _| s.active_ix());
+    let hidden = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles()[0]);
+    let ws2 = shell.read_with(&vcx, |s, cx| s.active_ix(cx));
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
     follow(&frame, &mut vcx, hidden, Some(Group::B));
     assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
@@ -374,7 +370,7 @@ fn a_follower_in_a_pinned_workspace_reads_its_group_and_its_own_lane(
     add_tile(&mut vcx);
     let follower = TileId(2);
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
-    let ws2 = shell.read_with(&vcx, |s, _| s.active_ix());
+    let ws2 = shell.read_with(&vcx, |s, cx| s.active_ix(cx));
     assert!(frame.read_with(&vcx, |f, _| f.is_pinned(ws2)));
     let pinned_as_of = AsOf::At(chrono::Utc::now());
     frame.update(&mut vcx, |f, cx| {
@@ -476,10 +472,8 @@ fn a_group_nobody_visible_follows_opens_no_barrier(cx: &mut gpui::TestAppContext
     // A third tile in workspace 2 follows B; workspace 1 is shown.
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
     add_tile(&mut vcx);
-    let hidden = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().tree().tiles()[0]
-    });
-    let ws2 = shell.read_with(&vcx, |s, _| s.active_ix());
+    let hidden = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles()[0]);
+    let ws2 = shell.read_with(&vcx, |s, cx| s.active_ix(cx));
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
     follow(&frame, &mut vcx, hidden, Some(Group::B));
 
@@ -990,9 +984,7 @@ fn closing_an_emitting_tile_removes_its_membership_and_entries(cx: &mut gpui::Te
     let rows = draft();
     let (services, _emitter) = emitting_services(emission_for("SPX.Z", &rows));
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
-    let tile = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     set_emit(&shell, &mut vcx, tile, Some(Group::A));
     assert!(on_board(&frame, &vcx, Group::A, "SPX.Z"));
     let notified = frame_notifications(&frame, &mut vcx);
@@ -1135,9 +1127,7 @@ fn a_closing_follower_hears_closed_before_its_membership_is_dropped(cx: &mut gpu
     let followed_at_close = rec.followed_at_close.clone();
     let log = rec.log.clone();
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services_with_recorders(vec![rec]));
-    let tile = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     set_follow(&shell, &mut vcx, tile, Some(Group::A));
 
     vcx.simulate_keystrokes("ctrl-w");
@@ -1292,9 +1282,7 @@ fn a_duplicated_tile_is_in_no_group(cx: &mut gpui::TestAppContext) {
     draw(&mut vcx);
     vcx.run_until_parked();
 
-    let copy = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let copy = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(copy, tile);
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.occupant_kind(copy)),
@@ -1328,15 +1316,13 @@ fn filling_a_placeholder_drops_the_membership_its_tile_had(cx: &mut gpui::TestAp
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     shell.update(&mut vcx, |s, cx| {
-        s.services
-            .workspaces
-            .split_active(crate::tiling::Orientation::Horizontal);
+        s.with_workspaces(cx, |w| {
+            w.split_active(crate::tiling::Orientation::Horizontal)
+        });
         cx.notify();
     });
     draw(&mut vcx);
-    let tile = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND)
@@ -1755,7 +1741,7 @@ fn a_membership_in_an_inactive_workspace_survives_restore(cx: &mut gpui::TestApp
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
     let frame = frame_of(&shell, &vcx);
-    assert_eq!(shell.read_with(&vcx, |s, _| s.active_ix()), WS1);
+    assert_eq!(shell.read_with(&vcx, |s, cx| s.active_ix(cx)), WS1);
     draw(&mut vcx);
     vcx.run_until_parked();
     draw(&mut vcx);
@@ -1787,8 +1773,8 @@ fn a_membership_in_a_hidden_dock_survives_restore(cx: &mut gpui::TestAppContext)
     let shell = shell_of(&window, &mut vcx);
     let frame = frame_of(&shell, &vcx);
     assert!(
-        shell.read_with(&vcx, |s, _| {
-            let dock = s.services.workspaces.active().docks();
+        shell.read_with(&vcx, |s, cx| {
+            let dock = s.workspace(cx).docks();
             let left = dock.get(crate::tiling::DockSide::Left);
             !left.visible() && left.tree().tiles() == vec![TileId(3)]
         }),
@@ -1862,16 +1848,14 @@ fn the_doors_refuse_a_tile_with_no_occupant(cx: &mut gpui::TestAppContext) {
     let (services, _emitter) = emitting_services(Emission::default());
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     shell.update(&mut vcx, |s, cx| {
-        s.services
-            .workspaces
-            .split_active(crate::tiling::Orientation::Horizontal);
+        s.with_workspaces(cx, |w| {
+            w.split_active(crate::tiling::Orientation::Horizontal)
+        });
         cx.notify();
     });
     draw(&mut vcx);
     vcx.run_until_parked();
-    let placeholder = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let placeholder = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.occupant_kind(placeholder)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND)
@@ -1904,16 +1888,14 @@ fn a_refused_door_logs_the_tile_and_the_reason(cx: &mut gpui::TestAppContext) {
 
     let (_window, mut vcx, shell, _frame) = two_tiles(cx);
     shell.update(&mut vcx, |s, cx| {
-        s.services
-            .workspaces
-            .split_active(crate::tiling::Orientation::Horizontal);
+        s.with_workspaces(cx, |w| {
+            w.split_active(crate::tiling::Orientation::Horizontal)
+        });
         cx.notify();
     });
     draw(&mut vcx);
     vcx.run_until_parked();
-    let placeholder = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let placeholder = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.occupant_kind(placeholder)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND)
@@ -2000,9 +1982,7 @@ fn closing_a_tile_and_reusing_nothing_leaves_no_membership_in_the_session(
     let dir = tempfile::tempdir().unwrap();
     let services = super::session::test_services_with_session(dir.path().join("session.toml"));
     let (_window, mut vcx, shell, _frame) = two_tiles_in(cx, services);
-    let tile = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     set_follow(&shell, &mut vcx, tile, Some(Group::A));
     let text = session_text(&shell, &mut vcx).expect("the baseline");
     assert!(text.contains("follow = \"a\""), "{text}");
@@ -2022,9 +2002,7 @@ fn closing_a_tile_and_reusing_nothing_leaves_no_membership_in_the_session(
 fn closing_an_unlinked_tile_drops_its_pending_notices(cx: &mut gpui::TestAppContext) {
     use crate::frame::TileNotice;
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, test_services());
-    let tile = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     let other = if tile == TileId(1) {
         TileId(2)
     } else {
@@ -2061,9 +2039,7 @@ fn one_tile_in(
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
     add_tile(&mut vcx);
-    let tile = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
         Some("rec")
@@ -2111,7 +2087,7 @@ fn a_link_chip_request_focuses_its_tile_and_opens_the_chooser(cx: &mut gpui::Tes
     draw(&mut vcx);
 
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.services.workspaces.active().focused_tile()),
+        shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile()),
         Some(other),
         "the chip's tile, not {focused:?}"
     );
@@ -2406,15 +2382,13 @@ fn the_chooser_refuses_on_a_placeholder(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, test_services());
     let shell = shell_of(&window, &mut vcx);
     shell.update(&mut vcx, |s, cx| {
-        s.services
-            .workspaces
-            .split_active(crate::tiling::Orientation::Horizontal);
+        s.with_workspaces(cx, |w| {
+            w.split_active(crate::tiling::Orientation::Horizontal)
+        });
         cx.notify();
     });
     draw(&mut vcx);
-    let tile = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND)
@@ -2605,9 +2579,7 @@ fn following(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Option
 
 /// The focused tile of a two-tile shell, and the tile beside it.
 fn focused_and_other(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> (TileId, TileId) {
-    let focused = shell.read_with(vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let focused = shell.read_with(vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     let other = if focused == TileId(1) {
         TileId(2)
     } else {
@@ -2676,7 +2648,7 @@ fn closing_the_focused_follower_hands_the_segment_to_the_next_focused_tile(
     let (_window, mut vcx, shell, frame) = two_tiles(cx);
     add_tile(&mut vcx);
     let focused = |vcx: &gpui::VisualTestContext| {
-        shell.read_with(vcx, |s, _| s.services.workspaces.active().focused_tile())
+        shell.read_with(vcx, |s, cx| s.workspace(cx).focused_tile())
     };
     assert_eq!(focused(&vcx), Some(TileId(3)), "fixture");
     set_follow(&shell, &mut vcx, TileId(3), Some(Group::A));

@@ -198,7 +198,7 @@ pub(super) fn save_prompt(seed: Option<String>) -> NamePrompt {
 /// line when the scope is empty. The caller re-derives and syncs the input.
 pub(super) fn push_save(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     let (empty, seed) = {
-        let frame = shell.target_frame().read(cx);
+        let frame = shell.target_frame(cx).read(cx);
         (
             frame.scope().is_empty(),
             frame.loaded_from().map(str::to_string),
@@ -351,14 +351,14 @@ fn copy_definition(
     cx: &mut Context<ShellView>,
 ) {
     let (doc, source, gone) = doc_of(from);
-    if apply::definition_owner(shell, doc, &name) != Owner::Absent {
+    if apply::definition_owner(shell, doc, &name, cx) != Owner::Absent {
         return set_prompt_error(shell, format!("'{name}' already exists"));
     }
     // Re-read, pending batch included: the row was prepared earlier and the
     // source may have changed or gone since.
     let value = {
-        let pending = apply::config_with_pending(shell);
-        let config = pending.as_ref().unwrap_or(&shell.services.config);
+        let pending = apply::config_with_pending(shell, cx);
+        let config = pending.as_ref().unwrap_or(&shell.services(cx).config);
         config.doc(doc).and_then(|d| d.value.get(source)).cloned()
     };
     let Some(value) = value else {
@@ -395,7 +395,7 @@ pub(super) fn ask_delete(shell: &mut ShellView, id: SavedId, cx: &App) -> Result
         SavedId::Expression(name) => super::saved_view::named_expression_users(shell, name, cx),
         SavedId::Scope(_) => None,
     };
-    let question = match apply::definition_owner(shell, doc, name) {
+    let question = match apply::definition_owner(shell, doc, name, cx) {
         Owner::User { .. } => format!("Delete '{name}' from your config?"),
         Owner::Inherited(layer) => {
             return Err(format!(
@@ -419,9 +419,9 @@ pub(super) fn ask_delete(shell: &mut ShellView, id: SavedId, cx: &App) -> Result
 /// `r` on a Saved row: ask before throwing away the user's copy of a
 /// definition a lower layer also holds; anything else has nothing to
 /// revert.
-pub(super) fn ask_revert(shell: &mut ShellView, id: SavedId) -> Result<(), String> {
+pub(super) fn ask_revert(shell: &mut ShellView, id: SavedId, cx: &App) -> Result<(), String> {
     let (doc, name, _) = doc_of(&id);
-    let Owner::User { over: Some(_) } = apply::definition_owner(shell, doc, name) else {
+    let Owner::User { over: Some(_) } = apply::definition_owner(shell, doc, name, cx) else {
         return Err(format!("'{name}' has no changes of yours to revert"));
     };
     let question = format!("Throw away your changes to '{name}'?");
@@ -444,7 +444,7 @@ pub(super) fn ask_revert(shell: &mut ShellView, id: SavedId) -> Result<(), Strin
 /// cursor stays on a reverted row or moves to the next after a delete.
 fn remove_saved(shell: &mut ShellView, id: &SavedId, revert: bool, cx: &mut Context<ShellView>) {
     let (doc, name, _) = doc_of(id);
-    let still = match apply::definition_owner(shell, doc, name) {
+    let still = match apply::definition_owner(shell, doc, name, cx) {
         Owner::User { over } => !revert || over.is_some(),
         Owner::Absent | Owner::Inherited(_) => false,
     };
@@ -471,7 +471,7 @@ fn name_expression(
     cx: &mut Context<ShellView>,
 ) {
     let doc = geode_core::config::EXPRESSIONS_DOC;
-    if apply::definition_owner(shell, doc, &name) != Owner::Absent {
+    if apply::definition_owner(shell, doc, &name, cx) != Owner::Absent {
         return set_prompt_error(shell, format!("'{name}' already exists"));
     }
     if let Err(refusal) = super::definition::write(shell, &name, text, cx) {
@@ -498,7 +498,7 @@ fn submit_save(
         return save_scope_as(shell, name, window, cx);
     }
     // Pending-aware: a scope saved a moment ago is already the user's.
-    match apply::definition_owner(shell, SCOPES_DOC, &name) {
+    match apply::definition_owner(shell, SCOPES_DOC, &name, cx) {
         Owner::User { .. } => {
             if let Some(state) = shell.scope_dialog.as_mut() {
                 state.pending = Some(Pending {
@@ -538,7 +538,7 @@ fn answer_pending(
 /// included), is exactly the lane's scope: the test the title's `from
 /// <name>` uses.
 fn saved_unchanged(shell: &ShellView, name: &str, cx: &App) -> bool {
-    let frame = shell.target_frame().read(cx);
+    let frame = shell.target_frame(cx).read(cx);
     frame.saved_scopes().get(name) == Some(frame.scope())
 }
 
@@ -553,7 +553,7 @@ fn save_scope_as(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let scope = shell.target_frame().read(cx).scope().clone();
+    let scope = shell.target_frame(cx).read(cx).scope().clone();
     if scope.is_empty() {
         return set_prompt_error(shell, NOTHING_TO_SAVE.into());
     }

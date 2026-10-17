@@ -14,7 +14,7 @@ fn chrome_paints_quads_even_with_no_tiles_open(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -44,7 +44,7 @@ fn escape_in_the_filter_input_returns_focus_to_the_shell_root(cx: &mut gpui::Tes
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -105,7 +105,7 @@ fn shell_chords_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppCont
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -133,9 +133,7 @@ fn shell_chords_fire_while_the_filter_input_has_focus(cx: &mut gpui::TestAppCont
 
     cx.simulate_keystrokes("ctrl-h");
 
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count, 1,
         "ctrl+h (the test layer's tile::add_rec_vertical) must dispatch \
@@ -153,7 +151,7 @@ fn all_shell_dialogs_share_the_same_top_edge(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -251,7 +249,7 @@ fn settings_open_opens_the_modal(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -289,9 +287,7 @@ fn settings_open_opens_the_modal(cx: &mut gpui::TestAppContext) {
 
     // The workspace itself must stay untouched — settings::open is not
     // a workspace verb and must not be mistaken for one.
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(tile_count, 0);
 
     cx.update(|window, cx| {
@@ -326,7 +322,7 @@ fn mod_comma_keystroke_opens_the_settings_modal(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -364,7 +360,7 @@ fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -394,9 +390,7 @@ fn modal_open_swallows_shell_chords(cx: &mut gpui::TestAppContext) {
     );
 
     cx.simulate_keystrokes("ctrl-v");
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count, 0,
         "ctrl+v (the test layer's tile::add_rec_horizontal) must not reach \
@@ -429,7 +423,7 @@ fn escape_keystroke_closes_the_modal(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -523,8 +517,8 @@ fn slash_enters_settings_filter_mode_and_typing_narrows(cx: &mut gpui::TestAppCo
     let (query, visible) = shell.read_with(&cx, |s, cx| {
         let state = s.settings.as_ref().unwrap();
         let rows = settings_view::derive_rows(
-            &s.services.theme.names(),
-            s.services.theme.active_name(),
+            &s.services(cx).theme.names(),
+            s.services(cx).theme.active_name(),
             s.font_size,
             s.find_style,
             s.line_numbers,
@@ -736,7 +730,7 @@ fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
     cx: &mut gpui::TestAppContext,
 ) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    let before = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    let before = shell.read_with(&cx, |s, cx| s.services(cx).theme.active_name().to_string());
     cx.simulate_keystrokes("i"); // row 0 is Theme
     cx.run_until_parked();
     assert!(shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().choosing()));
@@ -759,7 +753,7 @@ fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
         shell.read_with(&cx, |s, _| s.settings.as_ref().unwrap().mode),
         crate::dialogmode::DialogMode::Normal
     );
-    let after = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    let after = shell.read_with(&cx, |s, cx| s.services(cx).theme.active_name().to_string());
     assert_eq!(after, "Gruvbox Dark");
     assert_ne!(before, after);
     assert!(
@@ -779,7 +773,7 @@ fn i_on_the_theme_row_opens_a_typeahead_and_enter_applies_the_lit_theme(
 #[gpui::test]
 fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    let before = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    let before = shell.read_with(&cx, |s, cx| s.services(cx).theme.active_name().to_string());
 
     cx.simulate_keystrokes("i"); // row 0 is Theme
     cx.run_until_parked();
@@ -803,7 +797,7 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
 
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    let after = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    let after = shell.read_with(&cx, |s, cx| s.services(cx).theme.active_name().to_string());
     assert_eq!(
         after, before,
         "enter on the row it opened on must leave the theme untouched"
@@ -812,7 +806,7 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
 
     // Enter picks the highlighted row. Move down once and check that the theme
     // following `before` in `names()` order is applied.
-    let names = shell.read_with(&cx, |s, _| s.services.theme.names());
+    let names = shell.read_with(&cx, |s, cx| s.services(cx).theme.names());
     let before_ix = names.iter().position(|n| n == &before).unwrap();
     let expected_next = names[before_ix + 1].clone();
 
@@ -822,7 +816,7 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
     cx.run_until_parked();
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
-    let final_theme = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    let final_theme = shell.read_with(&cx, |s, cx| s.services(cx).theme.active_name().to_string());
     assert_eq!(
         final_theme, expected_next,
         "enter picked the row a step down lit, not the top-ranked match"
@@ -836,7 +830,7 @@ fn i_then_enter_on_the_theme_row_leaves_the_theme_alone(cx: &mut gpui::TestAppCo
 #[gpui::test]
 fn the_choice_list_paints_every_option_in_a_scrolling_viewport(cx: &mut gpui::TestAppContext) {
     let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-    let names = shell.read_with(&cx, |s, _| s.services.theme.names().to_vec());
+    let names = shell.read_with(&cx, |s, cx| s.services(cx).theme.names().to_vec());
     assert!(names.len() > 12, "the fixture needs more themes than fit");
     cx.simulate_keystrokes("i"); // Theme
     cx.run_until_parked();
@@ -860,7 +854,7 @@ fn the_choice_list_paints_every_option_in_a_scrolling_viewport(cx: &mut gpui::Te
         first
     );
     // `down` past the fold: the lit row is scrolled into the viewport.
-    let active = shell.read_with(&cx, |s, _| s.services.theme.active_name().to_string());
+    let active = shell.read_with(&cx, |s, cx| s.services(cx).theme.active_name().to_string());
     let active_ix = names.iter().position(|n| n == &active).unwrap();
     let target_ix = (active_ix + 20) % names.len();
     for _ in 0..20 {
@@ -1231,14 +1225,14 @@ fn tab_and_shift_tab_step_the_selected_value(cx: &mut gpui::TestAppContext) {
 fn tab_steps_every_remaining_apply_setting_arm(cx: &mut gpui::TestAppContext) {
     {
         let (shell, mut cx) = dialog_test_shell(cx, "settings::open");
-        let before = shell.read_with(&cx, |shell, _| {
-            shell.services.theme.active_name().to_string()
+        let before = shell.read_with(&cx, |shell, cx| {
+            shell.services(cx).theme.active_name().to_string()
         });
         cx.simulate_keystrokes("/");
         cx.simulate_input("theme");
         cx.simulate_keystrokes("tab");
-        let after = shell.read_with(&cx, |shell, _| {
-            shell.services.theme.active_name().to_string()
+        let after = shell.read_with(&cx, |shell, cx| {
+            shell.services(cx).theme.active_name().to_string()
         });
         assert_ne!(
             after, before,
@@ -1363,7 +1357,7 @@ fn backdrop_click_closes_the_modal(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1419,7 +1413,7 @@ fn panel_click_does_not_close_the_modal(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1487,7 +1481,7 @@ fn settings_content_paints_with_a_meaningful_height(cx: &mut gpui::TestAppContex
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1554,7 +1548,7 @@ fn settings_dialog_theme_setter_applies_live_through_theme_service(cx: &mut gpui
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1580,8 +1574,8 @@ fn settings_dialog_theme_setter_applies_live_through_theme_service(cx: &mut gpui
     // which has its own direct coverage in `theme.rs`'s own tests.
     cx.update(|_window, cx| settings_view::set_theme(&shell, "Gruvbox Light", cx));
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
+        shell.read_with(&cx, |shell, cx| shell
+            .services(cx)
             .theme
             .active_name()
             .to_string()),
@@ -1604,7 +1598,7 @@ fn set_font_size_applies_the_rem_size_on_the_next_render(cx: &mut gpui::TestAppC
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1661,7 +1655,7 @@ fn ctrl_equals_and_minus_step_the_font_size_with_clamping(cx: &mut gpui::TestApp
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1740,7 +1734,7 @@ fn a_configured_font_size_applies_from_the_first_render(cx: &mut gpui::TestAppCo
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                let view = view_for_test(services, None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1772,7 +1766,7 @@ fn set_find_style_updates_the_shell_state(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1825,7 +1819,7 @@ fn a_configured_find_style_resolves_at_startup_and_on_reload(cx: &mut gpui::Test
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                let view = view_for_test(services, None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -2339,9 +2333,7 @@ fn modal_open_through_the_utility_clears_a_pending_sequence(cx: &mut gpui::TestA
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
-                });
+                let view = view_for_test(test_services_with_gg_binding(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -2414,7 +2406,7 @@ fn open_shell_dialog_closes_an_open_palette(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -2681,7 +2673,7 @@ fn chrome_and_dialog_rows_follow_the_font_size(cx: &mut gpui::TestAppContext) {
             h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
         };
         let shell = shell.read(app);
-        let workspace = shell.services.workspaces.active();
+        let workspace = shell.workspace(app);
         let focused = workspace.tree().focused().expect("a focused tile");
         let (tree_area, _) = crate::tiling::dock_layout(workspace.docks(), area);
         let r = workspace

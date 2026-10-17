@@ -231,7 +231,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(chosen) = self.services.roster.actions().get(action).cloned() else {
+        let Some(chosen) = self.services(cx).roster.actions().get(action).cloned() else {
             return;
         };
         let mut acx = ActionCx {
@@ -260,7 +260,7 @@ impl ShellView {
         if self.modal_open() {
             return;
         }
-        let rows = menu_rows(&context, &self.services.roster, &self.text_dims);
+        let rows = menu_rows(&context, &self.services(cx).roster, &self.text_dims);
         if rows.is_empty() {
             self.notice = Some(NO_ROW_ACTIONS.into());
             cx.notify();
@@ -274,7 +274,7 @@ impl ShellView {
         // it, so this is the only record of whether the field did.
         let return_to_filter = !by_pointer && self.filter_field_focused(window, cx);
         self.row_menu = Some(RowMenu {
-            menu: Menu::new(rows, self.services.keymap.bindings()),
+            menu: Menu::new(rows, self.services(cx).keymap.bindings()),
             context,
             at,
             return_to_filter,
@@ -406,14 +406,14 @@ impl MenuHost for ShellView {
         match pick {
             RowPick::Open { kind } => {
                 let state = self
-                    .services
+                    .services(cx)
                     .roster
                     .factory(kind)
                     .and_then(|f| f.launch_state(&open.context));
                 self.add_tile(kind, AddPlacement::Split(None), state, window, cx);
             }
             RowPick::Action { index } => {
-                let Some(action) = self.services.roster.actions().get(index).cloned() else {
+                let Some(action) = self.services(cx).roster.actions().get(index).cloned() else {
                     return;
                 };
                 let mut acx = ActionCx {

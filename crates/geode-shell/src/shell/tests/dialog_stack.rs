@@ -282,8 +282,12 @@ fn opens_dialog_matches_what_dispatch_pushes(cx: &mut gpui::TestAppContext) {
     ];
     let (window, mut vcx) = open_shell(cx, super::picker::services_with_pickable());
     let shell = shell_of(&window, &mut vcx);
-    let ids: Vec<crate::actions::ActionId> = shell.read_with(&vcx, |s, _| {
-        s.services.registry.iter().map(|d| d.id.clone()).collect()
+    let ids: Vec<crate::actions::ActionId> = shell.read_with(&vcx, |s, cx| {
+        s.services(cx)
+            .registry
+            .iter()
+            .map(|d| d.id.clone())
+            .collect()
     });
     let mut wrong = Vec::new();
     for id in ids {

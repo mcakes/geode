@@ -33,8 +33,7 @@ pub(super) fn stacked_shell(
         });
         let _ = window.draw(cx);
     });
-    let tiles: Vec<TileId> =
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles: Vec<TileId> = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 3, "{tiles:?}");
     (cx, shell, log, tiles[0], tiles[1], tiles[2])
 }
@@ -84,7 +83,7 @@ fn mod_bracket_cycles_and_the_ring_follows(cx: &mut gpui::TestAppContext) {
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(right)
     );
     assert!(
@@ -103,7 +102,7 @@ fn mod_bracket_cycles_and_the_ring_follows(cx: &mut gpui::TestAppContext) {
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(top)
     );
     // A cycle changes which member is ACTIVE, never a member's own
@@ -163,7 +162,7 @@ fn a_count_prefix_steps_n_members(cx: &mut gpui::TestAppContext) {
         });
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(top)
     );
     let _ = right;
@@ -200,9 +199,7 @@ fn a_stack_verb_on_a_plain_tile_leaves_a_notice_the_next_action_clears(
 fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, log, left, right, top) = stacked_shell(cx);
     let visible = |cx: &gpui::VisualTestContext| {
-        shell.read_with(cx, |s, _| {
-            s.services.workspaces.active().tree().visible_tiles()
-        })
+        shell.read_with(cx, |s, cx| s.workspace(cx).tree().visible_tiles())
     };
     // The fixture's own adds dirtied the session; only the chord may now.
     // A fixed add direction makes the orientation independent of the
@@ -217,10 +214,8 @@ fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::T
     });
     assert_eq!(visible(&cx), vec![left, right, top], "every member painted");
     let rect = |id: TileId| {
-        shell.read_with(&cx, |s, _| {
-            s.services
-                .workspaces
-                .active()
+        shell.read_with(&cx, |s, cx| {
+            s.workspace(cx)
                 .tree()
                 .layout(crate::tiling::Rect::UNIT)
                 .into_iter()
@@ -237,7 +232,7 @@ fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::T
     assert_eq!(stack_events(&log, top).last(), Some(&None));
     assert!(shell.read_with(&cx, |s, _| s.session_dirty));
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile()),
         Some(top)
     );
 
@@ -300,7 +295,7 @@ fn unstack_pops_the_focused_member_out_and_the_survivors_are_re_notified(
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.stack_position(top)),
+        shell.read_with(&cx, |s, cx| s.workspaces(cx).stack_position(top)),
         None
     );
     assert_eq!(stack_events(&log, top).last(), Some(&None));
@@ -310,13 +305,7 @@ fn unstack_pops_the_focused_member_out_and_the_survivors_are_re_notified(
         "a one-member stack collapsed"
     );
     assert_eq!(
-        shell.read_with(&cx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .visible_tiles()
-            .len()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().visible_tiles().len()),
         3
     );
 }
@@ -383,7 +372,7 @@ fn stack_pick_opens_the_list_highlighting_the_active_member(cx: &mut gpui::TestA
 fn a_digit_enter_and_escape_do_what_the_spec_says(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _log, _left, right, top) = stacked_shell(cx);
     let focused = |cx: &gpui::VisualTestContext| {
-        shell.read_with(cx, |s, _| s.services.workspaces.active().tree().focused())
+        shell.read_with(cx, |s, cx| s.workspace(cx).tree().focused())
     };
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
@@ -433,7 +422,7 @@ fn a_row_click_activates_and_a_click_outside_closes(cx: &mut gpui::TestAppContex
     let row = cx.debug_bounds("stack-list-row-0").unwrap();
     cx.simulate_click(row.center(), gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(right)
     );
     assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
@@ -451,7 +440,7 @@ fn a_row_click_activates_and_a_click_outside_closes(cx: &mut gpui::TestAppContex
     );
     assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(right),
         "an outside click changes nothing"
     );
@@ -474,7 +463,7 @@ fn the_handle_opens_the_list_on_its_own_tile_and_ctrl_k_closes_it(cx: &mut gpui:
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(right)
     );
     assert_eq!(
@@ -529,7 +518,7 @@ fn the_list_takes_the_keyboard_from_the_scope_bar(cx: &mut gpui::TestAppContext)
     );
     cx.simulate_keystrokes("1");
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(right)
     );
     assert!(shell.read_with(&cx, |s, _| s.stack_list.is_none()));
@@ -551,7 +540,7 @@ fn a_chord_falls_through_the_list_to_the_matcher(cx: &mut gpui::TestAppContext) 
         "the chord fell through to the matcher, whose dispatch closed the list"
     );
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(top),
         "nothing was activated"
     );
@@ -577,10 +566,10 @@ fn a_stacked_add_on_a_placeholder_or_empty_region_fills_or_roots_like_a_split(
         });
         let _ = window.draw(cx);
     });
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 1, "empty region: the tile is the root");
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.stack_position(tiles[0])),
+        shell.read_with(&cx, |s, cx| s.workspaces(cx).stack_position(tiles[0])),
         None
     );
     assert!(
@@ -607,12 +596,12 @@ fn a_stacked_add_on_a_member_lands_after_it(cx: &mut gpui::TestAppContext) {
         });
         let _ = window.draw(cx);
     });
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 4);
     let new = tiles[2];
     assert_eq!(&tiles[1..], &[right, new, top]);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(new)
     );
 }
@@ -624,10 +613,10 @@ fn a_centre_drop_across_regions_stacks_into_the_targets_dock(cx: &mut gpui::Test
     let (mut cx, shell) = dock_test_shell(cx);
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-v");
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     let (a, b) = (tiles[0], tiles[1]);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().focused()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().focused()),
         Some(b),
         "the second add focused the new tile"
     );
@@ -644,10 +633,10 @@ fn a_centre_drop_across_regions_stacks_into_the_targets_dock(cx: &mut gpui::Test
     cx.simulate_mouse_move(drop, gpui::MouseButton::Left, gpui::Modifiers::none());
     cx.simulate_mouse_up(drop, gpui::MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.stack_position(a)),
+        shell.read_with(&cx, |s, cx| s.workspaces(cx).stack_position(a)),
         Some((2, 2))
     );
-    assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().is_empty()));
+    assert!(shell.read_with(&cx, |s, cx| s.workspace(cx).tree().is_empty()));
 }
 
 /// Placeholder occupants paint the stack marker on the active member only. Build both
