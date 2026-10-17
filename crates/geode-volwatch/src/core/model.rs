@@ -758,9 +758,10 @@ fn source_line(row: &Row, clock: &Clock) -> String {
 /// The cursor row's band: the fixed-delta surface over `tenors` (a tenor
 /// the surface lacks shows dashes), heat-tinted over one range for the
 /// whole table; the three one-year sparks and their captions; the context
-/// pairs. A row the surface lacks is all dashes.
+/// pairs. A row the surface lacks is all dashes. A stale row's band keeps
+/// its tone and colors like its grid row; the name and the header's
+/// surface run carry the staleness.
 pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock) -> BandModel {
-    let stale = is_stale(row, i.now, i.stale_after);
     let read = |m: &Measure| -> Option<&Cell> {
         if row.present {
             cell(row, m, i.asked)
@@ -825,7 +826,7 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
                             } else {
                                 Glyph::None
                             },
-                            muted: stale,
+                            muted: false,
                         }
                     }
                     None => blank(id(t, col)),
@@ -840,7 +841,7 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
                         value: Some(v),
                         sign: f.sign,
                         glyph: Glyph::None,
-                        muted: stale,
+                        muted: false,
                     }
                 }
                 None => blank(id(t, BAND_IDS[5])),
@@ -858,7 +859,7 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
                         } else {
                             Glyph::None
                         },
-                        muted: stale || i.board_lookback != i.shown,
+                        muted: i.board_lookback != i.shown,
                     }
                 }
                 None => blank(id(t, BAND_IDS[6])),
@@ -885,7 +886,7 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
                 mark: None,
                 end_dot: true,
             },
-            muted: stale,
+            muted: false,
         })
     });
     let [atfm, skew3m, _] = band_sparks();
@@ -1744,6 +1745,34 @@ mod tests {
         with_vega.vega = Some(-312_000.0);
         let b = prepare_band(&i, &with_vega, &listed, &clock_utc());
         assert_eq!(b.context[2].1.as_ref(), "-312k");
+    }
+
+    /// The band follows the grid: a stale row's surface, skew, delta chip
+    /// and sparks keep their tone; only a lookback mismatch mutes the chip.
+    #[test]
+    fn a_stale_rows_band_keeps_its_cells_tone() {
+        let listed = tenors();
+        let (asked, rows) = band_row(&listed, true);
+        let mut i = inputs(&rows, View::Changes);
+        i.asked = &asked;
+        i.stale_after = Duration::from_secs(60);
+        assert!(prepare(&i).rows[0].stale, "the fixture row is an hour old");
+        let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
+        let three_m = &b.surface[2].1;
+        assert!(matches!(three_m[2].glyph, Glyph::Heat(Some(_))));
+        assert!(!three_m[2].muted, "a heat tint keeps its tone");
+        assert!(!three_m[5].muted, "the skew keeps its tone");
+        assert!(matches!(three_m[6].glyph, Glyph::Chip(_)));
+        assert!(!three_m[6].muted, "the delta chip keeps its color");
+        let spark = b.sparks[0].as_ref().expect("the ATFM spark");
+        assert!(!spark.muted, "a spark keeps its tone");
+        i.shown = Lookback::W1;
+        let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
+        assert!(
+            b.surface[2].1[6].muted,
+            "a chip from another lookback still paints muted"
+        );
+        assert!(!b.surface[2].1[2].muted);
     }
 
     #[test]

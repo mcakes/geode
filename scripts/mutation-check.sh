@@ -42477,6 +42477,19 @@ run_mutation "volwatch: the default stale threshold is a day" \
   geode-volwatch \
   the_default_stale_threshold_is_a_day
 
+# The band follows the grid: a stale row's band cells keep their tone, or
+# the owner sees a grey band under a colored row.
+run_mutation "volwatch: a stale row's band keeps its tone" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                end_dot: true,
+            },
+            muted: false,' \
+  '                end_dot: true,
+            },
+            muted: is_stale(row, i.now, i.stale_after),' \
+  geode-volwatch \
+  a_stale_rows_band_keeps_its_cells_tone
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
