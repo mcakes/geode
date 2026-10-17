@@ -7466,9 +7466,9 @@ run_mutation "shell page: close leaves focus on the hidden page" \
   crates/geode-shell/src/shell/page.rs \
   '        page.occupant.content.set_visible(false, cx);
         self.focus_handle.focus(window, cx);
-        self.session_dirty = true;' \
+        self.mark_session_dirty(cx);' \
   '        page.occupant.content.set_visible(false, cx);
-        self.session_dirty = true;' \
+        self.mark_session_dirty(cx);' \
   geode-shell \
   toggle_opens_then_closes_the_page_and_announces_visibility
 
@@ -9723,9 +9723,9 @@ run_mutation "fullscreen: a docked tile is refused, not redirected to the main t
   '        if !self.with_workspace(cx, |ws| ws.focus_main_tile(id)) {
             return false;
         }
-        self.session_dirty = true;' \
+        self.mark_session_dirty(cx);' \
   '        let _ = self.with_workspace(cx, |ws| ws.focus_main_tile(id));
-        self.session_dirty = true;' \
+        self.mark_session_dirty(cx);' \
   geode-shell mod_double_click_on_a_docked_tile_changes_nothing
 
 # Order in the tree-tile listener: the fullscreen door must run AHEAD of
@@ -17812,7 +17812,7 @@ run_mutation "stack split: takes the add direction" \
 run_mutation "stack split: dirties the session" \
   crates/geode-shell/src/shell/input.rs \
   '            if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {
-                self.session_dirty = true;' \
+                self.mark_session_dirty(cx);' \
   '            if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {' \
   geode-shell \
   mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
@@ -17820,7 +17820,7 @@ run_mutation "stack split: dirties the session" \
 run_mutation "stack pull: dirties the session" \
   crates/geode-shell/src/shell/input.rs \
   '            if self.with_workspace(cx, |ws| ws.pull(dir)) {
-                self.session_dirty = true;' \
+                self.mark_session_dirty(cx);' \
   '            if self.with_workspace(cx, |ws| ws.pull(dir)) {' \
   geode-shell \
   mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back
@@ -20155,11 +20155,11 @@ run_mutation "tilepicker: focus_empty_dock refuses an occupied dock" \
 # The empty dock hint's double-click opens the picker.
 run_mutation "tilepicker: the empty dock hint's double-click opens the picker" \
   crates/geode-shell/src/shell/drag.rs \
-  '            self.session_dirty = true;
+  '            self.mark_session_dirty(cx);
             cx.notify();
         }
         self.try_pick_on_double_click(event, window, cx);' \
-  '            self.session_dirty = true;
+  '            self.mark_session_dirty(cx);
             cx.notify();
         }' \
   geode-shell \
@@ -25617,11 +25617,11 @@ run_mutation "quit: the data hook stops the service without flushing sheets" \
   geode-app quitting_saves_every_unsaved_sheet_before_the_data_service_stops
 
 # Closing the window saves the session while the window still exists: the
-# quit hook's walk of the open windows finds none after a close.
+# quit hook that follows a close finds no live window and writes nothing.
 run_mutation "close: the should-close hook saves no session" \
   crates/geode-app/src/bridge.rs \
-  '                shell.read(cx).save_session(cx);' \
-  '                let _ = &shell;' \
+  '            app.read(cx).save_session(cx);' \
+  '            let _ = &app;' \
   geode-app closing_the_window_saves_the_session_and_lets_the_close_proceed
 
 # Closing the window queues every unsaved sheet ahead of the service's stop.
@@ -35476,7 +35476,7 @@ run_mutation "chrome rows: palette row click passes the item index" \
 # it leaves the item just chosen where it was.
 run_mutation "chrome rows: palette open ignores recorded usage" \
   crates/geode-shell/src/shell/palette_ctl.rs \
-  $'            &self.palette_usage,\n            unix_now(),' \
+  $'            self.app.read(cx).palette_usage(),\n            unix_now(),' \
   $'            &crate::palette_usage::PaletteUsage::new(),\n            unix_now(),' \
   geode-shell \
   a_dispatched_item_leads_the_next_palette_open
@@ -37588,7 +37588,7 @@ run_mutation "close: the pointer route records the action" \
 run_mutation "close: a pointer close dirties the session" \
   crates/geode-shell/src/shell/occupants.rs \
   '        if self.with_workspace(cx, |ws| ws.close_tile_id(tile)) {
-            self.session_dirty = true;' \
+            self.mark_session_dirty(cx);' \
   '        if self.with_workspace(cx, |ws| ws.close_tile_id(tile)) {' \
   geode-shell the_close_button_closes_its_own_tile_and_keeps_focus
 

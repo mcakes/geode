@@ -106,8 +106,10 @@ pub struct ShellServices {
     /// The modules the app compiled in; the shell creates tile
     /// occupants through it and never names a module crate.
     pub roster: ModuleRoster,
-    /// Module names and state from `session.toml`, consumed as the shell
-    /// creates occupants. Unavailable kinds retain their records separately.
+    /// Module names and state from `session.toml`. `ShellApp::new` parks
+    /// them; a window drains the ones it hosts at construction
+    /// (`ShellApp::take_parked_records`) and consumes each as it creates
+    /// the occupant. Unavailable kinds retain their records separately.
     pub restored_tiles: crate::session::TileRecords,
     /// Optional scope, grouping slot, and as-of from `[frame]`.
     /// `ShellApp::new` applies them and clears scope undo/redo history.
@@ -122,7 +124,7 @@ pub struct ShellServices {
     pub restored_links: crate::session::GroupScopes,
     /// The palette's usage history from `session.toml`'s `[palette.usage]`
     /// table — empty for a fresh session and in every test setup that
-    /// doesn't opt in. `ShellView::new` takes it as the live history.
+    /// doesn't opt in. `ShellApp::new` takes it as the live history.
     pub restored_palette_usage: crate::palette_usage::PaletteUsage,
     /// Optional logging services: the diagnostics ring, runtime level control,
     /// and startup levels. The palette updates levels through this control.
@@ -478,21 +480,9 @@ pub struct ShellView {
     focus_handle: FocusHandle,
     /// State for the open command palette, or `None`. Each open rebuilds the
     /// registry/keymap/theme snapshot and reverse binding index; closing drops
-    /// it. Usage history persists separately in `palette_usage`.
+    /// it. Usage history is the app's (`ShellApp::palette_usage`), shared
+    /// by every window and persisted with the session.
     palette: Option<PaletteState>,
-    /// How often and how recently each palette row was chosen
-    /// (`crate::palette_usage`): read once per palette open to rank the
-    /// rows (`PaletteState::with_usage`), written by every palette
-    /// dispatch but `palette::toggle`'s own row, and persisted as
-    /// `session.toml`'s `[palette.usage]` table through the same
-    /// coalesced flush the layout rides.
-    palette_usage: crate::palette_usage::PaletteUsage,
-    /// Bumped by every `palette_usage` mutation; `take_dirty_session_write`
-    /// compares it against `last_palette_usage_written`, the same shape
-    /// as `last_frame_generation_written`, so a palette dispatch that
-    /// mutates nothing else still reaches the flush.
-    palette_usage_version: u64,
-    last_palette_usage_written: u64,
     /// Open modals, bottom first. Only the last entry paints and receives keys;
     /// the rest keep their state and reappear when everything above them pops.
     /// Installed through `dialog::open_shell_dialog`. Dialog-specific data and
@@ -554,30 +544,6 @@ pub struct ShellView {
     /// `services.keymap` are replaced. Config dialog rows derived from either are
     /// keyed by it (`crate::prepared`).
     config_revision: u64,
-    /// Layout changes awaiting snapshot extraction. The periodic watcher
-    /// clears this flag before serialization and writes in the background;
-    /// it is not a record of whether the disk write succeeded.
-    session_dirty: bool,
-    /// Tile records from the last successfully serialized periodic snapshot,
-    /// initially empty. Compared every tick to catch module-only state changes.
-    /// Updated before disk I/O; a failed write does not reset this baseline.
-    last_tiles_written: crate::session::TileRecords,
-    /// Page records from the last successfully serialized periodic snapshot,
-    /// initially empty. Compared every tick like `last_tiles_written`, since
-    /// a page's state changes do not set the layout flag.
-    last_pages_written: crate::session::PageRecords,
-    /// The frame's generation counter captured by the last successfully
-    /// serialized periodic snapshot, initially zero. Every scope, grouping,
-    /// as-of, pin, and unpin change in any lane advances it, so it detects
-    /// frame-only changes; updated before the disk write completes.
-    last_frame_generation_written: u64,
-    /// The last periodic snapshot handed to the writer, as text WITHOUT the
-    /// link groups' scopes (`[links]`); `None` before the first. A group's
-    /// scope moves with an emitting tile's cursor and advances the frame
-    /// generation, so a dirty check can produce a snapshot that differs
-    /// from the last only there; that snapshot is not written. The file's
-    /// text carries the groups' scopes whenever a snapshot is written.
-    last_session_text: Option<String>,
     /// Deferred focus restoration for paths without a `Window`, such as hot
     /// reload closing the palette. `render` consumes it before painting. Waiting
     /// for a key event is unsafe: dropping a focused overlay can leave no live
@@ -665,8 +631,9 @@ pub struct ShellView {
     /// by `add_tile`. `ensure_occupants` consumes each request at that tile on
     /// the next render; simultaneous requests cannot replace one another.
     pending_tiles: BTreeMap<TileId, PendingTile>,
-    /// Session tile records not yet consumed by an occupant, taken out of
-    /// the services at construction: a restore input, not a shared
+    /// Session tile records not yet consumed by an occupant, drained from
+    /// the app's parked records at construction
+    /// (`ShellApp::take_parked_records`): a restore input, not a shared
     /// service, so creating an occupant during render reads nothing
     /// through the app entity's writer.
     restored_tiles: crate::session::TileRecords,
@@ -1127,7 +1094,9 @@ impl ShellView {
                 && (view.tile_drag.is_some() || view.divider_drag.is_some())
             {
                 view.cancel_tile_drag();
-                view.cancel_divider_drag();
+                if view.cancel_divider_drag() {
+                    view.mark_session_dirty(cx);
+                }
                 cx.notify();
             }
         })
@@ -1136,6 +1105,10 @@ impl ShellView {
         // Seed the config snapshot on the background executor. Directory scans
         // perform filesystem I/O and must not run during UI construction.
         let poll_window = window.window_handle();
+        // The session snapshot is taken through the app entity directly,
+        // never from inside this view's own update: the app reads every
+        // registered view's records, this one included.
+        let session_app = app.clone();
         cx.spawn(async move |this, cx| {
             let mut is_first_poll = true;
             let mut memory = crate::memory::MemoryTracker::new();
@@ -1224,12 +1197,10 @@ impl ShellView {
                 // Extract session state on the UI thread and await its write on the
                 // background executor. Run before config-scan early returns so saving
                 // does not depend on a config change. Write failures are logged without
-                // restoring the snapshot's dirty flag or comparison baselines.
-                let Ok(pending_write) =
-                    this.update(cx, |view, cx| view.take_dirty_session_write(cx))
-                else {
-                    return; // window/entity gone; stop polling
-                };
+                // restoring the snapshot's dirty flag or comparison baselines. The
+                // snapshot is the app's: one writer over every window's records.
+                let pending_write =
+                    session_app.update(cx, |app, cx| app.take_dirty_session_write(cx));
                 if let Some((path, text)) = pending_write {
                     cx.background_executor()
                         .spawn(async move { session::write_atomic(&path, &text) })
@@ -1365,7 +1336,6 @@ impl ShellView {
         })
         .detach();
 
-        let palette_usage = app.read(cx).services.restored_palette_usage.clone();
         // A restored tile is in its link groups before its occupant exists,
         // so the first query it sends is already scoped by the group it
         // follows. Two conditions, each for a tile that will never have a
@@ -1376,11 +1346,12 @@ impl ShellView {
         // the layout's healing left behind gets no occupant at all.
         // Nothing is notified. A membership moves no lane version and no
         // group's scope generation, so it is not a flip either.
-        // The restore inputs become this view's own (see the fields' docs);
-        // the services keep none of them after this.
+        // The restore inputs become this view's own (see the fields' docs):
+        // the tile records the app parked for this window, and the page
+        // tables, which the services keep none of after this.
         let (restored_tiles, restored_pages) = app.update(cx, |app, _| {
             (
-                std::mem::take(&mut app.services.restored_tiles),
+                app.take_parked_records(key),
                 std::mem::take(&mut app.services.restored_pages),
             )
         });
@@ -1466,7 +1437,10 @@ impl ShellView {
         let expr_vocab = std::rc::Rc::new(expr_vocab(&services.config));
         let page_entries: Vec<crate::module::PageEntry> = services.pages.entries().collect();
 
-        Self {
+        // Registered with the app below, once the view is whole: the
+        // session writer asks every registered view for its records.
+        let weak = cx.weak_entity();
+        let view = Self {
             app,
             key,
             matcher: Matcher::default(),
@@ -1474,9 +1448,6 @@ impl ShellView {
             find_style,
             focus_handle,
             palette: None,
-            palette_usage,
-            palette_usage_version: 0,
-            last_palette_usage_written: 0,
             modals: Vec::new(),
             keybindings: None,
             keybindings_scroll: ScrollHandle::new(),
@@ -1494,11 +1465,6 @@ impl ShellView {
             last_reload: reload::ReloadOutcome::Unchanged,
             reload_status: None,
             config_revision: 0,
-            session_dirty: false,
-            last_tiles_written: crate::session::TileRecords::new(),
-            last_pages_written: crate::session::PageRecords::new(),
-            last_frame_generation_written: 0,
-            last_session_text: None,
             pending_focus_restore: false,
             swallow_double_click_followup: false,
             overlay_return_to_filter: false,
@@ -1567,7 +1533,9 @@ impl ShellView {
             config_write_seq: 0,
             config_write_error: None,
             today: clock.today(chrono::Utc::now()),
-        }
+        };
+        view.app.update(cx, |app, _| app.register_view(key, weak));
+        view
     }
 
     /// Close the live (topmost) modal: clear only its kind's state, then give the
@@ -1981,6 +1949,14 @@ impl ShellView {
         f: impl FnOnce(&mut ShellServices) -> R,
     ) -> R {
         self.app.update(cx, |app, _| f(&mut app.services))
+    }
+
+    /// A layout change in this window awaits the app's next periodic
+    /// snapshot. An event, dispatch or constructor path only: the draw
+    /// pass never updates the app entity, so a render-time cancellation
+    /// defers its mark (`render.rs`).
+    pub(crate) fn mark_session_dirty(&self, cx: &mut App) {
+        self.app.update(cx, |app, _| app.mark_session_dirty());
     }
 
     pub(crate) fn workspaces<'a>(&self, cx: &'a App) -> &'a Workspaces {

@@ -267,7 +267,7 @@ impl ShellView {
             let n = i64::from(count.unwrap_or(1).max(1));
             let delta = if action.0 == "stack::next" { n } else { -n };
             if self.with_workspace(cx, |ws| ws.stack_step(delta)) {
-                self.session_dirty = true;
+                self.mark_session_dirty(cx);
                 self.note_keyboard_focus_move(window, cx);
             } else {
                 self.notice = Some(NOT_IN_A_STACK.into());
@@ -282,7 +282,7 @@ impl ShellView {
                 .focused_tile_rect(super::render::content_area(window));
             let orientation = self.add_direction.resolve(None, rect);
             if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {
-                self.session_dirty = true;
+                self.mark_session_dirty(cx);
                 self.note_keyboard_focus_move(window, cx);
             } else {
                 self.notice = Some(NOT_IN_A_STACK.into());
@@ -293,7 +293,7 @@ impl ShellView {
             // Focus stays on its tile; the pulled one is hidden, and the
             // occupant sync delivers both tiles' new stack positions.
             if self.with_workspace(cx, |ws| ws.pull(dir)) {
-                self.session_dirty = true;
+                self.mark_session_dirty(cx);
             } else {
                 self.notice = Some(NO_TILE_THAT_WAY.into());
             }
@@ -305,7 +305,7 @@ impl ShellView {
                 .focused_tile_rect(super::render::content_area(window));
             let orientation = self.add_direction.resolve(None, rect);
             if self.with_workspace(cx, |ws| ws.unstack_focused(orientation)) {
-                self.session_dirty = true;
+                self.mark_session_dirty(cx);
                 self.note_keyboard_focus_move(window, cx);
             } else {
                 self.notice = Some(NOT_IN_A_STACK.into());
@@ -324,7 +324,7 @@ impl ShellView {
         let before = self.active_ix(cx);
         let handled = self.with_workspaces(cx, |w| apply_workspace_action(w, action));
         if handled {
-            self.session_dirty = true;
+            self.mark_session_dirty(cx);
             // A switch shows another workspace's lane: the flip baseline and
             // the scope field must follow it before anything reads them.
             if self.active_ix(cx) != before {
@@ -1168,7 +1168,9 @@ impl ShellView {
             && (self.tile_drag.is_some() || self.divider_drag.is_some())
         {
             self.cancel_tile_drag();
-            self.cancel_divider_drag();
+            if self.cancel_divider_drag() {
+                self.mark_session_dirty(cx);
+            }
             cx.notify();
             return;
         }

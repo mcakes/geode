@@ -81,7 +81,9 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.update(&mut cx, |s, _| s.session_dirty = false);
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, _| a.session_dirty = false)
+    });
     cx.update(|window, cx| {
         window.dispatch_event(
             gpui::PlatformInput::MouseDown(MouseDownEvent {
@@ -124,7 +126,7 @@ fn double_clicking_a_placeholder_opens_the_picker_and_a_pick_fills_it(
     // can hide an accidental call to `focus_main_tile`, but its session-dirty
     // side effect remains observable even when the tile was already focused.
     assert!(
-        !shell.read_with(&cx, |s, _| s.session_dirty),
+        !shell.read_with(&cx, |s, cx| s.app().read(cx).session_dirty),
         "opening the picker is not a workspace-mutating dispatch"
     );
 
@@ -480,7 +482,9 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
         shell.read_with(&cx, |s, cx| s.workspace(cx).region()),
         crate::tiling::FocusRegion::Main
     );
-    shell.update(&mut cx, |s, _| s.session_dirty = false);
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     let hint = cx
         .debug_bounds("dock-empty-hint-left")
@@ -497,7 +501,7 @@ fn clicking_an_empty_dock_focuses_it_and_double_clicking_adds_into_it(
         "a single click opens nothing"
     );
     assert!(
-        shell.read_with(&cx, |s, _| s.session_dirty),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).session_dirty),
         "a region change persists"
     );
 

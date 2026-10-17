@@ -36,7 +36,7 @@ use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::{
-    DIAGNOSTICS_KEY, REFERENCE_KEY, ShellEvent, ShellView, is_shell_key, is_watchlist_key,
+    DIAGNOSTICS_KEY, REFERENCE_KEY, ShellApp, ShellEvent, ShellView, is_shell_key, is_watchlist_key,
 };
 use geode_shell::vimfind::FindStyle;
 use geode_watchlist::{WatchlistConfig, WatchlistFactory};
@@ -1011,27 +1011,26 @@ pub fn stop_at_quit(bridge: &Bridge, cx: &mut App) {
 /// `QuitMode::LastWindowClosed` the app quits after it.
 ///
 /// The quit hooks cannot do this for a window close: gpui removes the
-/// window before it quits, so the session hook's walk of `cx.windows()`
-/// finds nothing. They still run afterwards: the session hook saves
-/// nothing, and the sheet flush finds no dirty sheet, so nothing is done
-/// twice. On an explicit application quit (Dock Quit, logout) no
-/// should-close runs and the quit hooks do the work alone.
+/// window before it quits, and the window's occupants go with it. They
+/// still run afterwards: the session hook asks the app, which writes
+/// nothing without a live window (`ShellApp::save_session`), and the sheet
+/// flush finds no dirty sheet, so nothing is done twice. On an explicit
+/// application quit (Dock Quit, logout) no should-close runs and the quit
+/// hooks do the work alone.
 ///
 /// The platform keeps one should-close callback per window, so this
 /// replaces any earlier one; neither gpui-component's `Root` nor its
 /// `TitleBar` registers one.
-pub fn save_on_close(window: WindowHandle<Root>, bridge: Option<&Bridge>, cx: &mut App) {
-    let shell = window
-        .read(cx)
-        .ok()
-        .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
-        .map(|shell| shell.downgrade());
+pub fn save_on_close(
+    window: WindowHandle<Root>,
+    app: Entity<ShellApp>,
+    bridge: Option<&Bridge>,
+    cx: &mut App,
+) {
     let pricer = bridge.map(|bridge| Rc::clone(&bridge.pricer));
     let _ = window.update(cx, |_, window, cx| {
         window.on_window_should_close(cx, move |_window, cx| {
-            if let Some(shell) = shell.as_ref().and_then(|shell| shell.upgrade()) {
-                shell.read(cx).save_session(cx);
-            }
+            app.read(cx).save_session(cx);
             if let Some(factory) = &pricer {
                 factory.flush_all(cx);
             }
@@ -2406,6 +2405,19 @@ role = "key"
             })
         })
         .unwrap()
+    }
+
+    /// The app behind `window`'s shell, as `main` holds it for the hooks.
+    fn app_of(window: WindowHandle<Root>, cx: &mut gpui::TestAppContext) -> Entity<ShellApp> {
+        cx.update(|cx| {
+            let root = window.read(cx).expect("the window is open");
+            let shell = root
+                .view()
+                .clone()
+                .downcast::<ShellView>()
+                .expect("the root view is the shell");
+            shell.read(cx).app().clone()
+        })
     }
 
     fn test_pricer(handle: &DataHandle) -> Rc<PricerFactory> {
@@ -6893,7 +6905,8 @@ grain = "underlying"
         let db = dir.path().join("geode.duckdb");
         let (bridge, window, tiles) =
             open_app_with_a_pricer_tile(cx, sources(), db.clone(), "book");
-        cx.update(|cx| save_on_close(window, Some(&bridge), cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| save_on_close(window, app, Some(&bridge), cx));
         {
             let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
             vcx.update(|window, cx| {
@@ -6920,8 +6933,8 @@ grain = "underlying"
 
     /// Closing the window saves the session through the should-close hook,
     /// while the window is still among the app's windows, and lets the
-    /// close proceed. Without it the quit hook, which walks `cx.windows()`,
-    /// would find no window: gpui removes it before quitting.
+    /// close proceed. Without it the quit hook would find no live window
+    /// and write nothing: gpui removes the window before quitting.
     #[gpui::test]
     fn closing_the_window_saves_the_session_and_lets_the_close_proceed(
         cx: &mut gpui::TestAppContext,
@@ -6931,7 +6944,8 @@ grain = "underlying"
         let (mut services, _log) = test_shell_services_with_rec_roster();
         services.session_path = Some(path.clone());
         let window = open_test_window(cx, services);
-        cx.update(|cx| save_on_close(window, None, cx));
+        let app = app_of(window, cx);
+        cx.update(|cx| save_on_close(window, app, None, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()

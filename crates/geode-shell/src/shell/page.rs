@@ -116,7 +116,7 @@ impl ShellView {
         // for a keyboard open (the flag is per event and only mouse handling
         // reads it).
         window.prevent_default();
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         cx.notify();
     }
 
@@ -130,7 +130,7 @@ impl ShellView {
         page.open = false;
         page.occupant.content.set_visible(false, cx);
         self.focus_handle.focus(window, cx);
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         cx.notify();
     }
 

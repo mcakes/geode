@@ -182,21 +182,20 @@ fn main() {
             // state.
             restore_session(&mut services);
 
+            // The app-level owner of the services: built once, before any
+            // window, and read by every window's `ShellView` through its key.
+            // It is also the session's owner and its one writer.
+            let app = cx.new(|cx| ShellApp::new(services, desk, user, cx));
+
             // Save current session state synchronously at quit, including changes
             // since the last periodic snapshot. This is best-effort and does not
             // join any in-flight periodic session write; their renames may race.
             // A window close has already removed the window by the time this
-            // runs, so `bridge::save_on_close` saves for that route.
-            cx.on_app_quit(|cx| {
-                for window in cx.windows() {
-                    if let Some(handle) = window.downcast::<Root>() {
-                        let _ = handle.update(cx, |root, _window, cx| {
-                            if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
-                                shell.read(cx).save_session(cx);
-                            }
-                        });
-                    }
-                }
+            // runs: `bridge::save_on_close` saves for that route, and the app
+            // writes nothing without a live window (`ShellApp::save_session`).
+            let quit_app = app.clone();
+            cx.on_app_quit(move |cx| {
+                quit_app.read(cx).save_session(cx);
                 async {}
             })
             .detach();
@@ -224,16 +223,13 @@ fn main() {
                 .detach();
             }
 
-            // The app-level owner of the services: built once, before any
-            // window, and read by every window's `ShellView` through its key.
-            let app = cx.new(|cx| ShellApp::new(services, desk, user, cx));
             cx.spawn(async move |cx| {
                 // The shell toolbar owns title-bar controls and drag gestures. Use the
                 // matching window options when creating its native window.
                 let window = cx
                     .open_window(TitleBar::window_options(), |window, cx| {
                         let key = app.update(cx, |app, _| app.register_window());
-                        let view = cx.new(|cx| ShellView::new(app, key, window, cx));
+                        let view = cx.new(|cx| ShellView::new(app.clone(), key, window, cx));
                         cx.new(|cx| Root::new(view, window, cx))
                     })
                     .expect("failed to open window");
@@ -247,7 +243,7 @@ fn main() {
                 // Save the session and unsaved sheets when the window closes,
                 // while it still exists; the quit hooks above cover an
                 // explicit application quit (Dock Quit, logout).
-                cx.update(|cx| bridge::save_on_close(window, bridge.as_ref(), cx));
+                cx.update(|cx| bridge::save_on_close(window, app, bridge.as_ref(), cx));
 
                 // Refresh diagnostic configuration independently of the data bridge.
                 // The frame's config counter changes on every applied reload, including
@@ -1918,7 +1914,7 @@ label = "skew"
             Some("guide")
         );
         vcx.simulate_keystrokes("]");
-        shell.read_with(&vcx, |s, cx| s.save_session(cx));
+        shell.read_with(&vcx, |s, cx| s.app().read(cx).save_session(cx));
         let saved: toml::Table = std::fs::read_to_string(user.path().join("session.toml"))
             .unwrap()
             .parse()
@@ -2135,7 +2131,7 @@ label = "skew"
             shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
             Some(geode_shell::module::placeholder::PLACEHOLDER_KIND)
         );
-        shell.read_with(&vcx, |s, cx| s.save_session(cx));
+        shell.read_with(&vcx, |s, cx| s.app().read(cx).save_session(cx));
         assert_eq!(
             session::load(&path).tiles.get(&1).map(|r| r.kind.as_str()),
             Some("cvi"),

@@ -529,9 +529,7 @@ fn a_group_scope_change_writes_no_session_file(cx: &mut gpui::TestAppContext) {
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     follow(&frame, &mut vcx, TileId(1), Some(Group::A));
     assert!(
-        shell
-            .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
-            .is_some(),
+        shell.take_dirty_session_write(&mut vcx).is_some(),
         "the baseline: the layout and the follow are written once"
     );
 
@@ -542,9 +540,7 @@ fn a_group_scope_change_writes_no_session_file(cx: &mut gpui::TestAppContext) {
         });
         vcx.run_until_parked();
         assert!(
-            shell
-                .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
-                .is_none(),
+            shell.take_dirty_session_write(&mut vcx).is_none(),
             "a group's scope alone writes nothing ({u})"
         );
     }
@@ -860,9 +856,7 @@ fn a_changed_draft_is_one_board_write_and_no_session_write(cx: &mut gpui::TestAp
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     set_emit(&shell, &mut vcx, TileId(1), Some(Group::A));
     assert!(
-        shell
-            .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
-            .is_some(),
+        shell.take_dirty_session_write(&mut vcx).is_some(),
         "the baseline"
     );
     let counters = |vcx: &gpui::VisualTestContext| {
@@ -890,9 +884,7 @@ fn a_changed_draft_is_one_board_write_and_no_session_write(cx: &mut gpui::TestAp
         "a repeated pull is no write"
     );
     assert!(
-        shell
-            .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut vcx).is_none(),
         "neither a group's scope nor a draft on its board is session state"
     );
 }
@@ -1397,9 +1389,7 @@ fn frame_of(shell: &Entity<ShellView>, vcx: &gpui::VisualTestContext) -> Entity<
 
 /// The next periodic session snapshot's text, if one is due.
 fn session_text(shell: &Entity<ShellView>, vcx: &mut gpui::VisualTestContext) -> Option<String> {
-    shell
-        .update(vcx, |s, cx| s.take_dirty_session_write(cx))
-        .map(|(_, text)| text)
+    shell.take_dirty_session_write(vcx).map(|(_, text)| text)
 }
 
 /// A follower's first query is scoped by its group. A membership applied
@@ -1538,7 +1528,7 @@ fn save_session_writes_the_groups_scopes(cx: &mut gpui::TestAppContext) {
     vcx.run_until_parked();
     assert!(session_text(&shell, &mut vcx).is_none(), "nothing periodic");
 
-    shell.read_with(&vcx, |s, cx| s.save_session(cx));
+    shell.read_with(&vcx, |s, cx| s.app().read(cx).save_session(cx));
 
     let restored = crate::session::load(&path);
     assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);

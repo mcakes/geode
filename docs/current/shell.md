@@ -14,9 +14,9 @@ data handle while receiving only shell concepts such as `TileId`, `Frame`, and
 
 `ShellView` is the retained GPUI entity for one window. It owns transient
 window state: the active workspace, tile occupants, focus restoration,
-palette, modal, command line, drag state, and session dirt. Its `render`
-method describes the current frame; it must not become a second domain model
-or perform blocking work.
+palette, modal, command line, and drag state. Its `render` method describes
+the current frame; it must not become a second domain model or perform
+blocking work.
 
 `ShellApp` is the one app-level entity behind every window. It owns
 `ShellServices` (config, the action registry, the keymap, the theme, the
@@ -30,6 +30,23 @@ accessors and never updates the app entity: the session-restore inputs
 (`restored_tiles`, `restored_pages`) are taken into the view at construction,
 and the rosters hand out shared factory handles, so creating an occupant or a
 page holds no borrow of the services while `create` runs.
+
+`ShellApp` also owns the session: the dirty flag, the baselines the periodic
+writer compares against, the palette's usage history, and the tile records
+no window has taken (`parked_tiles`, seeded from the restored session; a
+window drains them at construction through `take_parked_records`, every
+record while there is one window). Each `ShellView` registers itself with
+the app at the end of its constructor (`register_view`, a weak handle), and
+the app's writer unions every live view's records (`ShellView::current_tiles`:
+its non-placeholder occupants, then its own unplaced records) with the parked
+ones, earlier sources winning an id; page records are each view's, a later
+view winning a kind. A window marks the session dirty through
+`ShellView::mark_session_dirty`, which updates the app entity, so it is
+called from event, dispatch and constructor paths only; the one render-time
+case, a divider drag cancelled because an overlay, page, fullscreen or
+workspace switch hid its boundary, defers the mark to the effects that flush
+after the draw. The palette records a chosen row the same way
+(`ShellApp::note_palette_use`).
 
 `ShellApp` also creates the shared `Frame` and the `Diagnostics` entities
 (`frame()`, `diagnostics()`) and applies the session's restored frame state to
@@ -1588,17 +1605,22 @@ not read as a change and opens no flip.
 
 ### Saving and failure behavior
 
-Workspace actions mark layout state dirty and return without session file I/O.
-The shared reload watcher checks for a session snapshot on its 500 ms tick,
-before any configuration-scan early return. It also compares serialized module
-state, the frame's generation counter, and palette usage versions, so those
-changes can trigger a save independently of layout dirt. This is periodic
-coalescing, not a timer reset after each action; other work adds to the
-interval. A link group's scope moves with an emitter's cursor and advances
-the frame's generation each time, so the snapshot is compared, as text
-without the `links` tables, with the last one extracted, and an equal one is
-not written again. A group's scope alone therefore never causes a write; the
-text handed to the file includes the `links` tables whenever one is written.
+Workspace actions mark the app's layout state dirty and return without
+session file I/O. The writer is the app's (`ShellApp::take_dirty_session_write`,
+`ShellApp::save_session`): one snapshot over every live window's records and
+the parked ones, whichever window's loop asks for it. The shared reload
+watcher checks for a session snapshot on its 500 ms tick, before any
+configuration-scan early return, through the app entity rather than from
+inside its own view's update, since the app reads that view's records. It
+also compares serialized module state, the frame's generation counter, and
+palette usage versions, so those changes can trigger a save independently of
+layout dirt. This is periodic coalescing, not a timer reset after each
+action; other work adds to the interval. A link group's scope moves with an
+emitter's cursor and advances the frame's generation each time, so the
+snapshot is compared, as text without the `links` tables, with the last one
+extracted, and an equal one is not written again. A group's scope alone
+therefore never causes a write; the text handed to the file includes the
+`links` tables whenever one is written.
 
 Snapshot collection and TOML serialization run on the UI thread. The watcher
 awaits the file write on the background executor before continuing its loop.
@@ -1612,12 +1634,14 @@ The session is saved synchronously, regardless of dirty flags and with the
 link groups' scopes included, both when the window closes and when the
 application quits. Closing the window quits Geode on every platform
 (`QuitMode::LastWindowClosed`). gpui removes a closing window before it runs
-the quit hooks, so the quit hook's walk of the open windows would find
-nothing; the app's should-close hook on the main window
-(`bridge::save_on_close`) saves the session while the window still exists,
-then lets the close proceed. On an explicit application quit (Dock Quit,
-logout) no should-close runs and the quit hook saves alone. After a window
-close the quit hook still runs, but finds no window and saves nothing, so the
+the quit hooks, and the window's occupants go with it, so a snapshot taken
+then would replace their records with placeholders: `ShellApp::save_session`
+writes nothing while no window is live. The app's should-close hook on the
+main window (`bridge::save_on_close`) saves the session while the window
+still exists, then lets the close proceed. On an explicit application quit
+(Dock Quit, logout) no should-close runs and the quit hook, which holds the
+app entity, saves alone with the windows still open. After a window close
+the quit hook still runs, finds no live window and saves nothing, so the
 session is written once.
 
 Limit: on Linux with client-drawn decorations, gpui-component's `TitleBar`

@@ -164,7 +164,7 @@ fn the_session_snapshot_carries_the_lanes_provenance(cx: &mut gpui::TestAppConte
     let shell = shell_of(&window, &mut vcx);
     let frame = shell.read_with(&vcx, |s, _| s.frame().clone());
     // Baseline: whatever startup left dirty is written first.
-    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+    let _ = shell.take_dirty_session_write(&mut vcx);
 
     frame.update(&mut vcx, |f, cx| {
         f.shared_mut().load_scope("eu").unwrap();
@@ -173,7 +173,7 @@ fn the_session_snapshot_carries_the_lanes_provenance(cx: &mut gpui::TestAppConte
     vcx.run_until_parked();
 
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("a load dirties the session");
     assert!(text.contains("loaded_from = \"eu\""), "{text}");
 }

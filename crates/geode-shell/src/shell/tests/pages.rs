@@ -2,8 +2,8 @@
 //! visibility announcements, and the insert-mode route for page inputs.
 
 use super::{
-    dispatch_action, open_shell, services_with_page, services_with_recorders, shell_of, with_page,
-    with_pages,
+    SessionWriteExt as _, dispatch_action, open_shell, services_with_page, services_with_recorders,
+    shell_of, with_page, with_pages,
 };
 use crate::actions::ActionId;
 use crate::module::recording::{PageRecorded, RecordingPageFactory};
@@ -714,14 +714,14 @@ fn page_table(key: &str, value: &str) -> toml::Table {
 /// Point the flush at a path (it never writes; the snapshot is returned) and
 /// force one flush so the baselines are clean.
 fn arm_session_flush(shell: &gpui::Entity<ShellView>, cx: &mut gpui::VisualTestContext) -> String {
+    shell.update(cx, |s, cx| {
+        s.with_services(cx, |s| {
+            s.session_path = Some(std::path::PathBuf::from("/nonexistent/session.toml"));
+        });
+        s.mark_session_dirty(cx);
+    });
     shell
-        .update(cx, |s, cx| {
-            s.with_services(cx, |s| {
-                s.session_path = Some(std::path::PathBuf::from("/nonexistent/session.toml"));
-            });
-            s.session_dirty = true;
-            s.take_dirty_session_write(cx)
-        })
+        .take_dirty_session_write(cx)
         .expect("the layout flag forces a flush")
         .1
 }
@@ -754,17 +754,13 @@ fn a_page_state_change_alone_flushes_once_and_is_quiet_afterwards(cx: &mut gpui:
     let text = arm_session_flush(&shell, &mut cx);
     assert!(!text.contains("[pages"), "no page created, nothing written");
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
-    let (_, text) = shell
-        .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
-        .unwrap();
+    let (_, text) = shell.take_dirty_session_write(&mut cx).unwrap();
     assert!(
         text.contains("[pages.diagnostics]") && text.contains("recorded = true"),
         "{text}"
     );
     assert!(
-        shell
-            .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut cx).is_none(),
         "nothing changed: nothing written"
     );
     // The page's state moves without any shell action, so no layout flag
@@ -772,17 +768,13 @@ fn a_page_state_change_alone_flushes_once_and_is_quiet_afterwards(cx: &mut gpui:
     serialized
         .borrow_mut()
         .insert("section".into(), toml::Value::String("log".into()));
+    shell.read_with(&cx, |s, cx| assert!(!s.app().read(cx).session_dirty));
     let (_, text) = shell
-        .update(&mut cx, |s, cx| {
-            assert!(!s.session_dirty);
-            s.take_dirty_session_write(cx)
-        })
+        .take_dirty_session_write(&mut cx)
         .expect("a page-state-only change flushes");
     assert!(text.contains("section = \"log\""), "{text}");
     assert!(
-        shell
-            .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut cx).is_none(),
         "written once, then quiet"
     );
 }
@@ -806,9 +798,7 @@ fn a_replaced_page_kind_keeps_its_state_through_the_next_flush(cx: &mut gpui::Te
     // A different kind replaces the retained page; its last state is kept.
     dispatch_action(&shell, "page::toggle_other", &mut cx);
     shell.read_with(&cx, |s, _| assert_eq!(s.open_page_kind(), Some("other")));
-    let (_, text) = shell
-        .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
-        .unwrap();
+    let (_, text) = shell.take_dirty_session_write(&mut cx).unwrap();
     assert!(
         text.contains("[pages.diagnostics]") && text.contains("which = \"diagnostics\""),
         "the replaced kind's table survives: {text}"

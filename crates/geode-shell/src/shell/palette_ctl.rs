@@ -41,7 +41,7 @@ impl ShellView {
         );
         self.palette = Some(PaletteState::with_usage(
             items,
-            &self.palette_usage,
+            self.app.read(cx).palette_usage(),
             unix_now(),
         ));
         // Fresh scroll state for a fresh palette session — a stale offset
@@ -103,8 +103,9 @@ impl ShellView {
         // later fails. The toggle row is just dismissal and receives no usage bonus.
         let is_toggle = matches!(item, PaletteItem::Action(id, ..) if id.0 == "palette::toggle");
         if !is_toggle {
-            self.palette_usage.record(&item.usage_key(), unix_now());
-            self.palette_usage_version += 1;
+            let key = item.usage_key();
+            self.app
+                .update(cx, |app, _| app.note_palette_use(&key, unix_now()));
         }
         match item {
             PaletteItem::Action(..) if is_toggle => {}

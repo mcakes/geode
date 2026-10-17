@@ -122,7 +122,7 @@ fn dispatch_marks_the_session_dirty_without_writing_synchronously(cx: &mut gpui:
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
     assert!(
-        shell.read_with(&cx, |shell, _| shell.session_dirty),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "a workspace-mutating dispatch must still mark the session dirty"
     );
 }
@@ -185,7 +185,7 @@ fn dispatch_saves_the_session_and_it_restores_with_safe_tile_ids(cx: &mut gpui::
 
     // Invoke the flush path directly — the same two steps the
     // background watcher's ~500ms tick performs in production.
-    let pending = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let pending = shell.take_dirty_session_write(&mut cx);
     let (path, text) = pending.expect("a dirty session with a configured path must flush");
     session::write_atomic(&path, &text).unwrap();
 
@@ -204,7 +204,7 @@ fn dispatch_saves_the_session_and_it_restores_with_safe_tile_ids(cx: &mut gpui::
         "no *.tmp files should remain in the session directory, found {leftover_tmp_files:?}"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "taking the pending write must clear the dirty flag"
     );
 
@@ -281,23 +281,19 @@ fn take_dirty_session_write_is_none_when_clean(cx: &mut gpui::TestAppContext) {
     });
 
     assert!(
-        shell
-            .update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut cx).is_none(),
         "nothing dirty yet — no pending write"
     );
 
     cx.simulate_keystrokes("ctrl-v");
-    let first = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let first = shell.take_dirty_session_write(&mut cx);
     assert!(
         first.is_some(),
         "the dispatch above must have marked it dirty"
     );
 
     assert!(
-        shell
-            .update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut cx).is_none(),
         "the dirty flag must be consumed by the first take, not left set"
     );
 }
@@ -322,15 +318,13 @@ fn a_module_state_change_alone_flushes_once_with_the_new_state(cx: &mut gpui::Te
     // Drain the layout-dirty write the split above queued, so what
     // follows isolates the state-only trigger from the
     // already-covered layout one.
-    let layout_flush = shell.update(&mut vcx, |shell, cx| shell.take_dirty_session_write(cx));
+    let layout_flush = shell.take_dirty_session_write(&mut vcx);
     assert!(
         layout_flush.is_some(),
         "the split must have marked the layout dirty"
     );
     assert!(
-        shell
-            .update(&mut vcx, |shell, cx| shell.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut vcx).is_none(),
         "nothing changed since that flush — session_dirty is clear and \
          the occupant's state hasn't moved"
     );
@@ -344,7 +338,7 @@ fn a_module_state_change_alone_flushes_once_with_the_new_state(cx: &mut gpui::Te
             .expect("the recorder's command always succeeds");
     });
 
-    let state_flush = shell.update(&mut vcx, |shell, cx| shell.take_dirty_session_write(cx));
+    let state_flush = shell.take_dirty_session_write(&mut vcx);
     let (_, text) = state_flush.expect(
         "a state-only change must still flush — `session_dirty` alone \
          would miss it, which is exactly what this test guards",
@@ -355,9 +349,7 @@ fn a_module_state_change_alone_flushes_once_with_the_new_state(cx: &mut gpui::Te
     );
 
     assert!(
-        shell
-            .update(&mut vcx, |shell, cx| shell.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut vcx).is_none(),
         "the state hasn't changed again since the flush above"
     );
 }
@@ -573,7 +565,7 @@ fn a_restored_frame_applies_to_the_frame_with_clean_history_and_the_first_flush_
         "clear_history must leave no phantom undo entry from applying the restore"
     );
 
-    let pending = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let pending = shell.take_dirty_session_write(&mut cx);
     let (path, text) = pending.expect("the first tick after a restore must flush [frame]");
     session::write_atomic(&path, &text).unwrap();
 
@@ -638,4 +630,57 @@ fn rapid_settings_changes_persist_in_order_without_losing_other_keys(
     assert_eq!(doc["ui"]["find_style"].as_str(), Some("fzf"));
     assert_eq!(doc["ui"]["line_numbers"].as_str(), Some("rel"));
     assert!(doc["timeseries"].get("default_source").is_none());
+}
+
+/// One writer for every window: a save made through the app carries the
+/// live tile of the window that hosts it and a parked record for a tile
+/// no window has an occupant for (here: a tile in workspace 3's tree,
+/// which workspace 1 never paints). The record sits in
+/// `ShellApp::parked_tiles`; the save reaches it through the union of
+/// every live view's records and the parked ones.
+#[gpui::test]
+fn a_session_save_includes_every_window_and_the_parked_records(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut services = services_with_recorder().0;
+    services.session_path = Some(dir.path().join("session.toml"));
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx);
+    // One live tile in window 1.
+    super::occupants::dispatch_and_draw(&s1, &mut vcx, "tile::add_rec");
+    let live = s1.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    // A tile placed in workspace 3's tree, with a parked record for it:
+    // the writer emits only tiles that some tree holds.
+    let parked = vcx.update(|_, cx| {
+        s1.update(cx, |s, cx| {
+            s.with_workspaces(cx, |w| {
+                w.switch(3);
+                let id = w.split_active(crate::tiling::Orientation::Horizontal);
+                w.switch(1);
+                id
+            })
+        })
+    });
+    vcx.update(|_, cx| {
+        app.update(cx, |a, _| {
+            a.parked_tiles.insert(
+                parked.0,
+                session::TileRecord {
+                    kind: "rec".into(),
+                    state: toml::Table::new(),
+                    link: geode_core::link::Membership::default(),
+                },
+            );
+        })
+    });
+    vcx.update(|_, cx| app.read(cx).save_session(cx));
+    let text = std::fs::read_to_string(dir.path().join("session.toml")).unwrap();
+    assert!(
+        text.contains(&format!("[workspaces.1.tiles.{}]", live.0)),
+        "the live occupant's record: {text}"
+    );
+    assert!(
+        text.contains(&format!("tiles.{}]", parked.0)),
+        "the parked record: {text}"
+    );
 }

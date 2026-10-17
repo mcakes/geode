@@ -556,7 +556,7 @@ impl ShellView {
             return;
         }
         if self.with_workspace(cx, |ws| ws.close_tile_id(tile)) {
-            self.session_dirty = true;
+            self.mark_session_dirty(cx);
             self.swallow_double_click_followup = true;
             self.note_keyboard_focus_move(window, cx);
         }
@@ -580,7 +580,7 @@ impl ShellView {
             return false;
         };
         if moved && was_focused != Some(tile) {
-            self.session_dirty = true;
+            self.mark_session_dirty(cx);
         }
         true
     }
@@ -677,7 +677,7 @@ impl ShellView {
             None => false,
         });
         if moved {
-            self.session_dirty = true;
+            self.mark_session_dirty(cx);
             self.note_keyboard_focus_move(window, cx);
         }
         self.close_stack_list(cx);

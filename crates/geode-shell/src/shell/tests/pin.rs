@@ -581,7 +581,7 @@ fn a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it(cx: &mut gpui
     });
     vcx.run_until_parked();
     // Baseline: whatever startup left dirty is written first.
-    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+    let _ = shell.take_dirty_session_write(&mut vcx);
 
     dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
     dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
@@ -594,7 +594,7 @@ fn a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it(cx: &mut gpui
     });
 
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("a pin and a pinned-lane edit dirty the session");
     let restored = crate::session::from_toml(&text.parse().unwrap()).unwrap();
     let record = restored
@@ -610,13 +610,13 @@ fn a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it(cx: &mut gpui
         "the pinned lane's scope is not the shared record's"
     );
 
-    shell.read_with(&vcx, |s, cx| s.save_session(cx));
+    shell.read_with(&vcx, |s, cx| s.app().read(cx).save_session(cx));
     let saved = crate::session::load(&session_path);
     assert_eq!(saved.pinned.get(&ws(2)), Some(record), "the quit save too");
 
     dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("an unpin dirties the session");
     let restored = crate::session::from_toml(&text.parse().unwrap()).unwrap();
     assert!(

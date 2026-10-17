@@ -78,13 +78,15 @@ fn the_close_button_closes_its_own_tile_and_keeps_focus(cx: &mut gpui::TestAppCo
         Some(c),
         "fixture: the split's new tile is focused"
     );
-    shell.update(&mut cx, |s, _| s.session_dirty = false);
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, _| a.session_dirty = false)
+    });
     press(&mut cx, sel(a));
     shell.read_with(&cx, |s, cx| {
         let ws = s.workspace(cx);
         assert!(!ws.tree().contains(a), "the pressed tile closed");
         assert_eq!(ws.focused_tile(), Some(c), "focus stayed");
-        assert!(s.session_dirty);
+        assert!(s.app().read(cx).session_dirty);
     });
 }
 

@@ -53,7 +53,7 @@ impl ShellView {
                     state,
                 },
             );
-            self.session_dirty = true;
+            self.mark_session_dirty(cx);
             cx.notify();
             return;
         }
@@ -67,7 +67,7 @@ impl ShellView {
                     state,
                 },
             );
-            self.session_dirty = true;
+            self.mark_session_dirty(cx);
             cx.notify();
             return;
         }
@@ -91,7 +91,7 @@ impl ShellView {
                 state,
             },
         );
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         cx.notify();
     }
 
@@ -155,7 +155,7 @@ impl ShellView {
                     ws.focus_main_tile(tile);
                 }
             });
-            self.session_dirty = true;
+            self.mark_session_dirty(cx);
             // Release keyboard focus from an occupant when moving to the existing
             // tile, as for directional focus actions.
             self.note_keyboard_focus_move(window, cx);

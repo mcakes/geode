@@ -24,7 +24,7 @@ impl ShellView {
             }
             cx.notify();
         });
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         self.rebind_scope_field(window, cx);
     }
 

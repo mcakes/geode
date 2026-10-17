@@ -1274,9 +1274,11 @@ fn a_palette_dispatch_is_recorded_and_ranks_first_on_the_next_open(cx: &mut gpui
     cx.simulate_keystrokes("enter");
     assert!(shell.read_with(&cx, |shell, _| shell.palette.is_none()));
 
-    let record = shell.read_with(&cx, |shell, _| {
+    let record = shell.read_with(&cx, |shell, cx| {
         shell
-            .palette_usage
+            .app()
+            .read(cx)
+            .palette_usage()
             .get("action:tile::add_rec_vertical")
             .copied()
     });
@@ -1302,7 +1304,9 @@ fn choosing_the_palette_toggle_row_records_nothing(cx: &mut gpui::TestAppContext
         Some("Toggle command palette")
     );
     cx.simulate_keystrokes("enter");
-    assert!(shell.read_with(&cx, |shell, _| shell.palette_usage.is_empty()));
+    assert!(shell.read_with(&cx, |shell, cx| {
+        shell.app().read(cx).palette_usage().is_empty()
+    }));
 }
 
 /// A restored history (`ShellServices::restored_palette_usage`, from
@@ -1331,7 +1335,7 @@ fn a_palette_dispatch_reaches_the_session_flush(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell) =
         open_ranked_shell(cx, super::session::test_services_with_session(session_path));
 
-    let clean = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let clean = shell.take_dirty_session_write(&mut cx);
     assert!(clean.is_none(), "a fresh shell has nothing to flush");
 
     cx.simulate_keystrokes("ctrl-k");
@@ -1342,12 +1346,12 @@ fn a_palette_dispatch_reaches_the_session_flush(cx: &mut gpui::TestAppContext) {
     );
     cx.simulate_keystrokes("enter");
 
-    let pending = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let pending = shell.take_dirty_session_write(&mut cx);
     let (_, text) = pending.expect("a palette dispatch must dirty the session flush");
     assert!(text.contains("[palette.usage"), "{text}");
     assert!(text.contains("\"theme:Gruvbox Dark\""), "{text}");
 
-    let again = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let again = shell.take_dirty_session_write(&mut cx);
     assert!(again.is_none(), "one dispatch flushes once");
 }
 
@@ -1582,7 +1586,7 @@ fn assert_palette_view_is_fresh(shell: &Entity<ShellView>, cx: &gpui::VisualTest
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let mut fresh = PaletteState::with_usage(items, &s.palette_usage, now);
+        let mut fresh = PaletteState::with_usage(items, s.app().read(cx).palette_usage(), now);
         fresh.set_query(open.query());
         let (view, fresh) = (open.view(), fresh.view());
         assert_eq!(view.rows, fresh.rows, "query {:?}", open.query());

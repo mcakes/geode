@@ -123,7 +123,9 @@ fn ctrl_brace_keystroke_moves_the_tile_to_the_left_dock_and_back(cx: &mut gpui::
     });
     // Clear the dirty flag left by the split so the assertion below
     // isolates the dock move's own dirtying.
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     cx.simulate_keystrokes("ctrl-{");
 
@@ -138,7 +140,7 @@ fn ctrl_brace_keystroke_moves_the_tile_to_the_left_dock_and_back(cx: &mut gpui::
             crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left)
         );
         assert!(
-            shell.session_dirty,
+            shell.app().read(cx).session_dirty,
             "a handled dock action must mark the session dirty"
         );
     });
@@ -165,7 +167,9 @@ fn adds_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-{"); // tile → left dock, dock focused
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     cx.simulate_keystrokes("ctrl-v"); // add inside the dock
     shell.read_with(&cx, |shell, cx| {
@@ -182,7 +186,7 @@ fn adds_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
         );
         assert!(ws.tree().is_empty(), "the main tree must stay untouched");
         assert!(
-            shell.session_dirty,
+            shell.app().read(cx).session_dirty,
             "a dock-tree split must mark the session dirty"
         );
     });

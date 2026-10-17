@@ -196,10 +196,14 @@ change most often hits:
   pass would narrow it further and no row could widen it back.
 - A link group's scope is session state (`[links.<letter>]`), restored
   before any membership and before the flip baseline is seeded. The
-  periodic writer compares its snapshot without those tables
-  (`last_session_text` is the links-free text), so a group's scope alone
-  never writes the file; the text it hands to the file, and the quit-time
-  save, include them.
+  periodic writer (`ShellApp`'s, in `shell/session_io.rs`: one snapshot
+  over every live window's records and the app's parked ones) compares its
+  snapshot without those tables (`last_session_text` is the links-free
+  text), so a group's scope alone never writes the file; the text it hands
+  to the file, and the quit-time save, include them.
+- `ShellApp::save_session` writes nothing while no window is live: a closed
+  window's occupants are gone, and the snapshot would replace their records
+  with placeholders. The should-close hook saves while the window stands.
 - Chrome geometry is authored at the `Medium` rem through `scale::design`;
   radii come from the theme.
 - Every gpui-kit and gpui-pre crate is `=`-pinned in the root `Cargo.toml`.

@@ -143,8 +143,13 @@ impl Render for ShellView {
                     .tree()
                     .fullscreen()
                     .is_some()
-        }) {
-            self.cancel_divider_drag();
+        }) && self.cancel_divider_drag()
+        {
+            // The resize already applied must still reach the session, but
+            // render never holds the app entity's writer: the mark runs when
+            // this draw's effects flush, before the watcher's next tick.
+            let app = self.app.clone();
+            cx.defer(move |cx| app.update(cx, |app, _| app.mark_session_dirty()));
         }
 
         // Cancel tile tracking when overlays or a page obscure its targets, the
@@ -1288,7 +1293,7 @@ impl ShellView {
                                     return;
                                 }
                                 if view.with_workspace(cx, |ws| ws.focus_main_tile(id)) {
-                                    view.session_dirty = true;
+                                    view.mark_session_dirty(cx);
                                 }
                                 // An occupant can claim window focus on mouse-down. Re-arm
                                 // restoration so the next render preserves a valid editor or
@@ -1312,7 +1317,7 @@ impl ShellView {
                                 }
                                 view.leave_command_line(window, cx);
                                 if view.with_workspace(cx, |ws| ws.focus_main_tile(id)) {
-                                    view.session_dirty = true;
+                                    view.mark_session_dirty(cx);
                                 }
                                 view.pending_focus_restore = true;
                                 cx.notify();
@@ -1360,7 +1365,7 @@ impl ShellView {
                                         return;
                                     }
                                     if view.with_workspace(cx, |ws| ws.focus_dock_tile(side, id)) {
-                                        view.session_dirty = true;
+                                        view.mark_session_dirty(cx);
                                     }
                                     // Dock occupants can also claim window focus; use the same
                                     // deferred restoration as main-tree clicks.
@@ -1378,7 +1383,7 @@ impl ShellView {
                                     }
                                     view.leave_command_line(window, cx);
                                     if view.with_workspace(cx, |ws| ws.focus_dock_tile(side, id)) {
-                                        view.session_dirty = true;
+                                        view.mark_session_dirty(cx);
                                     }
                                     view.pending_focus_restore = true;
                                     cx.notify();

@@ -96,7 +96,7 @@ fn mod_bracket_cycles_and_the_ring_follows(cx: &mut gpui::TestAppContext) {
             .iter()
             .any(|r| matches!(r, Recorded::Visible(t, false) if *t == top))
     );
-    assert!(shell.read_with(&cx, |s, _| s.session_dirty));
+    assert!(shell.read_with(&cx, |s, cx| s.app().read(cx).session_dirty));
     cx.simulate_keystrokes("alt-[");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -204,8 +204,8 @@ fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::T
     // The fixture's own adds dirtied the session; only the chord may now.
     // A fixed add direction makes the orientation independent of the
     // test window's shape.
-    shell.update(&mut cx, |shell, _| {
-        shell.session_dirty = false;
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false);
         shell.add_direction = crate::tileadd::AddDirection::Vertical;
     });
     cx.simulate_keystrokes("alt-s");
@@ -230,7 +230,7 @@ fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::T
     );
     assert_eq!(stack_events(&log, right).last(), Some(&None));
     assert_eq!(stack_events(&log, top).last(), Some(&None));
-    assert!(shell.read_with(&cx, |s, _| s.session_dirty));
+    assert!(shell.read_with(&cx, |s, cx| s.app().read(cx).session_dirty));
     assert_eq!(
         shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile()),
         Some(top)
@@ -238,7 +238,9 @@ fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::T
 
     // `top` sits below `right`: pulling up puts `right` first in top's
     // slot, and pulling left then puts `left` first again.
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
     cx.simulate_keystrokes("alt-shift-k");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -246,7 +248,7 @@ fn mod_s_splits_the_stack_and_mod_shift_direction_pulls_it_back(cx: &mut gpui::T
     assert_eq!(visible(&cx), vec![left, top]);
     assert_eq!(stack_events(&log, right).last(), Some(&Some((1, 2))));
     assert_eq!(stack_events(&log, top).last(), Some(&Some((2, 2))));
-    assert!(shell.read_with(&cx, |s, _| s.session_dirty));
+    assert!(shell.read_with(&cx, |s, cx| s.app().read(cx).session_dirty));
     cx.simulate_keystrokes("alt-shift-h");
     cx.update(|window, cx| {
         let _ = window.draw(cx);

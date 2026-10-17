@@ -321,7 +321,7 @@ fn the_session_writer_saves_each_lanes_ad_hoc_chain(cx: &mut gpui::TestAppContex
     dispatch_action(&shell, "workspace::switch_2", &mut vcx);
     vcx.run_until_parked();
     // Baseline: whatever startup left dirty is written first.
-    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+    let _ = shell.take_dirty_session_write(&mut vcx);
 
     frame.update(&mut vcx, |f, cx| {
         assert!(f.shared_mut().set_ad_hoc(chain(&["lhu", "book"])));
@@ -332,7 +332,7 @@ fn the_session_writer_saves_each_lanes_ad_hoc_chain(cx: &mut gpui::TestAppContex
     vcx.run_until_parked();
 
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("an ad hoc chain and a pin dirty the session");
     let shared = written_frame(&text, None).expect("[frame] is written");
     assert_eq!(written_chain(&shared), Some(chain(&["lhu", "book"])));
@@ -358,14 +358,14 @@ fn the_session_writer_saves_each_lanes_ad_hoc_chain(cx: &mut gpui::TestAppContex
         cx.notify();
     });
     vcx.run_until_parked();
-    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+    let _ = shell.take_dirty_session_write(&mut vcx);
     frame.update(&mut vcx, |f, cx| {
         assert!(f.shared_mut().forget_ad_hoc());
         cx.notify();
     });
     vcx.run_until_parked();
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("forgetting an inactive chain dirties the session");
     let shared = written_frame(&text, None).expect("[frame] is written");
     assert!(!shared.contains_key("ad_hoc"), "{shared:?}");

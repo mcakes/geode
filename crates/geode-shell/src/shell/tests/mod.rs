@@ -475,6 +475,27 @@ pub(super) fn shell_of(
     })
 }
 
+/// The watcher tick's snapshot step, taken directly on the app behind a
+/// shell — the session's owner and its one writer. Through the app
+/// entity, never from inside the shell's own `update`: the app reads
+/// every registered view's records, that shell's included.
+pub(super) trait SessionWriteExt {
+    fn take_dirty_session_write(
+        &self,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<(PathBuf, String)>;
+}
+
+impl SessionWriteExt for Entity<ShellView> {
+    fn take_dirty_session_write(
+        &self,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<(PathBuf, String)> {
+        let app = self.read_with(cx, |s, _| s.app().clone());
+        app.update(cx, |app, cx| app.take_dirty_session_write(cx))
+    }
+}
+
 /// Dispatch an action through `ShellView::dispatch`, the common path for keymap,
 /// palette, and dialog actions. Tests of palette-only actions can use it to isolate
 /// action handling from palette filtering.

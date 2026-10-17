@@ -118,7 +118,9 @@ impl ShellView {
             return false;
         };
         if epoch != self.workspaces(cx).switch_epoch() {
-            self.cancel_divider_drag();
+            if self.cancel_divider_drag() {
+                self.mark_session_dirty(cx);
+            }
             return false;
         }
         let Some(drag) = &self.divider_drag else {
@@ -146,19 +148,20 @@ impl ShellView {
     /// the dirty flag coalesces onto the watcher's ~500ms background
     /// flush, never a synchronous write on the UI thread.
     pub(super) fn finish_divider_drag(&mut self, cx: &mut Context<Self>) {
-        self.cancel_divider_drag();
+        if self.cancel_divider_drag() {
+            self.mark_session_dirty(cx);
+        }
         cx.notify();
     }
 
-    /// Stop divider tracking while preserving live resizes. Mark the session
-    /// dirty if anything moved. Shared by release and cancellation; callers
+    /// Stop divider tracking while preserving live resizes. Answers whether
+    /// anything moved, which the caller turns into a session-dirty mark on
+    /// its own path: an event path marks at once, the draw pass defers the
+    /// mark (`render.rs`). Shared by release and cancellation; callers
     /// notify when needed, keeping render-time invalidation notify-free.
-    pub(super) fn cancel_divider_drag(&mut self) {
-        if let Some(drag) = self.divider_drag.take()
-            && drag.moved
-        {
-            self.session_dirty = true;
-        }
+    #[must_use = "a moved divider's resize is persisted only when the caller marks the session dirty"]
+    pub(super) fn cancel_divider_drag(&mut self) -> bool {
+        self.divider_drag.take().is_some_and(|drag| drag.moved)
     }
 
     /// Open the tile picker on a bare double-click of the focused placeholder.
@@ -206,7 +209,7 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) {
         if self.with_workspace(cx, |ws| ws.focus_empty_dock(side)) {
-            self.session_dirty = true;
+            self.mark_session_dirty(cx);
             cx.notify();
         }
         self.try_pick_on_double_click(event, window, cx);
@@ -272,7 +275,7 @@ impl ShellView {
         if !self.with_workspace(cx, |ws| ws.focus_main_tile(id)) {
             return false;
         }
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         self.dispatch(
             &crate::actions::ActionId("workspace::fullscreen_tile".into()),
             None,
@@ -370,8 +373,8 @@ impl ShellView {
             self.cancel_tile_drag();
         }
         let heal_divider = self.divider_drag.is_some();
-        if heal_divider {
-            self.cancel_divider_drag();
+        if heal_divider && self.cancel_divider_drag() {
+            self.mark_session_dirty(cx);
         }
         if heal_tile || heal_divider {
             cx.notify();
@@ -428,7 +431,7 @@ impl ShellView {
                 None => false,
             });
             if changed {
-                self.session_dirty = true;
+                self.mark_session_dirty(cx);
             }
         }
         cx.notify();
