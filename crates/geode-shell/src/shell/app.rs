@@ -491,18 +491,26 @@ impl ShellApp {
         self.views.iter().filter_map(|(_, view)| view.upgrade())
     }
 
-    /// Whether the watcher has work left: until the first view registers,
-    /// and then while any registered view's window is still open. The
+    /// The views whose window is still open, in registration order. The
     /// window decides, not the entity: the bridge's closures and the quit
-    /// hooks hold a view past its window, and a tick for a closed window
-    /// would wake its diagnostics and write its session for nobody.
-    pub(super) fn watcher_runs(&self, cx: &App) -> bool {
-        if !self.has_registered_view {
-            return true;
-        }
+    /// hooks hold a view past its window. What the watcher gathers for
+    /// the diagnostics page and whether it ticks at all read this; the
+    /// session union reads [`Self::views`] (see `current_tiles`).
+    pub(super) fn open_views<'a>(
+        &'a self,
+        cx: &'a App,
+    ) -> impl Iterator<Item = Entity<ShellView>> + 'a {
         let open = cx.windows();
         self.views()
-            .any(|view| open.contains(&view.read(cx).window_handle))
+            .filter(move |view| open.contains(&view.read(cx).window_handle))
+    }
+
+    /// Whether the watcher has work left: until the first view registers,
+    /// and then while any registered view's window is still open. A tick
+    /// for a closed window would wake its diagnostics and write its
+    /// session for nobody.
+    pub(super) fn watcher_runs(&self, cx: &App) -> bool {
+        !self.has_registered_view || self.open_views(cx).next().is_some()
     }
 
     /// Hand a window the parked records it should host, removing them
@@ -541,6 +549,10 @@ impl ShellApp {
     /// parked record for the same tile.
     pub(super) fn current_tiles(&self, cx: &App) -> TileRecords {
         let mut tiles = TileRecords::new();
+        // Deliberately every registered view, open window or not: until the
+        // close path parks a closed window's tiles and deregisters its view,
+        // skipping an entity-alive closed view would drop its tiles from the
+        // file.
         for view in self.views() {
             for (id, record) in view.read(cx).current_tiles(cx) {
                 tiles.entry(id).or_insert(record);

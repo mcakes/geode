@@ -7086,6 +7086,12 @@ run_mutation "perf model: a limit just under a petabyte reads as unlimited" \
   'pub const UNLIMITED_LIMIT_BYTES: u64 = (1 << 50) - 1;' \
   geode-diagnostics perf_model_formats_process_memory_and_duckdb_memory_detail
 
+run_mutation "shell: the watcher sums a closed window's histogram" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '        for view in self.open_views(cx) {' \
+  '        for view in self.views() {' \
+  geode-shell the_watcher_sums_only_open_windows_histograms
+
 run_mutation "shell: the reload poll never copies process memory into diagnostics" \
   crates/geode-shell/src/shell/hot_reload.rs \
   '                                if d.refresh_memory(&reading) {' \

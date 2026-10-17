@@ -298,11 +298,13 @@ impl ShellApp {
         .detach();
     }
 
-    /// Every live window's frame-interval histogram, summed: the one
-    /// histogram the diagnostics page shows.
+    /// Every open window's frame-interval histogram, summed: the one
+    /// histogram the diagnostics page shows. A closed window's view, held
+    /// by a host, contributes nothing: its frozen counts would otherwise
+    /// sit in the page for the rest of the run.
     fn frame_histogram(&self, cx: &App) -> FrameHistogram {
         let mut merged = FrameHistogram::new();
-        for view in self.views() {
+        for view in self.open_views(cx) {
             merged.merge(&view.read(cx).perf);
         }
         merged

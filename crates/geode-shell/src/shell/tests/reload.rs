@@ -2054,6 +2054,52 @@ fn the_watcher_ends_when_the_last_window_closes(cx: &mut gpui::TestAppContext) {
     );
 }
 
+/// The diagnostics histogram the tick copies sums only the open windows'
+/// frames. A closed window's view, held by a host as the bridge holds it,
+/// no longer contributes: its frozen counts would otherwise sit in the
+/// page for the rest of the run.
+#[gpui::test]
+fn the_watcher_sums_only_open_windows_histograms(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let (_w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let s2 = shell_of(&_w2, &mut vcx2);
+    // A sample only the second window holds, far above any interval a
+    // test render records (idle gaps from 500 ms are discarded): the
+    // histogram's maximum says whether that window is in the sum.
+    const SECOND_ONLY_MICROS: u64 = 450_000;
+    s1.update(&mut vcx1, |s, _| s.perf.record_micros(1_000));
+    s2.update(&mut vcx2, |s, _| s.perf.record_micros(SECOND_ONLY_MICROS));
+    let diagnostics = app.read_with(&vcx1, |a, _| a.diagnostics().clone());
+    diagnostics.update(&mut vcx1, |d, cx| {
+        d.watch();
+        cx.notify();
+    });
+    let tick = |vcx: &mut gpui::VisualTestContext| {
+        vcx.run_until_parked();
+        vcx.executor().advance_clock(
+            crate::shell::hot_reload::RELOAD_POLL_INTERVAL + std::time::Duration::from_millis(1),
+        );
+        vcx.run_until_parked();
+    };
+    tick(&mut vcx1);
+    assert_eq!(
+        diagnostics.read_with(&vcx1, |d, _| d.frame_hist.max_micros()),
+        SECOND_ONLY_MICROS,
+        "two open windows: both summed"
+    );
+
+    // Close the second window; its view stays alive in `s2`.
+    vcx2.update(|window, _| window.remove_window());
+    tick(&mut vcx1);
+    assert!(
+        diagnostics.read_with(&vcx1, |d, _| d.frame_hist.max_micros()) < SECOND_ONLY_MICROS,
+        "a closed window's frames leave the sum, however long its view lives"
+    );
+    drop(s2);
+}
+
 /// Hot reload splices module fragments back into the rebuilt keymap. The loaded files
 /// alone do not contain them; module bindings must survive any config reload.
 #[gpui::test]
