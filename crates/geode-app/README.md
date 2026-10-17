@@ -2,8 +2,9 @@
 
 The `geode` binary. This is the one crate where everything meets: it
 loads the layered config, builds the action registry and keymap, installs
-logging, spawns the data service, fills the module roster and opens the
-window on `geode_shell::shell::ShellView`.
+logging, spawns the data service, fills the module roster, builds the one
+`geode_shell::shell::ShellApp` and opens the window on a
+`geode_shell::shell::ShellView` over it.
 
 The `guide` tile factory is always registered, independently of data setup.
 It displays the bundled user guide through **Guide: Split** in the palette
@@ -126,9 +127,10 @@ cargo check -p geode-app --features profiling
   with no window). `save_on_close` registers the main window's should-close
   hook, which saves the session and flushes unsaved pricer sheets while the
   window still exists, then lets the close proceed: gpui removes the window
-  before the quit hooks run, so the session quit hook would find none. The
-  quit hooks run after it too: the session hook finds no window and saves
-  nothing, and the sheet flush finds nothing dirty. The real close button is
+  before the quit hooks run, and the window's view with it. The quit hooks
+  run after it too: the session hook asks `ShellApp::save_session`, which
+  writes nothing while no registered view is alive, and the sheet flush
+  finds nothing dirty. The real close button is
   not exercised headlessly; tests reach the hook through
   `VisualTestContext::simulate_close`, which runs only the handler. Also
   untestable headlessly: the quit-mode line (gpui exposes no reader and the

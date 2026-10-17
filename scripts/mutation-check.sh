@@ -7113,6 +7113,38 @@ run_mutation "shell: the watcher ends when the last window closes" \
   '                let Ok(runs) = this.update(cx, |app, cx| app.watcher_runs(cx) || true) else {' \
   geode-shell the_watcher_ends_when_the_last_window_closes
 
+# ---- ShellApp: the one owner behind every window
+
+# One reload for every window: the app advances the one revision both
+# windows read. A revision that stands still leaves every tile on its
+# old config version.
+run_mutation "shell app: a reload advances the one shared revision" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            self.config_revision += 1;' \
+  '            self.config_revision += 0;' \
+  geode-shell \
+  a_reload_applies_once_for_two_windows
+
+# The session union is every registered window's records and then the
+# parked ones; a loop that never runs drops a tile no window has taken
+# from the file.
+run_mutation "shell app: the session union includes parked records" \
+  crates/geode-shell/src/shell/app.rs \
+  '        for (id, record) in &self.parked_tiles {' \
+  '        for (id, record) in self.parked_tiles.iter().take(0) {' \
+  geode-shell \
+  a_session_save_includes_every_window_and_the_parked_records
+
+# gpui removes a closing window before the quit hooks run: a save then,
+# with no live view, would write the layout without the closed window's
+# tile records over the should-close hook's save.
+run_mutation "shell app: save_session writes nothing with no live view" \
+  crates/geode-shell/src/shell/session_io.rs \
+  '        if self.views().next().is_none() {' \
+  '        if false {' \
+  geode-shell \
+  save_session_writes_nothing_with_every_window_closed
+
 run_mutation "catalog: a GiB memory limit reads as GB" \
   crates/geode-data/src/query/catalog.rs \
   '        "gib" => 1024f64.powi(3),' \

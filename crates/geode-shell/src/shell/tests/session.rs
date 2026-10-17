@@ -684,3 +684,35 @@ fn a_session_save_includes_every_window_and_the_parked_records(cx: &mut gpui::Te
         "the parked record: {text}"
     );
 }
+
+/// With every window closed and its view dropped, `save_session` writes
+/// nothing: gpui removes a closing window before the quit hooks run, and a
+/// save then would write the layout without the closed window's tile
+/// records over the should-close hook's save. The sanity save before the
+/// close proves the path is configured and the file is the guard's doing.
+#[gpui::test]
+fn save_session_writes_nothing_with_every_window_closed(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.toml");
+    let mut services = test_services();
+    services.session_path = Some(path.clone());
+    let app = test_app(cx, services, None);
+    let (_window, mut vcx) = open_shell_on(cx, app.clone());
+    vcx.update(|_, cx| app.read(cx).save_session(cx));
+    assert!(path.exists(), "sanity: a save with the window open writes");
+    std::fs::remove_file(&path).unwrap();
+
+    // Nothing here holds the view: the window was its only owner.
+    vcx.update(|window, _| window.remove_window());
+    vcx.run_until_parked();
+    assert!(
+        app.read_with(&vcx, |a, _| a.views().next().is_none()),
+        "sanity: the closed window's view is gone"
+    );
+    app.read_with(&vcx, |a, cx| a.save_session(cx));
+    assert!(
+        !path.exists(),
+        "a save with no live view wrote: {}",
+        std::fs::read_to_string(&path).unwrap_or_default()
+    );
+}

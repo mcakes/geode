@@ -113,10 +113,17 @@ calculator into the process does not let a module call it directly.
 
 The UI thread owns GPUI entities, rendering, input dispatch, and prepared
 presentation. It reads immutable or retained values and never performs data
-I/O. One `ShellApp` entity owns `ShellServices` and the config directories
-for the process; each window contains one `ShellView`, wrapped by
-gpui-component's `Root` for window-level component facilities, which reads
-the services through its app entity and its own `WindowKey`.
+I/O. One `ShellApp` entity is the retained owner for the process: the
+`ShellServices` (config, registry, keymap, theme, rosters and `Workspaces`),
+the config directories, the shared `Frame` and `Diagnostics` entities, the
+session (its dirty flag, baselines, palette usage and parked tile records)
+and its one writer, the app-wide settings and reload state, the six GPUI
+globals, and the one 500 ms watcher loop. Each window contains one
+`ShellView` over that one `ShellApp`, wrapped by gpui-component's `Root` for
+window-level component facilities; the view is one window's transient state,
+reads the owner through `&App` accessors under its own `WindowKey`, and reacts
+to the owner's `ShellEvent`s (a reload, a day change). See
+[state ownership](shell.md#state-ownership).
 
 `DataService` runs on its own thread and accepts bounded, nonblocking requests
 through `DataHandle`. One ingest runner owns the DuckDB writer. A read pool

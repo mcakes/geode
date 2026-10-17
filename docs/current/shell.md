@@ -26,21 +26,36 @@ them through `services(cx)`, `workspaces(cx)`, `workspace(cx)` and
 `config(cx)` and writes them only inside `with_services`, `with_workspaces`
 and `with_workspace`, so a second window sees the same config revision and
 the same tile allocator as the first. Render reads through the `&App`
-accessors and never updates the app entity: the session-restore inputs
-(`restored_tiles`, `restored_pages`) are taken into the view at construction,
-and the rosters hand out shared factory handles, so creating an occupant or a
-page holds no borrow of the services while `create` runs.
+accessors and never updates the app entity; `app.update` runs only on event,
+dispatch, constructor and deferred paths, because an update of the owner from
+inside a window's draw would be a nested update of an entity that window is
+reading. The restore inputs are consumed once, at construction: `ShellApp::new`
+takes the restored tile records into `parked_tiles`, applies the frame,
+pinned-lane and link-scope records and seeds the palette usage, and
+`ShellView::new` takes the parked records (`take_parked_records`) and the
+restored page records out of the app before it creates its occupants, so no
+restore input is read twice or by a second window. The rosters hand out
+module and page factories as `Arc`s, so a factory's `create` runs with no
+lease on the owner.
 
 `ShellApp` also owns the session: the dirty flag, the baselines the periodic
 writer compares against, the palette's usage history, and the tile records
 no window has taken (`parked_tiles`, seeded from the restored session; a
 window drains them at construction through `take_parked_records`, every
-record while there is one window). Each `ShellView` registers itself with
-the app at the end of its constructor (`register_view`, a weak handle), and
-the app's writer unions every live view's records (`ShellView::current_tiles`:
-its non-placeholder occupants, then its own unplaced records) with the parked
-ones, earlier sources winning an id; page records are each view's, a later
-view winning a kind. A window marks the session dirty through
+record while there is one window: this is the seam a later window-to-tile
+mapping narrows to the tiles that window hosts). Each `ShellView` registers
+itself with the app at the end of its constructor (`register_view`, a weak
+handle). The app knows two sets of windows: its registered views whose
+entity is still alive (`views`), and among those the ones whose window is
+still open (`open_views`, by `cx.windows()`; a view can outlive its window
+while a host such as the bridge holds it). The writer unions every
+registered view's records (`ShellView::current_tiles`: its non-placeholder
+occupants, then its own unplaced records) with the parked ones, earlier
+sources winning an id; page records are each view's, a later view winning a
+kind. It deliberately reads every registered view, open window or not: until
+the window-close path parks a closed window's tiles and deregisters its view,
+skipping a closed window whose view is still alive would drop its tiles from
+the file. A window marks the session dirty through
 `ShellView::mark_session_dirty`, which updates the app entity, so it is
 called from event, dispatch and constructor paths only; the one render-time
 case, a divider drag cancelled because an overlay, page, fullscreen or
@@ -56,12 +71,13 @@ compares against) and the cached date, each behind a read accessor the status
 bar, the settings rows and the prepared dialog rows use; a settings row writes
 them through `ShellView::with_app` on its dispatch path. The watcher loop is
 the app's too, started once by `ShellApp::new` (`spawn_watcher`) and ended
-once every registered view's window has closed (the bridge's closures and
-the quit hooks hold a view or the app past its window, so the window
-decides): every tick sweeps the flip barrier,
-refreshes the diagnostics histogram (every live window's, summed) and the
-memory sample, refreshes the date, writes a dirty session and scans config,
-applying a changed candidate through `ShellApp::apply_reload`. `ShellApp` is
+once no registered view's window is open (`watcher_runs`: the window decides,
+not the entity, since the bridge's closures and the quit hooks hold a view
+or the app past its window; a tick for nobody would wake diagnostics and
+write a session no one reads): every tick sweeps the flip barrier, refreshes
+the diagnostics histogram (every open window's, summed) and the memory
+sample, refreshes the date, writes a dirty session and scans config, applying
+a changed candidate through `ShellApp::apply_reload`. `ShellApp` is
 the one emitter of `ShellEvent`: the bridge subscribes to it for
 `ConfigReloaded`, `AppSettingsReloaded` and `DistinctRequested` (a window's
 picker emits through the app), and each window subscribes in its constructor
@@ -1634,11 +1650,12 @@ not read as a change and opens no flip.
 
 Workspace actions mark the app's layout state dirty and return without
 session file I/O. The writer is the app's (`ShellApp::take_dirty_session_write`,
-`ShellApp::save_session`): one snapshot over every live window's records and
-the parked ones, whichever window's loop asks for it. The shared reload
-watcher checks for a session snapshot on its 500 ms tick, before any
-configuration-scan early return, through the app entity rather than from
-inside its own view's update, since the app reads that view's records. It
+`ShellApp::save_session`): one loop, one writer, one snapshot over every
+registered window's records and the parked ones, however many windows are
+open. The app's reload watcher checks for a session snapshot on its 500 ms
+tick, before any configuration-scan early return, from the app entity's own
+update and never from inside a window's, since the snapshot reads every
+window's view. It
 also compares serialized module state, the frame's generation counter, and
 palette usage versions, so those changes can trigger a save independently of
 layout dirt. This is periodic coalescing, not a timer reset after each
@@ -1661,15 +1678,19 @@ The session is saved synchronously, regardless of dirty flags and with the
 link groups' scopes included, both when the window closes and when the
 application quits. Closing the window quits Geode on every platform
 (`QuitMode::LastWindowClosed`). gpui removes a closing window before it runs
-the quit hooks, and the window's occupants go with it, so a snapshot taken
-then would replace their records with placeholders: `ShellApp::save_session`
-writes nothing while no window is live. The app's should-close hook on the
-main window (`bridge::save_on_close`) saves the session while the window
-still exists, then lets the close proceed. On an explicit application quit
-(Dock Quit, logout) no should-close runs and the quit hook, which holds the
-app entity, saves alone with the windows still open. After a window close
-the quit hook still runs, finds no live window and saves nothing, so the
-session is written once.
+the quit hooks, and the window's view and occupants go with it unless a host
+still holds the view, so a snapshot taken then would write the layout with
+that window's tile records missing, and the next start would restore empty
+tiles over the should-close save: `ShellApp::save_session` writes nothing
+while no registered view is alive. The app's should-close hook on the main
+window (`bridge::save_on_close`) saves the session while the window still
+exists, then lets the close proceed. On an explicit application quit (Dock
+Quit, logout) no should-close runs and the quit hook, which holds the app
+entity, saves alone with the windows still open. After a window close the
+quit hook still runs; with the closed window's view dropped it finds no live
+view and saves nothing, so the session is written once. A view a host still
+holds past its window keeps its occupants with it, so a save it does reach
+writes that window's own records, not placeholders.
 
 Limit: on Linux with client-drawn decorations, gpui-component's `TitleBar`
 close button removes the window directly and never runs should-close, so a
