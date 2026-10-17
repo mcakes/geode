@@ -46,7 +46,9 @@ scales and ranges). Behaviour and limits are in the features guide's
   - `table.rs`: the grid's `TableDelegate` and `Paints` (one per theme);
     it formats nothing. It adds the table's fixed chrome (cell padding and
     the cursor border, `chrome_px`) to a prepared width and truncates a
-    cut cell or head with a trailing ellipsis. Sized widths (an `:autosize`
+    cut cell or head with a trailing ellipsis, and sizes a group head to
+    the heads' text (the table leaves it to the delegate). Sized widths (an
+    `:autosize`
     fit, a header drag through `record_widths`) are keyed `view:id`
     (`sized_key`): a column id is shared across views whose heads and
     glyphs differ. `restored_widths` drops a session entry without a view
@@ -54,7 +56,7 @@ scales and ranges). Behaviour and limits are in the features guide's
   - `header.rs`: the header, the view strip, the band's slot and the
     footer.
   - `band.rs`: the inspection band's paint, docked between the grid and
-    the footer.
+    the footer, at the grid's text size.
   - `vega.rs`: book vega, one grouped query joined by name at depth 1.
   - `tests/`: the gpui harness (`harness.rs`, a shell stand-in matching
     the real keymap) and the key, data and chrome tests.

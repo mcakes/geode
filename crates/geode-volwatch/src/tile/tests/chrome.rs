@@ -153,3 +153,36 @@ fn a_lookback_chip_press_sets_that_lookback(cx: &mut gpui::TestAppContext) {
         "the press asks as `d` does"
     );
 }
+
+#[gpui::test]
+fn group_heads_and_the_band_paint_at_the_grids_text_size(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "enter"); // the band opens
+    h.draw(&mut vcx);
+    let head = vcx
+        .debug_bounds("volwatch-th-text-atfm-1M-level")
+        .expect("the head's text is painted")
+        .size
+        .height;
+    let group = vcx
+        .debug_bounds("volwatch-group-ATFM 1M")
+        .expect("the group label is painted")
+        .size
+        .height;
+    // The band's name is keyed by the tile (`TILE`, 7).
+    let band_name = vcx
+        .debug_bounds("volwatch-band-name-7")
+        .expect("the band's name is painted")
+        .size
+        .height;
+    // Same line height => same text size (the elements are single-line
+    // text in one font).
+    assert!(
+        (head - group).abs() <= gpui::px(1.0),
+        "group {group:?} vs head {head:?}"
+    );
+    assert!(
+        (head - band_name).abs() <= gpui::px(1.0),
+        "band {band_name:?} vs head {head:?}"
+    );
+}

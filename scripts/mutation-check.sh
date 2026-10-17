@@ -42432,6 +42432,15 @@ run_mutation "volwatch: a record without view prefixes is ignored" \
   geode-volwatch \
   a_part_4_record_without_view_prefixes_is_ignored
 
+# The table sizes its heads and cells but hands a group head back unsized;
+# a group row at another size makes a view with groups look larger.
+run_mutation "volwatch: a group head paints at the grid's text size" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '            .text_size(rems(TABLE_TEXT_REM))' \
+  '            .text_xs()' \
+  geode-volwatch \
+  group_heads_and_the_band_paint_at_the_grids_text_size
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -3727,10 +3727,11 @@ keeps a blank column rather than shifting the grid.
 answered first and those it lacks at the foot, muted and blank (`not in
 surface` in the readout). The Underlying column is pinned left; the
 reference name is in the readout. Column heads group under a shared header
-row (`ATFM 3M` over `vol` and `Δ`); Levels has no groups. A column's width
-is its glyph's minimum plus the widest text, head included, the sort mark
-on a sortable head and the table's cell padding; a group label wider than
-its columns widens them, the deficit shared across the run; a column
+row (`ATFM 3M` over `vol` and `Δ`) painted at the heads' text size, so a view
+with groups is no larger than one without; Levels has no groups. A column's
+width is its glyph's minimum plus the widest text, head included, the sort
+mark on a sortable head and the table's cell padding; a group label wider
+than its columns widens them, the deficit shared across the run; a column
 narrower than its text ends it in an ellipsis, never cutting a number's
 leading digits. Widths belong to a view: `:autosize` (the shell's verb,
 also in the palette) fits the shown view's columns in the real mono
@@ -3769,7 +3770,8 @@ theme change rebuilds the paints.
 
 **Band.** `enter` opens the inspection band for the cursor row, docked
 between the grid and the footer; `enter` again or `escape` closes it. It
-follows the cursor and shows the row's surface at fixed deltas
+paints at the grid's text size (the view strip and footer are chrome, a size
+smaller). It follows the cursor and shows the row's surface at fixed deltas
 (`10p 25p atm 25c 10c` as call deltas `0.90 0.75 0.50 0.25 0.10`, every
 listed tenor, the 25Δ skew and its Δ, one heat range over the table), three
 one-year sparklines (ATFM 3M, 25Δ skew 3M, realized 20D) captioned with

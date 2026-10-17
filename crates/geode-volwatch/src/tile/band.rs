@@ -8,10 +8,11 @@
 //! every color from [`Paints`] and the theme. Paint clones and lays out.
 
 use geode_chart::spark::{Spark, SparkPaint, sizes};
+use geode_shell::colfit::TABLE_TEXT_REM;
 use geode_shell::fonts;
 use geode_widgets::cell::{delta_chip, design, heat};
 use gpui::prelude::*;
-use gpui::{AnyElement, Div, SharedString, div};
+use gpui::{AnyElement, Div, SharedString, div, rems};
 use gpui_component::theme::Theme;
 use gpui_component::{h_flex, v_flex};
 
@@ -223,14 +224,20 @@ pub(crate) fn render(band: &BandModel, paints: &Paints, theme: &Theme, tile: u64
         .gap_1()
         .px_2()
         .py_1()
-        .text_xs()
+        // The band reads as part of the grid above it: one text size.
+        .text_size(rems(TABLE_TEXT_REM))
         .font_family(fonts::MONO)
         .border_t_1()
         .border_color(theme.border)
         .bg(theme.background)
         .overflow_hidden()
         .debug_selector(move || format!("volwatch-band-{tile}"))
-        .child(div().text_color(theme.foreground).child(band.name.clone()))
+        .child(
+            div()
+                .text_color(theme.foreground)
+                .debug_selector(move || format!("volwatch-band-name-{tile}"))
+                .child(band.name.clone()),
+        )
         .child(
             h_flex()
                 .items_start()

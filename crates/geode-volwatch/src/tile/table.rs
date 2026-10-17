@@ -8,7 +8,9 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use geode_chart::spark::{Spark, SparkPaint, sizes};
-use geode_shell::colfit::{CURSOR_BORDER_PX, FitMetrics, FittedWidths, widths_from_record};
+use geode_shell::colfit::{
+    CURSOR_BORDER_PX, FitMetrics, FittedWidths, TABLE_TEXT_REM, widths_from_record,
+};
 use geode_shell::fonts;
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
@@ -19,7 +21,7 @@ use geode_widgets::cell::zero_bar::{self, BarPaint};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, Pixels,
-    Point, SharedString, Stateful, Window, div, px,
+    Point, SharedString, Stateful, Window, div, px, rems,
 };
 use gpui_component::table::{
     Column as TableColumn, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableState,
@@ -524,6 +526,7 @@ impl TableDelegate for GridDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let selector = label.clone();
         div()
             .w(width)
             .h_full()
@@ -534,12 +537,21 @@ impl TableDelegate for GridDelegate {
             .px_1()
             .overflow_hidden()
             .whitespace_nowrap()
+            // The table sizes its heads and cells (`table_cell_size`) but
+            // hands a group head back unsized: at the window's default it
+            // would paint larger than the head row under it.
+            .text_size(rems(TABLE_TEXT_REM))
             .font_family(fonts::MONO)
             .text_color(theme.muted_foreground)
             .when(!label.is_empty(), |el| {
                 el.border_r_1().border_color(theme.border)
             })
-            .child(label.clone())
+            .child(
+                div()
+                    .whitespace_nowrap()
+                    .debug_selector(move || format!("volwatch-group-{selector}"))
+                    .child(label.clone()),
+            )
     }
 
     /// The head's text; a press on a sortable head walks its click cycle.
@@ -554,6 +566,7 @@ impl TableDelegate for GridDelegate {
             return div();
         };
         let id = self.ids.get(col_ix).cloned().unwrap_or_default();
+        let text_id = id.clone();
         let underlying = c.kind == ColumnKind::Underlying;
         div()
             .size_full()
@@ -582,6 +595,7 @@ impl TableDelegate for GridDelegate {
                     .when(!underlying, |el| el.text_right())
                     .truncate()
                     .text_ellipsis()
+                    .debug_selector(move || format!("volwatch-th-text-{text_id}"))
                     .children(self.heads.get(col_ix).cloned()),
             )
     }
