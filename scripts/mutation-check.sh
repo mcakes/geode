@@ -7135,6 +7135,98 @@ run_mutation "shell app: the session union includes parked records" \
   geode-shell \
   a_session_save_includes_every_window_and_the_parked_records
 
+# ---- workspaces moving between windows
+
+# A module hears `park` with a live context before its record is taken and
+# its occupant closed: the pricer flushes its dirty sheet there. Without the
+# call the move still rebuilds, from a record that lost the unsaved work.
+run_mutation "shell: a move parks before it closes" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '            let o = &self.occupants[id];
+            o.content.park(cx);' \
+  '            let o = &self.occupants[id];' \
+  geode-shell \
+  a_move_parks_then_rebuilds_with_the_record_and_links
+
+# Only a `Moved` outcome emits `Park`. A switch within one window (`Shown`)
+# keeps its occupants where they are; parking them would close and rebuild
+# every tile on every mod+N.
+run_mutation "shell: a plain switch parks nothing" \
+  crates/geode-shell/src/shell/app.rs \
+  '        let outcome = self.services.workspaces.switch(key, n);
+        if let Switch::Moved { from } = outcome {' \
+  '        let outcome = self.services.workspaces.switch(key, n);
+        let from = match outcome {
+            Switch::Moved { from } => Some(from),
+            Switch::Shown => Some(key),
+            _ => None,
+        };
+        if let Some(from) = from {' \
+  geode-shell \
+  a_plain_switch_parks_nothing
+
+# A `Raise` changed no host: the other window keeps showing the index and
+# must not be told to park it.
+run_mutation "shell: a raise moves nothing" \
+  crates/geode-shell/src/shell/app.rs \
+  '        if let Switch::Moved { from } = outcome {' \
+  '        if let Switch::Moved { from } | Switch::Raise(from) = outcome {' \
+  geode-shell \
+  a_switch_to_a_shown_index_moves_nothing_and_asks_to_raise
+
+# A parked record goes to the window hosting its tile's workspace. Handed
+# to whichever window asks first, a record for another window's tile would
+# never reach the window that builds the occupant.
+run_mutation "shell: parked records go to the hosting window" \
+  crates/geode-shell/src/shell/app.rs \
+  '                Some(host) => host == key,' \
+  '                Some(_) => true,' \
+  geode-shell \
+  parked_records_go_to_the_window_that_hosts_them
+
+# A window builds occupants only for the workspaces it hosts: walking every
+# stored workspace would build a second live module entity for another
+# window's tile.
+run_mutation "shell: fill_all_tiles walks only hosted workspaces" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        for (_, ws) in self.workspaces(cx).hosted_by(self.key) {' \
+  '        for (_, ws) in self.workspaces(cx).spaces() {' \
+  geode-shell \
+  a_window_builds_no_occupant_for_another_windows_workspace
+
+# gpui draws a new window once inside `open_window`, before the park's
+# events flush, so a window opened on a taken index has painted a
+# placeholder per tile; the pulled record must replace it.
+run_mutation "shell: a pulled record replaces a placeholder" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '                .is_some_and(|o| o.kind == PLACEHOLDER_KIND)
+            {
+                let o = self.occupants.remove(&tile).expect("just found");' \
+  '                .is_some_and(|_| false)
+            {
+                let o = self.occupants.remove(&tile).expect("just found");' \
+  geode-shell \
+  a_window_opening_on_a_hidden_workspace_takes_it_through_park
+
+# A record pulled from the app's parked set but not yet built sits only in
+# the window's `restored_tiles` until its next draw; a save in that gap
+# must still carry the tile.
+run_mutation "shell: a pulled record not yet built is still written" \
+  crates/geode-shell/src/shell/occupants.rs \
+  '        for (id, record) in self.unplaced_records.iter().chain(&self.restored_tiles) {' \
+  '        for (id, record) in self.unplaced_records.iter() {' \
+  geode-shell \
+  a_move_parks_then_rebuilds_with_the_record_and_links
+
+# An index hidden in another window leaves it through `Park` when a new
+# window opens on it; otherwise two windows hold occupants for its tiles.
+run_mutation "shell app: a window opening on a hidden index parks it" \
+  crates/geode-shell/src/shell/app.rs \
+  '        if let Added::TakenFrom(host) = added {' \
+  '        if let (Added::TakenFrom(host), false) = (added, true) {' \
+  geode-shell \
+  a_window_opening_on_a_hidden_workspace_takes_it_through_park
+
 # gpui removes a closing window before the quit hooks run: a save then,
 # with no live view, would write the layout without the closed window's
 # tile records over the should-close hook's save.
@@ -8431,8 +8523,10 @@ run_mutation "shell: MAJ-2 — ensure_occupants drops a vanished tile's occupant
 # `FLIP_DEADLINE`. The test also pins that a workspace switch never closes.
 run_mutation "hosting: a removed occupant is told it closed" \
   crates/geode-shell/src/shell/occupants.rs \
-  '                o.content.closed(cx);' \
-  '                let _ = &o.content;' \
+  '                o.content.closed(cx);
+                gone.push(*id);' \
+  '                let _ = &o.content;
+                gone.push(*id);' \
   geode-shell closing_a_tile_tells_its_occupant_it_closed_and_a_workspace_switch_does_not
 
 run_mutation "shell: MAJ-3 — note_config_reloaded goes back behind the views_changed gate" \
@@ -18008,8 +18102,9 @@ run_mutation "stacks: set_stack is sent once per change" \
 
 run_mutation "stacks: a replaced occupant is re-told its position" \
   crates/geode-shell/src/shell/occupants.rs \
-  '            self.stack_sent.remove(id);' \
-  '' \
+  '            self.stack_sent.remove(id);
+            // Likewise for focus: a fresh occupant under the focused id' \
+  '            // Likewise for focus: a fresh occupant under the focused id' \
   geode-shell \
   a_replaced_occupant_is_re_told_its_position
 
@@ -33638,8 +33733,8 @@ run_mutation "link: a restored emitter syncs after every occupant exists" \
 # in no group and the frame's answer would erase it.
 run_mutation "link: a live occupant's record carries its membership" \
   crates/geode-shell/src/shell/occupants.rs \
-  '                        link: frame.membership(*id),' \
-  '                        link: Default::default(),' \
+  '        link: frame.membership(tile),' \
+  '        link: Default::default(),' \
   geode-shell the_session_text_carries_a_membership_change
 
 run_mutation "link: an unplaced record keeps its membership" \

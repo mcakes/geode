@@ -513,7 +513,7 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
                         cx,
                     )
                 });
-                let key = app.update(cx, |a, _| a.add_window(None));
+                let key = app.update(cx, |a, cx| a.add_window(None, cx));
                 let view = cx.new(|cx| ShellView::new(app, key, window, cx));
                 cx.new(|cx| Root::new(view, window, cx))
             })

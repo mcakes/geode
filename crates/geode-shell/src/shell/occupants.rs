@@ -9,16 +9,32 @@ use std::collections::HashSet;
 
 use gpui::{App, Context, FocusHandle, Focusable as _, Window};
 
-use crate::frame::FrameRef;
-use crate::module::Delivery;
+use crate::frame::{Frame, FrameRef};
 use crate::module::ModuleFactory as _;
 use crate::module::placeholder::PLACEHOLDER_KIND;
+use crate::module::{Delivery, TileOccupant};
 use crate::session;
-use crate::tiling::TileId;
+use crate::tiling::{TileId, WorkspaceIx};
 use geode_core::link::Membership;
 use geode_core::query::QueryKey;
 
 use super::ShellView;
+
+/// The session record for `tile`'s live occupant: its kind, its serialized
+/// state and the frame's answer for its link groups. The session writer
+/// (`current_tiles`) and a park (`park_workspace`) build the one record.
+fn record_of(
+    tile: TileId,
+    occupant: &TileOccupant,
+    frame: &Frame,
+    cx: &App,
+) -> session::TileRecord {
+    session::TileRecord {
+        kind: occupant.kind.to_string(),
+        state: occupant.content.serialize(cx),
+        link: frame.membership(tile),
+    }
+}
 
 impl ShellView {
     /// Collect fresh serialized state from non-placeholder occupants, plus
@@ -31,27 +47,144 @@ impl ShellView {
     /// keeps the ones it was read with: its placeholder is in no group, and
     /// taking the frame's answer would erase a membership the tile gets back
     /// when its module does.
+    ///
+    /// A record this window has taken but not yet built (`restored_tiles`:
+    /// pulled from the app's parked records, awaiting the next draw) is
+    /// written too, as read: it left the app's parked set when it was
+    /// taken, so a save between the pull and the draw would otherwise
+    /// drop the tile from the file.
     pub(super) fn current_tiles(&self, cx: &App) -> session::TileRecords {
         let frame = self.frame.read(cx);
         let mut tiles: session::TileRecords = self
             .occupants
             .iter()
             .filter(|(_, o)| o.kind != PLACEHOLDER_KIND)
-            .map(|(id, o)| {
-                (
-                    id.0,
-                    session::TileRecord {
-                        kind: o.kind.to_string(),
-                        state: o.content.serialize(cx),
-                        link: frame.membership(*id),
-                    },
-                )
-            })
+            .map(|(id, o)| (id.0, record_of(*id, o, frame, cx)))
             .collect();
-        for (id, record) in &self.unplaced_records {
+        for (id, record) in self.unplaced_records.iter().chain(&self.restored_tiles) {
             tiles.entry(*id).or_insert_with(|| record.clone());
         }
         tiles
+    }
+
+    /// Workspace `ix` has left this window for another: park every tile in
+    /// it and forget its occupants. Each occupant hears `park` first, with
+    /// a live context, so a module flushes unsaved work; its record (kind,
+    /// serialized state, the frame's membership) then goes to the app's
+    /// parked records for the destination window to pull; then
+    /// `set_visible(false)` and `closed`, as a closing tile hears them,
+    /// before the occupant is dropped. A record this window held but had
+    /// not built (a restored one awaiting its first draw, an unplaced one
+    /// behind a placeholder, an `add_tile` request not yet drawn) moves
+    /// the same way. Link membership stays on the frame: the tile lives
+    /// on, in another window, in the same groups, so the destination's
+    /// rebuild reads it there as a restore does. Only a move `Workspaces`
+    /// has already committed reaches here, so this window's next draw
+    /// neither rebuilds these tiles nor finds them gone.
+    ///
+    /// An event path only (`on_app_event`'s `Park` arm): the one
+    /// `app.update` here must never run inside a draw.
+    pub(super) fn park_workspace(&mut self, ix: WorkspaceIx, cx: &mut Context<Self>) {
+        // Sorted so `park`, `closed` and the records are handed out in a
+        // stable order, not the occupant map's.
+        let mut leaving: Vec<TileId> = {
+            let workspaces = self.workspaces(cx);
+            self.occupants
+                .keys()
+                .copied()
+                .filter(|id| workspaces.workspace_of(*id) == Some(ix))
+                .collect()
+        };
+        leaving.sort();
+        let mut records = session::TileRecords::new();
+        for id in &leaving {
+            let o = &self.occupants[id];
+            o.content.park(cx);
+            // A placeholder has no state of its own; the record it stands
+            // in for, if any, moves from `unplaced_records` below.
+            if o.kind != PLACEHOLDER_KIND {
+                records.insert(id.0, record_of(*id, o, self.frame.read(cx), cx));
+            }
+            o.content.set_visible(false, cx);
+            o.content.closed(cx);
+        }
+        for id in &leaving {
+            self.occupants.remove(id);
+            self.emit_subs.remove(id);
+            self.stack_sent.remove(id);
+            self.visible_tiles.remove(id);
+            if self.focused_sent == Some(*id) {
+                self.focused_sent = None;
+            }
+        }
+        let unbuilt: Vec<u64> = {
+            let workspaces = self.workspaces(cx);
+            self.restored_tiles
+                .keys()
+                .chain(self.unplaced_records.keys())
+                .chain(self.pending_tiles.keys().map(|id| &id.0))
+                .copied()
+                .filter(|id| workspaces.workspace_of(TileId(*id)) == Some(ix))
+                .collect()
+        };
+        for id in unbuilt {
+            if let Some(record) = self.restored_tiles.remove(&id) {
+                records.entry(id).or_insert(record);
+            }
+            if let Some(record) = self.unplaced_records.remove(&id) {
+                records.entry(id).or_insert(record);
+            }
+            if let Some(pending) = self.pending_tiles.remove(&TileId(id)) {
+                records.entry(id).or_insert(session::TileRecord {
+                    kind: pending.kind,
+                    state: pending.state.unwrap_or_default(),
+                    link: Membership::default(),
+                });
+            }
+        }
+        if !records.is_empty() {
+            self.app
+                .update(cx, |app, _| app.parked_tiles.extend(records));
+        }
+        cx.notify();
+    }
+
+    /// Take the parked records this window now hosts
+    /// (`ShellApp::take_parked_records`) into `restored_tiles`, for the
+    /// next draw's `ensure_occupants` to build from. An event or dispatch
+    /// path only: a switch that showed or moved a workspace here, and the
+    /// `Parked` announcement for the workspace this window shows. The draw
+    /// pass reads only this view's own map and never updates the app.
+    ///
+    /// A draw can come before the records do: gpui draws a new window once
+    /// inside `open_window`, before the effects carrying `Park` and
+    /// `Parked` flush, so a window opened on a workspace taken from another
+    /// has already painted a placeholder for each of its tiles. A pulled
+    /// record replaces such a placeholder the way `add_tile` fills one:
+    /// the placeholder is closed and dropped here, and the next draw builds
+    /// the record's module in its place. A real occupant is never replaced.
+    pub(super) fn pull_parked_records(&mut self, cx: &mut Context<Self>) {
+        let key = self.key;
+        let records = self.app.update(cx, |app, _| app.take_parked_records(key));
+        if records.is_empty() {
+            return;
+        }
+        for id in records.keys() {
+            let tile = TileId(*id);
+            if self
+                .occupants
+                .get(&tile)
+                .is_some_and(|o| o.kind == PLACEHOLDER_KIND)
+            {
+                let o = self.occupants.remove(&tile).expect("just found");
+                o.content.set_visible(false, cx);
+                o.content.closed(cx);
+                self.emit_subs.remove(&tile);
+                self.unplaced_records.remove(id);
+            }
+        }
+        self.restored_tiles.extend(records);
+        cx.notify();
     }
 
     /// The retained page's state (open or not), plus every table still in

@@ -46,7 +46,7 @@ use crate::palette_usage::PaletteUsage;
 use crate::reload;
 use crate::session::{PageRecords, TileRecords};
 use crate::tileadd::AddDirection;
-use crate::tiling::{WindowKey, WorkspaceIx};
+use crate::tiling::{Added, Switch, TileId, WindowKey, WorkspaceIx};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, LayerDoc};
 
@@ -166,11 +166,14 @@ pub struct ShellApp {
     /// The startup `[vol] model` value used to build the data engine's vol
     /// worker, compared on reload exactly as `pricing_baseline` is.
     pub(super) vol_baseline: Option<toml::Value>,
-    /// Session tile records no window has taken yet, seeded from the
-    /// restored session. A window drains them at construction through
-    /// [`Self::take_parked_records`]; whatever remains here is written
-    /// back by every save, after the live records, so a tile no window
-    /// hosts keeps its module and state across a restart.
+    /// Tile records no window holds an occupant for: the restored
+    /// session's until a window takes them, and the records a window parks
+    /// when a workspace it hosted leaves for another window
+    /// (`ShellView::park_workspace`). A window takes the ones it hosts
+    /// through [`Self::take_parked_records`], at construction and on the
+    /// event and dispatch paths that make it host more; whatever remains
+    /// here is written back by every save, after the live records, so a
+    /// tile no window hosts keeps its module and state across a restart.
     pub(super) parked_tiles: TileRecords,
     /// How often and how recently each palette row was chosen
     /// (`crate::palette_usage`): read once per palette open to rank the
@@ -479,7 +482,14 @@ impl ShellApp {
     /// A caller asking for an index another window shows is expected to
     /// have checked `Workspaces::shown_in` first; until the second-window
     /// path exists, that refusal is reported by the `expect`.
-    pub fn add_window(&mut self, index: Option<WorkspaceIx>) -> WindowKey {
+    ///
+    /// An index another window hosted hidden (`Added::TakenFrom`) leaves
+    /// it through the same park a `Moved` switch uses: that window hears
+    /// [`ShellEvent::Park`] and parks what it built for the index, and
+    /// the new window pulls the records when `Parked` follows. The event
+    /// is delivered when this update's effects flush, after the new
+    /// window's view exists to hear the answer.
+    pub fn add_window(&mut self, index: Option<WorkspaceIx>, cx: &mut Context<Self>) -> WindowKey {
         self.next_window += 1;
         let key = WindowKey(self.next_window);
         let workspaces = &mut self.services.workspaces;
@@ -491,10 +501,55 @@ impl ShellApp {
                 .expect("nine windows already show every workspace")
                 .get(),
         };
-        workspaces
+        let added = workspaces
             .add_window(key, n)
             .unwrap_or_else(|| panic!("workspace {n} is shown by another window"));
+        if let Added::TakenFrom(host) = added {
+            let workspace = WorkspaceIx::new(n).expect("add_window accepted the index");
+            cx.emit(ShellEvent::Park {
+                window: host,
+                workspace,
+            });
+        }
         key
+    }
+
+    /// Show index `n` in window `key` (`Workspaces::switch`), and start
+    /// the park a `Moved` outcome needs: the move is already committed, so
+    /// the window it came from is told to park the occupants it built for
+    /// the index ([`ShellEvent::Park`]) and answers through
+    /// [`Self::records_parked`]. Every other outcome parks nothing: a
+    /// raise or a refusal changed no host, and a switch within one window
+    /// keeps its occupants where they are.
+    pub fn switch(&mut self, key: WindowKey, n: u8, cx: &mut Context<Self>) -> Switch {
+        let outcome = self.services.workspaces.switch(key, n);
+        if let Switch::Moved { from } = outcome {
+            let workspace = WorkspaceIx::new(n).expect("a move names a valid index");
+            cx.emit(ShellEvent::Park {
+                window: from,
+                workspace,
+            });
+        }
+        outcome
+    }
+
+    /// A window's answer to `Park`: the records for `workspace` are in
+    /// `parked_tiles`. Announced as [`ShellEvent::Parked`] for the window
+    /// that now shows the index to pull them; see that variant for why
+    /// this is a second event.
+    pub fn records_parked(&mut self, workspace: WorkspaceIx, cx: &mut Context<Self>) {
+        cx.emit(ShellEvent::Parked { workspace });
+    }
+
+    /// Bring window `key` to the front: a switch asked for an index that
+    /// window shows (`Switch::Raise`). Not yet implemented; the request is
+    /// logged until the window-activation path exists.
+    pub fn activate_window(&mut self, key: WindowKey, _cx: &mut Context<Self>) {
+        tracing::debug!(
+            target: "geode::shell",
+            window = key.0,
+            "activate_window: not yet implemented"
+        );
     }
 
     /// Record the view built for `key`, at the end of `ShellView::new`, so
@@ -534,14 +589,26 @@ impl ShellApp {
         !self.has_registered_view || self.open_views(cx).next().is_some()
     }
 
-    /// Hand a window the parked records it should host, removing them
-    /// from here. While there is one window every record goes to it; this
-    /// is the seam a later window-to-workspace mapping narrows to the
-    /// tiles `_key`'s window hosts. A record that leaves is the window's
-    /// to write back (`ShellView::current_tiles`), through its occupant
-    /// or its own unplaced-record map.
-    pub fn take_parked_records(&mut self, _key: WindowKey) -> TileRecords {
-        std::mem::take(&mut self.parked_tiles)
+    /// Hand window `key` the parked records it should host, removing them
+    /// from here: a record whose tile sits in a workspace `key` hosts
+    /// (`Workspaces::window_of`), and, for the oldest open window only, a
+    /// record whose tile is in no workspace at all, so the first window
+    /// owns unplaced records and writes them back as it always has.
+    /// Everything else stays parked for the window that hosts it. A record
+    /// that leaves is the window's to write back
+    /// (`ShellView::current_tiles`), through its occupant or its own
+    /// unplaced-record map. With one window open, every record is its.
+    pub fn take_parked_records(&mut self, key: WindowKey) -> TileRecords {
+        let workspaces = &self.services.workspaces;
+        let oldest = workspaces.windows().next().map(|(k, _)| k);
+        let (taken, kept): (TileRecords, TileRecords) = std::mem::take(&mut self.parked_tiles)
+            .into_iter()
+            .partition(|(id, _)| match workspaces.window_of(TileId(*id)) {
+                Some(host) => host == key,
+                None => oldest == Some(key),
+            });
+        self.parked_tiles = kept;
+        taken
     }
 
     /// A layout change awaits the next periodic snapshot. Called from a

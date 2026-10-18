@@ -40,19 +40,28 @@ lease on the owner.
 
 `ShellApp` also owns the session: the dirty flag, the baselines the periodic
 writer compares against, the palette's usage history, and the tile records
-no window has taken (`parked_tiles`, seeded from the restored session; a
-window drains them at construction through `take_parked_records`, every
-record while there is one window: this is the seam a later window-to-tile
-mapping narrows to the tiles that window hosts). Each `ShellView` registers
+no window holds an occupant for (`parked_tiles`: the restored session's
+until a window takes them, and the records a window parks when a workspace
+it hosted leaves for another window, see [workspaces moving between
+windows](#workspaces-moving-between-windows)). A window takes the parked
+records it should host through `take_parked_records`: a record whose tile
+sits in a workspace the window hosts (`Workspaces::window_of`), and, for the
+oldest open window only, a record whose tile is in no workspace, so the
+first window owns unplaced records and writes them back as it always has;
+every other record stays parked for the window that hosts it. A window
+pulls at construction and on the event and dispatch paths that make it
+host more (a switch that `Shown` or `Moved` a workspace to it, a `Parked`
+announcement), never from its draw. Each `ShellView` registers
 itself with the app at the end of its constructor (`register_view`, a weak
 handle). The app knows two sets of windows: its registered views whose
 entity is still alive (`views`), and among those the ones whose window is
 still open (`open_views`, by `cx.windows()`; a view can outlive its window
 while a host such as the bridge holds it). The writer unions every
 registered view's records (`ShellView::current_tiles`: its non-placeholder
-occupants, then its own unplaced records) with the parked ones, earlier
-sources winning an id; page records are each view's, a later view winning a
-kind. It deliberately reads every registered view, open window or not: until
+occupants, then its own unplaced records and the records it has pulled but
+not yet built, which left the parked set when they were taken) with the
+parked ones, earlier sources winning an id; page records are each view's, a
+later view winning a kind. It deliberately reads every registered view, open window or not: until
 the window-close path parks a closed window's tiles and deregisters its view,
 skipping a closed window whose view is still alive would drop its tiles from
 the file. A window marks the session dirty through
@@ -84,10 +93,56 @@ picker emits through the app), and each window subscribes in its constructor
 (`on_app_event`) for `Reloaded`, which carries the reload's "changed" flags so
 the window rebuilds only what the reload touched (its picker vocabulary, an
 open palette, its emitters' composition rule, an open expression dialog's
-offers, every open dialog's rows), for `ReloadRejected` (repaint the status)
-and for `DayChanged` (repaint the scope bar). `Reloaded` is queued after the
-bridge's events and before the frame's notifications, so a window sees a
-revision only after the bridge refreshed its views.
+offers, every open dialog's rows), for `ReloadRejected` (repaint the status),
+for `DayChanged` (repaint the scope bar), and for the pair that moves a
+workspace between windows, `Park` and `Parked` (below). `Reloaded` is queued
+after the bridge's events and before the frame's notifications, so a window
+sees a revision only after the bridge refreshed its views.
+
+### Workspaces moving between windows
+
+A live module entity renders only in the window that created it. When a
+workspace changes window, its occupants are not handed over: the window it
+leaves parks them into records and the window it reaches rebuilds them from
+those records, as a restore does. Two routes move a workspace: a switch in
+one window to an index another window hosts hidden (`Workspaces::switch`
+answers `Moved { from }`), and a new window opening on such an index
+(`Workspaces::add_window` answers `TakenFrom`). A switch within one window
+(`Shown`, `Unchanged`), a switch to an index another window shows
+(`Raise`, which asks that window forward and changes nothing) and a refused
+one (`Invalid`) move nothing and park nothing.
+
+The move runs in two app events, because subscriber order is not a
+contract and one event could not order the source's park before the
+destination's pull. `ShellApp::switch` (or `add_window`) commits the move
+in `Workspaces` and emits `ShellEvent::Park { window, workspace }`. The
+named window's `park_workspace` takes every tile in that workspace in id
+order: the occupant hears `park` with a live context (a module flushes
+unsaved work there; the pricer saves a dirty sheet), its record (kind,
+serialized state, the frame's membership) is put in `ShellApp::parked_tiles`,
+then it hears `set_visible(false)` and `closed`, as a closing tile does, and
+is dropped with its emitter subscription, its stack and focus bookkeeping
+and its visible-set entry. A record the window held but had not built (a
+restored record awaiting its first draw, an unplaced record behind a
+placeholder, an `add_tile` request not yet drawn) moves as a record too.
+Link membership stays on the frame: the tile lives on, in the same groups,
+and the destination's rebuild reads it there as a restore does. The source
+then calls `ShellApp::records_parked`, which emits `ShellEvent::Parked {
+workspace }`; the window showing that workspace pulls the records
+(`pull_parked_records`, through `take_parked_records`) into its own
+restored-record map, and its next draw's `ensure_occupants` builds the
+occupants from them, under the same tile ids. The draw pass itself never
+reads the app's parked records.
+
+A draw can come before the records do: gpui draws a new window once inside
+`open_window`, before the effects carrying the two events flush, so a window
+opened on a taken index has already painted a placeholder for each of its
+tiles. A pulled record replaces such a placeholder the way `add_tile` fills
+one (the placeholder is closed and dropped, and the next draw builds the
+record's module); a real occupant is never replaced. The switch dispatch
+also pulls on every `Shown` or `Moved` outcome, so records parked earlier
+(a closed window's, or a move's that this window did not show at the time)
+reach the window that now hosts them.
 
 `ShellApp` also creates the shared `Frame` and the `Diagnostics` entities
 (`frame()`, `diagnostics()`) and applies the session's restored frame state to

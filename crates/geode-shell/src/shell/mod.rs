@@ -212,12 +212,22 @@ pub enum ShellEvent {
     /// The configured clock's date moved since the watcher's last tick;
     /// every window repaints its scope bar from `ShellApp::today`.
     DayChanged,
-    /// Window `window` should show `workspace`'s tiles no longer. Unused
-    /// until a window-to-workspace mapping emits it.
+    /// `workspace` has left window `window` for another (a switch that
+    /// `Moved` it, or a new window opening on it): `window` parks the
+    /// occupants it built for it (`ShellView::park_workspace`), then
+    /// answers with `ShellApp::records_parked`. Emitted by `ShellApp::switch`
+    /// and `ShellApp::add_window` once `Workspaces` has committed the move,
+    /// never for a raise, a refusal or a switch within one window.
     Park {
         window: WindowKey,
         workspace: WorkspaceIx,
     },
+    /// The window that hosted `workspace` has parked its occupants' records
+    /// (`ShellApp::parked_tiles`): the window now showing it pulls them and
+    /// rebuilds on its next draw. A second event rather than part of
+    /// `Park`, because subscriber order is not a contract: one event could
+    /// not order the source's park before the destination's pull.
+    Parked { workspace: WorkspaceIx },
     /// Views, dimensions or groupings changed and were applied; the app
     /// bridge forwards the new views to the data thread.
     ConfigReloaded,

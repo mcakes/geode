@@ -12,7 +12,7 @@ use gpui_component::WindowExt as _;
 use crate::actions::ActionId;
 use crate::commandline::Prompt;
 use crate::keymap::{Binding, KeyContext, MatchResult, UNBOUND_ACTION};
-use crate::tiling::{Direction, Orientation, apply_workspace_action};
+use crate::tiling::{Direction, Orientation, Switch, apply_workspace_action};
 use crate::vimfind;
 use crate::{fontsize, theme};
 use geode_core::query::AsOf;
@@ -201,9 +201,11 @@ impl ShellView {
         None
     }
 
-    /// Dispatch a resolved action from either the keymap or palette. Workspace
-    /// actions go through `apply_workspace_action`; shell actions are handled
-    /// here, and remaining ids reach the focused occupant with their count.
+    /// Dispatch a resolved action from either the keymap or palette. A
+    /// workspace switch goes through `ShellApp::switch`, whose outcome
+    /// decides what else happens; other workspace actions go through
+    /// `apply_workspace_action`; shell actions are handled here, and
+    /// remaining ids reach the focused occupant with their count.
     ///
     /// Recognized workspace actions, including no-ops, mark the session dirty
     /// and reconcile focus. Persistence runs later on the background save path
@@ -320,17 +322,50 @@ impl ShellView {
             return;
         }
 
+        // A workspace switch is the shell's, not the layout router's: its
+        // outcome says whether another window must park (`Moved`), should
+        // come forward (`Raise`), or nothing happened (`Invalid`). `Shown`
+        // and `Moved` also pull the parked records this window now hosts
+        // (a closed window's, or ones a move parked before this switch), so
+        // the next draw rebuilds them. A move's own records arrive later,
+        // through `Park` and `Parked` (see `on_app_event`).
+        if let Some(n) = action
+            .0
+            .strip_prefix("workspace::switch_")
+            .and_then(|s| s.parse::<u8>().ok())
+        {
+            let before = self.shown_ix(cx);
+            let key = self.key;
+            match self.app.update(cx, |app, cx| app.switch(key, n, cx)) {
+                Switch::Shown | Switch::Moved { .. } => {
+                    self.pull_parked_records(cx);
+                    self.mark_session_dirty(cx);
+                    // Another workspace's lane: the flip baseline and the
+                    // scope field must follow it before anything reads them.
+                    self.on_workspace_switched(before, window, cx);
+                    self.note_keyboard_focus_move(window, cx);
+                }
+                // Re-selecting the shown index changes nothing, but it is
+                // still a recognized workspace action: the session is
+                // marked and focus reconciled as for any other.
+                Switch::Unchanged => {
+                    self.mark_session_dirty(cx);
+                    self.note_keyboard_focus_move(window, cx);
+                }
+                Switch::Raise(other) => {
+                    self.app
+                        .update(cx, |app, cx| app.activate_window(other, cx));
+                }
+                Switch::Invalid => {}
+            }
+            return;
+        }
+
         // The workspace router ignores counts; the module fallback receives them.
-        let before = self.shown_ix(cx);
         let key = self.key;
         let handled = self.with_workspaces(cx, |w| apply_workspace_action(w, key, action));
         if handled {
             self.mark_session_dirty(cx);
-            // A switch shows another workspace's lane: the flip baseline and
-            // the scope field must follow it before anything reads them.
-            if self.shown_ix(cx) != before {
-                self.on_workspace_switched(before, window, cx);
-            }
             // Reconcile focus after every recognized workspace action, including no-ops
             // and geometry-only changes. A separate list of focus-moving action ids
             // would have to track the workspace router exactly.

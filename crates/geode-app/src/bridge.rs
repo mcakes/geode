@@ -1617,7 +1617,10 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
             // The shell already logged and installed the rejected reload's diagnostics.
             ShellEvent::ReloadRejected(_) => {}
             // Each window's own reactions (`ShellView::on_app_event`).
-            ShellEvent::Reloaded { .. } | ShellEvent::DayChanged | ShellEvent::Park { .. } => {}
+            ShellEvent::Reloaded { .. }
+            | ShellEvent::DayChanged
+            | ShellEvent::Park { .. }
+            | ShellEvent::Parked { .. } => {}
         }
     })
     .detach();
@@ -2403,7 +2406,7 @@ role = "key"
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let view = {
                     let app = cx.new(|cx| ShellApp::new(services, None, None, cx));
-                    let key = app.update(cx, |a, _| a.add_window(None));
+                    let key = app.update(cx, |a, cx| a.add_window(None, cx));
                     cx.new(|cx| ShellView::new(app, key, window, cx))
                 };
                 cx.new(|cx| Root::new(view, window, cx))
@@ -3537,7 +3540,7 @@ grain = "underlying"
                         let view = {
                             let app =
                                 cx.new(|cx| ShellApp::new(services, None, Some(user_dir), cx));
-                            let key = app.update(cx, |a, _| a.add_window(None));
+                            let key = app.update(cx, |a, cx| a.add_window(None, cx));
                             cx.new(|cx| ShellView::new(app, key, window, cx))
                         };
                         cx.new(|cx| Root::new(view, window, cx))

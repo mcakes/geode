@@ -418,7 +418,7 @@ pub(super) fn view_for_test(
     cx: &mut App,
 ) -> Entity<ShellView> {
     let app = cx.new(|cx| ShellApp::new(services, None, user_dir, cx));
-    let key = app.update(cx, |a, _| a.add_window(None));
+    let key = app.update(cx, |a, cx| a.add_window(None, cx));
     cx.new(|cx| ShellView::new(app, key, window, cx))
 }
 
@@ -453,7 +453,7 @@ fn open_window_on(
 ) -> gpui::WindowHandle<Root> {
     cx.update(|cx| {
         cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-            let key = app.update(cx, |a, _| a.add_window(None));
+            let key = app.update(cx, |a, cx| a.add_window(None, cx));
             let view = cx.new(|cx| ShellView::new(app, key, window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         })

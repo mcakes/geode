@@ -631,10 +631,12 @@ impl ShellView {
     /// What this window does when the app announces a change. `Reloaded`
     /// carries the reload's "changed" flags, computed once by
     /// `ShellApp::apply_reload`, so each window rebuilds only what the
-    /// reload touched; `DayChanged` and `ReloadRejected` repaint. The
-    /// bridge's events (`ConfigReloaded`, `AppSettingsReloaded`,
-    /// `RestartRequired`, `DistinctRequested`) are not this window's to
-    /// act on, and `Park` has no handler yet.
+    /// reload touched; `DayChanged` and `ReloadRejected` repaint. `Park`
+    /// names the window that must park a workspace's occupants, and
+    /// `Parked` the workspace whose records are ready for the window
+    /// showing it. The bridge's events (`ConfigReloaded`,
+    /// `AppSettingsReloaded`, `RestartRequired`, `DistinctRequested`) are
+    /// not this window's to act on.
     pub(super) fn on_app_event(
         &mut self,
         event: &ShellEvent,
@@ -701,11 +703,29 @@ impl ShellView {
             }
             // The scope bar paints the app's cached date.
             ShellEvent::DayChanged => cx.notify(),
+            // A workspace this window hosted now belongs to another: park
+            // what was built for it, then tell the app, which announces
+            // `Parked` for the destination to pull. The move is already
+            // committed, so this window's next draw finds nothing of it.
+            ShellEvent::Park { window, workspace } => {
+                if *window == self.key {
+                    let workspace = *workspace;
+                    self.park_workspace(workspace, cx);
+                    self.app
+                        .update(cx, |app, cx| app.records_parked(workspace, cx));
+                }
+            }
+            // The records for the workspace this window shows are parked:
+            // take them, and the next draw rebuilds their occupants.
+            ShellEvent::Parked { workspace } => {
+                if self.workspaces(cx).shown(self.key) == Some(*workspace) {
+                    self.pull_parked_records(cx);
+                }
+            }
             ShellEvent::ConfigReloaded
             | ShellEvent::AppSettingsReloaded
             | ShellEvent::RestartRequired(_)
-            | ShellEvent::DistinctRequested(_)
-            | ShellEvent::Park { .. } => {}
+            | ShellEvent::DistinctRequested(_) => {}
         }
     }
 }

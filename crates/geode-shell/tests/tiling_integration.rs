@@ -6,7 +6,7 @@ use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults;
 use geode_shell::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
 use geode_shell::tiling::{
-    DockSide, FocusRegion, Orientation, Rect, WindowKey, Workspaces, apply_workspace_action,
+    DockSide, FocusRegion, Orientation, Rect, Switch, WindowKey, Workspaces, apply_workspace_action,
 };
 
 /// The one window these keyboard pipelines drive.
@@ -66,9 +66,26 @@ fn keystrokes_drive_the_tiling_tree() {
     press(&mut matcher, &mut ws, "mod+f");
 
     // mod+2: switch to an empty workspace; mod+1: back with tiles intact.
-    press(&mut matcher, &mut ws, "mod+2");
+    // A switch resolves through the keymap like any other action, but the
+    // shell applies it itself (`Workspaces::switch`) rather than through
+    // the router, since the outcome decides whether another window acts.
+    let switch = |matcher: &mut Matcher, ws: &mut Workspaces, key: &str, n: u8| {
+        let ks = parse_keystroke(key, mod_alias).unwrap();
+        match matcher.press(&keymap, ks, &stack) {
+            MatchResult::Matched { action, .. } => {
+                assert_eq!(action.0, format!("workspace::switch_{n}"));
+                assert!(
+                    !apply_workspace_action(ws, W, &action),
+                    "a switch is the shell's, not the router's"
+                );
+                assert_ne!(ws.switch(W, n), Switch::Invalid);
+            }
+            other => panic!("expected a match for {key}, got {other:?}"),
+        }
+    };
+    switch(&mut matcher, &mut ws, "mod+2", 2);
     assert!(ws.workspace(W).is_empty());
-    press(&mut matcher, &mut ws, "mod+1");
+    switch(&mut matcher, &mut ws, "mod+1", 1);
     assert_eq!(ws.workspace(W).tree().tiles().len(), 3);
 
     // Directional focus works through the same pipeline (mod+l).

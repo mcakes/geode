@@ -1179,6 +1179,9 @@ pub const RESIZE_STEP: f32 = 0.03;
 /// was recognized as a workspace action — even if it changed nothing (focus
 /// at an edge still counts as handled; the keystroke must not fall through
 /// to another handler). False means "not a workspace action".
+/// `workspace::switch_*` is not this router's: the shell calls
+/// [`Workspaces::switch`] itself and acts on the outcome (a raise asks
+/// another window forward, a move parks that window's occupants).
 pub fn apply_workspace_action(ws: &mut Workspaces, key: WindowKey, action: &ActionId) -> bool {
     match action.0.as_str() {
         "workspace::focus_left" => {
@@ -1273,17 +1276,7 @@ pub fn apply_workspace_action(ws: &mut Workspaces, key: WindowKey, action: &Acti
             ws.workspace_mut(key).move_to_dock(DockSide::Bottom);
             true
         }
-        other => match other.strip_prefix("workspace::switch_") {
-            Some(n) => match n.parse::<u8>() {
-                // Handled unless the index is invalid: re-selecting the
-                // shown index changes nothing but is still this router's,
-                // like focus at an edge. The shell reads the outcome
-                // itself for the side effects a raise or move needs.
-                Ok(n) => !matches!(ws.switch(key, n), Switch::Invalid),
-                Err(_) => false,
-            },
-            None => false,
-        },
+        _ => false,
     }
 }
 
@@ -1428,15 +1421,17 @@ mod tests {
         assert_eq!(ws.workspace(W1).tree().tiles().len(), 1);
     }
 
+    /// A switch is the shell's verb: the router leaves every spelling of
+    /// it alone, valid index or not, and changes nothing.
     #[test]
-    fn switch_actions_parse_their_index() {
+    fn switch_actions_are_not_the_routers() {
         let mut ws = one_window();
-        assert!(apply_workspace_action(
+        assert!(!apply_workspace_action(
             &mut ws,
             W1,
             &act("workspace::switch_3")
         ));
-        assert_eq!(ws.shown(W1), WorkspaceIx::new(3));
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(1), "nothing switched");
         assert!(!apply_workspace_action(
             &mut ws,
             W1,
@@ -1688,39 +1683,23 @@ mod tests {
             "W1's tile is untouched"
         );
         assert!(ws.workspace(W2).is_empty());
-        assert!(
-            apply_workspace_action(&mut ws, W2, &act("workspace::switch_1")),
-            "shown elsewhere is a raise, which still counts as handled"
-        );
-        assert_eq!(ws.shown(W2), WorkspaceIx::new(2), "and changes nothing");
     }
 
+    /// Every switch outcome in one collection: the same index is
+    /// `Unchanged`, an index another window shows is a `Raise`, a free
+    /// index is `Shown`, and an index outside 1–9 or a window not open
+    /// here is `Invalid`; only `Shown` changes what the window shows.
     #[test]
-    fn a_switch_action_is_handled_unless_the_index_is_invalid() {
+    fn switch_outcomes_by_index() {
         let mut ws = one_window();
         ws.add_window(W2, 2);
-        assert!(
-            apply_workspace_action(&mut ws, W1, &act("workspace::switch_1")),
-            "unchanged"
-        );
-        assert!(
-            apply_workspace_action(&mut ws, W1, &act("workspace::switch_2")),
-            "raise"
-        );
+        assert_eq!(ws.switch(W1, 1), Switch::Unchanged);
+        assert_eq!(ws.switch(W1, 2), Switch::Raise(W2));
         assert_eq!(ws.shown(W1), WorkspaceIx::new(1));
-        assert!(
-            apply_workspace_action(&mut ws, W1, &act("workspace::switch_3")),
-            "shown"
-        );
-        assert!(!apply_workspace_action(
-            &mut ws,
-            W1,
-            &act("workspace::switch_0")
-        ));
-        assert!(
-            !apply_workspace_action(&mut ws, W3, &act("workspace::switch_4")),
-            "not open"
-        );
+        assert_eq!(ws.switch(W1, 3), Switch::Shown);
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(3));
+        assert_eq!(ws.switch(W1, 0), Switch::Invalid);
+        assert_eq!(ws.switch(W3, 4), Switch::Invalid, "not open");
     }
 
     #[test]

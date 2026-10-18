@@ -152,9 +152,16 @@ hosted `n` hidden; this window now shows and hosts it and the caller moves
 the occupants. `Shown`: `n` was free, hidden in this same window, or not yet
 created; it is created if needed and shown and hosted here. The index left
 behind stays hosted by the window that showed it. `Invalid` names an index
-outside 1–9 or a window that is not open. The action router counts every
-outcome but `Invalid` as handled, so a re-select or a raise never falls
-through to another handler.
+outside 1–9 or a window that is not open. `workspace::switch_*` is not the
+action router's (`apply_workspace_action` leaves it unhandled): the shell
+dispatches it through `ShellApp::switch` and acts on the outcome. `Raise`
+asks the other window forward; `Moved` tells the window it came from to
+park its occupants for the index, which the new host rebuilds from their
+records (see [workspaces moving between
+windows](shell.md#workspaces-moving-between-windows)); `Shown` and `Moved`
+re-seed the window's flip baseline and pull any records already parked for
+what it now hosts; `Unchanged` reconciles focus as any recognised workspace
+action does; `Invalid` does nothing.
 
 Each window has its own switch generation (`switch_epoch`), advanced only by
 `Shown` and `Moved`, allowing a gesture to detect switching away and back
