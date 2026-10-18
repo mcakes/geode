@@ -319,3 +319,83 @@ fn barrier_opens_before_any_occupant_could_deliver(cx: &mut gpui::TestAppContext
          cannot be explained by an occupant having already acted"
     );
 }
+
+/// Two windows on unpinned workspaces read one shared lane, and each
+/// window's `on_frame_changed` answers a change to it with its own visible
+/// tiles. The second answer joins the barrier the first opened rather than
+/// replacing it: the first window's tile stays awaited, and the flip (the
+/// counter every staged tile promotes on) does not advance until the tile
+/// in each window has arrived. The recorder submits no query, so arrival
+/// is reported for it here, through the route a tile's delivery takes.
+#[gpui::test]
+fn two_windows_on_one_lane_flip_together(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    vcx1.simulate_keystrokes("ctrl-v");
+    vcx1.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s2 = shell_of(&w2, &mut vcx2);
+    vcx2.simulate_keystrokes("ctrl-v");
+    vcx2.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    let first = s1.read_with(&vcx1, |s, cx| s.workspace(cx).tree().tiles()[0]);
+    let second = s2.read_with(&vcx2, |s, cx| s.workspace(cx).tree().tiles()[0]);
+    assert_ne!(first, second, "fixture: a tile in each window");
+    let (ws1, ws2) = (
+        s1.read_with(&vcx1, |s, cx| s.shown_ix(cx)),
+        s2.read_with(&vcx2, |s, cx| s.shown_ix(cx)),
+    );
+    assert_ne!(ws1, ws2, "fixture: the windows show different workspaces");
+    let frame = s1.read_with(&vcx1, |s, _| s.frame().clone());
+    assert!(
+        frame.read_with(&vcx1, |f, _| !f.is_pinned(ws1) && !f.is_pinned(ws2)),
+        "fixture: both workspaces read the shared lane"
+    );
+
+    // One edit of the shared scope; both windows' observers answer it.
+    frame.update(&mut vcx1, |f, cx| {
+        assert!(f.shared_mut().set_text(Some("spx".into())));
+        cx.notify();
+    });
+    vcx1.run_until_parked();
+
+    let v = frame.read_with(&vcx1, |f, _| f.shared().versions());
+    let (k1, k2) = (QueryKey(first.0), QueryKey(second.0));
+    assert!(
+        frame.read_with(&vcx1, |f, _| f.barrier_wants(k1, v)),
+        "the first window's tile is still awaited after the second window answered"
+    );
+    assert!(
+        frame.read_with(&vcx1, |f, _| f.barrier_wants(k2, v)),
+        "the second window's tile joined the same barrier"
+    );
+
+    // The first window's tile arrives: nothing promotes yet.
+    assert!(
+        !frame.update(&mut vcx1, |f, _| f.arrived(k1, v)),
+        "one window's arrival must not release the flip"
+    );
+    assert_eq!(
+        frame.read_with(&vcx1, |f, _| f.shared().versions().flip),
+        v.flip,
+        "no tile in either window may promote before both arrived"
+    );
+    assert!(frame.read_with(&vcx1, |f, _| f.barrier_open()));
+
+    // The second window's tile arrives: both windows flip at once.
+    assert!(
+        frame.update(&mut vcx2, |f, _| f.arrived(k2, v)),
+        "the last arrival releases the flip for both windows"
+    );
+    assert_eq!(
+        frame.read_with(&vcx2, |f, _| f.shared().versions().flip),
+        v.flip + 1
+    );
+    assert!(!frame.read_with(&vcx2, |f, _| f.barrier_open()));
+}

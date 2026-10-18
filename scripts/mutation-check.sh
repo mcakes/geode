@@ -33566,12 +33566,30 @@ run_mutation "link: a group's change awaits only that group's followers" \
 
 # A lane change is a new flip for everyone on screen: the barrier is
 # replaced. Joined instead, keys of tiles now hidden would hold it to its
-# deadline.
+# deadline. `join_flip` replaces because the lane write advanced the
+# generation; an unconditional extension would carry the old keys.
 run_mutation "link: a lane move replaces the barrier" \
   crates/geode-shell/src/shell/mod.rs \
-  '                    f.open_flip_each(awaited, Instant::now());' \
+  '                    f.join_flip(awaited, Instant::now());' \
   '                    f.extend_flip(awaited, Instant::now());' \
   geode-shell a_lane_change_replaces_the_barrier_and_drops_the_keys_it_awaited
+
+# Two windows answering one lane change answer it under one generation:
+# the second joins the first's barrier. Joining regardless of generation
+# would carry a stale barrier's keys into a later change's flip.
+run_mutation "frame: join_flip keys on the generation" \
+  crates/geode-shell/src/frame.rs \
+  '            Some(barrier) if barrier.generation == self.generation => {' \
+  '            Some(barrier) if true => {' \
+  geode-shell join_flip_replaces_a_barrier_from_an_older_generation
+
+# The second window's answer must join, not replace: replaced, the first
+# window's tiles are no longer awaited and the two windows flip apart.
+run_mutation "frame: a second window's answer joins the barrier" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                    f.join_flip(awaited, Instant::now());' \
+  '                    f.open_flip_each(awaited, Instant::now());' \
+  geode-shell two_windows_on_one_lane_flip_together
 
 # The group baseline advances with the change it flipped, or every later
 # notification reads as the same change again.

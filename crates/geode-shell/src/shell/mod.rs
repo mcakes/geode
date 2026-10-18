@@ -1408,8 +1408,11 @@ impl ShellView {
                     .collect();
                 if lane_moved {
                     // A new flip for everyone: whatever was awaited before
-                    // answered an older frame.
-                    f.open_flip_each(awaited, Instant::now());
+                    // answered an older frame. Another window answering
+                    // this same change (same generation) joins it instead
+                    // of replacing it, or its tiles would no longer be
+                    // awaited and the two windows would flip apart.
+                    f.join_flip(awaited, Instant::now());
                 } else {
                     // A group's change alone joins the flip in progress.
                     // Replacing it would drop the other tiles while their

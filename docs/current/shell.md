@@ -900,7 +900,11 @@ tuple that tile itself reads, so an old result cannot satisfy it. A later
 change to the active lane replaces the barrier with one over every visible
 tile: whatever was awaited before answered an older frame. A link group's
 scope change concerns only that group's followers, so it joins the open
-barrier instead of replacing it (see [link groups](#link-groups)).
+barrier instead of replacing it (see [link groups](#link-groups)). Two
+windows showing workspaces on one lane both answer a change to it, each with
+its own visible tiles; the second answer joins the barrier the first opened,
+so the tiles in both windows flip together (the rule is under **Flips** in
+[link groups](#link-groups)).
 
 Only visible occupants are barrier participants. Hiding a following tile (a
 stack, dock or workspace switch) cancels nothing: its in-flight query
@@ -1183,8 +1187,20 @@ next registration.
 group's: enrolled under the lane's, its arrival would never match and every
 flip beside a follower would wait out the 250 ms deadline. The shell keeps
 two baselines, the active lane's versions and the four group scope
-generations. When the lane moved, it replaces the barrier over every visible
-tile, each under its own reading. When only a group's scope moved, it calls
+generations. When the lane moved, it answers with every visible tile, each
+under its own reading, through `Frame::join_flip`: a barrier opened at the
+same frame generation is joined, any other is replaced. The generation is
+the frame-wide counter every lane and group write advances, so "same
+generation" means "the same change": each window's `ShellView` observes the
+frame and answers a lane change with its own visible tiles, and the second
+window's answer must join the first's or the first window's tiles would no
+longer be awaited and the two windows would flip apart. The barrier is one
+per generation, not one per window, because the `flip` counter it releases
+is frame-wide: a per-window barrier releasing early would promote the other
+window's staged tiles before their answers arrived. A later edit advances
+the generation and its answer replaces the barrier, so keys carried from a
+workspace shown before (hidden tiles that submit nothing) never hold a new
+flip to its deadline. When only a group's scope moved, it calls
 `Frame::extend_flip` with that group's visible followers: an open barrier
 keeps its other keys and its deadline and takes the followers under their new
 identity, and with no barrier open one opens over those followers alone. A
