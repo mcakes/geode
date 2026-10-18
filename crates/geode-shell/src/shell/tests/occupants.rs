@@ -2193,20 +2193,19 @@ fn a_move_parks_then_rebuilds_with_the_record_and_links(cx: &mut gpui::TestAppCo
         Some(s2.read_with(&vcx2, |s, _| s.key())),
         "the destination hosts 3"
     );
-    // Before the destination draws, the record is nobody's occupant and no
-    // longer parked; a save now must still carry it.
-    assert_eq!(
-        app.read_with(&vcx2, |a, cx| a.current_tiles(cx).get(&tile.0).cloned()),
-        Some(record.clone()),
-        "the session union carries a pulled record before it is built"
-    );
-
     vcx2.update(|window, cx| {
         let _ = window.draw(cx);
     });
     assert!(
         s2.read_with(&vcx2, |s, _| s.occupants.contains_key(&tile)),
         "the destination rebuilt the occupant"
+    );
+    // The session union carries the tile once, as the destination's live
+    // record, equal to what was parked.
+    assert_eq!(
+        app.read_with(&vcx2, |a, cx| a.current_tiles(cx).get(&tile.0).cloned()),
+        Some(record.clone()),
+        "the moved tile is the destination's to write"
     );
     let states = created_states(&log, tile);
     assert_eq!(states.len(), 2, "one occupant per window: {states:?}");
@@ -2340,6 +2339,14 @@ fn parked_records_go_to_the_window_that_hosts_them(cx: &mut gpui::TestAppContext
         );
         assert!(!s.restored_tiles.contains_key(&hosted.0));
     });
+    // A pulled record is its window's to write from the moment it is
+    // taken, built or not: it has left the parked set, and this one, in
+    // no tree, is never built. (The writer itself emits only tiles some
+    // tree holds.)
+    assert!(
+        app.read_with(&vcx1, |a, cx| a.current_tiles(cx).contains_key(&unplaced)),
+        "the session union lost a pulled record that is not yet built"
+    );
 
     // The hosting window shows 3 again: the record is its, and its draw
     // builds the occupant from it.

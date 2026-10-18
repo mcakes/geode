@@ -7210,13 +7210,15 @@ run_mutation "shell: a pulled record replaces a placeholder" \
 
 # A record pulled from the app's parked set but not yet built sits only in
 # the window's `restored_tiles` until its next draw; a save in that gap
-# must still carry the tile.
+# must still carry the tile. The test context draws a notified window
+# during the flush, so the gap is observed through a pulled record no
+# tree holds, which is never built.
 run_mutation "shell: a pulled record not yet built is still written" \
   crates/geode-shell/src/shell/occupants.rs \
   '        for (id, record) in self.unplaced_records.iter().chain(&self.restored_tiles) {' \
   '        for (id, record) in self.unplaced_records.iter() {' \
   geode-shell \
-  a_move_parks_then_rebuilds_with_the_record_and_links
+  parked_records_go_to_the_window_that_hosts_them
 
 # An index hidden in another window leaves it through `Park` when a new
 # window opens on it; otherwise two windows hold occupants for its tiles.
