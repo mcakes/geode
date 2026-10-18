@@ -6022,7 +6022,7 @@ run_mutation "objectdialog: a browse removal walks leave_edit and drops the filt
 run_mutation "objectdialog: the removal landing clamps against the pre-flush rows" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '            .chain(state.domain.objects(&config))' \
-  '            .chain(state.domain.objects(&shell.services.config))' \
+  '            .chain(state.domain.objects(shell.config(cx)))' \
   geode-shell \
   a_browse_delete_of_the_last_row_lands_the_cursor_on_the_new_last_row
 
@@ -6286,7 +6286,7 @@ run_mutation "objectdialog: a fork asks first" \
   '    match super::apply::commit_edit(shell, cx) {
         Some(refusal) => set_notice(shell, refusal),' \
   '    if fork.is_some() {
-        arm_confirm(shell, Confirm::Overwrite);
+        arm_confirm(shell, Confirm::Revert);
         return;
     }
     match super::apply::commit_edit(shell, cx) {
