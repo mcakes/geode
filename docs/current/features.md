@@ -25,6 +25,18 @@ followed versions and request anything stale. A closed following tile cancels
 its query and answers any flip barrier still waiting on it. The pricer's own
 hide rule is described with the pricer.
 
+`park` comes once, before `closed`, when the shell is about to serialise a
+tile's record and drop its occupant because the tile's workspace is moving
+to another window or its window is closing: a module entity renders only
+in the window that created it, so the record rebuilds the tile there. It
+is called with a live context so a module queues the unsaved work a later
+timer or close would have saved; the pricer queues its dirty sheet's save.
+It is never called for a workspace switch within the window, a dock toggle
+or a stack cycle, which only hide, nor for an ordinary close, which
+rebuilds nothing. The default does nothing. The rebuilt tile starts from
+its record as a restored tile does: staged results and in-flight answers
+do not survive a move, and the module requeries when it is shown.
+
 Every module follows these interaction rules:
 
 - `:` changes only the focused tile; global changes use actions and palette

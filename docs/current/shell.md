@@ -13,7 +13,7 @@ data handle while receiving only shell concepts such as `TileId`, `Frame`, and
 ## State ownership
 
 `ShellView` is the retained GPUI entity for one window. It owns transient
-window state: the active workspace, tile occupants, focus restoration,
+window state: the workspace it shows, tile occupants, focus restoration,
 palette, modal, command line, and drag state. Its `render` method describes
 the current frame; it must not become a second domain model or perform
 blocking work.
@@ -144,6 +144,15 @@ also pulls on every `Shown` or `Moved` outcome, so records parked earlier
 (a closed window's, or a move's that this window did not show at the time)
 reach the window that now hosts them.
 
+A moved workspace is rebuilt, not handed over, so it requeries when it is
+shown. The destination's module entities are new, built from records as
+a restore's are: a module's staged result, an in-flight query's answer
+and anything its state does not serialize are gone with the old
+entities, and each rebuilt tile asks its queries again against the frame
+it now reads. The cost is a restore's cost for that workspace's tiles,
+paid once per move; a switch within one window parks nothing and pays
+nothing, which is why the plain switch is kept apart from the move.
+
 `ShellApp` also creates the shared `Frame` and the `Diagnostics` entities
 (`frame()`, `diagnostics()`) and applies the session's restored frame state to
 the frame once, before any window exists: the `[frame]` record to the shared
@@ -236,6 +245,30 @@ geometry. Each workspace also owns left, right, and bottom dock trees.
 
 See [tiling and workspaces](tiling.md) for region crossing, empty-dock focus,
 insertion/removal rules, drag geometry, and restoration limits.
+
+Every window draws its workspaces from the one `Workspaces` the app owns.
+A window *shows* one index, 1–9, and *hosts* every index whose occupants
+it has built and keeps: the one it shows, each one it showed and switched
+away from (hidden in that window until another window takes it), and,
+for the first window of the process, every index the restored session
+materialised, since no other window existed to build them. An index is
+shown by at most one window; a tile's window is its workspace's host,
+which need not be showing it. `workspace::switch_N` is not the pure
+router's action: the shell dispatches it through `ShellApp::switch` and
+acts on what `Workspaces::switch` answers. `Unchanged`, the window
+already shows N: focus is reconciled as after any workspace action.
+`Shown`, N was free, hidden in this window or not yet created: the window
+shows it (and now hosts it), re-seeds its flip baseline from N's lane and
+pulls any records already parked for what it hosts. `Raise`, another
+window shows N: nothing changes, and that window is asked forward
+instead (`ShellApp::activate_window`). `Moved`, another window hosted N
+hidden: this window now shows and hosts it, and N's occupants are parked
+in the window they leave and rebuilt here, under [workspaces moving
+between windows](#workspaces-moving-between-windows). `Invalid`, an
+index outside 1–9, does nothing. Only `Shown` and `Moved` advance the
+window's switch generation. The map's own rules (`add_window`,
+`remove_window`, `lowest_free`) are under [windows, shown and
+hosted](tiling.md#windows-shown-and-hosted).
 
 A stack occupies one layout slot and keeps two or more leaf tiles alive. Only
 its active member is visible. Focusing a member activates it, so structural
@@ -372,7 +405,7 @@ added with no state — from the palette, the tile picker, or
 `tile::open_with` falling back to the picker — asks for it here.
 
 `TileContent::set_focused` tells an occupant whether it is the focused tile
-of the active workspace's focused region. The shell diffs the focused tile
+of the window's shown workspace's focused region. The shell diffs the focused tile
 during its render, before the tiles render, and tells the tile that lost
 focus and the one that gained it; a fresh occupant under the focused id is
 told again. Focus is reported after visibility in the same render, so a tile
@@ -802,10 +835,16 @@ reads, and following a [link group](#link-groups) changes whose scope it
 reads, without it re-subscribing. Any lane's or group's change notifies every
 observer; each tile's version compare filters out the ones it does not read.
 
-Only the active workspace's lane opens a flip barrier: its visible tiles are
-the ones a barrier coordinates, so the shell compares and opens against the
-active lane. A workspace switch is not a frame change: it re-seeds the flip
-baseline from the new active lane instead of opening a barrier. When the
+A window answers a frame change for the lane its shown workspace reads,
+its active lane: that workspace's visible tiles are the ones a barrier
+coordinates, so each window compares and answers against its own shown
+lane. Two windows showing workspaces on one lane both answer a change to
+it; the second answer joins the barrier the first opened
+(`Frame::join_flip` keys the barrier by the frame generation, see
+**Flips** under [link groups](#link-groups)), and the one frame-wide
+`flip` releases both windows' tiles together. A workspace switch is not a
+frame change: it re-seeds the window's flip baseline from the newly shown
+lane instead of opening a barrier. When the
 switch leaves or enters a pinned workspace, the old lane's text session ends
 and the scope field re-reads the new lane; a focused field keeps focus and
 opens a fresh session there, so Escape restores the new lane's text. A switch
@@ -814,7 +853,7 @@ ending it would split one edit into two undo entries. Pinning and unpinning
 rebind the field the same way.
 
 The toolbar's first readout control is a pin glyph, before the as-of chip:
-a bare, muted verb while the active workspace is unpinned, a solid chip in
+a bare, muted verb while the window's shown workspace is unpinned, a solid chip in
 the theme's primary color while it is pinned (`Tone::Active`: the fill is
 moved toward `foreground` where a theme's primary sits too close to its title
 bar, so the on state reads at a glance on every bundled theme). The glyph
@@ -827,9 +866,10 @@ as-of together; there is no per-part pin.
 
 Shell surfaces resolve their lane through `ShellView::target_frame`: the
 workspace recorded on the base entry of the modal stack when a dialog is
-open, else the active workspace. A dialog therefore reads and commits the
-lane it was opened from. The flip barrier and the toolbar's scope text field
-use the active workspace's lane directly. Under a modal the two name the same
+open, else the workspace the window shows. A dialog therefore reads and
+commits the lane it was opened from. The flip barrier and the toolbar's
+scope text field use the shown workspace's lane directly. Under a modal
+the two name the same
 workspace: the palette refuses `workspace::switch_*` and
 `frame::pin_workspace` while a dialog is open (see
 [input and dialogs](input-and-dialogs.md#palette-and-which-key)), so the
@@ -1400,7 +1440,7 @@ flight is cancelled when a page opens.
 The sidebar paints one button per registered page between the workspace
 discs and the settings avatar, in roster order, with the factory's icon
 and a tooltip naming the page and its toggle binding. The open page's
-button takes the active workspace disc's treatment and no pointer states,
+button takes the shown workspace disc's treatment and no pointer states,
 because selected must stay distinct from hovered.
 
 A page persists as `[pages.<kind>]` in the session file, written from
@@ -1616,7 +1656,7 @@ The writer emits `config_version = 1` and these records:
 
 | Record | Contents |
 |---|---|
-| `active` | Workspace index, 1–9 |
+| `active` | Workspace index, 1–9: the one the oldest open window shows, which the first window of the next run opens on |
 | `workspaces.N` | Main tree, focused tile, optional fullscreen tile, and focused region |
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name, its opaque state table, and the link groups the tile is in: `follow` and `emit`, each a group letter `"a"` to `"d"`, written only when set |

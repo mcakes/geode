@@ -2370,6 +2370,48 @@ fn parked_records_go_to_the_window_that_hosts_them(cx: &mut gpui::TestAppContext
     );
 }
 
+/// A record whose tile is in no workspace waits for the oldest open
+/// window: a younger window's pull leaves it parked. Handed to whichever
+/// window pulls first, an unplaced record would be written back by a
+/// window that may close before the oldest, and the first window would
+/// no longer own what it always has.
+#[gpui::test]
+fn an_unplaced_record_waits_for_the_oldest_window(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let s2 = shell_of(&w2, &mut vcx2);
+    let unplaced = 999u64;
+    vcx1.update(|_, cx| {
+        app.update(cx, |a, _| {
+            a.parked_tiles.insert(
+                unplaced,
+                session::TileRecord {
+                    kind: "rec".into(),
+                    state: toml::Table::new(),
+                    link: geode_core::link::Membership::default(),
+                },
+            );
+        })
+    });
+
+    // The younger window switches to a free index and pulls what it may
+    // host: not the unplaced record.
+    dispatch_action(&s2, "workspace::switch_5", &mut vcx2);
+    assert!(
+        app.read_with(&vcx2, |a, _| a.parked_tiles.contains_key(&unplaced)),
+        "a younger window took the unplaced record"
+    );
+    assert!(!s2.read_with(&vcx2, |s, _| s.restored_tiles.contains_key(&unplaced)));
+
+    // The oldest window's pull takes it.
+    dispatch_action(&s1, "workspace::switch_4", &mut vcx1);
+    assert!(app.read_with(&vcx1, |a, _| a.parked_tiles.is_empty()));
+    assert!(s1.read_with(&vcx1, |s, _| s.restored_tiles.contains_key(&unplaced)));
+}
+
 /// A window builds occupants only for the workspaces it hosts: a tile in
 /// another window's workspace has one occupant, in that window.
 #[gpui::test]

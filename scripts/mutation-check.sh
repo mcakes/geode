@@ -7184,6 +7184,17 @@ run_mutation "shell: parked records go to the hosting window" \
   geode-shell \
   parked_records_go_to_the_window_that_hosts_them
 
+# An unplaced record is the oldest window's alone. Handed to whichever
+# window pulls first, it would be written back by a window that may close
+# before the oldest, and the first window would no longer own what it
+# always has.
+run_mutation "shell: an unplaced record waits for the oldest window" \
+  crates/geode-shell/src/shell/app.rs \
+  '                None => oldest == Some(key),' \
+  '                None => oldest.is_some(),' \
+  geode-shell \
+  an_unplaced_record_waits_for_the_oldest_window
+
 # A window builds occupants only for the workspaces it hosts: walking every
 # stored workspace would build a second live module entity for another
 # window's tile.
@@ -9113,6 +9124,15 @@ run_mutation "workspaces: lowest_free counts only shown indexes" \
   '        (1..=9).find(|n| self.shower(*n).is_none()).map(WorkspaceIx)' \
   '        (1..=9).find(|n| !self.host.contains_key(n)).map(WorkspaceIx)' \
   geode-shell lowest_free_skips_a_hidden_hosted_index_only_if_shown
+
+# A closing window frees every index it hosted, the hidden ones included:
+# returning only the shown one would leave hidden workspaces hosted by a
+# window that no longer exists, where no window could take them.
+run_mutation "workspaces: remove_window frees hidden hosted indexes too" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '            .filter(|(_, v)| **v == key)' \
+  '            .filter(|(ix, v)| **v == key && self.shown.get(&key) == Some(*ix))' \
+  geode-shell remove_window_returns_hidden_hosted_indexes_too
 
 # The session's `active` follows the oldest open window, so a restart reopens
 # where the trader was; a frozen restore-time value would reopen elsewhere.
