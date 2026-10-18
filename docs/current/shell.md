@@ -269,7 +269,16 @@ must requery when shown if their followed versions changed. Removing an
 occupant (closing its tile, or filling a placeholder in place) calls
 `set_visible(false)` and then `closed`, once, before the occupant is dropped.
 Hiding never calls `closed`: a workspace switch, a dock toggle or a stack
-cycle only hides.
+cycle only hides. `park` is the one moment before that teardown: when the
+shell is about to serialise a tile's record and drop its occupant because
+the workspace is moving to another window or its window is closing (a live
+module entity never renders in a window other than the one that created
+it; the record rebuilds it there), it calls `park` first, with a live
+context, so a module queues unsaved work it would otherwise have saved on
+a timer that never fires; `closed` follows. The pricer queues its dirty
+sheet's save there. `park` is never called for a plain workspace switch,
+dock toggle or stack cycle, which only hide, nor for an ordinary tile
+close, which does not rebuild the occupant. The default does nothing.
 
 ### Dimension context
 

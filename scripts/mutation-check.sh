@@ -25734,6 +25734,15 @@ run_mutation "pricer: flush_all flushes no tile" \
   '' \
   geode-pricer flush_all_saves_every_unsaved_sheet_now
 
+# `park` is the shell's hook before a workspace move or window close
+# serialises a tile and drops its occupant; a park that skips the flush
+# leaves a dirty sheet to an idle timer that never fires.
+run_mutation "pricer: park queues the dirty sheet save" \
+  crates/geode-pricer/src/content.rs \
+  $'        self.tile.update(cx, |t, cx| {\n            if t.flush_save(cx) {' \
+  $'        self.tile.update(cx, |t, cx| {\n            if false {' \
+  geode-pricer park_queues_the_dirty_sheet_save
+
 # A deferred load starts only after the LAST queued save of its sheet.
 run_mutation "pricer: the first save outcome releases the name" \
   crates/geode-pricer/src/content.rs \

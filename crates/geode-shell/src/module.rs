@@ -364,6 +364,12 @@ pub trait TileContent {
     /// still waiting on it, so a closed tile never holds the others to the
     /// deadline. The default does nothing.
     fn closed(&self, _cx: &mut App) {}
+    /// The shell is about to serialise this tile's record and drop the
+    /// occupant because its workspace is moving to another window or its
+    /// window is closing. Queue any unsaved work now, with this live
+    /// context; `closed` follows. Never called for a plain workspace
+    /// switch.
+    fn park(&self, _cx: &mut App) {}
     /// Set this tile's stack position, or `None` outside a stack.
     /// `ShellView::ensure_occupants` calls this after creation and whenever
     /// `(index, len)` changes. Modules paint the marker first in their header
@@ -1138,6 +1144,10 @@ pub mod recording {
         Visible(TileId, bool),
         /// `closed` reached this tile: its occupant is being removed.
         Closed(TileId),
+        /// `park` reached this tile: its workspace is moving to another
+        /// window or its window is closing, and the occupant is about to
+        /// be serialised and dropped.
+        Park(TileId),
         Delivered(TileId, u64),
         Priced(TileId, u64),
         VolSliced(TileId, u64),
@@ -1662,6 +1672,9 @@ pub mod recording {
             self.followed_at_close
                 .borrow_mut()
                 .push((self.tile, self.frame.read(cx).following()));
+        }
+        fn park(&self, _: &mut App) {
+            self.log.borrow_mut().push(Recorded::Park(self.tile));
         }
         fn follows(&self) -> bool {
             self.follows

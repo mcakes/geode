@@ -434,6 +434,20 @@ impl TileContent for PricerContent {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
     }
 
+    /// The sheet's write-behind save waits on an idle timer that a
+    /// dropped tile never sees fire: queue it now, as the quit-time
+    /// `PricerFactory::flush_all` does for every tile. A rolled-back
+    /// live step changes the sheet, so the grid is rebuilt off it
+    /// before the record is read; no chrome repaint, the occupant is
+    /// dropped before another paint.
+    fn park(&self, cx: &mut App) {
+        self.tile.update(cx, |t, cx| {
+            if t.flush_save(cx) {
+                t.rebuild(cx);
+            }
+        })
+    }
+
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_stack(stack, cx))
     }

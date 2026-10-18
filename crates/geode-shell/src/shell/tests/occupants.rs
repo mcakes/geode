@@ -578,6 +578,41 @@ fn closing_a_tile_tells_its_occupant_it_closed_and_a_workspace_switch_does_not(
     );
 }
 
+/// `park` reaches an occupant through the trait object the shell holds,
+/// and is its own moment: the module queues unsaved work, and `closed`
+/// is a separate call that follows later. (The move and close paths
+/// prove their calling order; this proves the hook alone.)
+#[gpui::test]
+fn park_is_recorded_without_closing(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::Recorded;
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v");
+    let shell = shell_of(&window, &mut cx);
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    cx.update(|_, cx| {
+        shell.update(cx, |s, cx| {
+            s.occupants
+                .get(&tile)
+                .expect("the added tile has an occupant")
+                .content
+                .park(cx);
+        });
+    });
+    let log = log.borrow();
+    assert_eq!(
+        log.iter()
+            .filter(|r| matches!(r, Recorded::Park(t) if *t == tile))
+            .count(),
+        1,
+        "park reached the occupant once: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|r| matches!(r, Recorded::Closed(_))),
+        "park is not a close: {log:?}"
+    );
+}
+
 #[gpui::test]
 fn a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::TestAppContext) {
     // GPUI focuses tracked elements on mouse-down. The tile click handler arms
