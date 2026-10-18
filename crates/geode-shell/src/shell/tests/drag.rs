@@ -717,7 +717,7 @@ fn switching_workspaces_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui
     // isolated in `a_grab_leaves_the_shell_focused_on_the_next_frame`.
     cx.simulate_keystrokes("alt-1");
     assert_eq!(
-        shell.read_with(&cx, |shell, cx| shell.workspaces(cx).active_index()),
+        shell.read_with(&cx, |shell, cx| shell.shown_ix(cx).get()),
         1,
         "the keyboard survived the grab: `alt-1` still reaches the shell after \
          the workspace switch unmounted the focused occupant"
@@ -1458,7 +1458,7 @@ fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAp
             );
         });
         assert_eq!(
-            shell.read(cx).workspaces(cx).active_index(),
+            shell.read(cx).shown_ix(cx).get(),
             1,
             "sanity: back on the original workspace before the release"
         );

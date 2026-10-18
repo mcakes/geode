@@ -93,7 +93,7 @@ impl ShellView {
             // workspace's lane.
             let occupant = factory.create(
                 restored.as_ref(),
-                self.frame_at(self.active_ix(cx)),
+                self.frame_at(self.shown_ix(cx)),
                 self.diagnostics.clone(),
                 actions,
                 window,

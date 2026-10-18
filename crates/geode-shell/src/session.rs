@@ -460,12 +460,14 @@ impl FrameRecord {
     }
 }
 
-/// Serialize all materialized workspaces without I/O. Write tile records only
-/// under the workspace whose main or dock tree contains the ID; omit stale
-/// records. Include `[frame]` whenever `frame` is `Some`, even if its table is
-/// empty, `workspaces.N.frame` for exactly the workspaces in `pinned`, and
-/// palette usage and pages only when nonempty. Link group scopes are not
-/// written here: [`insert_links`] adds them.
+/// Serialize all materialized workspaces without I/O. `active` is
+/// [`Workspaces::initial_index`]: the workspace the first window reopens on.
+/// Write tile records only under the workspace whose main or dock tree
+/// contains the ID; omit stale records. Include `[frame]` whenever `frame`
+/// is `Some`, even if its table is empty, `workspaces.N.frame` for exactly
+/// the workspaces in `pinned`, and palette usage and pages only when
+/// nonempty. Link group scopes are not written here: [`insert_links`] adds
+/// them.
 pub fn to_toml(
     workspaces: &Workspaces,
     tiles: &TileRecords,
@@ -481,7 +483,7 @@ pub fn to_toml(
     );
     root.insert(
         "active".to_string(),
-        toml::Value::Integer(i64::from(workspaces.active_index())),
+        toml::Value::Integer(i64::from(workspaces.initial_index())),
     );
 
     let mut spaces_table = toml::Table::new();
@@ -1307,7 +1309,36 @@ pub fn load(path: &Path) -> Restored {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tiling::{Direction, apply_workspace_action};
+    use crate::tiling::{Direction, WindowKey, apply_workspace_action};
+
+    /// The shell's first window, standing in for every fixture here that
+    /// builds through one window.
+    const W1: WindowKey = WindowKey(1);
+
+    /// A fresh collection with `W1` open on workspace 1.
+    fn one_window() -> Workspaces {
+        let mut ws = Workspaces::new();
+        ws.add_window(W1, 1);
+        ws
+    }
+
+    /// `load`, then `W1` opened on the restored initial index, as
+    /// `ShellApp::add_window(None)` opens the first window.
+    fn load_opened(path: &Path) -> Restored {
+        let mut restored = load(path);
+        let n = restored.workspaces.initial_index();
+        restored.workspaces.add_window(W1, n);
+        restored
+    }
+
+    /// `from_toml`, then `W1` opened on the restored initial index, as
+    /// `ShellApp::add_window(None)` opens the first window.
+    fn from_toml_opened(table: &toml::Table) -> Result<Restored, Vec<String>> {
+        let mut restored = from_toml(table)?;
+        let n = restored.workspaces.initial_index();
+        restored.workspaces.add_window(W1, n);
+        Ok(restored)
+    }
 
     /// An empty usage history, for the tests that serialize a session and
     /// do not care about the palette.
@@ -1327,13 +1358,41 @@ mod tests {
 
     /// Two tiles side by side in workspace 1 — the simplest fixture with
     /// more than one tile to hang a `TileRecord` on. The first
-    /// `split_active` on an empty tree only creates the first tile
+    /// `split_in` on an empty tree only creates the first tile
     /// (nothing to split yet); the second actually splits it in two.
     fn two_tile_workspaces() -> Workspaces {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Horizontal);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Horizontal);
         ws
+    }
+
+    #[test]
+    fn to_toml_writes_the_initial_index_as_active() {
+        let (ws, _) = Workspaces::from_parts(BTreeMap::new(), 4).unwrap();
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
+        assert_eq!(table.get("active").and_then(|v| v.as_integer()), Some(4));
+        // Once a window is open, the file follows what it shows, so a
+        // restart reopens where the trader was.
+        let mut ws = ws;
+        ws.add_window(W1, 4);
+        ws.switch(W1, 6);
+        let table = to_toml(
+            &ws,
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+        );
+        assert_eq!(table.get("active").and_then(|v| v.as_integer()), Some(6));
     }
 
     // --- Tile records --------------------------------------------------
@@ -1341,7 +1400,7 @@ mod tests {
     #[test]
     fn tiles_round_trip_with_their_kind_and_opaque_state() {
         let ws = two_tile_workspaces();
-        let ids = ws.active().tree().tiles();
+        let ids = ws.workspace(W1).tree().tiles();
         let mut tiles = TileRecords::new();
         let mut state = toml::Table::new();
         state.insert("view".into(), toml::Value::String("tree".into()));
@@ -1382,10 +1441,10 @@ mod tests {
         assert!(text.contains("module = \"blotter\""), "{text}");
         assert!(text.contains("view = \"tree\""), "{text}");
 
-        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        let restored = from_toml_opened(&text.parse().unwrap()).unwrap();
         assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
         assert_eq!(restored.tiles, tiles);
-        assert_eq!(restored.workspaces.active().tree().tiles(), ids);
+        assert_eq!(restored.workspaces.workspace(W1).tree().tiles(), ids);
     }
 
     #[test]
@@ -1421,7 +1480,7 @@ mod tests {
         tiles_table.insert("999".into(), toml::Value::Table(stray));
         ws_table.insert("tiles".into(), toml::Value::Table(tiles_table));
 
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         assert!(!restored.tiles.contains_key(&999));
         assert!(
             restored.warnings.iter().any(|w| w.contains("999")),
@@ -1433,7 +1492,7 @@ mod tests {
     #[test]
     fn a_tile_record_without_a_module_or_with_a_bad_state_is_dropped_with_a_warning() {
         let ws = two_tile_workspaces();
-        let id = ws.active().tree().tiles()[0].0;
+        let id = ws.workspace(W1).tree().tiles()[0].0;
         let mut table = to_toml(
             &ws,
             &TileRecords::new(),
@@ -1448,7 +1507,7 @@ mod tests {
         no_module.insert("state".into(), toml::Value::Table(toml::Table::new()));
         tiles_table.insert(id.to_string(), toml::Value::Table(no_module));
         ws_table.insert("tiles".into(), toml::Value::Table(tiles_table));
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         assert!(restored.tiles.is_empty());
         assert_eq!(restored.warnings.len(), 1, "{:?}", restored.warnings);
     }
@@ -1478,7 +1537,7 @@ mod tests {
     /// first tile's id: a record to write a hand-edited key into.
     fn two_unlinked_tiles() -> (toml::Table, u64) {
         let ws = two_tile_workspaces();
-        let ids = ws.active().tree().tiles();
+        let ids = ws.workspace(W1).tree().tiles();
         let mut tiles = TileRecords::new();
         tiles.insert(ids[0].0, linked(None, None));
         tiles.insert(ids[1].0, linked(None, None));
@@ -1495,7 +1554,7 @@ mod tests {
     #[test]
     fn a_tiles_link_round_trips_and_absent_keys_mean_none() {
         let ws = two_tile_workspaces();
-        let ids = ws.active().tree().tiles();
+        let ids = ws.workspace(W1).tree().tiles();
         let mut tiles = TileRecords::new();
         tiles.insert(ids[0].0, linked(Some(Group::A), Some(Group::B)));
         tiles.insert(ids[1].0, linked(None, None));
@@ -1517,7 +1576,7 @@ mod tests {
 
         // Through the file's text as well, which is what a restart reads.
         let text = toml::to_string_pretty(&table).unwrap();
-        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        let restored = from_toml_opened(&text.parse().unwrap()).unwrap();
         assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
         assert_eq!(restored.tiles, tiles);
     }
@@ -1525,11 +1584,11 @@ mod tests {
     #[test]
     fn a_tile_may_follow_or_emit_alone() {
         let ws = two_tile_workspaces();
-        let ids = ws.active().tree().tiles();
+        let ids = ws.workspace(W1).tree().tiles();
         let mut tiles = TileRecords::new();
         tiles.insert(ids[0].0, linked(Some(Group::D), None));
         tiles.insert(ids[1].0, linked(None, Some(Group::C)));
-        let restored = from_toml(&session_of(&ws, &tiles)).unwrap();
+        let restored = from_toml_opened(&session_of(&ws, &tiles)).unwrap();
         assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
         assert_eq!(restored.tiles, tiles);
     }
@@ -1541,7 +1600,7 @@ mod tests {
     #[test]
     fn a_linked_tile_with_state_round_trips_through_the_file_text() {
         let ws = two_tile_workspaces();
-        let ids = ws.active().tree().tiles();
+        let ids = ws.workspace(W1).tree().tiles();
         let mut state = toml::Table::new();
         state.insert("view".into(), toml::Value::String("tree".into()));
         let mut nested = toml::Table::new();
@@ -1578,7 +1637,7 @@ mod tests {
         assert!(at("follow = \"a\"") < state_header, "{text}");
         assert!(at("emit = \"b\"") < state_header, "{text}");
 
-        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        let restored = from_toml_opened(&text.parse().unwrap()).unwrap();
         assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
         assert_eq!(restored.tiles, tiles);
     }
@@ -1589,7 +1648,7 @@ mod tests {
         set_tile_key(&mut table, id, "follow", toml::Value::String("z".into()));
         set_tile_key(&mut table, id, "emit", toml::Value::String("c".into()));
 
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         let record = restored.tiles.get(&id).expect("the tile survives");
         assert_eq!(record.kind, "blotter");
         assert_eq!(record.link.follow, None);
@@ -1613,7 +1672,7 @@ mod tests {
         let (mut table, id) = two_unlinked_tiles();
         set_tile_key(&mut table, id, "emit", toml::Value::Integer(3));
 
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         let record = restored.tiles.get(&id).expect("the tile survives");
         assert_eq!(record.link, Membership::default());
         assert_eq!(restored.warnings.len(), 1, "{:?}", restored.warnings);
@@ -1630,7 +1689,7 @@ mod tests {
 
     /// The session table of an empty layout with these group scopes added.
     fn session_with_links(links: &GroupScopes) -> toml::Table {
-        let mut table = session_of(&Workspaces::new(), &TileRecords::new());
+        let mut table = session_of(&one_window(), &TileRecords::new());
         insert_links(&mut table, links);
         table
     }
@@ -1674,7 +1733,7 @@ mod tests {
 
         let text = toml::to_string_pretty(&table).unwrap();
         assert!(text.contains("[links.a.scope.dimensions]"), "{text}");
-        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        let restored = from_toml_opened(&text.parse().unwrap()).unwrap();
         assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
         assert_eq!(restored.links, links);
 
@@ -1686,7 +1745,7 @@ mod tests {
             &mut toml::Table::new(),
             &GroupScopes::default()
         ));
-        let restored = from_toml(&bare).unwrap();
+        let restored = from_toml_opened(&bare).unwrap();
         assert_eq!(restored.links, GroupScopes::default());
     }
 
@@ -1710,7 +1769,7 @@ mod tests {
         .unwrap();
         table.insert("links".into(), toml::Value::Table(links));
 
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         assert!(restored.tiles.contains_key(&id), "the layout still reads");
         let mut expected = GroupScopes::default();
         expected[Group::C.index()] = underlying("NDX");
@@ -1728,7 +1787,7 @@ mod tests {
 
         // A `links` value that is no table at all is ignored whole.
         table.insert("links".into(), toml::Value::Integer(1));
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         assert_eq!(restored.links, GroupScopes::default());
         assert_eq!(restored.warnings, ["links is not a table; ignored"]);
         assert!(restored.tiles.contains_key(&id));
@@ -1743,7 +1802,7 @@ mod tests {
         links[Group::B.index()] = underlying("SPX.Z");
         save(
             &path,
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -1752,7 +1811,7 @@ mod tests {
             &no_pages(),
         )
         .unwrap();
-        let restored = load(&path);
+        let restored = load_opened(&path);
         assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
         assert_eq!(restored.links, links);
     }
@@ -1771,7 +1830,7 @@ mod tests {
         )
         .unwrap();
         assert!(!text.contains("tiles"), "{text}");
-        let restored = from_toml(&text.parse().unwrap()).unwrap();
+        let restored = from_toml_opened(&text.parse().unwrap()).unwrap();
         assert!(restored.tiles.is_empty());
     }
 
@@ -1779,14 +1838,15 @@ mod tests {
 
     #[test]
     fn round_trips_a_stack_in_the_main_tree_and_in_a_dock() {
-        let mut ws = Workspaces::new();
-        let a = ws.split_active(Orientation::Horizontal);
-        let b = ws.stack_active().unwrap();
-        let _c = ws.stack_active().unwrap();
-        ws.active_mut().focus_main_tile(b); // b active, hidden c and a
-        let d = ws.split_active(Orientation::Horizontal);
-        ws.active_mut().move_to_dock(crate::tiling::DockSide::Left);
-        let _e = ws.stack_active().unwrap(); // stack in the dock
+        let mut ws = one_window();
+        let a = ws.split_in(W1, Orientation::Horizontal);
+        let b = ws.stack_in(W1).unwrap();
+        let _c = ws.stack_in(W1).unwrap();
+        ws.workspace_mut(W1).focus_main_tile(b); // b active, hidden c and a
+        let d = ws.split_in(W1, Orientation::Horizontal);
+        ws.workspace_mut(W1)
+            .move_to_dock(crate::tiling::DockSide::Left);
+        let _e = ws.stack_in(W1).unwrap(); // stack in the dock
         let _ = (a, d);
 
         let table = to_toml(
@@ -1804,21 +1864,29 @@ mod tests {
             workspaces: restored,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(restored.active().tree().tiles(), ws.active().tree().tiles());
         assert_eq!(
-            restored.active().tree().visible_tiles(),
-            ws.active().tree().visible_tiles()
+            restored.workspace(W1).tree().tiles(),
+            ws.workspace(W1).tree().tiles()
         );
         assert_eq!(
-            restored.active().tree().focused(),
-            ws.active().tree().focused()
+            restored.workspace(W1).tree().visible_tiles(),
+            ws.workspace(W1).tree().visible_tiles()
+        );
+        assert_eq!(
+            restored.workspace(W1).tree().focused(),
+            ws.workspace(W1).tree().focused()
         );
         let side = crate::tiling::DockSide::Left;
         assert_eq!(
-            restored.active().docks().get(side).tree().visible_tiles(),
-            ws.active().docks().get(side).tree().visible_tiles()
+            restored
+                .workspace(W1)
+                .docks()
+                .get(side)
+                .tree()
+                .visible_tiles(),
+            ws.workspace(W1).docks().get(side).tree().visible_tiles()
         );
     }
 
@@ -1842,8 +1910,8 @@ members = [1, 2, 3]
 active = 12
 "#;
         let table: toml::Table = toml::from_str(text).unwrap();
-        let Restored { workspaces, .. } = from_toml(&table).unwrap();
-        let tree = workspaces.active().tree();
+        let Restored { workspaces, .. } = from_toml_opened(&table).unwrap();
+        let tree = workspaces.workspace(W1).tree();
         assert_eq!(tree.tiles(), vec![TileId(1), TileId(2), TileId(3)]);
         assert_eq!(
             tree.stack_position(TileId(2)),
@@ -1868,13 +1936,13 @@ kind = "stack"
 members = [1, -4]
 "#;
         let table: toml::Table = toml::from_str(text).unwrap();
-        let err = from_toml(&table).unwrap_err();
+        let err = from_toml_opened(&table).unwrap_err();
         assert!(err.iter().any(|e| e.contains("negative")), "{err:?}");
     }
 
     #[test]
     fn round_trips_a_fresh_workspaces() {
-        let ws = Workspaces::new();
+        let ws = one_window();
         let table = to_toml(
             &ws,
             &TileRecords::new(),
@@ -1887,22 +1955,22 @@ members = [1, -4]
             workspaces: restored,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(restored.active_index(), ws.active_index());
-        assert!(restored.active().is_empty());
+        assert_eq!(restored.initial_index(), ws.initial_index());
+        assert!(restored.workspace(W1).is_empty());
     }
 
     #[test]
     fn round_trips_a_multi_workspace_layout() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Vertical);
-        ws.switch(3);
-        ws.split_active(Orientation::Horizontal);
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
-        ws.switch(1);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Vertical);
+        ws.switch(W1, 3);
+        ws.split_in(W1, Orientation::Horizontal);
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
+        ws.switch(W1, 1);
 
         let table = to_toml(
             &ws,
@@ -1916,10 +1984,10 @@ members = [1, -4]
             workspaces: restored,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
 
-        assert_eq!(restored.active_index(), 1);
+        assert_eq!(restored.initial_index(), 1);
 
         let before: BTreeMap<u8, _> = ws
             .spaces()
@@ -1952,7 +2020,7 @@ members = [1, -4]
     fn from_toml_tolerates_a_legacy_extra_theme_mode_table() {
         // Unknown `[extra]` fields are ignored without discarding the layout.
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -1970,16 +2038,16 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(ws.active_index(), 1);
-        assert!(ws.active().is_empty());
+        assert_eq!(ws.initial_index(), 1);
+        assert!(ws.workspace(W1).is_empty());
     }
 
     #[test]
     fn from_toml_tolerates_unknown_keys() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -1995,7 +2063,7 @@ members = [1, -4]
         {
             w1.insert("unknown".to_string(), toml::Value::Boolean(true));
         }
-        assert!(from_toml(&table).is_ok());
+        assert!(from_toml_opened(&table).is_ok());
     }
 
     // --- hostile inputs --------------------------------------------------
@@ -2006,9 +2074,9 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&toml::Table::new()).unwrap();
-        assert_eq!(ws.active_index(), 1);
-        assert!(ws.active().is_empty());
+        } = from_toml_opened(&toml::Table::new()).unwrap();
+        assert_eq!(ws.initial_index(), 1);
+        assert!(ws.workspace(W1).is_empty());
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("config_version"));
     }
@@ -2047,7 +2115,7 @@ members = [1, -4]
         table.insert("workspaces".to_string(), toml::Value::Table(ws_table));
 
         assert!(
-            from_toml(&table).is_err(),
+            from_toml_opened(&table).is_err(),
             "a non-positive ratio must fail the whole session, not silently apply"
         );
     }
@@ -2088,7 +2156,7 @@ members = [1, -4]
         table.insert("workspaces".to_string(), toml::Value::Table(ws_table));
 
         assert!(
-            from_toml(&table).is_err(),
+            from_toml_opened(&table).is_err(),
             "a NaN ratio must fail the whole session, not silently apply"
         );
     }
@@ -2111,7 +2179,7 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).expect("dangling focused must be healed, not rejected");
+        } = from_toml_opened(&table).expect("dangling focused must be healed, not rejected");
         assert_eq!(
             warnings,
             vec!["missing config_version (assuming 1)".to_string()],
@@ -2119,8 +2187,8 @@ members = [1, -4]
         );
         // A dangling focus heals to the first tile via `Workspace::from_parts`.
         // A nonempty restored main tree must have focus for tile movement.
-        assert_eq!(ws.active().tree().focused(), Some(TileId(1)));
-        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert_eq!(ws.workspace(W1).tree().focused(), Some(TileId(1)));
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![TileId(1)]);
     }
 
     // --- Config version ------------------------------------------------
@@ -2129,8 +2197,8 @@ members = [1, -4]
     fn from_toml_rejects_a_mismatched_config_version() {
         let mut table = toml::Table::new();
         table.insert("config_version".to_string(), toml::Value::Integer(99));
-        let err =
-            from_toml(&table).expect_err("a mismatched version must invalidate the whole session");
+        let err = from_toml_opened(&table)
+            .expect_err("a mismatched version must invalidate the whole session");
         assert_eq!(err.len(), 1);
         assert!(
             err[0].contains("99"),
@@ -2149,7 +2217,7 @@ members = [1, -4]
             workspaces: _,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
     }
 
@@ -2164,7 +2232,7 @@ members = [1, -4]
             workspaces: _,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert_eq!(
             warnings,
             vec!["missing config_version (assuming 1)".to_string()]
@@ -2175,7 +2243,7 @@ members = [1, -4]
     fn from_toml_rejects_active_out_of_range() {
         let mut table = toml::Table::new();
         table.insert("active".to_string(), toml::Value::Integer(42));
-        assert!(from_toml(&table).is_err());
+        assert!(from_toml_opened(&table).is_err());
     }
 
     #[test]
@@ -2184,7 +2252,7 @@ members = [1, -4]
         let mut ws_table = toml::Table::new();
         ws_table.insert("1".to_string(), toml::Value::String("nope".to_string()));
         table.insert("workspaces".to_string(), toml::Value::Table(ws_table));
-        assert!(from_toml(&table).is_err());
+        assert!(from_toml_opened(&table).is_err());
     }
 
     #[test]
@@ -2193,7 +2261,7 @@ members = [1, -4]
         let mut ws_table = toml::Table::new();
         ws_table.insert("42".to_string(), toml::Value::Table(toml::Table::new()));
         table.insert("workspaces".to_string(), toml::Value::Table(ws_table));
-        assert!(from_toml(&table).is_err());
+        assert!(from_toml_opened(&table).is_err());
     }
 
     // --- save / load (I/O) ------------------------------------------------
@@ -2205,10 +2273,10 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = load(&dir.path().join("session.toml"));
+        } = load_opened(&dir.path().join("session.toml"));
         assert!(warnings.is_empty());
-        assert_eq!(ws.active_index(), 1);
-        assert!(ws.active().is_empty());
+        assert_eq!(ws.initial_index(), 1);
+        assert!(ws.workspace(W1).is_empty());
     }
 
     #[test]
@@ -2220,9 +2288,9 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = load(&path);
+        } = load_opened(&path);
         assert!(!warnings.is_empty());
-        assert!(ws.active().is_empty());
+        assert!(ws.workspace(W1).is_empty());
     }
 
     #[test]
@@ -2234,9 +2302,9 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = load(&path);
+        } = load_opened(&path);
         assert!(!warnings.is_empty());
-        assert_eq!(ws.active_index(), 1);
+        assert_eq!(ws.initial_index(), 1);
     }
 
     #[test]
@@ -2248,9 +2316,9 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = load(&path);
+        } = load_opened(&path);
         assert_eq!(
-            ws.active_index(),
+            ws.initial_index(),
             1,
             "a version mismatch must be a fresh start"
         );
@@ -2270,9 +2338,9 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = load(&path);
+        } = load_opened(&path);
         assert_eq!(
-            ws.active_index(),
+            ws.initial_index(),
             2,
             "a missing config_version must warn, not discard the rest of the file"
         );
@@ -2285,9 +2353,9 @@ members = [1, -4]
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
 
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Horizontal);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Horizontal);
 
         save(
             &path,
@@ -2316,11 +2384,14 @@ members = [1, -4]
             workspaces: restored,
             warnings,
             ..
-        } = load(&path);
+        } = load_opened(&path);
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
-            restored.active().tree().layout(crate::tiling::Rect::UNIT),
-            ws.active().tree().layout(crate::tiling::Rect::UNIT)
+            restored
+                .workspace(W1)
+                .tree()
+                .layout(crate::tiling::Rect::UNIT),
+            ws.workspace(W1).tree().layout(crate::tiling::Rect::UNIT)
         );
     }
 
@@ -2330,7 +2401,7 @@ members = [1, -4]
         let path = dir.path().join("session.toml");
         save(
             &path,
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2350,7 +2421,7 @@ members = [1, -4]
         let path = dir.path().join("nested").join("session.toml");
         save(
             &path,
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2364,10 +2435,10 @@ members = [1, -4]
 
     #[test]
     fn a_restored_session_then_splitting_does_not_collide_tile_ids() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Horizontal);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Horizontal);
         let table = to_toml(
             &ws,
             &TileRecords::new(),
@@ -2380,14 +2451,14 @@ members = [1, -4]
             workspaces: mut restored,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let before_ids: std::collections::HashSet<_> =
-            restored.active().tree().tiles().into_iter().collect();
+            restored.workspace(W1).tree().tiles().into_iter().collect();
 
-        restored.split_active(Orientation::Horizontal);
-        let after_ids: Vec<_> = restored.active().tree().tiles();
+        restored.split_in(W1, Orientation::Horizontal);
+        let after_ids: Vec<_> = restored.workspace(W1).tree().tiles();
         let new_id = after_ids
             .iter()
             .find(|id| !before_ids.contains(id))
@@ -2397,8 +2468,8 @@ members = [1, -4]
             "newly allocated tile id must not collide with a restored id"
         );
 
-        apply_workspace_action(&mut restored, &act("workspace::focus_left"));
-        let _ = restored.active().tree().neighbor(Direction::Right);
+        apply_workspace_action(&mut restored, W1, &act("workspace::focus_left"));
+        let _ = restored.workspace(W1).tree().neighbor(Direction::Right);
     }
 
     // --- Docks ---------------------------------------------------------
@@ -2408,12 +2479,12 @@ members = [1, -4]
     /// A main leaf and a resized, visible split dock with dock focus exercise
     /// recursive dock serialization.
     fn docked_workspaces() -> Workspaces {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Horizontal);
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical);
-        apply_workspace_action(&mut ws, &act("workspace::resize_right"));
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Horizontal);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical);
+        apply_workspace_action(&mut ws, W1, &act("workspace::resize_right"));
         ws
     }
 
@@ -2432,11 +2503,11 @@ members = [1, -4]
             workspaces: restored,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
 
-        let before = ws.active();
-        let after = restored.active();
+        let before = ws.workspace(W1);
+        let after = restored.workspace(W1);
         assert_eq!(after.region(), before.region());
         assert_eq!(after.region(), FocusRegion::Dock(DockSide::Left));
         for side in DockSide::ALL {
@@ -2468,16 +2539,20 @@ members = [1, -4]
     /// a warning or a change of focus region.
     #[test]
     fn an_empty_but_visible_focused_dock_round_trips_without_a_warning() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Left),
             "fixture sanity: toggling shows and focuses the empty left dock"
         );
         assert!(
-            ws.active().docks().get(DockSide::Left).tree().is_empty(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .is_empty(),
             "fixture sanity: the dock really is empty"
         );
 
@@ -2493,18 +2568,18 @@ members = [1, -4]
             workspaces: restored,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(
             warnings.is_empty(),
             "an empty visible dock is legal; nothing to heal: {warnings:?}"
         );
         assert_eq!(
-            restored.active().region(),
+            restored.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Left),
             "the region must survive the restore"
         );
         assert!(
-            restored.active().docks().get(DockSide::Left).visible(),
+            restored.workspace(W1).docks().get(DockSide::Left).visible(),
             "and the dock is still visible"
         );
     }
@@ -2512,8 +2587,8 @@ members = [1, -4]
     #[test]
     fn a_default_dock_session_writes_no_dock_keys() {
         // Omit dock fields when all docks and the focus region are at defaults.
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
         let text = to_string_pretty(
             &ws,
             &TileRecords::new(),
@@ -2542,21 +2617,21 @@ members = [1, -4]
             workspaces: mut restored,
             warnings: _,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         let known: Vec<_> = restored
-            .active()
+            .workspace(W1)
             .tree()
             .tiles()
             .into_iter()
-            .chain(restored.active().docks().tiles())
+            .chain(restored.workspace(W1).docks().tiles())
             .collect();
         // Focus is restored into the left dock; step back to Main so the
         // fresh split lands in the main tree (a dock-focused split would
         // work too — same allocator — but Main keeps the assertion simple).
-        apply_workspace_action(&mut restored, &act("workspace::focus_right"));
-        restored.split_active(Orientation::Horizontal);
+        apply_workspace_action(&mut restored, W1, &act("workspace::focus_right"));
+        restored.split_in(W1, Orientation::Horizontal);
         let new_id = restored
-            .active()
+            .workspace(W1)
             .tree()
             .tiles()
             .into_iter()
@@ -2571,7 +2646,7 @@ members = [1, -4]
     #[test]
     fn from_toml_drops_a_dock_tile_also_present_in_the_tree() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2597,15 +2672,21 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).expect("a duplicate dock claim heals, not fails");
+        } = from_toml_opened(&table).expect("a duplicate dock claim heals, not fails");
         assert!(
             warnings.iter().any(|w| w.contains("removing")),
             "{warnings:?}"
         );
-        assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
-        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert!(
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .is_empty()
+        );
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![TileId(1)]);
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Left),
             "the dock is emptied but still visible, so it keeps the region"
         );
@@ -2614,7 +2695,7 @@ members = [1, -4]
     #[test]
     fn from_toml_heals_a_region_pointing_at_a_hidden_or_absent_dock() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2637,16 +2718,16 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(!warnings.is_empty(), "{warnings:?}");
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
     fn from_toml_heals_an_out_of_range_or_nan_dock_size_to_default() {
         for bad in ["size = 0.9", "size = -3.0", "size = nan"] {
             let mut table = to_toml(
-                &Workspaces::new(),
+                &one_window(),
                 &TileRecords::new(),
                 None,
                 &PinnedRecords::new(),
@@ -2669,12 +2750,12 @@ members = [1, -4]
                 workspaces: ws,
                 warnings,
                 ..
-            } = from_toml(&table).expect(bad);
+            } = from_toml_opened(&table).expect(bad);
             assert!(
                 warnings.iter().any(|w| w.contains("size")),
                 "{bad}: {warnings:?}"
             );
-            let dock = ws.active().docks().get(DockSide::Right);
+            let dock = ws.workspace(W1).docks().get(DockSide::Right);
             assert!(
                 (dock.size() - DOCK_DEFAULT_SIZE).abs() < 1e-4,
                 "{bad}: {}",
@@ -2689,7 +2770,7 @@ members = [1, -4]
         // Main-tree fullscreen and dock focus cannot coexist. Restore dock
         // focus and clear fullscreen with a warning.
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2717,15 +2798,15 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).expect("the contradictory combo heals, never fails");
+        } = from_toml_opened(&table).expect("the contradictory combo heals, never fails");
         assert!(
             warnings.iter().any(|w| w.contains("fullscreen")),
             "{warnings:?}"
         );
-        assert_eq!(ws.active().tree().fullscreen(), None);
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).tree().fullscreen(), None);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().tiles(),
+            ws.workspace(W1).docks().get(DockSide::Left).tree().tiles(),
             vec![TileId(2)]
         );
     }
@@ -2733,7 +2814,7 @@ members = [1, -4]
     #[test]
     fn from_toml_heals_an_unknown_region_string_to_main() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2748,12 +2829,12 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(
             warnings.iter().any(|w| w.contains("region")),
             "{warnings:?}"
         );
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
@@ -2761,7 +2842,7 @@ members = [1, -4]
         // docks not a table; a side not a table; tile negative/non-integer;
         // visible non-bool — every one heals with a warning, none fails.
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2788,13 +2869,13 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.len() >= 2, "{warnings:?}");
-        let left = ws.active().docks().get(DockSide::Left);
+        let left = ws.workspace(W1).docks().get(DockSide::Left);
         assert!(left.tree().is_empty(), "negative tile id dropped");
         assert!(!left.visible(), "non-bool visible heals to hidden");
         assert_eq!(
-            ws.active().docks().get(DockSide::Right).tree().tiles(),
+            ws.workspace(W1).docks().get(DockSide::Right).tree().tiles(),
             vec![TileId(2)]
         );
     }
@@ -2813,12 +2894,12 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = load(&path);
+        } = load_opened(&path);
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![TileId(1)]);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
         for side in DockSide::ALL {
-            let dock = ws.active().docks().get(side);
+            let dock = ws.workspace(W1).docks().get(side);
             assert!(dock.tree().is_empty());
             assert!(!dock.visible());
         }
@@ -2842,12 +2923,12 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = load(&path);
+        } = load_opened(&path);
         assert!(
             warnings.is_empty(),
             "legacy tile must load silently: {warnings:?}"
         );
-        let dock = ws.active().docks().get(DockSide::Left);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(dock.tree().tiles(), vec![TileId(2)]);
         assert_eq!(
             dock.tree().focused(),
@@ -2856,13 +2937,13 @@ members = [1, -4]
         );
         assert!(dock.visible());
         assert!((dock.size() - 0.3).abs() < 1e-4);
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
     }
 
     #[test]
     fn a_dock_with_both_node_and_legacy_tile_picks_the_node_with_a_warning() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2886,13 +2967,13 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(
             warnings.iter().any(|w| w.contains("legacy tile")),
             "{warnings:?}"
         );
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().tiles(),
+            ws.workspace(W1).docks().get(DockSide::Left).tree().tiles(),
             vec![TileId(2)],
             "the node tree wins; the legacy tile is ignored"
         );
@@ -2904,7 +2985,7 @@ members = [1, -4]
         // key inside a dock table is ignored (warned), and the dock's
         // tree loads without it.
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2929,12 +3010,12 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(
             warnings.iter().any(|w| w.contains("fullscreen")),
             "{warnings:?}"
         );
-        let dock = ws.active().docks().get(DockSide::Bottom);
+        let dock = ws.workspace(W1).docks().get(DockSide::Bottom);
         assert_eq!(dock.tree().tiles(), vec![TileId(3)]);
         assert_eq!(dock.tree().fullscreen(), None);
     }
@@ -2945,7 +3026,7 @@ members = [1, -4]
         // to an empty dock with a warning — the workspace's main tree is
         // never discarded over a dock (docks are an adornment).
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -2976,11 +3057,17 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).expect("a bad dock tree heals, never fails");
+        } = from_toml_opened(&table).expect("a bad dock tree heals, never fails");
         assert!(warnings.iter().any(|w| w.contains("dock")), "{warnings:?}");
-        assert!(ws.active().docks().get(DockSide::Right).tree().is_empty());
+        assert!(
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Right)
+                .tree()
+                .is_empty()
+        );
         assert_eq!(
-            ws.active().tree().tiles(),
+            ws.workspace(W1).tree().tiles(),
             vec![TileId(1)],
             "the main tree survives"
         );
@@ -2993,7 +3080,7 @@ members = [1, -4]
         // main tree wins, then first dock claim wins; the right dock
         // keeps its unique tile.
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3032,16 +3119,22 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert_eq!(
             warnings.iter().filter(|w| w.contains("removing")).count(),
             2,
             "{warnings:?}"
         );
-        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
-        assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![TileId(1)]);
+        assert!(
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .is_empty()
+        );
         assert_eq!(
-            ws.active().docks().get(DockSide::Right).tree().tiles(),
+            ws.workspace(W1).docks().get(DockSide::Right).tree().tiles(),
             vec![TileId(2)]
         );
     }
@@ -3051,7 +3144,7 @@ members = [1, -4]
         // A repeated dock ID keeps its first occurrence, removes the other,
         // and emits one warning for the duplicate.
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3082,13 +3175,13 @@ members = [1, -4]
             workspaces: ws,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert_eq!(
             warnings.iter().filter(|w| w.contains("removing")).count(),
             1,
             "exactly one warning for the one healed duplicate: {warnings:?}"
         );
-        let dock = ws.active().docks().get(DockSide::Left);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(
             dock.tree().tiles(),
             vec![TileId(5)],
@@ -3101,7 +3194,7 @@ members = [1, -4]
     #[test]
     fn a_dangling_dock_focused_reference_heals_to_the_first_tile() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3125,9 +3218,13 @@ members = [1, -4]
             workspaces: ws,
             warnings: _,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().focused(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .focused(),
             Some(TileId(4)),
             "Tree::from_parts heals the dangling ref to None; Dock::from_parts \
              then refocuses the first tile so the dock's verbs stay usable"
@@ -3293,8 +3390,8 @@ members = [1, -4]
 
     #[test]
     fn a_pinned_lane_round_trips_under_its_workspace() {
-        let mut spaces = Workspaces::new();
-        spaces.switch(2);
+        let mut spaces = one_window();
+        spaces.switch(W1, 2);
         let mut pinned = PinnedRecords::new();
         pinned.insert(WorkspaceIx::new(2).unwrap(), sample_frame_record());
         let table = to_toml(
@@ -3314,14 +3411,14 @@ members = [1, -4]
                 .contains_key("frame"),
             "an unpinned workspace writes no frame"
         );
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         assert_eq!(restored.pinned, pinned);
     }
 
     #[test]
     fn a_non_table_workspace_frame_restores_unpinned_with_a_warning() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3332,7 +3429,7 @@ members = [1, -4]
             .as_table_mut()
             .unwrap()
             .insert("frame".into(), toml::Value::Integer(3));
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         assert!(restored.pinned.is_empty());
         assert!(
             restored
@@ -3345,7 +3442,7 @@ members = [1, -4]
     #[test]
     fn a_partial_pinned_record_keeps_its_usable_fields() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3363,7 +3460,7 @@ members = [1, -4]
             .as_table_mut()
             .unwrap()
             .insert("frame".into(), toml::Value::Table(frame));
-        let restored = from_toml(&table).unwrap();
+        let restored = from_toml_opened(&table).unwrap();
         let record = &restored.pinned[&WorkspaceIx::FIRST];
         assert_eq!(record.active_slot, Some(2));
         assert_eq!(
@@ -3382,7 +3479,7 @@ members = [1, -4]
     fn a_frame_record_round_trips_through_session_toml_with_every_field() {
         let record = sample_frame_record();
         let table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             Some(&record),
             &PinnedRecords::new(),
@@ -3395,7 +3492,7 @@ members = [1, -4]
             frame: restored,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(restored, Some(record));
     }
@@ -3454,7 +3551,7 @@ members = [1, -4]
     #[test]
     fn no_frame_record_writes_no_frame_table() {
         let table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3462,7 +3559,7 @@ members = [1, -4]
             &no_pages(),
         );
         assert!(!table.contains_key("frame"), "{table:?}");
-        let Restored { frame, .. } = from_toml(&table).unwrap();
+        let Restored { frame, .. } = from_toml_opened(&table).unwrap();
         assert_eq!(frame, None);
     }
 
@@ -3474,7 +3571,7 @@ members = [1, -4]
         usage.record("action:workspace::close_tile", 1_800_000_000);
         usage.record("theme:Gruvbox Dark", 1_800_000_100);
         let text = to_string_pretty(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3487,7 +3584,7 @@ members = [1, -4]
             palette_usage: restored,
             warnings,
             ..
-        } = from_toml(&text.parse().unwrap()).unwrap();
+        } = from_toml_opened(&text.parse().unwrap()).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(restored, usage);
     }
@@ -3495,7 +3592,7 @@ members = [1, -4]
     #[test]
     fn empty_palette_usage_writes_no_palette_table() {
         let table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3509,7 +3606,7 @@ members = [1, -4]
     #[test]
     fn a_session_file_without_a_palette_table_restores_empty_usage_silently() {
         let table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3521,7 +3618,7 @@ members = [1, -4]
             palette_usage,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(palette_usage.is_empty());
         assert!(warnings.is_empty(), "{warnings:?}");
     }
@@ -3529,7 +3626,7 @@ members = [1, -4]
     #[test]
     fn a_malformed_palette_table_warns_and_restores_empty_usage() {
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3541,12 +3638,12 @@ members = [1, -4]
             palette_usage,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(palette_usage.is_empty());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
 
         let mut table = to_toml(
-            &Workspaces::new(),
+            &one_window(),
             &TileRecords::new(),
             None,
             &PinnedRecords::new(),
@@ -3560,7 +3657,7 @@ members = [1, -4]
             palette_usage,
             warnings,
             ..
-        } = from_toml(&table).unwrap();
+        } = from_toml_opened(&table).unwrap();
         assert!(palette_usage.is_empty());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
@@ -3569,7 +3666,7 @@ members = [1, -4]
 
     #[test]
     fn pages_round_trip_and_an_unknown_kind_is_kept() {
-        let workspaces = Workspaces::new();
+        let workspaces = one_window();
         let mut pages = PageRecords::new();
         let mut diag = toml::Table::new();
         diag.insert("section".into(), toml::Value::String("log".into()));
@@ -3588,7 +3685,7 @@ members = [1, -4]
             pages: restored,
             warnings,
             ..
-        } = from_toml(&text.parse::<toml::Table>().unwrap()).unwrap();
+        } = from_toml_opened(&text.parse::<toml::Table>().unwrap()).unwrap();
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(restored, pages);
         // Empty pages are omitted.
@@ -3611,7 +3708,7 @@ members = [1, -4]
             pages: restored,
             warnings,
             ..
-        } = from_toml(&text.parse::<toml::Table>().unwrap()).unwrap();
+        } = from_toml_opened(&text.parse::<toml::Table>().unwrap()).unwrap();
         assert!(restored.is_empty());
         assert!(
             warnings.iter().any(|w| w.contains("pages.diagnostics")),

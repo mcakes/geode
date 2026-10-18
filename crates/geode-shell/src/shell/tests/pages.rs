@@ -246,7 +246,7 @@ fn a_workspace_switch_closes_the_page(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("alt-2");
     shell.read_with(&cx, |s, cx| {
         assert!(!s.page_open());
-        assert_eq!(s.workspaces(cx).active_index(), 2);
+        assert_eq!(s.shown_ix(cx).get(), 2);
     });
 }
 
@@ -267,7 +267,7 @@ fn a_workspace_switch_chord_from_a_focused_page_input_closes_the_page(
     cx.simulate_keystrokes("alt-3");
     shell.read_with(&cx, |s, cx| {
         assert!(!s.page_open(), "the chord resolved against the whole stack");
-        assert_eq!(s.workspaces(cx).active_index(), 3);
+        assert_eq!(s.shown_ix(cx).get(), 3);
     });
 }
 
@@ -323,7 +323,7 @@ fn layout_edits_are_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) 
     dispatch_action(&shell, "workspace::switch_2", &mut cx);
     shell.read_with(&cx, |s, cx| {
         assert!(!s.page_open());
-        assert_eq!(s.workspaces(cx).active_index(), 2);
+        assert_eq!(s.shown_ix(cx).get(), 2);
     });
 }
 

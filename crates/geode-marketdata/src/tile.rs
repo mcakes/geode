@@ -16852,7 +16852,7 @@ edits = [["2026-11-20", "-1", 9.5]]
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let view = {
                         let app = cx.new(|cx| ShellApp::new(services, None, None, cx));
-                        let key = app.update(cx, |a, _| a.register_window());
+                        let key = app.update(cx, |a, _| a.add_window(None));
                         cx.new(|cx| ShellView::new(app, key, window, cx))
                     };
                     *shell_slot.borrow_mut() = Some(view.clone());

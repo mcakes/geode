@@ -648,13 +648,11 @@ fn a_centre_drop_across_regions_stacks_into_the_targets_dock(cx: &mut gpui::Test
 #[gpui::test]
 fn a_placeholder_paints_the_marker_for_the_active_member_only(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
-    let a = services
-        .workspaces
-        .split_active(crate::tiling::Orientation::Horizontal);
-    let b = services
-        .workspaces
-        .stack_active()
-        .expect("a focused tile to stack onto");
+    let (a, b) = before_any_window(&mut services.workspaces, |w, k| {
+        let a = w.split_in(k, crate::tiling::Orientation::Horizontal);
+        let b = w.stack_in(k).expect("a focused tile to stack onto");
+        (a, b)
+    });
     let (_window, mut cx) = open_shell(cx, services);
 
     let a_sel: &'static str = Box::leak(format!("stack-marker-{}", a.0).into_boxed_str());
@@ -676,13 +674,10 @@ fn a_placeholder_paints_the_marker_for_the_active_member_only(cx: &mut gpui::Tes
 fn a_replaced_occupant_is_re_told_its_position(cx: &mut gpui::TestAppContext) {
     let (mut services, log) = services_with_recorder();
     // Both members are placeholders because the fixture uses `Workspaces` directly.
-    services
-        .workspaces
-        .split_active(crate::tiling::Orientation::Horizontal);
-    let b = services
-        .workspaces
-        .stack_active()
-        .expect("a focused tile to stack onto");
+    let b = before_any_window(&mut services.workspaces, |w, k| {
+        w.split_in(k, crate::tiling::Orientation::Horizontal);
+        w.stack_in(k).expect("a focused tile to stack onto")
+    });
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     // `b` is the focused placeholder; `tile::add_rec` fills it in place.

@@ -306,7 +306,7 @@ fn a_group_change_pending_across_a_workspace_switch_still_flips(cx: &mut gpui::T
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
     add_tile(&mut vcx);
     let hidden = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles()[0]);
-    let ws2 = shell.read_with(&vcx, |s, cx| s.active_ix(cx));
+    let ws2 = shell.read_with(&vcx, |s, cx| s.shown_ix(cx));
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
     follow(&frame, &mut vcx, hidden, Some(Group::B));
     assert!(!frame.read_with(&vcx, |f, _| f.barrier_open()));
@@ -370,7 +370,7 @@ fn a_follower_in_a_pinned_workspace_reads_its_group_and_its_own_lane(
     add_tile(&mut vcx);
     let follower = TileId(2);
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
-    let ws2 = shell.read_with(&vcx, |s, cx| s.active_ix(cx));
+    let ws2 = shell.read_with(&vcx, |s, cx| s.shown_ix(cx));
     assert!(frame.read_with(&vcx, |f, _| f.is_pinned(ws2)));
     let pinned_as_of = AsOf::At(chrono::Utc::now());
     frame.update(&mut vcx, |f, cx| {
@@ -473,7 +473,7 @@ fn a_group_nobody_visible_follows_opens_no_barrier(cx: &mut gpui::TestAppContext
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
     add_tile(&mut vcx);
     let hidden = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles()[0]);
-    let ws2 = shell.read_with(&vcx, |s, cx| s.active_ix(cx));
+    let ws2 = shell.read_with(&vcx, |s, cx| s.shown_ix(cx));
     super::occupants::dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
     follow(&frame, &mut vcx, hidden, Some(Group::B));
 
@@ -1309,7 +1309,7 @@ fn filling_a_placeholder_drops_the_membership_its_tile_had(cx: &mut gpui::TestAp
     let shell = shell_of(&window, &mut vcx);
     shell.update(&mut vcx, |s, cx| {
         s.with_workspaces(cx, |w| {
-            w.split_active(crate::tiling::Orientation::Horizontal)
+            w.split_in(s.key(), crate::tiling::Orientation::Horizontal)
         });
         cx.notify();
     });
@@ -1731,7 +1731,7 @@ fn a_membership_in_an_inactive_workspace_survives_restore(cx: &mut gpui::TestApp
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
     let frame = frame_of(&shell, &vcx);
-    assert_eq!(shell.read_with(&vcx, |s, cx| s.active_ix(cx)), WS1);
+    assert_eq!(shell.read_with(&vcx, |s, cx| s.shown_ix(cx)), WS1);
     draw(&mut vcx);
     vcx.run_until_parked();
     draw(&mut vcx);
@@ -1839,7 +1839,7 @@ fn the_doors_refuse_a_tile_with_no_occupant(cx: &mut gpui::TestAppContext) {
     let (_window, mut vcx, shell, frame) = two_tiles_in(cx, services);
     shell.update(&mut vcx, |s, cx| {
         s.with_workspaces(cx, |w| {
-            w.split_active(crate::tiling::Orientation::Horizontal)
+            w.split_in(s.key(), crate::tiling::Orientation::Horizontal)
         });
         cx.notify();
     });
@@ -1879,7 +1879,7 @@ fn a_refused_door_logs_the_tile_and_the_reason(cx: &mut gpui::TestAppContext) {
     let (_window, mut vcx, shell, _frame) = two_tiles(cx);
     shell.update(&mut vcx, |s, cx| {
         s.with_workspaces(cx, |w| {
-            w.split_active(crate::tiling::Orientation::Horizontal)
+            w.split_in(s.key(), crate::tiling::Orientation::Horizontal)
         });
         cx.notify();
     });
@@ -2373,7 +2373,7 @@ fn the_chooser_refuses_on_a_placeholder(cx: &mut gpui::TestAppContext) {
     let shell = shell_of(&window, &mut vcx);
     shell.update(&mut vcx, |s, cx| {
         s.with_workspaces(cx, |w| {
-            w.split_active(crate::tiling::Orientation::Horizontal)
+            w.split_in(s.key(), crate::tiling::Orientation::Horizontal)
         });
         cx.notify();
     });

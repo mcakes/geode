@@ -12,7 +12,8 @@ use crate::session;
 /// Two windows over one `ShellApp` read one `Workspaces`: a tile allocated
 /// through the first view's writer is visible to the second view's reader,
 /// and the second allocation continues the same counter. Each view keeps
-/// its own window key.
+/// its own window key and shows its own workspace: the first opens on the
+/// session's initial index, the second on the lowest index nobody shows.
 #[gpui::test]
 fn two_views_over_one_app_read_the_same_workspaces(cx: &mut gpui::TestAppContext) {
     let app = test_app(cx, test_services(), None);
@@ -24,8 +25,19 @@ fn two_views_over_one_app_read_the_same_workspaces(cx: &mut gpui::TestAppContext
         let first = s1.update(cx, |s, cx| s.with_workspaces(cx, |w| w.alloc_tile()));
         let second = s2.update(cx, |s, cx| s.with_workspaces(cx, |w| w.alloc_tile()));
         assert_eq!(second.0, first.0 + 1);
-        assert_eq!(ws(&s2, cx).spaces().count(), 1);
         assert_ne!(s1.read(cx).key(), s2.read(cx).key());
+        assert_eq!(s1.read(cx).shown_ix(cx), WorkspaceIx::new(1).unwrap());
+        assert_eq!(s2.read(cx).shown_ix(cx), WorkspaceIx::new(2).unwrap());
+        assert_eq!(
+            ws(&s2, cx).spaces().count(),
+            2,
+            "the second window materialised the workspace it opened on"
+        );
+        assert_eq!(
+            ws(&s1, cx).host_of(WorkspaceIx::new(2).unwrap()),
+            Some(s2.read(cx).key()),
+            "a later window hosts only its own index"
+        );
     });
 }
 
@@ -654,9 +666,9 @@ fn a_session_save_includes_every_window_and_the_parked_records(cx: &mut gpui::Te
     let parked = vcx.update(|_, cx| {
         s1.update(cx, |s, cx| {
             s.with_workspaces(cx, |w| {
-                w.switch(3);
-                let id = w.split_active(crate::tiling::Orientation::Horizontal);
-                w.switch(1);
+                w.switch(s.key(), 3);
+                let id = w.split_in(s.key(), crate::tiling::Orientation::Horizontal);
+                w.switch(s.key(), 1);
                 id
             })
         })

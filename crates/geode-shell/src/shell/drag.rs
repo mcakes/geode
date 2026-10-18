@@ -117,7 +117,7 @@ impl ShellView {
         let Some(epoch) = self.divider_drag.as_ref().map(|drag| drag.epoch) else {
             return false;
         };
-        if epoch != self.workspaces(cx).switch_epoch() {
+        if epoch != self.workspaces(cx).switch_epoch(self.key) {
             if self.cancel_divider_drag() {
                 self.mark_session_dirty(cx);
             }
@@ -316,7 +316,7 @@ impl ShellView {
         let position = (f32::from(event.position.x), f32::from(event.position.y));
         self.tile_drag = Some(TileDrag {
             tile: id,
-            epoch: self.workspaces(cx).switch_epoch(),
+            epoch: self.workspaces(cx).switch_epoch(self.key),
             origin: position,
             cursor: position,
             active: false,
@@ -401,7 +401,7 @@ impl ShellView {
         };
         if drag.active
             // The epoch catches switches away and back between renders.
-            && drag.epoch == self.workspaces(cx).switch_epoch()
+            && drag.epoch == self.workspaces(cx).switch_epoch(self.key)
             && self.palette.is_none()
             && !self.modal_open()
             && self.matcher.pending().is_empty()

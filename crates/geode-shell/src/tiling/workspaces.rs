@@ -797,19 +797,62 @@ impl WorkspaceIx {
     }
 }
 
-/// Workspace collection with indices 1–9 and a shared tile-ID allocator.
-/// Switching materializes an absent workspace; empty workspaces remain stored.
-/// Each shell owns its collection through `ShellServices`.
+/// Workspace collection with indices 1–9, a shared tile-ID allocator, and
+/// the map from windows to workspaces. Each open window *shows* one index
+/// and *hosts* the indexes whose occupants it builds: the one it shows,
+/// every one it showed and switched away from (hidden there until another
+/// window takes it), and, for the first window of the process, every
+/// index a restored session materialised, since no other window exists to
+/// build them. A workspace is shown by at most one window. Switching
+/// materializes an absent workspace; empty workspaces remain stored. One
+/// collection per app, owned by `ShellServices`.
 #[derive(Debug)]
 pub struct Workspaces {
     spaces: BTreeMap<u8, Workspace>,
-    active: u8,
+    /// The index each open window shows.
+    shown: BTreeMap<WindowKey, u8>,
+    /// The window hosting each index: it builds and keeps the occupants.
+    /// Invariant: `shown[k] == n` implies `host[n] == k`; an index with a
+    /// host and no shower is hidden in that window.
+    host: BTreeMap<u8, WindowKey>,
+    /// Generation of each window's actual switches. Drag state compares
+    /// this rather than only the shown index, so switching away and back
+    /// invalidates a gesture even between renders. Selecting the current
+    /// index, or a refused switch, does not advance it.
+    epochs: BTreeMap<WindowKey, u64>,
+    /// The index the session file named as `active` and the first window
+    /// opens on. See [`Self::initial_index`].
+    initial: u8,
     next_tile: u64,
-    /// Generation of actual workspace switches. Drag state compares this
-    /// rather than only `active`, so switching away and back invalidates a
-    /// gesture even between renders. Selecting the current index does not
-    /// advance it.
-    switch_epoch: u64,
+}
+
+/// What [`Workspaces::add_window`] found at the index a window opens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Added {
+    /// Nobody hosted it: it is empty or a restored workspace no window
+    /// has built yet.
+    Fresh,
+    /// The named window hosted it hidden; its occupants move to the new
+    /// window.
+    TakenFrom(WindowKey),
+}
+
+/// The outcome of [`Workspaces::switch`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    /// The window already shows that index.
+    Unchanged,
+    /// The window now shows an index nobody else hosted (free, or hidden
+    /// in this same window).
+    Shown,
+    /// Another window shows that index; it should come to the front
+    /// instead. Nothing changed.
+    Raise(WindowKey),
+    /// The window now shows an index `from` hosted hidden; `from`'s
+    /// occupants for it move here.
+    Moved { from: WindowKey },
+    /// Outside 1–9, or the window is not open. Nothing changed.
+    Invalid,
 }
 
 impl Default for Workspaces {
@@ -819,23 +862,112 @@ impl Default for Workspaces {
 }
 
 impl Workspaces {
+    /// Workspace 1 materialised and empty, no window open on it yet.
     pub fn new() -> Self {
         let mut spaces = BTreeMap::new();
         spaces.insert(1, Workspace::default());
         Workspaces {
             spaces,
-            active: 1,
+            shown: BTreeMap::new(),
+            host: BTreeMap::new(),
+            epochs: BTreeMap::new(),
+            initial: 1,
             next_tile: 0,
-            switch_epoch: 0,
         }
     }
 
-    pub fn active_index(&self) -> u8 {
-        self.active
+    /// The index the session file's `active` names: while a window is
+    /// open, what the oldest one shows, so a restart reopens there; before
+    /// any opens, what the file said. The first window opens on it.
+    pub fn initial_index(&self) -> u8 {
+        self.shown.values().next().copied().unwrap_or(self.initial)
     }
 
-    pub fn active_ix(&self) -> WorkspaceIx {
-        WorkspaceIx(self.active)
+    /// Open window `key` on index `n`. `None` when `n` is outside 1–9 or
+    /// another window shows it: a workspace is on at most one screen.
+    /// Materialises `n`, shows and hosts it in `key`. The first window
+    /// also hosts every index already materialised (a restored session's),
+    /// since no other window can build their occupants. `TakenFrom(v)`
+    /// when `v` hosted `n` hidden; the caller moves what `v` built for it.
+    pub fn add_window(&mut self, key: WindowKey, n: u8) -> Option<Added> {
+        if !(1..=9).contains(&n) || self.shower(n).is_some() {
+            return None;
+        }
+        debug_assert!(
+            !self.shown.contains_key(&key),
+            "window {key:?} added while already open"
+        );
+        self.spaces.entry(n).or_default();
+        let taken = self.host.get(&n).copied().filter(|v| *v != key);
+        if self.host.is_empty() {
+            for ix in self.spaces.keys() {
+                self.host.insert(*ix, key);
+            }
+        } else {
+            self.host.insert(n, key);
+        }
+        self.shown.insert(key, n);
+        self.epochs.entry(key).or_insert(0);
+        Some(match taken {
+            Some(v) => Added::TakenFrom(v),
+            None => Added::Fresh,
+        })
+    }
+
+    /// Close window `key`: the indexes it hosted, ascending, now unhosted
+    /// and ready for another window to take. The workspaces themselves
+    /// stay materialised; only the window's own entries go.
+    pub fn remove_window(&mut self, key: WindowKey) -> Vec<WorkspaceIx> {
+        let hosted: Vec<WorkspaceIx> = self
+            .host
+            .iter()
+            .filter(|(_, v)| **v == key)
+            .map(|(ix, _)| WorkspaceIx(*ix))
+            .collect();
+        self.host.retain(|_, v| *v != key);
+        self.shown.remove(&key);
+        self.epochs.remove(&key);
+        hosted
+    }
+
+    /// The index window `key` shows; `None` for a window not open here.
+    pub fn shown(&self, key: WindowKey) -> Option<WorkspaceIx> {
+        self.shown.get(&key).map(|n| WorkspaceIx(*n))
+    }
+
+    /// The window showing `n`, if any.
+    fn shower(&self, n: u8) -> Option<WindowKey> {
+        self.shown.iter().find(|(_, s)| **s == n).map(|(k, _)| *k)
+    }
+
+    /// The window showing `ix`, if any.
+    pub fn shown_in(&self, ix: WorkspaceIx) -> Option<WindowKey> {
+        self.shower(ix.0)
+    }
+
+    /// The window hosting `ix`: its shower, or the window it is hidden in.
+    /// `None` for an index no window has opened since the restore.
+    pub fn host_of(&self, ix: WorkspaceIx) -> Option<WindowKey> {
+        self.host.get(&ix.0).copied()
+    }
+
+    /// The workspaces window `key` hosts, ascending by index.
+    pub fn hosted_by(&self, key: WindowKey) -> impl Iterator<Item = (WorkspaceIx, &Workspace)> {
+        self.host
+            .iter()
+            .filter(move |(_, v)| **v == key)
+            .map(|(ix, _)| (WorkspaceIx(*ix), &self.spaces[ix]))
+    }
+
+    /// Every open window and the index it shows, in key order.
+    pub fn windows(&self) -> impl Iterator<Item = (WindowKey, WorkspaceIx)> {
+        self.shown.iter().map(|(k, n)| (*k, WorkspaceIx(*n)))
+    }
+
+    /// The lowest index of 1–9 no window shows, materialised or not;
+    /// `None` once nine windows show every index.
+    pub fn lowest_free(&self) -> Option<WorkspaceIx> {
+        (1..=9).find(|n| self.shower(*n).is_none()).map(WorkspaceIx)
     }
 
     /// The workspace whose main or dock trees hold `id`. A tile never
@@ -846,37 +978,70 @@ impl Workspaces {
             .map(|(ix, _)| WorkspaceIx(ix))
     }
 
+    /// The window holding `id`'s occupant: the host of its workspace, not
+    /// necessarily a window showing it.
+    pub fn window_of(&self, id: TileId) -> Option<WindowKey> {
+        self.workspace_of(id).and_then(|ix| self.host_of(ix))
+    }
+
     /// See the field doc: the ABA-proof "which workspace era is this"
-    /// pin for the shell's drag re-checks.
-    pub fn switch_epoch(&self) -> u64 {
-        self.switch_epoch
+    /// pin for the shell's drag re-checks, per window.
+    pub fn switch_epoch(&self, key: WindowKey) -> u64 {
+        self.epochs.get(&key).copied().unwrap_or(0)
     }
 
-    pub fn active(&self) -> &Workspace {
-        // Invariant: `active` is always a key (established in new/switch).
-        &self.spaces[&self.active]
+    /// The workspace window `key` shows. Panics for a window not open
+    /// here: every view's key is added before the view is built.
+    pub fn workspace(&self, key: WindowKey) -> &Workspace {
+        let n = self.shown_index(key);
+        // Invariant: a shown index is always materialised (add_window/switch).
+        &self.spaces[&n]
     }
 
-    pub fn active_mut(&mut self) -> &mut Workspace {
-        // Invariant: 'active' is always a key — established in new() and switch().
+    pub fn workspace_mut(&mut self, key: WindowKey) -> &mut Workspace {
+        let n = self.shown_index(key);
         self.spaces
-            .get_mut(&self.active)
-            .expect("active workspace always exists")
+            .get_mut(&n)
+            .expect("a shown workspace always exists")
     }
 
-    /// Switch to workspace `n` (1..=9), creating it empty if needed. An
-    /// actual change of active workspace bumps [`Workspaces::switch_epoch`]
-    /// (a same-index re-select does not — nothing on screen changes).
-    pub fn switch(&mut self, n: u8) -> bool {
+    fn shown_index(&self, key: WindowKey) -> u8 {
+        match self.shown.get(&key) {
+            Some(n) => *n,
+            None => panic!("window {key:?} is not open on these workspaces"),
+        }
+    }
+
+    /// Show index `n` in window `key`. The four outcomes: the window
+    /// already shows it (`Unchanged`); another window shows it (`Raise`,
+    /// nothing changes — the caller brings that window forward); another
+    /// window hosts it hidden (`Moved`: this window now shows and hosts
+    /// it, the caller moves the occupants); else it is free, hidden here,
+    /// or not yet materialised (`Shown`: materialised if needed, shown and
+    /// hosted here). The index left behind stays hosted by this window.
+    /// `Shown` and `Moved` bump the window's [`Self::switch_epoch`].
+    pub fn switch(&mut self, key: WindowKey, n: u8) -> Switch {
+        let Some(&current) = self.shown.get(&key) else {
+            return Switch::Invalid;
+        };
         if !(1..=9).contains(&n) {
-            return false;
+            return Switch::Invalid;
         }
+        if current == n {
+            return Switch::Unchanged;
+        }
+        if let Some(v) = self.shower(n) {
+            return Switch::Raise(v);
+        }
+        let moved_from = self.host.get(&n).copied().filter(|v| *v != key);
         self.spaces.entry(n).or_default();
-        if n != self.active {
-            self.switch_epoch += 1;
+        self.host.insert(n, key);
+        self.shown.insert(key, n);
+        *self.epochs.entry(key).or_insert(0) += 1;
+        match moved_from {
+            Some(from) => Switch::Moved { from },
+            None => Switch::Shown,
         }
-        self.active = n;
-        true
     }
 
     /// Allocate the next ID in this collection, shared by all its workspaces
@@ -886,12 +1051,13 @@ impl Workspaces {
         TileId(self.next_tile)
     }
 
-    /// Allocate a tile ID and split at focus in the active region, creating a
-    /// root if empty. The shell associates its pending occupant request with
-    /// the returned ID. All workspaces and docks share this allocator.
-    pub fn split_active(&mut self, orientation: Orientation) -> TileId {
+    /// Allocate a tile ID and split at focus in the focused region of the
+    /// workspace window `key` shows, creating a root if empty. The shell
+    /// associates its pending occupant request with the returned ID. All
+    /// workspaces and docks share this allocator.
+    pub fn split_in(&mut self, key: WindowKey, orientation: Orientation) -> TileId {
         let id = self.alloc_tile();
-        let ws = self.active_mut();
+        let ws = self.workspace_mut(key);
         match ws.region {
             FocusRegion::Main => ws.tree.split(id, orientation),
             FocusRegion::Dock(side) => ws.docks.get_mut(side).tree_mut().split(id, orientation),
@@ -899,12 +1065,13 @@ impl Workspaces {
         id
     }
 
-    /// Allocate and stack a tile after focus in the active region. Return
-    /// `None` without focus so callers can use the split path instead.
-    pub fn stack_active(&mut self) -> Option<TileId> {
-        let focused = self.active().focused_tile()?;
+    /// Allocate and stack a tile after focus in the focused region of the
+    /// workspace window `key` shows. Return `None` without focus so
+    /// callers can use the split path instead.
+    pub fn stack_in(&mut self, key: WindowKey) -> Option<TileId> {
+        let focused = self.workspace(key).focused_tile()?;
         let id = self.alloc_tile();
-        let ws = self.active_mut();
+        let ws = self.workspace_mut(key);
         let region = ws.region;
         if !ws.tree_for_mut(region).stack_after(focused, id) {
             // Unreachable: `focused_tile` is a leaf of that tree and `id`
@@ -915,7 +1082,7 @@ impl Workspaces {
     }
 
     /// `id`'s stack position in whichever workspace holds it (the shell
-    /// delivers markers for every tile, not only the active workspace's).
+    /// delivers markers for every tile, not only the shown workspace's).
     pub fn stack_position(&self, id: TileId) -> Option<(usize, usize)> {
         self.spaces.values().find_map(|ws| ws.stack_position(id))
     }
@@ -935,11 +1102,12 @@ impl Workspaces {
         self.spaces.iter().map(|(ix, ws)| (*ix, ws))
     }
 
-    /// Restore a workspace collection. Reject an active index outside 1–9,
-    /// filter other out-of-range indices, and materialize the active workspace
-    /// if missing. Prune duplicate dock claims against all main trees, then
-    /// prior docks in workspace/side/tree order, with warnings. Hidden focused
-    /// docks use a fallback; empty visible docks may retain focus.
+    /// Restore a workspace collection with no window open on it. Reject an
+    /// initial index outside 1–9, filter other out-of-range indices, and
+    /// materialize the initial workspace if missing. Prune duplicate dock
+    /// claims against all main trees, then prior docks in
+    /// workspace/side/tree order, with warnings. Hidden focused docks use a
+    /// fallback; empty visible docks may retain focus.
     ///
     /// Seed allocation from the maximum restored tile ID. This does not check
     /// plain duplicate IDs across main trees; callers should supply globally
@@ -947,17 +1115,17 @@ impl Workspaces {
     /// exhaustion check.
     pub fn from_parts(
         spaces: BTreeMap<u8, Workspace>,
-        active: u8,
+        initial: u8,
     ) -> Result<(Workspaces, Vec<String>), String> {
-        if !(1..=9).contains(&active) {
-            return Err(format!("active workspace {active} is out of range 1..=9"));
+        if !(1..=9).contains(&initial) {
+            return Err(format!("active workspace {initial} is out of range 1..=9"));
         }
 
         let mut spaces: BTreeMap<u8, Workspace> = spaces
             .into_iter()
             .filter(|(ix, _)| (1..=9).contains(ix))
             .collect();
-        spaces.entry(active).or_default();
+        spaces.entry(initial).or_default();
 
         // Cross-workspace dock-claim healing: every main-tree tile (all
         // workspaces) is claimed first — the tree always wins over a dock
@@ -990,11 +1158,13 @@ impl Workspaces {
         Ok((
             Workspaces {
                 spaces,
-                active,
+                // A fresh restore starts fresh switch-eras as windows open;
+                // no drag can predate them (drags never survive a session).
+                shown: BTreeMap::new(),
+                host: BTreeMap::new(),
+                epochs: BTreeMap::new(),
+                initial,
                 next_tile,
-                // A fresh restore starts a fresh switch-era; no drag can
-                // predate it (drags never survive across sessions).
-                switch_epoch: 0,
             },
             warnings,
         ))
@@ -1009,52 +1179,52 @@ pub const RESIZE_STEP: f32 = 0.03;
 /// was recognized as a workspace action — even if it changed nothing (focus
 /// at an edge still counts as handled; the keystroke must not fall through
 /// to another handler). False means "not a workspace action".
-pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
+pub fn apply_workspace_action(ws: &mut Workspaces, key: WindowKey, action: &ActionId) -> bool {
     match action.0.as_str() {
         "workspace::focus_left" => {
-            ws.active_mut().focus_direction(Direction::Left);
+            ws.workspace_mut(key).focus_direction(Direction::Left);
             true
         }
         "workspace::focus_down" => {
-            ws.active_mut().focus_direction(Direction::Down);
+            ws.workspace_mut(key).focus_direction(Direction::Down);
             true
         }
         "workspace::focus_up" => {
-            ws.active_mut().focus_direction(Direction::Up);
+            ws.workspace_mut(key).focus_direction(Direction::Up);
             true
         }
         "workspace::focus_right" => {
-            ws.active_mut().focus_direction(Direction::Right);
+            ws.workspace_mut(key).focus_direction(Direction::Right);
             true
         }
         // Adding a tile needs a module kind and is handled by `ShellView` via
-        // `Workspaces::split_active`; this router handles pure layout actions.
+        // `Workspaces::split_in`; this router handles pure layout actions.
         "workspace::close_tile" => {
-            ws.active_mut().close_tile();
+            ws.workspace_mut(key).close_tile();
             true
         }
         "workspace::fullscreen_tile" => {
-            ws.active_mut().toggle_fullscreen();
+            ws.workspace_mut(key).toggle_fullscreen();
             true
         }
         "workspace::toggle_split_orientation" => {
-            ws.active_mut().toggle_split_orientation();
+            ws.workspace_mut(key).toggle_split_orientation();
             true
         }
         "workspace::move_left" => {
-            ws.active_mut().move_direction(Direction::Left);
+            ws.workspace_mut(key).move_direction(Direction::Left);
             true
         }
         "workspace::move_down" => {
-            ws.active_mut().move_direction(Direction::Down);
+            ws.workspace_mut(key).move_direction(Direction::Down);
             true
         }
         "workspace::move_up" => {
-            ws.active_mut().move_direction(Direction::Up);
+            ws.workspace_mut(key).move_direction(Direction::Up);
             true
         }
         "workspace::move_right" => {
-            ws.active_mut().move_direction(Direction::Right);
+            ws.workspace_mut(key).move_direction(Direction::Right);
             true
         }
         // "Move split <dir>" (vim model) — shift+arrows move a divider
@@ -1064,48 +1234,52 @@ pub fn apply_workspace_action(ws: &mut Workspaces, action: &ActionId) -> bool {
         // instead (dividers first, frame fallback — see
         // `Workspace::resize`).
         "workspace::resize_left" => {
-            ws.active_mut().resize(Direction::Left);
+            ws.workspace_mut(key).resize(Direction::Left);
             true
         }
         "workspace::resize_down" => {
-            ws.active_mut().resize(Direction::Down);
+            ws.workspace_mut(key).resize(Direction::Down);
             true
         }
         "workspace::resize_up" => {
-            ws.active_mut().resize(Direction::Up);
+            ws.workspace_mut(key).resize(Direction::Up);
             true
         }
         "workspace::resize_right" => {
-            ws.active_mut().resize(Direction::Right);
+            ws.workspace_mut(key).resize(Direction::Right);
             true
         }
         "dock::toggle_left" => {
-            ws.active_mut().toggle_dock(DockSide::Left);
+            ws.workspace_mut(key).toggle_dock(DockSide::Left);
             true
         }
         "dock::toggle_right" => {
-            ws.active_mut().toggle_dock(DockSide::Right);
+            ws.workspace_mut(key).toggle_dock(DockSide::Right);
             true
         }
         "dock::toggle_bottom" => {
-            ws.active_mut().toggle_dock(DockSide::Bottom);
+            ws.workspace_mut(key).toggle_dock(DockSide::Bottom);
             true
         }
         "dock::move_left" => {
-            ws.active_mut().move_to_dock(DockSide::Left);
+            ws.workspace_mut(key).move_to_dock(DockSide::Left);
             true
         }
         "dock::move_right" => {
-            ws.active_mut().move_to_dock(DockSide::Right);
+            ws.workspace_mut(key).move_to_dock(DockSide::Right);
             true
         }
         "dock::move_bottom" => {
-            ws.active_mut().move_to_dock(DockSide::Bottom);
+            ws.workspace_mut(key).move_to_dock(DockSide::Bottom);
             true
         }
         other => match other.strip_prefix("workspace::switch_") {
             Some(n) => match n.parse::<u8>() {
-                Ok(n) => ws.switch(n),
+                // Handled unless the index is invalid: re-selecting the
+                // shown index changes nothing but is still this router's,
+                // like focus at an edge. The shell reads the outcome
+                // itself for the side effects a raise or move needs.
+                Ok(n) => !matches!(ws.switch(key, n), Switch::Invalid),
                 Err(_) => false,
             },
             None => false,
@@ -1119,6 +1293,27 @@ mod tests {
     use crate::tiling::Node;
     use crate::tiling::docks::{DOCK_DEFAULT_SIZE, DOCK_MAX_SIZE, DOCK_MIN_SIZE, Dock};
 
+    /// The shell's first window, standing in for every fixture here that
+    /// builds through one window.
+    const W1: WindowKey = WindowKey(1);
+    const W2: WindowKey = WindowKey(2);
+    const W3: WindowKey = WindowKey(3);
+
+    /// A fresh collection with `W1` open on workspace 1.
+    fn one_window() -> Workspaces {
+        let mut ws = Workspaces::new();
+        ws.add_window(W1, 1);
+        ws
+    }
+
+    /// A restored collection with `W1` open on its initial index, as
+    /// `ShellApp::add_window(None)` opens the first window.
+    fn opened((mut ws, warnings): (Workspaces, Vec<String>)) -> (Workspaces, Vec<String>) {
+        let n = ws.initial_index();
+        ws.add_window(W1, n);
+        (ws, warnings)
+    }
+
     fn act(s: &str) -> ActionId {
         ActionId(s.to_string())
     }
@@ -1129,78 +1324,78 @@ mod tests {
 
     /// Two tiles side by side in the tree, focus on the second (right).
     fn two_tiles() -> Workspaces {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Horizontal);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Horizontal);
         ws
     }
 
     #[test]
     fn starts_on_workspace_one_empty() {
-        let ws = Workspaces::new();
-        assert_eq!(ws.active_index(), 1);
-        assert!(ws.active().is_empty());
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        let ws = one_window();
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(1));
+        assert!(ws.workspace(W1).is_empty());
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
         assert_eq!(ws.non_empty_indices(), Vec::<u8>::new());
     }
 
     #[test]
     fn switch_creates_lazily_and_validates_range() {
-        let mut ws = Workspaces::new();
-        assert!(ws.switch(5));
-        assert_eq!(ws.active_index(), 5);
-        assert!(ws.active().is_empty());
-        assert!(!ws.switch(0));
-        assert!(!ws.switch(10));
-        assert_eq!(ws.active_index(), 5);
+        let mut ws = one_window();
+        assert_eq!(ws.switch(W1, 5), Switch::Shown);
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(5));
+        assert!(ws.workspace(W1).is_empty());
+        assert_eq!(ws.switch(W1, 0), Switch::Invalid);
+        assert_eq!(ws.switch(W1, 10), Switch::Invalid);
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(5));
     }
 
     /// Switching away and back advances the epoch twice. Reselecting the
     /// current index or refusing an invalid index leaves it unchanged.
     #[test]
     fn switch_epoch_counts_actual_switches_only() {
-        let mut ws = Workspaces::new();
-        let start = ws.switch_epoch();
-        assert!(ws.switch(1), "re-selecting the active workspace is valid");
-        assert_eq!(ws.switch_epoch(), start, "same-index switch: no bump");
-        assert!(!ws.switch(0));
-        assert_eq!(ws.switch_epoch(), start, "refused switch: no bump");
-        assert!(ws.switch(2));
-        assert!(ws.switch(1));
+        let mut ws = one_window();
+        let start = ws.switch_epoch(W1);
+        assert_eq!(ws.switch(W1, 1), Switch::Unchanged);
+        assert_eq!(ws.switch_epoch(W1), start, "same-index switch: no bump");
+        assert_eq!(ws.switch(W1, 0), Switch::Invalid);
+        assert_eq!(ws.switch_epoch(W1), start, "refused switch: no bump");
+        assert_eq!(ws.switch(W1, 2), Switch::Shown);
+        assert_eq!(ws.switch(W1, 1), Switch::Shown);
         assert_eq!(
-            ws.switch_epoch(),
+            ws.switch_epoch(W1),
             start + 2,
             "away-and-back is two bumps — the ABA the epoch exists to expose"
         );
-        assert_eq!(ws.active_index(), 1);
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(1));
     }
 
     #[test]
     fn workspace_of_names_the_workspace_holding_the_tile() {
-        let mut ws = Workspaces::new();
-        let a = ws.split_active(Orientation::Horizontal);
-        ws.switch(2);
-        let b = ws.split_active(Orientation::Horizontal);
+        let mut ws = one_window();
+        let a = ws.split_in(W1, Orientation::Horizontal);
+        ws.switch(W1, 2);
+        let b = ws.split_in(W1, Orientation::Horizontal);
         assert_eq!(ws.workspace_of(a), WorkspaceIx::new(1));
         assert_eq!(ws.workspace_of(b), WorkspaceIx::new(2));
         assert_eq!(ws.workspace_of(TileId(999)), None);
-        assert_eq!(ws.active_ix(), WorkspaceIx::new(2).unwrap());
+        assert_eq!(ws.shown(W1).unwrap(), WorkspaceIx::new(2).unwrap());
     }
 
     #[test]
     fn tile_ids_are_unique_across_workspaces() {
-        let mut ws = Workspaces::new();
+        let mut ws = one_window();
         let a = ws.alloc_tile();
-        ws.switch(2);
+        ws.switch(W1, 2);
         let b = ws.alloc_tile();
         assert_ne!(a, b);
     }
 
     #[test]
-    fn split_active_creates_and_arranges_tiles() {
+    fn split_in_creates_and_arranges_tiles() {
         let ws = two_tiles();
-        assert_eq!(ws.active().tree().tiles().len(), 2);
-        let rects = ws.active().tree().layout(Rect::UNIT);
+        assert_eq!(ws.workspace(W1).tree().tiles().len(), 2);
+        let rects = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert!((rects[0].1.w - 0.5).abs() < 1e-4);
     }
 
@@ -1209,63 +1404,356 @@ mod tests {
         let mut ws = two_tiles();
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::focus_left")
         ));
-        let left = ws.active().tree().focused().unwrap();
+        let left = ws.workspace(W1).tree().focused().unwrap();
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::fullscreen_tile")
         ));
-        assert_eq!(ws.active().tree().fullscreen(), Some(left));
+        assert_eq!(ws.workspace(W1).tree().fullscreen(), Some(left));
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::fullscreen_tile")
         ));
-        assert_eq!(ws.active().tree().fullscreen(), None);
+        assert_eq!(ws.workspace(W1).tree().fullscreen(), None);
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::close_tile")
         ));
-        assert_eq!(ws.active().tree().tiles().len(), 1);
+        assert_eq!(ws.workspace(W1).tree().tiles().len(), 1);
     }
 
     #[test]
     fn switch_actions_parse_their_index() {
-        let mut ws = Workspaces::new();
-        assert!(apply_workspace_action(&mut ws, &act("workspace::switch_3")));
-        assert_eq!(ws.active_index(), 3);
+        let mut ws = one_window();
+        assert!(apply_workspace_action(
+            &mut ws,
+            W1,
+            &act("workspace::switch_3")
+        ));
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(3));
         assert!(!apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::switch_zzz")
         ));
     }
 
+    // --- Windows: shown, hosted, switch outcomes -------------------------
+
+    #[test]
+    fn add_window_shows_and_hosts_its_index() {
+        let mut ws = Workspaces::new();
+        assert_eq!(ws.add_window(W1, 1), Some(Added::Fresh));
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(1));
+        assert_eq!(ws.host_of(WorkspaceIx::FIRST), Some(W1));
+        assert_eq!(ws.shown_in(WorkspaceIx::FIRST), Some(W1));
+        assert_eq!(
+            ws.windows().collect::<Vec<_>>(),
+            vec![(W1, WorkspaceIx::FIRST)]
+        );
+    }
+
+    #[test]
+    fn add_window_refuses_an_index_shown_elsewhere() {
+        let mut ws = one_window();
+        assert_eq!(ws.add_window(W2, 1), None);
+        assert_eq!(ws.add_window(W2, 0), None);
+        assert_eq!(ws.add_window(W2, 10), None);
+        assert_eq!(ws.shown(W2), None, "a refused window is not open");
+    }
+
+    #[test]
+    fn add_window_takes_a_hidden_index_from_its_host() {
+        let mut ws = one_window();
+        ws.switch(W1, 2);
+        ws.switch(W1, 1);
+        assert_eq!(ws.add_window(W2, 2), Some(Added::TakenFrom(W1)));
+        assert_eq!(ws.host_of(WorkspaceIx::new(2).unwrap()), Some(W2));
+        assert_eq!(ws.shown(W2), WorkspaceIx::new(2));
+        assert_eq!(
+            ws.host_of(WorkspaceIx::FIRST),
+            Some(W1),
+            "W1 keeps what it shows"
+        );
+    }
+
+    #[test]
+    fn the_first_window_hosts_every_materialised_index() {
+        let mut spaces = BTreeMap::new();
+        spaces.insert(1, Workspace::default());
+        spaces.insert(3, Workspace::default());
+        let (mut ws, _) = Workspaces::from_parts(spaces, 1).unwrap();
+        assert_eq!(ws.host_of(WorkspaceIx::FIRST), None, "no window yet");
+        assert_eq!(ws.add_window(W1, 1), Some(Added::Fresh));
+        assert_eq!(ws.host_of(WorkspaceIx::FIRST), Some(W1));
+        assert_eq!(ws.host_of(WorkspaceIx::new(3).unwrap()), Some(W1));
+        assert_eq!(
+            ws.hosted_by(W1).map(|(ix, _)| ix.get()).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        assert_eq!(
+            ws.shown(W1),
+            WorkspaceIx::new(1),
+            "it shows only the index it opened on"
+        );
+    }
+
+    #[test]
+    fn a_later_window_hosts_only_its_own_index() {
+        let mut spaces = BTreeMap::new();
+        spaces.insert(1, Workspace::default());
+        spaces.insert(3, Workspace::default());
+        spaces.insert(5, Workspace::default());
+        let (mut ws, _) = Workspaces::from_parts(spaces, 1).unwrap();
+        ws.add_window(W1, 1);
+        assert_eq!(ws.add_window(W2, 2), Some(Added::Fresh));
+        assert_eq!(
+            ws.hosted_by(W2).map(|(ix, _)| ix.get()).collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            ws.hosted_by(W1).map(|(ix, _)| ix.get()).collect::<Vec<_>>(),
+            vec![1, 3, 5],
+            "the first window keeps the restored indexes"
+        );
+    }
+
+    #[test]
+    fn switch_to_the_shown_index_is_unchanged() {
+        let mut ws = one_window();
+        let epoch = ws.switch_epoch(W1);
+        assert_eq!(ws.switch(W1, 1), Switch::Unchanged);
+        assert_eq!(ws.switch_epoch(W1), epoch);
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(1));
+    }
+
+    #[test]
+    fn switch_to_a_free_index_shows_it_and_keeps_the_old_one_hosted() {
+        let mut ws = one_window();
+        let epoch = ws.switch_epoch(W1);
+        assert_eq!(ws.switch(W1, 2), Switch::Shown);
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(2));
+        assert_eq!(ws.host_of(WorkspaceIx::FIRST), Some(W1));
+        assert_eq!(ws.host_of(WorkspaceIx::new(2).unwrap()), Some(W1));
+        assert_eq!(ws.shown_in(WorkspaceIx::FIRST), None, "1 is hidden in W1");
+        assert_eq!(ws.switch_epoch(W1), epoch + 1);
+    }
+
+    #[test]
+    fn switch_to_an_index_shown_elsewhere_raises() {
+        let mut ws = one_window();
+        ws.add_window(W2, 2);
+        let epoch = ws.switch_epoch(W1);
+        assert_eq!(ws.switch(W1, 2), Switch::Raise(W2));
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(1), "W1 keeps showing 1");
+        assert_eq!(ws.host_of(WorkspaceIx::new(2).unwrap()), Some(W2));
+        assert_eq!(ws.switch_epoch(W1), epoch, "a raise is not a switch");
+    }
+
+    #[test]
+    fn switch_to_an_index_hosted_elsewhere_moves_it() {
+        let mut ws = one_window();
+        ws.switch(W1, 2);
+        ws.switch(W1, 1);
+        ws.add_window(W2, 3);
+        let epoch = ws.switch_epoch(W2);
+        assert_eq!(ws.switch(W2, 2), Switch::Moved { from: W1 });
+        assert_eq!(ws.host_of(WorkspaceIx::new(2).unwrap()), Some(W2));
+        assert_eq!(ws.shown(W2), WorkspaceIx::new(2));
+        assert_eq!(ws.switch_epoch(W2), epoch + 1);
+        assert_eq!(
+            ws.hosted_by(W1).map(|(ix, _)| ix.get()).collect::<Vec<_>>(),
+            vec![1],
+            "W1 no longer hosts 2"
+        );
+    }
+
+    #[test]
+    fn switch_to_an_unmaterialised_index_shows_it() {
+        let mut ws = one_window();
+        assert!(!ws.spaces().any(|(ix, _)| ix == 7));
+        assert_eq!(ws.switch(W1, 7), Switch::Shown);
+        assert!(ws.spaces().any(|(ix, _)| ix == 7));
+        assert!(ws.workspace(W1).is_empty());
+    }
+
+    #[test]
+    fn remove_window_frees_its_shown_index() {
+        let mut ws = one_window();
+        ws.add_window(W2, 2);
+        assert_eq!(ws.remove_window(W2), vec![WorkspaceIx::new(2).unwrap()]);
+        assert_eq!(ws.shown_in(WorkspaceIx::new(2).unwrap()), None);
+        assert_eq!(ws.host_of(WorkspaceIx::new(2).unwrap()), None);
+        assert_eq!(ws.shown(W2), None);
+        assert!(
+            ws.spaces().any(|(ix, _)| ix == 2),
+            "the workspace itself stays"
+        );
+        assert_eq!(ws.switch(W1, 2), Switch::Shown);
+    }
+
+    #[test]
+    fn remove_window_returns_hidden_hosted_indexes_too() {
+        let mut ws = one_window();
+        ws.add_window(W2, 2);
+        ws.switch(W2, 3);
+        assert_eq!(
+            ws.remove_window(W2),
+            vec![WorkspaceIx::new(2).unwrap(), WorkspaceIx::new(3).unwrap()]
+        );
+        assert_eq!(ws.switch_epoch(W2), 0, "its epoch is gone with it");
+        assert_eq!(
+            ws.windows().collect::<Vec<_>>(),
+            vec![(W1, WorkspaceIx::FIRST)]
+        );
+    }
+
+    #[test]
+    fn lowest_free_counts_unmaterialised_indexes() {
+        let ws = one_window();
+        assert!(!ws.spaces().any(|(ix, _)| ix == 2));
+        assert_eq!(ws.lowest_free(), WorkspaceIx::new(2));
+    }
+
+    #[test]
+    fn lowest_free_skips_a_hidden_hosted_index_only_if_shown() {
+        // Hidden in W1, 2 is still free to be shown by a new window.
+        let mut ws = one_window();
+        ws.switch(W1, 2);
+        ws.switch(W1, 1);
+        assert_eq!(ws.lowest_free(), WorkspaceIx::new(2));
+    }
+
+    #[test]
+    fn lowest_free_is_none_with_nine_shown() {
+        let mut ws = Workspaces::new();
+        for n in 1..=9u8 {
+            assert!(ws.add_window(WindowKey(u64::from(n)), n).is_some());
+        }
+        assert_eq!(ws.lowest_free(), None);
+        ws.remove_window(WindowKey(4));
+        assert_eq!(ws.lowest_free(), WorkspaceIx::new(4));
+    }
+
+    #[test]
+    fn window_of_follows_the_host_not_the_shown_index() {
+        let mut ws = one_window();
+        ws.switch(W1, 2);
+        let tile = ws.split_in(W1, Orientation::Horizontal);
+        ws.switch(W1, 1);
+        ws.add_window(W2, 3);
+        assert_eq!(ws.shown_in(WorkspaceIx::new(2).unwrap()), None);
+        assert_eq!(ws.window_of(tile), Some(W1));
+        assert_eq!(ws.window_of(TileId(999)), None);
+        assert_eq!(ws.switch(W2, 2), Switch::Moved { from: W1 });
+        assert_eq!(ws.window_of(tile), Some(W2));
+    }
+
+    #[test]
+    fn initial_index_follows_the_oldest_window() {
+        let (mut ws, _) = Workspaces::from_parts(BTreeMap::new(), 3).unwrap();
+        assert_eq!(ws.initial_index(), 3, "before any window: the file's");
+        ws.add_window(W1, 3);
+        ws.add_window(W2, 1);
+        ws.switch(W1, 5);
+        assert_eq!(ws.initial_index(), 5, "the oldest window's shown index");
+        ws.switch(W2, 7);
+        assert_eq!(ws.initial_index(), 5);
+        ws.remove_window(W1);
+        assert_eq!(ws.initial_index(), 7, "the next-oldest once it closes");
+        ws.remove_window(W2);
+        assert_eq!(ws.initial_index(), 3, "none open: back to the file's");
+    }
+
+    #[test]
+    fn keyed_actions_route_to_the_windows_own_workspace() {
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.add_window(W2, 2);
+        ws.split_in(W2, Orientation::Horizontal);
+        assert!(apply_workspace_action(
+            &mut ws,
+            W2,
+            &act("workspace::close_tile")
+        ));
+        assert_eq!(
+            ws.workspace(W1).tree().tiles().len(),
+            1,
+            "W1's tile is untouched"
+        );
+        assert!(ws.workspace(W2).is_empty());
+        assert!(
+            apply_workspace_action(&mut ws, W2, &act("workspace::switch_1")),
+            "shown elsewhere is a raise, which still counts as handled"
+        );
+        assert_eq!(ws.shown(W2), WorkspaceIx::new(2), "and changes nothing");
+    }
+
+    #[test]
+    fn a_switch_action_is_handled_unless_the_index_is_invalid() {
+        let mut ws = one_window();
+        ws.add_window(W2, 2);
+        assert!(
+            apply_workspace_action(&mut ws, W1, &act("workspace::switch_1")),
+            "unchanged"
+        );
+        assert!(
+            apply_workspace_action(&mut ws, W1, &act("workspace::switch_2")),
+            "raise"
+        );
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(1));
+        assert!(
+            apply_workspace_action(&mut ws, W1, &act("workspace::switch_3")),
+            "shown"
+        );
+        assert!(!apply_workspace_action(
+            &mut ws,
+            W1,
+            &act("workspace::switch_0")
+        ));
+        assert!(
+            !apply_workspace_action(&mut ws, W3, &act("workspace::switch_4")),
+            "not open"
+        );
+    }
+
     #[test]
     fn unrecognized_actions_are_not_claimed() {
-        let mut ws = Workspaces::new();
-        assert!(!apply_workspace_action(&mut ws, &act("palette::toggle")));
-        assert!(!apply_workspace_action(&mut ws, &act("blotter::group")));
+        let mut ws = one_window();
+        assert!(!apply_workspace_action(
+            &mut ws,
+            W1,
+            &act("palette::toggle")
+        ));
+        assert!(!apply_workspace_action(&mut ws, W1, &act("blotter::group")));
     }
 
     #[test]
     fn edge_focus_is_claimed_but_changes_nothing() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        let focused = ws.active().tree().focused();
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        let focused = ws.workspace(W1).tree().focused();
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::focus_left")
         ));
-        assert_eq!(ws.active().tree().focused(), focused);
+        assert_eq!(ws.workspace(W1).tree().focused(), focused);
     }
 
     #[test]
     fn a_vertical_split_creates_a_stacked_tile() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Vertical);
-        ws.split_active(Orientation::Vertical);
-        assert_eq!(ws.active().tree().tiles().len(), 2);
-        let rects = ws.active().tree().layout(Rect::UNIT);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Vertical);
+        ws.split_in(W1, Orientation::Vertical);
+        assert_eq!(ws.workspace(W1).tree().tiles().len(), 2);
+        let rects = ws.workspace(W1).tree().layout(Rect::UNIT);
         // Vertical (stacked) split: both tiles half-height, not half-width.
         assert!((rects[0].1.h - 0.5).abs() < 1e-4);
         assert!((rects[0].1.w - 1.0).abs() < 1e-4);
@@ -1275,25 +1763,27 @@ mod tests {
     fn move_actions_route_to_tree_move_direction() {
         let mut ws = two_tiles();
         // Two tiles side by side; focus is on the second (rightmost).
-        let before = ws.active().tree().layout(Rect::UNIT);
+        let before = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::move_left")
         ));
-        let after = ws.active().tree().layout(Rect::UNIT);
+        let after = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert_ne!(before, after, "move_left should swap the two tiles");
     }
 
     #[test]
     fn move_with_no_neighbor_is_claimed_but_changes_nothing() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        let before = ws.active().tree().layout(Rect::UNIT);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        let before = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::move_left")
         ));
-        assert_eq!(ws.active().tree().layout(Rect::UNIT), before);
+        assert_eq!(ws.workspace(W1).tree().layout(Rect::UNIT), before);
     }
 
     #[test]
@@ -1305,12 +1795,13 @@ mod tests {
         // always moves a divider that direction).
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::resize_left")
         ));
-        let rects = ws.active().tree().layout(Rect::UNIT);
+        let rects = ws.workspace(W1).tree().layout(Rect::UNIT);
         let focused_w = rects
             .iter()
-            .find(|(id, _)| Some(*id) == ws.active().tree().focused())
+            .find(|(id, _)| Some(*id) == ws.workspace(W1).tree().focused())
             .unwrap()
             .1
             .w;
@@ -1323,18 +1814,19 @@ mod tests {
     #[test]
     fn resize_right_widens_the_focused_leftmost_tile_normal_case() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
         // Now focus is the leftmost tile, which has a right neighbor:
         // resize_right moves the divider between them rightward, widening
         // the focused tile (the non-flip case).
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::resize_right")
         ));
-        let rects = ws.active().tree().layout(Rect::UNIT);
+        let rects = ws.workspace(W1).tree().layout(Rect::UNIT);
         let focused_w = rects
             .iter()
-            .find(|(id, _)| Some(*id) == ws.active().tree().focused())
+            .find(|(id, _)| Some(*id) == ws.workspace(W1).tree().focused())
             .unwrap()
             .1
             .w;
@@ -1354,10 +1846,11 @@ mod tests {
 
     #[test]
     fn from_parts_inserts_the_active_workspace_empty_if_missing() {
-        let (ws, warnings) = Workspaces::from_parts(BTreeMap::new(), 3).unwrap();
+        let (ws, warnings) = opened(Workspaces::from_parts(BTreeMap::new(), 3).unwrap());
         assert!(warnings.is_empty(), "{warnings:?}");
-        assert_eq!(ws.active_index(), 3);
-        assert!(ws.active().is_empty());
+        assert_eq!(ws.initial_index(), 3);
+        assert_eq!(ws.shown(W1), WorkspaceIx::new(3));
+        assert!(ws.workspace(W1).is_empty());
     }
 
     #[test]
@@ -1366,7 +1859,7 @@ mod tests {
         spaces.insert(1, Workspace::default());
         spaces.insert(0, Workspace::default());
         spaces.insert(200, Workspace::default());
-        let (ws, _) = Workspaces::from_parts(spaces, 1).unwrap();
+        let (ws, _) = opened(Workspaces::from_parts(spaces, 1).unwrap());
         assert_eq!(ws.spaces().map(|(ix, _)| ix).collect::<Vec<_>>(), vec![1]);
     }
 
@@ -1377,7 +1870,7 @@ mod tests {
         tree.split(TileId(12), Orientation::Horizontal);
         let mut spaces = BTreeMap::new();
         spaces.insert(1, Workspace::from(tree));
-        let (mut ws, _) = Workspaces::from_parts(spaces, 1).unwrap();
+        let (mut ws, _) = opened(Workspaces::from_parts(spaces, 1).unwrap());
 
         let next = ws.alloc_tile();
         assert_eq!(
@@ -1400,7 +1893,7 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         let mut spaces = BTreeMap::new();
         spaces.insert(1, workspace);
-        let (mut ws, warnings) = Workspaces::from_parts(spaces, 1).unwrap();
+        let (mut ws, warnings) = opened(Workspaces::from_parts(spaces, 1).unwrap());
         assert!(warnings.is_empty(), "{warnings:?}");
         assert_eq!(
             ws.alloc_tile(),
@@ -1411,7 +1904,7 @@ mod tests {
 
     #[test]
     fn from_parts_with_empty_spaces_starts_next_tile_at_one() {
-        let (mut ws, _) = Workspaces::from_parts(BTreeMap::new(), 1).unwrap();
+        let (mut ws, _) = opened(Workspaces::from_parts(BTreeMap::new(), 1).unwrap());
         assert_eq!(ws.alloc_tile(), TileId(1));
     }
 
@@ -1433,11 +1926,17 @@ mod tests {
         let mut spaces = BTreeMap::new();
         spaces.insert(1, Workspace::from(tree));
         spaces.insert(2, dup_ws);
-        let (ws, warnings) = Workspaces::from_parts(spaces, 2).unwrap();
+        let (ws, warnings) = opened(Workspaces::from_parts(spaces, 2).unwrap());
         assert_eq!(warnings.len(), 1, "{warnings:?}"); // the removed leaf, nothing else
-        assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
+        assert!(
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .is_empty()
+        );
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Left),
             "an emptied but visible dock keeps the region"
         );
@@ -1461,9 +1960,9 @@ mod tests {
         let mut spaces = BTreeMap::new();
         spaces.insert(1, Workspace::from(tree));
         spaces.insert(2, dup_ws);
-        let (ws, warnings) = Workspaces::from_parts(spaces, 2).unwrap();
+        let (ws, warnings) = opened(Workspaces::from_parts(spaces, 2).unwrap());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        let dock = ws.active().docks().get(DockSide::Left);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(dock.tree().tiles(), vec![TileId(8)]);
         assert_eq!(
             dock.tree().focused(),
@@ -1471,7 +1970,7 @@ mod tests {
             "removing the focused duplicate refocuses within the dock"
         );
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Left),
             "a still-occupied dock keeps the focus the file asked for"
         );
@@ -1585,21 +2084,21 @@ mod tests {
         assert!(warnings.is_empty(), "{warnings:?}");
         let mut spaces = BTreeMap::new();
         spaces.insert(1, workspace);
-        let (mut ws, warnings) = Workspaces::from_parts(spaces, 1).unwrap();
+        let (mut ws, warnings) = opened(Workspaces::from_parts(spaces, 1).unwrap());
         assert!(warnings.is_empty(), "{warnings:?}");
 
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // move back
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // move back
 
-        let mut all: Vec<TileId> = ws.active().tree().tiles();
-        all.extend(ws.active().docks().tiles());
+        let mut all: Vec<TileId> = ws.workspace(W1).tree().tiles();
+        all.extend(ws.workspace(W1).docks().tiles());
         all.sort();
         assert_eq!(
             all,
             vec![TileId(1), TileId(2)],
             "the moved tile must land in the main tree, never vanish"
         );
-        assert_eq!(ws.active().tree().focused(), Some(TileId(2)));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).tree().focused(), Some(TileId(2)));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
@@ -1619,33 +2118,36 @@ mod tests {
 
     #[test]
     fn resize_with_no_matching_split_is_claimed_but_changes_nothing() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        let before = ws.active().tree().layout(Rect::UNIT);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        let before = ws.workspace(W1).tree().layout(Rect::UNIT);
         // Single tile: no ancestor split to resize against.
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::resize_right")
         ));
-        assert_eq!(ws.active().tree().layout(Rect::UNIT), before);
+        assert_eq!(ws.workspace(W1).tree().layout(Rect::UNIT), before);
     }
 
     #[test]
     fn toggle_split_orientation_action_reorients_the_focused_split() {
         let mut ws = two_tiles();
-        let before = ws.active().tree().layout(Rect::UNIT);
+        let before = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::toggle_split_orientation")
         ));
-        let after = ws.active().tree().layout(Rect::UNIT);
+        let after = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert_ne!(before, after, "row should have become a stack");
         // Claimed even when it changes nothing (lone tile), same contract
         // as the resize arms.
-        let mut lone = Workspaces::new();
-        lone.split_active(Orientation::Horizontal);
+        let mut lone = one_window();
+        lone.split_in(W1, Orientation::Horizontal);
         assert!(apply_workspace_action(
             &mut lone,
+            W1,
             &act("workspace::toggle_split_orientation")
         ));
     }
@@ -1655,7 +2157,7 @@ mod tests {
     #[test]
     fn drag_main_divider_moves_the_pair_without_touching_focus_or_region() {
         let mut ws = two_tiles(); // focus on the right tile
-        let focused_before = ws.active().focused_tile();
+        let focused_before = ws.workspace(W1).focused_tile();
         let addr = DividerAddress {
             path: vec![],
             index: 0,
@@ -1666,21 +2168,28 @@ mod tests {
             w: 1000.0,
             h: 800.0,
         };
-        assert!(ws.active_mut().drag_main_divider(&addr, 300.0, 0.0, bounds));
-        let rects = ws.active().tree().layout(Rect::UNIT);
+        assert!(
+            ws.workspace_mut(W1)
+                .drag_main_divider(&addr, 300.0, 0.0, bounds)
+        );
+        let rects = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert!(approx(rects[0].1.w, 0.3) && approx(rects[1].1.w, 0.7));
-        assert_eq!(ws.active().focused_tile(), focused_before);
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).focused_tile(), focused_before);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
     fn pull_and_split_stack_act_in_the_focused_dock_and_leave_main_alone() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let remaining = ws.active().tree().focused().expect("one tile left in main");
-        assert!(ws.active_mut().focus_main_tile(remaining));
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let main_before = ws.active().tree().clone();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let remaining = ws
+            .workspace(W1)
+            .tree()
+            .focused()
+            .expect("one tile left in main");
+        assert!(ws.workspace_mut(W1).focus_main_tile(remaining));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let main_before = ws.workspace(W1).tree().clone();
         let dirs = [
             Direction::Left,
             Direction::Right,
@@ -1688,14 +2197,14 @@ mod tests {
             Direction::Down,
         ];
         assert!(
-            dirs.into_iter().any(|d| ws.active_mut().pull(d)),
+            dirs.into_iter().any(|d| ws.workspace_mut(W1).pull(d)),
             "the dock's other tile is beside focus"
         );
-        let dock = |ws: &Workspaces| ws.active().docks().get(DockSide::Left).tree().clone();
+        let dock = |ws: &Workspaces| ws.workspace(W1).docks().get(DockSide::Left).tree().clone();
         assert_eq!(dock(&ws).visible_tiles().len(), 1, "pulled into one slot");
-        assert!(ws.active_mut().split_stack(Orientation::Vertical));
+        assert!(ws.workspace_mut(W1).split_stack(Orientation::Vertical));
         assert_eq!(dock(&ws).visible_tiles().len(), 2, "split back");
-        assert_eq!(ws.active().tree(), &main_before);
+        assert_eq!(ws.workspace(W1).tree(), &main_before);
     }
 
     #[test]
@@ -1704,12 +2213,21 @@ mod tests {
         // Park both tiles in the left dock so its tree has a split (a
         // second dock::move_left from the dock would move the tile BACK,
         // so refocus the main region's remaining tile between moves).
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let remaining = ws.active().tree().focused().expect("one tile left in main");
-        assert!(ws.active_mut().focus_main_tile(remaining));
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let remaining = ws
+            .workspace(W1)
+            .tree()
+            .focused()
+            .expect("one tile left in main");
+        assert!(ws.workspace_mut(W1).focus_main_tile(remaining));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().tiles().len(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .tiles()
+                .len(),
             2
         );
         let addr = DividerAddress {
@@ -1725,12 +2243,15 @@ mod tests {
         // Side docks insert Horizontal (see `dock_insert_orientation`), so
         // the divider is vertical: drag it to x=62.5 within the 250-wide
         // dock frame → 25%.
-        assert!(
-            ws.active_mut()
-                .drag_dock_divider(DockSide::Left, &addr, 62.5, 0.0, dock_rect)
-        );
+        assert!(ws.workspace_mut(W1).drag_dock_divider(
+            DockSide::Left,
+            &addr,
+            62.5,
+            0.0,
+            dock_rect
+        ));
         let rects = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
@@ -1738,7 +2259,7 @@ mod tests {
         assert!(approx(rects[0].1.w, 0.25), "got {}", rects[0].1.w);
         // The main tree (now empty) and the dock's frame size are untouched.
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             DOCK_DEFAULT_SIZE
         ));
     }
@@ -1746,7 +2267,7 @@ mod tests {
     #[test]
     fn drag_dock_edge_sets_the_frame_size_with_the_existing_clamps() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
         let area = Rect {
             x: 0.0,
             y: 0.0,
@@ -1755,50 +2276,53 @@ mod tests {
         };
         // Cursor at x=400 → 0.40 of the area's width.
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 400.0, 0.0, area)
         );
-        assert!(approx(ws.active().docks().get(DockSide::Left).size(), 0.40));
+        assert!(approx(
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
+            0.40
+        ));
         // Past the max pins at DOCK_MAX_SIZE (set_size's clamp), and past
         // the min pins at DOCK_MIN_SIZE — clamp-not-fail, like tree drags.
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 900.0, 0.0, area)
         );
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             DOCK_MAX_SIZE
         ));
         // Repeated positions at the clamp report false so unchanged geometry
         // does not trigger rendering or dirty bookkeeping.
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 950.0, 0.0, area)
         );
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 999.0, 0.0, area)
         );
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             DOCK_MAX_SIZE
         ));
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 10.0, 0.0, area)
         );
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             DOCK_MIN_SIZE
         ));
         // And a repeat of the exact same in-range position is a no-change
         // too.
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 300.0, 0.0, area)
         );
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 300.0, 0.0, area)
         );
     }
@@ -1806,10 +2330,14 @@ mod tests {
     #[test]
     fn drag_dock_divider_refuses_a_hidden_dock() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let remaining = ws.active().tree().focused().expect("one tile left in main");
-        assert!(ws.active_mut().focus_main_tile(remaining));
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let remaining = ws
+            .workspace(W1)
+            .tree()
+            .focused()
+            .expect("one tile left in main");
+        assert!(ws.workspace_mut(W1).focus_main_tile(remaining));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         let addr = DividerAddress {
             path: vec![],
             index: 0,
@@ -1822,20 +2350,23 @@ mod tests {
         };
         // Hiding a dock during a drag makes subsequent applications refuse
         // without changing the retained hidden tree.
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert!(!ws.active().docks().get(DockSide::Left).visible());
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert!(!ws.workspace(W1).docks().get(DockSide::Left).visible());
         let before = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
             .layout(Rect::UNIT);
-        assert!(
-            !ws.active_mut()
-                .drag_dock_divider(DockSide::Left, &addr, 62.5, 0.0, dock_rect)
-        );
+        assert!(!ws.workspace_mut(W1).drag_dock_divider(
+            DockSide::Left,
+            &addr,
+            62.5,
+            0.0,
+            dock_rect
+        ));
         assert_eq!(
-            ws.active()
+            ws.workspace(W1)
                 .docks()
                 .get(DockSide::Left)
                 .tree()
@@ -1856,18 +2387,18 @@ mod tests {
         };
         // Hidden dock: an edge drag reaching it can only be stale.
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 400.0, 0.0, area)
         );
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             DOCK_DEFAULT_SIZE
         ));
         // Degenerate area / non-finite cursor: no-op, and crucially NOT a
         // set_size(NaN) — that would "heal" the size back to the default.
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 400.0, 0.0, area)
         );
         let flat = Rect {
@@ -1877,14 +2408,17 @@ mod tests {
             h: 0.0,
         };
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, 400.0, 0.0, flat)
         );
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drag_dock_edge(DockSide::Left, f32::NAN, 0.0, area)
         );
-        assert!(approx(ws.active().docks().get(DockSide::Left).size(), 0.40));
+        assert!(approx(
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
+            0.40
+        ));
     }
 
     // --- Dock toggling ------------------------------------------------
@@ -1892,34 +2426,34 @@ mod tests {
     #[test]
     fn fullscreen_hidden_is_none_without_a_fullscreen_tile() {
         let ws = two_tiles();
-        assert_eq!(ws.active().fullscreen_hidden(), None);
+        assert_eq!(ws.workspace(W1).fullscreen_hidden(), None);
     }
 
     #[test]
     fn fullscreen_hidden_counts_the_other_main_tree_slots() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
         assert_eq!(
-            ws.active().fullscreen_hidden(),
+            ws.workspace(W1).fullscreen_hidden(),
             Some(0),
             "a lone maximised tile hides nothing, but still reads as fullscreen"
         );
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Vertical);
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
-        assert_eq!(ws.active().fullscreen_hidden(), Some(2));
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Vertical);
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
+        assert_eq!(ws.workspace(W1).fullscreen_hidden(), Some(2));
     }
 
     #[test]
     fn fullscreen_hidden_counts_a_stack_as_one_slot() {
         let mut ws = two_tiles();
-        ws.stack_active().expect("focus is on a tile");
-        assert_eq!(ws.active().tree().tiles().len(), 3);
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
+        ws.stack_in(W1).expect("focus is on a tile");
+        assert_eq!(ws.workspace(W1).tree().tiles().len(), 3);
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
         assert_eq!(
-            ws.active().fullscreen_hidden(),
+            ws.workspace(W1).fullscreen_hidden(),
             Some(1),
             "the stack's hidden member would not show unmaximised either"
         );
@@ -1928,25 +2462,29 @@ mod tests {
     #[test]
     fn fullscreen_hidden_counts_visible_dock_slots_only() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical);
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().slot_count(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .slot_count(),
             2
         );
-        let main = ws.active().tree().tiles()[0];
-        assert!(ws.active_mut().focus_main_tile(main));
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
-        assert_eq!(ws.active().tree().fullscreen(), Some(main));
+        let main = ws.workspace(W1).tree().tiles()[0];
+        assert!(ws.workspace_mut(W1).focus_main_tile(main));
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
+        assert_eq!(ws.workspace(W1).tree().fullscreen(), Some(main));
         assert_eq!(
-            ws.active().fullscreen_hidden(),
+            ws.workspace(W1).fullscreen_hidden(),
             Some(2),
             "fullscreen paints no dock, so a visible dock's tiles are hidden too"
         );
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert!(!ws.active().docks().get(DockSide::Left).visible());
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert!(!ws.workspace(W1).docks().get(DockSide::Left).visible());
         assert_eq!(
-            ws.active().fullscreen_hidden(),
+            ws.workspace(W1).fullscreen_hidden(),
             Some(0),
             "a hidden dock's tiles are hidden with or without fullscreen"
         );
@@ -1954,11 +2492,19 @@ mod tests {
 
     #[test]
     fn toggle_shows_then_hides_a_dock() {
-        let mut ws = Workspaces::new();
-        assert!(apply_workspace_action(&mut ws, &act("dock::toggle_left")));
-        assert!(ws.active().docks().get(DockSide::Left).visible());
-        assert!(apply_workspace_action(&mut ws, &act("dock::toggle_left")));
-        assert!(!ws.active().docks().get(DockSide::Left).visible());
+        let mut ws = one_window();
+        assert!(apply_workspace_action(
+            &mut ws,
+            W1,
+            &act("dock::toggle_left")
+        ));
+        assert!(ws.workspace(W1).docks().get(DockSide::Left).visible());
+        assert!(apply_workspace_action(
+            &mut ws,
+            W1,
+            &act("dock::toggle_left")
+        ));
+        assert!(!ws.workspace(W1).docks().get(DockSide::Left).visible());
     }
 
     /// Showing even an empty dock gives it focus for the next add. Hiding it
@@ -1966,24 +2512,27 @@ mod tests {
     #[test]
     fn toggling_a_hidden_dock_shows_it_and_focuses_it_even_when_empty() {
         let mut ws = two_tiles();
-        let tree_focused = ws.active().tree().focused();
-        apply_workspace_action(&mut ws, &act("dock::toggle_bottom"));
-        assert!(ws.active().docks().get(DockSide::Bottom).visible());
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
+        let tree_focused = ws.workspace(W1).tree().focused();
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_bottom"));
+        assert!(ws.workspace(W1).docks().get(DockSide::Bottom).visible());
         assert_eq!(
-            ws.active().focused_tile(),
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Bottom)
+        );
+        assert_eq!(
+            ws.workspace(W1).focused_tile(),
             None,
             "an empty focused dock has no focused tile"
         );
         assert_eq!(
-            ws.active().tree().focused(),
+            ws.workspace(W1).tree().focused(),
             tree_focused,
             "the tree's own focus memory is untouched"
         );
-        apply_workspace_action(&mut ws, &act("dock::toggle_bottom"));
-        assert!(!ws.active().docks().get(DockSide::Bottom).visible());
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        assert_eq!(ws.active().focused_tile(), tree_focused);
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_bottom"));
+        assert!(!ws.workspace(W1).docks().get(DockSide::Bottom).visible());
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).focused_tile(), tree_focused);
     }
 
     /// Fullscreen and a focused dock is a combination `render` cannot
@@ -1994,49 +2543,49 @@ mod tests {
     #[test]
     fn toggling_a_dock_visible_exits_main_tree_fullscreen() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
-        assert!(ws.active().tree().fullscreen().is_some());
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
+        assert!(ws.workspace(W1).tree().fullscreen().is_some());
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
         assert!(
-            ws.active().tree().fullscreen().is_none(),
+            ws.workspace(W1).tree().fullscreen().is_none(),
             "showing a dock must exit main-tree fullscreen"
         );
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        assert!(ws.active().tree().fullscreen().is_none());
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        assert!(ws.workspace(W1).tree().fullscreen().is_none());
     }
 
     #[test]
     fn a_hidden_dock_keeps_its_whole_tree() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         // Split inside the dock so hiding has real structure to preserve.
-        ws.split_active(Orientation::Vertical);
-        let parked = ws.active().docks().get(DockSide::Left).tree().clone();
+        ws.split_in(W1, Orientation::Vertical);
+        let parked = ws.workspace(W1).docks().get(DockSide::Left).tree().clone();
         assert_eq!(parked.tiles().len(), 2);
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert!(!ws.active().docks().get(DockSide::Left).visible());
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert!(!ws.workspace(W1).docks().get(DockSide::Left).visible());
         assert_eq!(
-            *ws.active().docks().get(DockSide::Left).tree(),
+            *ws.workspace(W1).docks().get(DockSide::Left).tree(),
             parked,
             "hiding must not evict or disturb the parked tree (focus memory included)"
         );
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert!(ws.active().docks().get(DockSide::Left).visible());
-        assert_eq!(*ws.active().docks().get(DockSide::Left).tree(), parked);
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert!(ws.workspace(W1).docks().get(DockSide::Left).visible());
+        assert_eq!(*ws.workspace(W1).docks().get(DockSide::Left).tree(), parked);
     }
 
     #[test]
     fn hiding_the_focused_dock_returns_focus_to_main() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-        let tree_focused = ws.active().tree().focused();
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
+        let tree_focused = ws.workspace(W1).tree().focused();
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
         assert_eq!(
-            ws.active().tree().focused(),
+            ws.workspace(W1).tree().focused(),
             tree_focused,
             "the tree's own focused tile must be untouched"
         );
@@ -2047,8 +2596,8 @@ mod tests {
     #[test]
     fn verbs_on_an_empty_focused_dock_are_no_ops_that_keep_the_region_valid() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         for verb in [
             "workspace::close_tile",
             "workspace::fullscreen_tile",
@@ -2058,21 +2607,25 @@ mod tests {
             "dock::move_left",
             "dock::move_bottom",
         ] {
-            apply_workspace_action(&mut ws, &act(verb));
-            assert_eq!(ws.active().tree().tiles().len(), 2, "{verb} moved a tile");
-            let region = ws.active().region();
+            apply_workspace_action(&mut ws, W1, &act(verb));
+            assert_eq!(
+                ws.workspace(W1).tree().tiles().len(),
+                2,
+                "{verb} moved a tile"
+            );
+            let region = ws.workspace(W1).region();
             if let FocusRegion::Dock(side) = region {
                 assert!(
-                    ws.active().docks().get(side).visible(),
+                    ws.workspace(W1).docks().get(side).visible(),
                     "{verb} left focus on a hidden dock"
                 );
             }
         }
         // Directional focus out of the empty dock lands somewhere valid.
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        let region = ws.active().region();
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        let region = ws.workspace(W1).region();
         if let FocusRegion::Dock(side) = region {
-            assert!(ws.active().docks().get(side).visible());
+            assert!(ws.workspace(W1).docks().get(side).visible());
         }
     }
 
@@ -2084,9 +2637,9 @@ mod tests {
     /// (`focus_dock`) still refuses an empty dock.
     #[test]
     fn focus_empty_dock_takes_the_region_only_for_a_visible_empty_dock() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        let w = ws.active_mut();
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        let w = ws.workspace_mut(W1);
         assert!(!w.focus_empty_dock(DockSide::Left), "hidden: refused");
         assert_eq!(w.region(), FocusRegion::Main);
         w.docks.get_mut(DockSide::Left).set_visible(true);
@@ -2100,8 +2653,8 @@ mod tests {
             !w.focus_empty_dock(DockSide::Left),
             "already there: nothing changed"
         );
-        assert_eq!(ws.split_active(Orientation::Horizontal), TileId(2));
-        let w = ws.active_mut();
+        assert_eq!(ws.split_in(W1, Orientation::Horizontal), TileId(2));
+        let w = ws.workspace_mut(W1);
         assert_eq!(w.docks().get(DockSide::Left).tree().tiles().len(), 1);
         w.focus_main_tile(TileId(1));
         assert!(!w.focus_empty_dock(DockSide::Left), "occupied: refused");
@@ -2109,20 +2662,24 @@ mod tests {
     }
 
     #[test]
-    fn split_active_returns_the_new_focused_tile_in_main_and_in_a_dock() {
-        let mut ws = Workspaces::new();
-        let first = ws.split_active(Orientation::Horizontal);
-        assert_eq!(ws.active().tree().focused(), Some(first));
-        let second = ws.split_active(Orientation::Vertical);
+    fn split_in_returns_the_new_focused_tile_in_main_and_in_a_dock() {
+        let mut ws = one_window();
+        let first = ws.split_in(W1, Orientation::Horizontal);
+        assert_eq!(ws.workspace(W1).tree().focused(), Some(first));
+        let second = ws.split_in(W1, Orientation::Vertical);
         assert_ne!(second, first);
-        assert_eq!(ws.active().tree().focused(), Some(second));
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        let in_dock = ws.split_active(Orientation::Horizontal);
+        assert_eq!(ws.workspace(W1).tree().focused(), Some(second));
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        let in_dock = ws.split_in(W1, Orientation::Horizontal);
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().focused(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .focused(),
             Some(in_dock)
         );
-        assert_eq!(ws.active().focused_tile(), Some(in_dock));
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(in_dock));
     }
 
     #[test]
@@ -2133,21 +2690,21 @@ mod tests {
             w: 1000.0,
             h: 500.0,
         };
-        let mut ws = Workspaces::new();
-        assert_eq!(ws.active().focused_tile_rect(area), None);
-        ws.split_active(Orientation::Horizontal);
-        let whole = ws.active().focused_tile_rect(area).unwrap();
+        let mut ws = one_window();
+        assert_eq!(ws.workspace(W1).focused_tile_rect(area), None);
+        ws.split_in(W1, Orientation::Horizontal);
+        let whole = ws.workspace(W1).focused_tile_rect(area).unwrap();
         assert!(approx(whole.w, 1000.0) && approx(whole.h, 500.0));
-        ws.split_active(Orientation::Horizontal);
-        let right = ws.active().focused_tile_rect(area).unwrap();
+        ws.split_in(W1, Orientation::Horizontal);
+        let right = ws.workspace(W1).focused_tile_rect(area).unwrap();
         assert!(approx(right.w, 500.0), "{right:?}");
         assert!(right.x > 0.0, "the new tile is the right half");
         // A focused (visible, empty) dock has no focused tile → None.
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert_eq!(ws.active().focused_tile_rect(area), None);
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert_eq!(ws.workspace(W1).focused_tile_rect(area), None);
         // Add into the dock: its rect is the dock's column, not the tree's.
-        ws.split_active(Orientation::Horizontal);
-        let docked = ws.active().focused_tile_rect(area).unwrap();
+        ws.split_in(W1, Orientation::Horizontal);
+        let docked = ws.workspace(W1).focused_tile_rect(area).unwrap();
         assert!(docked.w < 500.0 && approx(docked.x, 0.0), "{docked:?}");
     }
 
@@ -2178,20 +2735,23 @@ mod tests {
     /// tiles must exist before the moves.)
     fn both_side_docks_occupied_tree_empty() -> Workspaces {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_right")); // back to Main
-        apply_workspace_action(&mut ws, &act("dock::move_right"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right")); // back to Main
+        apply_workspace_action(&mut ws, W1, &act("dock::move_right"));
         ws
     }
 
     #[test]
     fn hiding_the_focused_dock_with_an_empty_tree_falls_back_to_another_dock() {
         let mut ws = both_side_docks_occupied_tree_empty();
-        assert!(ws.active().tree().is_empty());
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Right));
-        apply_workspace_action(&mut ws, &act("dock::toggle_right"));
+        assert!(ws.workspace(W1).tree().is_empty());
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Right)
+        );
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_right"));
+        assert_eq!(
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Left),
             "with an empty tree, focus falls back to an occupied visible dock"
         );
@@ -2199,11 +2759,11 @@ mod tests {
 
     #[test]
     fn hiding_the_focused_dock_with_nothing_else_falls_back_to_main() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     // --- dock::move_* ----------------------------------------------------
@@ -2211,9 +2771,9 @@ mod tests {
     #[test]
     fn move_from_main_parks_the_tile_shows_the_dock_and_focuses_it() {
         let mut ws = two_tiles();
-        let moved = ws.active().tree().focused().unwrap();
-        assert!(apply_workspace_action(&mut ws, &act("dock::move_left")));
-        let dock = ws.active().docks().get(DockSide::Left);
+        let moved = ws.workspace(W1).tree().focused().unwrap();
+        assert!(apply_workspace_action(&mut ws, W1, &act("dock::move_left")));
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(dock.tree().tiles(), vec![moved]);
         assert_eq!(
             dock.tree().focused(),
@@ -2221,10 +2781,14 @@ mod tests {
             "focus follows into the dock's tree"
         );
         assert!(dock.visible(), "the dock auto-shows");
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-        assert_eq!(ws.active().tree().tiles().len(), 1, "tile left the tree");
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(
+            ws.workspace(W1).tree().tiles().len(),
+            1,
+            "tile left the tree"
+        );
         assert!(
-            ws.active().tree().focused().is_some(),
+            ws.workspace(W1).tree().focused().is_some(),
             "the tree refocused a neighbor like close does"
         );
     }
@@ -2234,14 +2798,19 @@ mod tests {
         // Moving into an occupied dock inserts beside its focused leaf,
         // preserving both tiles in the destination tree.
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let parked = ws.active().docks().get(DockSide::Left).tree().focused();
-        apply_workspace_action(&mut ws, &act("workspace::focus_right")); // → Main
-        let moved = ws.active().tree().focused().unwrap();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let parked = ws
+            .workspace(W1)
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .focused();
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right")); // → Main
+        let moved = ws.workspace(W1).tree().focused().unwrap();
 
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
 
-        let dock = ws.active().docks().get(DockSide::Left);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(dock.tree().tiles().len(), 2, "both tiles live in the dock");
         assert!(dock.tree().contains(parked.unwrap()));
         assert!(dock.tree().contains(moved));
@@ -2257,19 +2826,19 @@ mod tests {
             "left-dock insert must be a horizontal split, got {rects:?}"
         );
         assert!(
-            ws.active().tree().is_empty(),
+            ws.workspace(W1).tree().is_empty(),
             "the main tree drained completely"
         );
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
     }
 
     #[test]
     fn move_into_the_bottom_dock_inserts_stacked() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_up")); // → Main
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
-        let dock = ws.active().docks().get(DockSide::Bottom);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_up")); // → Main
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
+        let dock = ws.workspace(W1).docks().get(DockSide::Bottom);
         let rects = dock.tree().layout(Rect::UNIT);
         assert_eq!(rects.len(), 2);
         assert!(
@@ -2283,22 +2852,22 @@ mod tests {
     #[test]
     fn move_from_the_same_dock_returns_the_tile_to_the_tree_and_hides_the_dock() {
         let mut ws = two_tiles();
-        let moved = ws.active().tree().focused().unwrap();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        let moved = ws.workspace(W1).tree().focused().unwrap();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
         assert_eq!(
-            ws.active().tree().focused(),
+            ws.workspace(W1).tree().focused(),
             Some(moved),
             "focus follows the tile back into the tree"
         );
-        assert_eq!(ws.active().tree().tiles().len(), 2);
-        let dock = ws.active().docks().get(DockSide::Left);
+        assert_eq!(ws.workspace(W1).tree().tiles().len(), 2);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert!(dock.tree().is_empty());
         assert!(!dock.visible(), "the emptied dock auto-hides");
         // Side-dock return is a horizontal (side by side) split.
-        let rects = ws.active().tree().layout(Rect::UNIT);
+        let rects = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert!(rects.iter().all(|(_, r)| approx(r.h, 1.0)));
     }
 
@@ -2310,39 +2879,44 @@ mod tests {
         // the second — after focusing the dock again — moves the last one
         // and only then does the dock auto-hide.
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_right")); // → Main
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right")); // → Main
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().tiles().len(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .tiles()
+                .len(),
             2
         );
-        assert!(ws.active().tree().is_empty());
+        assert!(ws.workspace(W1).tree().is_empty());
 
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // drain #1
-        let dock = ws.active().docks().get(DockSide::Left);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // drain #1
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(dock.tree().tiles().len(), 1, "one tile per press");
         assert!(dock.visible(), "a non-empty dock must not auto-hide");
-        assert_eq!(ws.active().tree().tiles().len(), 1);
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).tree().tiles().len(), 1);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
 
         // Focus returns to the dock (edge-cross left), then drain again.
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // drain #2
-        let dock = ws.active().docks().get(DockSide::Left);
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // drain #2
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert!(dock.tree().is_empty());
         assert!(!dock.visible(), "the emptied dock auto-hides");
-        assert_eq!(ws.active().tree().tiles().len(), 2);
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).tree().tiles().len(), 2);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
     fn move_back_from_the_bottom_dock_splits_vertically() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
-        let rects = ws.active().tree().layout(Rect::UNIT);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
+        let rects = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert_eq!(rects.len(), 2);
         // The returning tile stacked onto the focused leaf: both tiles in
         // that slot are full width, half height.
@@ -2356,30 +2930,37 @@ mod tests {
 
     #[test]
     fn move_back_into_an_empty_tree_makes_the_tile_the_root() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        let tile = ws.active().tree().focused().unwrap();
-        apply_workspace_action(&mut ws, &act("dock::move_right"));
-        assert!(ws.active().tree().is_empty());
-        apply_workspace_action(&mut ws, &act("dock::move_right"));
-        assert_eq!(ws.active().tree().tiles(), vec![tile]);
-        assert_eq!(ws.active().tree().focused(), Some(tile));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        let tile = ws.workspace(W1).tree().focused().unwrap();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_right"));
+        assert!(ws.workspace(W1).tree().is_empty());
+        apply_workspace_action(&mut ws, W1, &act("dock::move_right"));
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![tile]);
+        assert_eq!(ws.workspace(W1).tree().focused(), Some(tile));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
     fn move_between_docks_relocates_and_hides_the_emptied_source() {
         let mut ws = two_tiles();
-        let moved = ws.active().tree().focused().unwrap();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
+        let moved = ws.workspace(W1).tree().focused().unwrap();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
         assert_eq!(
-            ws.active().docks().get(DockSide::Bottom).tree().tiles(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Bottom)
+                .tree()
+                .tiles(),
             vec![moved]
         );
-        assert!(ws.active().docks().get(DockSide::Bottom).visible());
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
-        let left = ws.active().docks().get(DockSide::Left);
+        assert!(ws.workspace(W1).docks().get(DockSide::Bottom).visible());
+        assert_eq!(
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Bottom)
+        );
+        let left = ws.workspace(W1).docks().get(DockSide::Left);
         assert!(left.tree().is_empty());
         assert!(!left.visible(), "the emptied source dock auto-hides");
     }
@@ -2389,41 +2970,60 @@ mod tests {
         // Dock-trees semantics: no swap — the source dock's focused tile
         // joins the target dock's tree; the emptied source auto-hides.
         let mut ws = both_side_docks_occupied_tree_empty();
-        let a = ws.active().docks().get(DockSide::Left).tree().focused();
-        let b = ws.active().docks().get(DockSide::Right).tree().focused();
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Right));
+        let a = ws
+            .workspace(W1)
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .focused();
+        let b = ws
+            .workspace(W1)
+            .docks()
+            .get(DockSide::Right)
+            .tree()
+            .focused();
+        assert_eq!(
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Right)
+        );
         // b (focused, in the right dock) moves into the left dock's tree,
         // alongside a; the emptied right dock auto-hides.
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let left = ws.active().docks().get(DockSide::Left);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let left = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(left.tree().tiles().len(), 2);
         assert!(left.tree().contains(a.unwrap()));
         assert!(left.tree().contains(b.unwrap()));
         assert_eq!(left.tree().focused(), b, "focus follows the moved tile");
-        let right = ws.active().docks().get(DockSide::Right);
+        let right = ws.workspace(W1).docks().get(DockSide::Right);
         assert!(right.tree().is_empty());
         assert!(!right.visible(), "the emptied source dock auto-hides");
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
     }
 
     #[test]
     fn move_on_an_empty_workspace_is_claimed_but_a_noop() {
-        let mut ws = Workspaces::new();
-        assert!(apply_workspace_action(&mut ws, &act("dock::move_left")));
-        assert!(ws.active().is_empty());
-        assert!(ws.active().docks().get(DockSide::Left).tree().is_empty());
-        assert!(!ws.active().docks().get(DockSide::Left).visible());
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        let mut ws = one_window();
+        assert!(apply_workspace_action(&mut ws, W1, &act("dock::move_left")));
+        assert!(ws.workspace(W1).is_empty());
+        assert!(
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .is_empty()
+        );
+        assert!(!ws.workspace(W1).docks().get(DockSide::Left).visible());
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
     fn moving_a_fullscreen_tile_to_a_dock_exits_fullscreen() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
-        assert!(ws.active().tree().fullscreen().is_some());
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
+        assert!(ws.workspace(W1).tree().fullscreen().is_some());
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         assert_eq!(
-            ws.active().tree().fullscreen(),
+            ws.workspace(W1).tree().fullscreen(),
             None,
             "a dock move is an explicit layout operation — fullscreen must not linger"
         );
@@ -2432,13 +3032,13 @@ mod tests {
     #[test]
     fn tile_ids_stay_unique_across_tree_and_docks_through_moves() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_right")); // → Main
-        ws.split_active(Orientation::Horizontal); // third tile
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // insert (dock holds two)
-        apply_workspace_action(&mut ws, &act("dock::move_bottom")); // dock→dock
-        let mut all: Vec<TileId> = ws.active().tree().tiles();
-        all.extend(ws.active().docks().tiles());
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right")); // → Main
+        ws.split_in(W1, Orientation::Horizontal); // third tile
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // insert (dock holds two)
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom")); // dock→dock
+        let mut all: Vec<TileId> = ws.workspace(W1).tree().tiles();
+        all.extend(ws.workspace(W1).docks().tiles());
         let mut deduped = all.clone();
         deduped.sort();
         deduped.dedup();
@@ -2451,12 +3051,12 @@ mod tests {
     #[test]
     fn focus_left_at_the_tree_edge_enters_a_focusable_left_dock() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         // Back to the tree, then walk left past the edge.
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
     }
 
     /// Directional focus skips hidden and empty docks. Explicitly showing or
@@ -2464,28 +3064,31 @@ mod tests {
     #[test]
     fn focus_does_not_enter_a_hidden_or_empty_dock() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
         // Left dock hidden+empty: staying put.
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
         // Visible but empty: `dock::toggle_left` focuses it directly
         // (that's a different path, covered elsewhere) — back out to
         // Main, then `focus_left` must still not enter it.
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
     fn focus_down_at_the_bottom_edge_enters_the_bottom_dock() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_up"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        apply_workspace_action(&mut ws, &act("workspace::focus_down"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_up"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_down"));
+        assert_eq!(
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Bottom)
+        );
     }
 
     #[test]
@@ -2494,30 +3097,30 @@ mod tests {
         // Up moves within the dock's own tree; only at the dock tree's
         // edge does the inward direction cross back to Main.
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical);
         let bottom = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
             .focused()
             .unwrap();
-        apply_workspace_action(&mut ws, &act("workspace::focus_up"));
-        let dock = ws.active().docks().get(DockSide::Left);
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_up"));
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         assert_ne!(
             dock.tree().focused(),
             Some(bottom),
             "Up must move within the dock's tree first"
         );
         // At the top edge now: Up stays put (not the inward direction).
-        apply_workspace_action(&mut ws, &act("workspace::focus_up"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_up"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         // Right (inward for the left dock, no neighbor in the stack)
         // crosses back to Main.
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     #[test]
@@ -2526,30 +3129,34 @@ mod tests {
         // column, Right moves to the dock's own right column; a second
         // Right — now at the edge — crosses into Main.
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Horizontal);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Horizontal);
         // Focus the dock's left column.
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
         let left_col = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
             .focused()
             .unwrap();
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Left),
             "the first Right stays inside the dock"
         );
         assert_ne!(
-            ws.active().docks().get(DockSide::Left).tree().focused(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .focused(),
             Some(left_col)
         );
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Main,
             "the edge press crosses back to Main"
         );
@@ -2558,52 +3165,58 @@ mod tests {
     #[test]
     fn inward_focus_from_a_dock_lands_on_the_trees_focused_tile() {
         let mut ws = two_tiles();
-        let stays = ws.active().tree().focused();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let tree_focused = ws.active().tree().focused();
+        let stays = ws.workspace(W1).tree().focused();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let tree_focused = ws.workspace(W1).tree().focused();
         assert_ne!(stays, tree_focused, "sanity: a different tile remains");
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        assert_eq!(ws.active().tree().focused(), tree_focused);
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).tree().focused(), tree_focused);
     }
 
     #[test]
     fn outward_and_lateral_directions_from_a_dock_are_noops() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         for dir in [
             "workspace::focus_left",
             "workspace::focus_up",
             "workspace::focus_down",
         ] {
-            assert!(apply_workspace_action(&mut ws, &act(dir)));
-            assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+            assert!(apply_workspace_action(&mut ws, W1, &act(dir)));
+            assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         }
     }
 
     #[test]
     fn inward_focus_over_an_empty_tree_crosses_to_the_opposite_dock() {
         let mut ws = both_side_docks_occupied_tree_empty();
-        assert!(ws.active().tree().is_empty());
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Right));
+        assert!(ws.workspace(W1).tree().is_empty());
+        assert_eq!(
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Right)
+        );
         // Right dock, inward is Left; the tree is empty, so cross to the
         // opposite (left) dock.
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         // And back.
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Right));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        assert_eq!(
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Right)
+        );
     }
 
     #[test]
     fn inward_focus_from_the_bottom_dock_over_an_empty_tree_stays_put() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
-        assert!(ws.active().tree().is_empty());
-        apply_workspace_action(&mut ws, &act("workspace::focus_up"));
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
+        assert!(ws.workspace(W1).tree().is_empty());
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_up"));
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Bottom),
             "the bottom dock has no opposite side to cross to"
         );
@@ -2612,13 +3225,13 @@ mod tests {
     #[test]
     fn fullscreen_blocks_focus_from_crossing_into_docks() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_left"));
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Main,
             "docks are not painted while fullscreen — focus must not enter them"
         );
@@ -2630,20 +3243,21 @@ mod tests {
     fn resize_in_a_split_dock_moves_the_docks_own_divider_not_the_frame() {
         // An internal dock divider gets the resize press before frame resizing.
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical); // vertical split inside
-        let frame_before = ws.active().docks().get(DockSide::Left).size();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical); // vertical split inside
+        let frame_before = ws.workspace(W1).docks().get(DockSide::Left).size();
         let layout_before = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
             .layout(Rect::UNIT);
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::resize_up")
         ));
-        let dock = ws.active().docks().get(DockSide::Left);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_ne!(
             dock.tree().layout(Rect::UNIT),
             layout_before,
@@ -2662,20 +3276,21 @@ mod tests {
         // so the frame resizes — and the along-axis frame no-op rule still
         // holds for a lone tile.
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical);
-        let frame_before = ws.active().docks().get(DockSide::Left).size();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical);
+        let frame_before = ws.workspace(W1).docks().get(DockSide::Left).size();
         let layout_before = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
             .layout(Rect::UNIT);
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::resize_right")
         ));
-        let dock = ws.active().docks().get(DockSide::Left);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(
             dock.tree().layout(Rect::UNIT),
             layout_before,
@@ -2690,30 +3305,32 @@ mod tests {
     #[test]
     fn resize_grows_and_shrinks_the_focused_left_dock() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let start = ws.active().docks().get(DockSide::Left).size();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let start = ws.workspace(W1).docks().get(DockSide::Left).size();
         assert!(approx(start, DOCK_DEFAULT_SIZE));
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::resize_right")
         ));
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             start + RESIZE_STEP
         ));
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::resize_left")
         ));
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             start
         ));
         // Along-axis arrows are no-ops for a side dock.
-        apply_workspace_action(&mut ws, &act("workspace::resize_up"));
-        apply_workspace_action(&mut ws, &act("workspace::resize_down"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::resize_up"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::resize_down"));
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             start
         ));
     }
@@ -2721,16 +3338,16 @@ mod tests {
     #[test]
     fn resize_directions_mirror_for_the_right_dock() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_right"));
-        let start = ws.active().docks().get(DockSide::Right).size();
-        apply_workspace_action(&mut ws, &act("workspace::resize_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_right"));
+        let start = ws.workspace(W1).docks().get(DockSide::Right).size();
+        apply_workspace_action(&mut ws, W1, &act("workspace::resize_left"));
         assert!(approx(
-            ws.active().docks().get(DockSide::Right).size(),
+            ws.workspace(W1).docks().get(DockSide::Right).size(),
             start + RESIZE_STEP
         ));
-        apply_workspace_action(&mut ws, &act("workspace::resize_right"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::resize_right"));
         assert!(approx(
-            ws.active().docks().get(DockSide::Right).size(),
+            ws.workspace(W1).docks().get(DockSide::Right).size(),
             start
         ));
     }
@@ -2738,16 +3355,16 @@ mod tests {
     #[test]
     fn resize_directions_for_the_bottom_dock_are_up_grows_down_shrinks() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
-        let start = ws.active().docks().get(DockSide::Bottom).size();
-        apply_workspace_action(&mut ws, &act("workspace::resize_up"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
+        let start = ws.workspace(W1).docks().get(DockSide::Bottom).size();
+        apply_workspace_action(&mut ws, W1, &act("workspace::resize_up"));
         assert!(approx(
-            ws.active().docks().get(DockSide::Bottom).size(),
+            ws.workspace(W1).docks().get(DockSide::Bottom).size(),
             start + RESIZE_STEP
         ));
-        apply_workspace_action(&mut ws, &act("workspace::resize_down"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::resize_down"));
         assert!(approx(
-            ws.active().docks().get(DockSide::Bottom).size(),
+            ws.workspace(W1).docks().get(DockSide::Bottom).size(),
             start
         ));
     }
@@ -2755,19 +3372,19 @@ mod tests {
     #[test]
     fn dock_resize_clamps_at_both_ends() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         for _ in 0..50 {
-            apply_workspace_action(&mut ws, &act("workspace::resize_right"));
+            apply_workspace_action(&mut ws, W1, &act("workspace::resize_right"));
         }
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             DOCK_MAX_SIZE
         ));
         for _ in 0..50 {
-            apply_workspace_action(&mut ws, &act("workspace::resize_left"));
+            apply_workspace_action(&mut ws, W1, &act("workspace::resize_left"));
         }
         assert!(approx(
-            ws.active().docks().get(DockSide::Left).size(),
+            ws.workspace(W1).docks().get(DockSide::Left).size(),
             DOCK_MIN_SIZE
         ));
     }
@@ -2775,16 +3392,20 @@ mod tests {
     #[test]
     fn resize_while_main_focused_still_moves_tree_dividers_with_docks_present() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        ws.split_active(Orientation::Horizontal);
-        let dock_size = ws.active().docks().get(DockSide::Left).size();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        ws.split_in(W1, Orientation::Horizontal);
+        let dock_size = ws.workspace(W1).docks().get(DockSide::Left).size();
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::resize_left")
         ));
         assert!(
-            approx(ws.active().docks().get(DockSide::Left).size(), dock_size),
+            approx(
+                ws.workspace(W1).docks().get(DockSide::Left).size(),
+                dock_size
+            ),
             "a Main-focused resize must not touch dock sizes"
         );
     }
@@ -2792,10 +3413,10 @@ mod tests {
     #[test]
     fn close_in_a_multi_tile_dock_refocuses_within_and_keeps_the_dock() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical); // second dock tile
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical); // second dock tile
         let closed = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
@@ -2803,9 +3424,10 @@ mod tests {
             .unwrap();
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::close_tile")
         ));
-        let dock = ws.active().docks().get(DockSide::Left);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(dock.tree().tiles().len(), 1);
         assert!(!dock.tree().contains(closed));
         assert!(
@@ -2814,7 +3436,7 @@ mod tests {
         );
         assert!(dock.visible(), "a still-occupied dock must not hide");
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Left),
             "focus stays in the dock while it has tiles"
         );
@@ -2823,18 +3445,19 @@ mod tests {
     #[test]
     fn close_of_a_docks_last_tile_hides_it_and_falls_back() {
         let mut ws = two_tiles();
-        let moved = ws.active().tree().focused().unwrap();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let moved = ws.workspace(W1).tree().focused().unwrap();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::close_tile")
         ));
-        let dock = ws.active().docks().get(DockSide::Left);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert!(dock.tree().is_empty());
         assert!(!dock.visible());
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
         assert!(
-            !ws.active().tree().contains(moved),
+            !ws.workspace(W1).tree().contains(moved),
             "close removes the tile entirely — it does not return to the tree"
         );
     }
@@ -2843,55 +3466,55 @@ mod tests {
     fn close_tile_id_on_the_focused_tile_matches_close_tile() {
         let mut by_key = two_tiles();
         let mut by_id = two_tiles();
-        let focused = by_id.active().focused_tile().unwrap();
-        apply_workspace_action(&mut by_key, &act("workspace::close_tile"));
-        assert!(by_id.active_mut().close_tile_id(focused));
+        let focused = by_id.workspace(W1).focused_tile().unwrap();
+        apply_workspace_action(&mut by_key, W1, &act("workspace::close_tile"));
+        assert!(by_id.workspace_mut(W1).close_tile_id(focused));
         assert_eq!(
-            by_id.active().tree().tiles(),
-            by_key.active().tree().tiles()
+            by_id.workspace(W1).tree().tiles(),
+            by_key.workspace(W1).tree().tiles()
         );
         assert_eq!(
-            by_id.active().focused_tile(),
-            by_key.active().focused_tile()
+            by_id.workspace(W1).focused_tile(),
+            by_key.workspace(W1).focused_tile()
         );
-        assert_eq!(by_id.active().region(), by_key.active().region());
+        assert_eq!(by_id.workspace(W1).region(), by_key.workspace(W1).region());
     }
 
     #[test]
     fn close_tile_id_on_an_unfocused_tile_keeps_focus() {
         let mut ws = two_tiles();
-        let focused = ws.active().focused_tile().unwrap();
+        let focused = ws.workspace(W1).focused_tile().unwrap();
         let other = *ws
-            .active()
+            .workspace(W1)
             .tree()
             .tiles()
             .iter()
             .find(|t| **t != focused)
             .unwrap();
-        assert!(ws.active_mut().close_tile_id(other));
-        assert!(!ws.active().tree().contains(other));
-        assert_eq!(ws.active().focused_tile(), Some(focused));
+        assert!(ws.workspace_mut(W1).close_tile_id(other));
+        assert!(!ws.workspace(W1).tree().contains(other));
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(focused));
     }
 
     #[test]
     fn close_tile_id_on_an_unfocused_stack_member_keeps_focus_and_shows_a_sibling() {
         // Main: [a | stack(b, c)] with c active; focus moves back to a.
         let mut ws = two_tiles();
-        let b = ws.active().focused_tile().unwrap();
-        let c = ws.stack_active().expect("stack onto b");
+        let b = ws.workspace(W1).focused_tile().unwrap();
+        let c = ws.stack_in(W1).expect("stack onto b");
         let a = *ws
-            .active()
+            .workspace(W1)
             .tree()
             .tiles()
             .iter()
             .find(|t| **t != b && **t != c)
             .unwrap();
-        assert!(ws.active_mut().focus_main_tile(a));
-        assert!(ws.active_mut().close_tile_id(c));
-        assert_eq!(ws.active().focused_tile(), Some(a), "focus stays put");
-        assert!(ws.active().tree().contains(b), "the sibling survives");
+        assert!(ws.workspace_mut(W1).focus_main_tile(a));
+        assert!(ws.workspace_mut(W1).close_tile_id(c));
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(a), "focus stays put");
+        assert!(ws.workspace(W1).tree().contains(b), "the sibling survives");
         assert!(
-            ws.active()
+            ws.workspace(W1)
                 .tree()
                 .layout(Rect::UNIT)
                 .iter()
@@ -2903,41 +3526,41 @@ mod tests {
     #[test]
     fn close_tile_id_of_an_unfocused_docks_last_tile_hides_it_and_keeps_focus() {
         let mut ws = two_tiles();
-        let docked = ws.active().focused_tile().unwrap();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        let docked = ws.workspace(W1).focused_tile().unwrap();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         // Focus back to the main tree's tile.
-        let main_tile = ws.active().tree().tiles()[0];
-        assert!(ws.active_mut().focus_main_tile(main_tile));
-        assert!(ws.active_mut().close_tile_id(docked));
-        let dock = ws.active().docks().get(DockSide::Left);
+        let main_tile = ws.workspace(W1).tree().tiles()[0];
+        assert!(ws.workspace_mut(W1).focus_main_tile(main_tile));
+        assert!(ws.workspace_mut(W1).close_tile_id(docked));
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert!(dock.tree().is_empty());
         assert!(!dock.visible(), "an emptied dock hides");
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        assert_eq!(ws.active().focused_tile(), Some(main_tile));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(main_tile));
     }
 
     #[test]
     fn close_tile_id_of_the_fullscreen_tile_clears_fullscreen() {
         let mut ws = two_tiles();
-        let focused = ws.active().focused_tile().unwrap();
-        apply_workspace_action(&mut ws, &act("workspace::fullscreen_tile"));
-        assert!(ws.active_mut().close_tile_id(focused));
+        let focused = ws.workspace(W1).focused_tile().unwrap();
+        apply_workspace_action(&mut ws, W1, &act("workspace::fullscreen_tile"));
+        assert!(ws.workspace_mut(W1).close_tile_id(focused));
         assert_eq!(
-            ws.active().tree().layout(Rect::UNIT).len(),
+            ws.workspace(W1).tree().layout(Rect::UNIT).len(),
             1,
             "no fullscreen left"
         );
-        assert_eq!(ws.active().tree().fullscreen(), None);
+        assert_eq!(ws.workspace(W1).tree().fullscreen(), None);
     }
 
     #[test]
     fn close_tile_id_of_an_absent_tile_changes_nothing() {
         let mut ws = two_tiles();
-        let before = ws.active().tree().tiles();
-        let focused = ws.active().focused_tile();
-        assert!(!ws.active_mut().close_tile_id(TileId(999)));
-        assert_eq!(ws.active().tree().tiles(), before);
-        assert_eq!(ws.active().focused_tile(), focused);
+        let before = ws.workspace(W1).tree().tiles();
+        let focused = ws.workspace(W1).focused_tile();
+        assert!(!ws.workspace_mut(W1).close_tile_id(TileId(999)));
+        assert_eq!(ws.workspace(W1).tree().tiles(), before);
+        assert_eq!(ws.workspace(W1).focused_tile(), focused);
     }
 
     #[test]
@@ -2945,10 +3568,10 @@ mod tests {
         // Splits land within the focused dock's tree and allocate from the
         // same app-wide tile ID counter as main-region splits.
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        let main_before = ws.active().tree().layout(Rect::UNIT);
-        ws.split_active(Orientation::Vertical);
-        let dock = ws.active().docks().get(DockSide::Left);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        let main_before = ws.workspace(W1).tree().layout(Rect::UNIT);
+        ws.split_in(W1, Orientation::Vertical);
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_eq!(dock.tree().tiles().len(), 2);
         assert_eq!(
             dock.tree().focused(),
@@ -2964,73 +3587,83 @@ mod tests {
             "{rects:?}"
         );
         assert_eq!(
-            ws.active().tree().layout(Rect::UNIT),
+            ws.workspace(W1).tree().layout(Rect::UNIT),
             main_before,
             "the main tree is untouched by a dock-focused split"
         );
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
     }
 
     #[test]
     fn directional_move_within_a_dock_swaps_and_never_crosses_regions() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical); // dock: two stacked tiles
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical); // dock: two stacked tiles
         let dock_layout_before = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
             .layout(Rect::UNIT);
         // The focused (bottom) dock tile swaps upward within the dock.
-        assert!(apply_workspace_action(&mut ws, &act("workspace::move_up")));
-        let dock = ws.active().docks().get(DockSide::Left);
+        assert!(apply_workspace_action(
+            &mut ws,
+            W1,
+            &act("workspace::move_up")
+        ));
+        let dock = ws.workspace(W1).docks().get(DockSide::Left);
         assert_ne!(dock.tree().layout(Rect::UNIT), dock_layout_before);
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         // At the dock tree's edge, a directional move is a claimed no-op —
         // it never crosses into Main, exactly like the main tree at its
         // own edge.
         let at_edge = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
             .layout(Rect::UNIT);
-        let main_before = ws.active().tree().layout(Rect::UNIT);
-        assert!(apply_workspace_action(&mut ws, &act("workspace::move_up")));
+        let main_before = ws.workspace(W1).tree().layout(Rect::UNIT);
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
+            &act("workspace::move_up")
+        ));
+        assert!(apply_workspace_action(
+            &mut ws,
+            W1,
             &act("workspace::move_right")
         ));
         assert_eq!(
-            ws.active()
+            ws.workspace(W1)
                 .docks()
                 .get(DockSide::Left)
                 .tree()
                 .layout(Rect::UNIT),
             at_edge
         );
-        assert_eq!(ws.active().tree().layout(Rect::UNIT), main_before);
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).tree().layout(Rect::UNIT), main_before);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
     }
 
     #[test]
     fn orientation_toggle_while_a_dock_is_focused_reorients_the_docks_split() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical);
         let before = ws
-            .active()
+            .workspace(W1)
             .docks()
             .get(DockSide::Left)
             .tree()
             .layout(Rect::UNIT);
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::toggle_split_orientation")
         ));
         assert_ne!(
-            ws.active()
+            ws.workspace(W1)
                 .docks()
                 .get(DockSide::Left)
                 .tree()
@@ -3043,60 +3676,75 @@ mod tests {
     #[test]
     fn fullscreen_stays_a_claimed_noop_while_a_dock_is_focused() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
         assert!(apply_workspace_action(
             &mut ws,
+            W1,
             &act("workspace::fullscreen_tile")
         ));
-        assert_eq!(ws.active().tree().fullscreen(), None);
+        assert_eq!(ws.workspace(W1).tree().fullscreen(), None);
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().fullscreen(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .fullscreen(),
             None,
             "dock trees never go fullscreen"
         );
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
     }
 
     // --- workspace emptiness / focused_tile -------------------------------
 
     #[test]
     fn a_workspace_whose_only_tile_is_docked_counts_as_non_empty() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        assert!(ws.active().tree().is_empty());
-        assert!(!ws.active().is_empty());
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        assert!(ws.workspace(W1).tree().is_empty());
+        assert!(!ws.workspace(W1).is_empty());
         assert_eq!(ws.non_empty_indices(), vec![1]);
         // Even hidden, the parked tile keeps the workspace non-empty.
-        apply_workspace_action(&mut ws, &act("dock::toggle_left"));
+        apply_workspace_action(&mut ws, W1, &act("dock::toggle_left"));
         assert_eq!(ws.non_empty_indices(), vec![1]);
     }
 
     #[test]
     fn focused_tile_follows_the_region() {
         let mut ws = two_tiles();
-        let in_tree = ws.active().tree().focused();
-        assert_eq!(ws.active().focused_tile(), in_tree);
-        apply_workspace_action(&mut ws, &act("dock::move_bottom"));
+        let in_tree = ws.workspace(W1).tree().focused();
+        assert_eq!(ws.workspace(W1).focused_tile(), in_tree);
+        apply_workspace_action(&mut ws, W1, &act("dock::move_bottom"));
         assert_eq!(
-            ws.active().focused_tile(),
-            ws.active().docks().get(DockSide::Bottom).tree().focused()
+            ws.workspace(W1).focused_tile(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Bottom)
+                .tree()
+                .focused()
         );
     }
 
     #[test]
     fn click_focus_helpers_respect_focusability() {
         let mut ws = two_tiles();
-        let left_tile = ws.active().tree().tiles()[0];
-        assert!(!ws.active_mut().focus_dock(DockSide::Left), "empty dock");
-        apply_workspace_action(&mut ws, &act("dock::move_right"));
-        assert!(ws.active_mut().focus_main_tile(left_tile));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        assert!(ws.active_mut().focus_dock(DockSide::Right));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Right));
-        assert!(!ws.active_mut().focus_main_tile(TileId(99)));
+        let left_tile = ws.workspace(W1).tree().tiles()[0];
+        assert!(
+            !ws.workspace_mut(W1).focus_dock(DockSide::Left),
+            "empty dock"
+        );
+        apply_workspace_action(&mut ws, W1, &act("dock::move_right"));
+        assert!(ws.workspace_mut(W1).focus_main_tile(left_tile));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        assert!(ws.workspace_mut(W1).focus_dock(DockSide::Right));
         assert_eq!(
-            ws.active().region(),
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Right)
+        );
+        assert!(!ws.workspace_mut(W1).focus_main_tile(TileId(99)));
+        assert_eq!(
+            ws.workspace(W1).region(),
             FocusRegion::Dock(DockSide::Right),
             "a failed click-focus must not move the region"
         );
@@ -3115,28 +3763,46 @@ mod tests {
     #[test]
     fn click_focus_on_a_dock_tile_focuses_it_within_the_docks_tree() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        ws.split_active(Orientation::Vertical); // dock: two tiles
-        let tiles = ws.active().docks().get(DockSide::Left).tree().tiles();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        ws.split_in(W1, Orientation::Vertical); // dock: two tiles
+        let tiles = ws.workspace(W1).docks().get(DockSide::Left).tree().tiles();
         let unfocused = tiles
             .iter()
             .copied()
-            .find(|id| Some(*id) != ws.active().docks().get(DockSide::Left).tree().focused())
+            .find(|id| {
+                Some(*id)
+                    != ws
+                        .workspace(W1)
+                        .docks()
+                        .get(DockSide::Left)
+                        .tree()
+                        .focused()
+            })
             .unwrap();
         // Click from Main back onto the non-focused dock tile.
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
-        assert!(ws.active_mut().focus_dock_tile(DockSide::Left, unfocused));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
+        assert!(
+            ws.workspace_mut(W1)
+                .focus_dock_tile(DockSide::Left, unfocused)
+        );
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().focused(),
+            ws.workspace(W1)
+                .docks()
+                .get(DockSide::Left)
+                .tree()
+                .focused(),
             Some(unfocused)
         );
         // A tile that isn't in the dock's tree is refused without moving
         // the region.
-        apply_workspace_action(&mut ws, &act("workspace::focus_right"));
-        assert!(!ws.active_mut().focus_dock_tile(DockSide::Left, TileId(99)));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        apply_workspace_action(&mut ws, W1, &act("workspace::focus_right"));
+        assert!(
+            !ws.workspace_mut(W1)
+                .focus_dock_tile(DockSide::Left, TileId(99))
+        );
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
     }
 
     // --- Drop operations ----------------------------------------------
@@ -3144,7 +3810,7 @@ mod tests {
     /// Assert the one-place-per-TileId invariant plus focused-iff-root
     /// across all four trees of the active workspace.
     fn assert_tile_invariants(ws: &Workspaces) {
-        let workspace = ws.active();
+        let workspace = ws.workspace(W1);
         let mut seen: Vec<TileId> = workspace.tree().tiles();
         assert_eq!(
             workspace.tree().is_empty(),
@@ -3173,9 +3839,9 @@ mod tests {
 
     /// [1 | 2 | 3] in the main tree, focus on 3.
     fn three_row() -> Workspaces {
-        let mut ws = Workspaces::new();
+        let mut ws = one_window();
         for _ in 0..3 {
-            ws.split_active(Orientation::Horizontal);
+            ws.split_in(W1, Orientation::Horizontal);
         }
         ws
     }
@@ -3186,15 +3852,15 @@ mod tests {
         // leftmost — [3 | 1 | 2], equalized.
         let mut ws = three_row();
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drop_split(TileId(3), TileId(1), Direction::Left)
         );
         assert_eq!(
-            ws.active().tree().tiles(),
+            ws.workspace(W1).tree().tiles(),
             vec![TileId(3), TileId(1), TileId(2)]
         );
-        assert_eq!(ws.active().tree().focused(), Some(TileId(3)));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).tree().focused(), Some(TileId(3)));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
         assert_tile_invariants(&ws);
     }
 
@@ -3204,15 +3870,15 @@ mod tests {
         // Drag 2 onto tile 1's TOP band: 1's slot becomes a stack with 2
         // on top; the row collapses to just 1's old slot holding both.
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drop_split(TileId(2), TileId(1), Direction::Up)
         );
-        let rects = ws.active().tree().layout(Rect::UNIT);
+        let rects = ws.workspace(W1).tree().layout(Rect::UNIT);
         let r2 = rects.iter().find(|(id, _)| *id == TileId(2)).unwrap().1;
         let r1 = rects.iter().find(|(id, _)| *id == TileId(1)).unwrap().1;
         assert!(approx(r2.y, 0.0) && approx(r2.h, 0.5) && approx(r2.w, 1.0));
         assert!(approx(r1.y, 0.5) && approx(r1.h, 0.5) && approx(r1.w, 1.0));
-        assert_eq!(ws.active().tree().focused(), Some(TileId(2)));
+        assert_eq!(ws.workspace(W1).tree().focused(), Some(TileId(2)));
         assert_tile_invariants(&ws);
     }
 
@@ -3221,34 +3887,34 @@ mod tests {
         // Tile 3 docked left; drag main tile 2 onto the docked tile's
         // BOTTOM band → 2 joins the dock's tree stacked below 3.
         let mut ws = three_row();
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // 3 → dock
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // 3 → dock
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drop_split(TileId(2), TileId(3), Direction::Down)
         );
-        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
+        let dock_tree = ws.workspace(W1).docks().get(DockSide::Left).tree();
         assert_eq!(dock_tree.tiles(), vec![TileId(3), TileId(2)]);
         assert_eq!(dock_tree.focused(), Some(TileId(2)));
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![TileId(1)]);
         assert_tile_invariants(&ws);
     }
 
     #[test]
     fn drop_split_from_a_dock_back_onto_a_main_tiles_edge_hides_the_emptied_dock() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_right")); // 2 → right dock
-        assert!(ws.active().docks().get(DockSide::Right).visible());
+        apply_workspace_action(&mut ws, W1, &act("dock::move_right")); // 2 → right dock
+        assert!(ws.workspace(W1).docks().get(DockSide::Right).visible());
         // Drag the docked 2 onto main tile 1's RIGHT band.
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drop_split(TileId(2), TileId(1), Direction::Right)
         );
-        assert_eq!(ws.active().tree().tiles(), vec![TileId(1), TileId(2)]);
-        assert_eq!(ws.active().tree().focused(), Some(TileId(2)));
-        assert_eq!(ws.active().region(), FocusRegion::Main);
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![TileId(1), TileId(2)]);
+        assert_eq!(ws.workspace(W1).tree().focused(), Some(TileId(2)));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Main);
         assert!(
-            !ws.active().docks().get(DockSide::Right).visible(),
+            !ws.workspace(W1).docks().get(DockSide::Right).visible(),
             "the emptied dock auto-hides"
         );
         assert_tile_invariants(&ws);
@@ -3257,21 +3923,21 @@ mod tests {
     #[test]
     fn drop_split_between_two_docks() {
         let mut ws = three_row();
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // 3 → left
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // 3 → left
         // Move 2 to the right dock via the keyboard verb: focus main tile 2
         // first (region currently Dock(Left)).
-        assert!(ws.active_mut().focus_main_tile(TileId(2)));
-        apply_workspace_action(&mut ws, &act("dock::move_right")); // 2 → right
+        assert!(ws.workspace_mut(W1).focus_main_tile(TileId(2)));
+        apply_workspace_action(&mut ws, W1, &act("dock::move_right")); // 2 → right
         // Drag the right dock's 2 onto the left dock's 3, left band.
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drop_split(TileId(2), TileId(3), Direction::Left)
         );
-        let left_tree = ws.active().docks().get(DockSide::Left).tree();
+        let left_tree = ws.workspace(W1).docks().get(DockSide::Left).tree();
         assert_eq!(left_tree.tiles(), vec![TileId(2), TileId(3)]);
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         assert!(
-            !ws.active().docks().get(DockSide::Right).visible(),
+            !ws.workspace(W1).docks().get(DockSide::Right).visible(),
             "the emptied source dock auto-hides"
         );
         assert_tile_invariants(&ws);
@@ -3280,20 +3946,24 @@ mod tests {
     #[test]
     fn drop_split_self_and_unknown_ids_are_noops() {
         let mut ws = two_tiles();
-        let before = ws.active().tree().clone();
+        let before = ws.workspace(W1).tree().clone();
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drop_split(TileId(1), TileId(1), Direction::Left)
         );
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drop_split(TileId(9), TileId(1), Direction::Left)
         );
         assert!(
-            !ws.active_mut()
+            !ws.workspace_mut(W1)
                 .drop_split(TileId(1), TileId(9), Direction::Left)
         );
-        assert_eq!(ws.active().tree(), &before, "no-op drops change nothing");
+        assert_eq!(
+            ws.workspace(W1).tree(),
+            &before,
+            "no-op drops change nothing"
+        );
         assert_tile_invariants(&ws);
     }
 
@@ -3320,83 +3990,89 @@ mod tests {
     }
 
     #[test]
-    fn stack_active_stacks_onto_the_focused_tile_in_whichever_region_holds_focus() {
-        let mut ws = Workspaces::new();
-        let a = ws.split_active(Orientation::Horizontal);
-        let b = ws.stack_active().expect("a focused tile to stack onto");
-        assert_eq!(ws.active().tree().visible_tiles(), vec![b]);
-        assert_eq!(ws.active().stack_position(a), Some((1, 2)));
-        assert_eq!(ws.active().focused_tile(), Some(b));
+    fn stack_in_stacks_onto_the_focused_tile_in_whichever_region_holds_focus() {
+        let mut ws = one_window();
+        let a = ws.split_in(W1, Orientation::Horizontal);
+        let b = ws.stack_in(W1).expect("a focused tile to stack onto");
+        assert_eq!(ws.workspace(W1).tree().visible_tiles(), vec![b]);
+        assert_eq!(ws.workspace(W1).stack_position(a), Some((1, 2)));
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(b));
         assert!(
-            Workspaces::new().stack_active().is_none(),
+            one_window().stack_in(W1).is_none(),
             "nothing focused, nothing stacked"
         );
     }
 
     #[test]
     fn stack_step_and_unstack_go_to_the_focused_region() {
-        let mut ws = Workspaces::new();
-        let a = ws.split_active(Orientation::Horizontal);
-        let b = ws.stack_active().unwrap();
-        assert!(ws.active_mut().stack_step(1));
-        assert_eq!(ws.active().focused_tile(), Some(a));
-        assert!(ws.active_mut().unstack_focused(Orientation::Horizontal));
-        assert_eq!(ws.active().stack_position(a), None);
-        assert_eq!(ws.active().stack_position(b), None);
-        assert_eq!(ws.active().tree().visible_tiles().len(), 2);
-        assert!(!ws.active_mut().stack_step(1), "no longer a member");
+        let mut ws = one_window();
+        let a = ws.split_in(W1, Orientation::Horizontal);
+        let b = ws.stack_in(W1).unwrap();
+        assert!(ws.workspace_mut(W1).stack_step(1));
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(a));
+        assert!(
+            ws.workspace_mut(W1)
+                .unstack_focused(Orientation::Horizontal)
+        );
+        assert_eq!(ws.workspace(W1).stack_position(a), None);
+        assert_eq!(ws.workspace(W1).stack_position(b), None);
+        assert_eq!(ws.workspace(W1).tree().visible_tiles().len(), 2);
+        assert!(!ws.workspace_mut(W1).stack_step(1), "no longer a member");
     }
 
     #[test]
     fn drop_stack_adds_the_dragged_tile_after_the_target_and_focuses_it() {
-        let mut ws = Workspaces::new();
-        let a = ws.split_active(Orientation::Horizontal);
-        let b = ws.split_active(Orientation::Horizontal);
-        assert!(ws.active_mut().drop_stack(a, b));
-        assert_eq!(ws.active().tree().tiles(), vec![b, a]);
-        assert_eq!(ws.active().stack_position(a), Some((2, 2)));
-        assert_eq!(ws.active().focused_tile(), Some(a));
-        assert!(!ws.active_mut().drop_stack(a, a), "self-drop is refused");
+        let mut ws = one_window();
+        let a = ws.split_in(W1, Orientation::Horizontal);
+        let b = ws.split_in(W1, Orientation::Horizontal);
+        assert!(ws.workspace_mut(W1).drop_stack(a, b));
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![b, a]);
+        assert_eq!(ws.workspace(W1).stack_position(a), Some((2, 2)));
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(a));
+        assert!(
+            !ws.workspace_mut(W1).drop_stack(a, a),
+            "self-drop is refused"
+        );
     }
 
     #[test]
     fn drop_stack_within_one_stack_reorders() {
-        let mut ws = Workspaces::new();
-        let a = ws.split_active(Orientation::Horizontal);
-        let b = ws.stack_active().unwrap();
-        let c = ws.stack_active().unwrap(); // [a, b, c]
-        assert!(ws.active_mut().drop_stack(a, c));
-        assert_eq!(ws.active().tree().tiles(), vec![b, c, a]);
-        assert_eq!(ws.active().stack_position(a), Some((3, 3)));
-        assert_eq!(ws.active().focused_tile(), Some(a));
+        let mut ws = one_window();
+        let a = ws.split_in(W1, Orientation::Horizontal);
+        let b = ws.stack_in(W1).unwrap();
+        let c = ws.stack_in(W1).unwrap(); // [a, b, c]
+        assert!(ws.workspace_mut(W1).drop_stack(a, c));
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![b, c, a]);
+        assert_eq!(ws.workspace(W1).stack_position(a), Some((3, 3)));
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(a));
     }
 
     #[test]
     fn drop_stack_across_regions_lands_in_the_targets_dock() {
-        let mut ws = Workspaces::new();
-        let a = ws.split_active(Orientation::Horizontal);
-        let b = ws.split_active(Orientation::Horizontal);
-        ws.active_mut().move_to_dock(DockSide::Left); // b into the left dock
+        let mut ws = one_window();
+        let a = ws.split_in(W1, Orientation::Horizontal);
+        let b = ws.split_in(W1, Orientation::Horizontal);
+        ws.workspace_mut(W1).move_to_dock(DockSide::Left); // b into the left dock
         assert_eq!(
-            ws.active().region_of(b),
+            ws.workspace(W1).region_of(b),
             Some(FocusRegion::Dock(DockSide::Left))
         );
-        assert!(ws.active_mut().drop_stack(a, b));
-        assert!(ws.active().tree().is_empty(), "a left the main tree");
+        assert!(ws.workspace_mut(W1).drop_stack(a, b));
+        assert!(ws.workspace(W1).tree().is_empty(), "a left the main tree");
         assert_eq!(
-            ws.active().region_of(a),
+            ws.workspace(W1).region_of(a),
             Some(FocusRegion::Dock(DockSide::Left))
         );
-        assert_eq!(ws.active().stack_position(a), Some((2, 2)));
-        assert_eq!(ws.active().focused_tile(), Some(a));
+        assert_eq!(ws.workspace(W1).stack_position(a), Some((2, 2)));
+        assert_eq!(ws.workspace(W1).focused_tile(), Some(a));
     }
 
     #[test]
     fn workspaces_stack_position_searches_every_workspace_and_dock() {
-        let mut ws = Workspaces::new();
-        let a = ws.split_active(Orientation::Horizontal);
-        let b = ws.stack_active().unwrap();
-        ws.switch(2);
+        let mut ws = one_window();
+        let a = ws.split_in(W1, Orientation::Horizontal);
+        let b = ws.stack_in(W1).unwrap();
+        ws.switch(W1, 2);
         assert_eq!(ws.stack_position(a), Some((1, 2)));
         assert_eq!(ws.stack_position(b), Some((2, 2)));
         assert_eq!(ws.stack_position(TileId(99)), None);
@@ -3424,9 +4100,9 @@ mod tests {
         // 3 → left dock via the keyboard verb, then drag 2 onto the left
         // dock's background: it must insert beside the dock tree's focused
         // leaf (3) side by side (Horizontal, the left-dock convention).
-        apply_workspace_action(&mut ws, &act("dock::move_left"));
-        assert!(ws.active_mut().drop_to_dock(TileId(2), DockSide::Left));
-        let dock_tree = ws.active().docks().get(DockSide::Left).tree();
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left"));
+        assert!(ws.workspace_mut(W1).drop_to_dock(TileId(2), DockSide::Left));
+        let dock_tree = ws.workspace(W1).docks().get(DockSide::Left).tree();
         assert_eq!(dock_tree.tiles(), vec![TileId(3), TileId(2)]);
         assert_eq!(dock_tree.focused(), Some(TileId(2)));
         let rects = dock_tree.layout(Rect::UNIT);
@@ -3434,84 +4110,96 @@ mod tests {
             approx(rects[0].1.w, 0.5) && approx(rects[0].1.h, 1.0),
             "left dock inserts side by side (Horizontal)"
         );
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-        assert_eq!(ws.active().tree().tiles(), vec![TileId(1)]);
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).tree().tiles(), vec![TileId(1)]);
         assert_tile_invariants(&ws);
     }
 
     #[test]
     fn drop_to_dock_on_an_empty_visible_dock_makes_the_tile_its_root() {
         let mut ws = two_tiles();
-        ws.active_mut().toggle_dock(DockSide::Bottom); // visible, empty
-        assert!(ws.active_mut().drop_to_dock(TileId(2), DockSide::Bottom));
-        let dock = ws.active().docks().get(DockSide::Bottom);
+        ws.workspace_mut(W1).toggle_dock(DockSide::Bottom); // visible, empty
+        assert!(
+            ws.workspace_mut(W1)
+                .drop_to_dock(TileId(2), DockSide::Bottom)
+        );
+        let dock = ws.workspace(W1).docks().get(DockSide::Bottom);
         assert_eq!(dock.tree().tiles(), vec![TileId(2)]);
         assert!(dock.visible() && dock.focusable());
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
+        assert_eq!(
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Bottom)
+        );
         assert_tile_invariants(&ws);
     }
 
     #[test]
     fn drop_to_dock_from_another_dock_moves_and_hides_the_emptied_source() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // 2 → left
-        assert!(ws.active_mut().drop_to_dock(TileId(2), DockSide::Right));
-        assert!(!ws.active().docks().get(DockSide::Left).visible());
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // 2 → left
+        assert!(
+            ws.workspace_mut(W1)
+                .drop_to_dock(TileId(2), DockSide::Right)
+        );
+        assert!(!ws.workspace(W1).docks().get(DockSide::Left).visible());
         assert_eq!(
-            ws.active().docks().get(DockSide::Right).tree().tiles(),
+            ws.workspace(W1).docks().get(DockSide::Right).tree().tiles(),
             vec![TileId(2)]
         );
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Right));
+        assert_eq!(
+            ws.workspace(W1).region(),
+            FocusRegion::Dock(DockSide::Right)
+        );
         assert_tile_invariants(&ws);
     }
 
     #[test]
     fn drop_to_dock_onto_the_tiles_own_dock_is_a_noop_not_a_move_back() {
         let mut ws = two_tiles();
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // 2 → left
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // 2 → left
         assert!(
-            !ws.active_mut().drop_to_dock(TileId(2), DockSide::Left),
+            !ws.workspace_mut(W1).drop_to_dock(TileId(2), DockSide::Left),
             "a background drop into the source dock leaves the tile there"
         );
         assert_eq!(
-            ws.active().docks().get(DockSide::Left).tree().tiles(),
+            ws.workspace(W1).docks().get(DockSide::Left).tree().tiles(),
             vec![TileId(2)],
             "nothing moved"
         );
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         assert_tile_invariants(&ws);
     }
 
     #[test]
     fn drop_verbs_from_a_single_tile_main_tree_empty_it_cleanly() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal); // lone tile 1
-        ws.active_mut().toggle_dock(DockSide::Left);
-        assert!(ws.active_mut().drop_to_dock(TileId(1), DockSide::Left));
-        assert!(ws.active().tree().is_empty());
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal); // lone tile 1
+        ws.workspace_mut(W1).toggle_dock(DockSide::Left);
+        assert!(ws.workspace_mut(W1).drop_to_dock(TileId(1), DockSide::Left));
+        assert!(ws.workspace(W1).tree().is_empty());
         assert_eq!(
-            ws.active().tree().focused(),
+            ws.workspace(W1).tree().focused(),
             None,
             "an emptied tree has no focus (focused-iff-root)"
         );
-        assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+        assert_eq!(ws.workspace(W1).region(), FocusRegion::Dock(DockSide::Left));
         assert_tile_invariants(&ws);
     }
 
     #[test]
     fn drop_split_exits_a_stale_fullscreen_on_the_main_tree() {
         let mut ws = three_row();
-        apply_workspace_action(&mut ws, &act("dock::move_left")); // 3 → left dock
+        apply_workspace_action(&mut ws, W1, &act("dock::move_left")); // 3 → left dock
         // Fullscreen a main tile, then edge-drop the docked tile beside it.
-        assert!(ws.active_mut().focus_main_tile(TileId(1)));
-        ws.active_mut().toggle_fullscreen();
-        assert!(ws.active().tree().fullscreen().is_some());
+        assert!(ws.workspace_mut(W1).focus_main_tile(TileId(1)));
+        ws.workspace_mut(W1).toggle_fullscreen();
+        assert!(ws.workspace(W1).tree().fullscreen().is_some());
         assert!(
-            ws.active_mut()
+            ws.workspace_mut(W1)
                 .drop_split(TileId(3), TileId(1), Direction::Right)
         );
         assert_eq!(
-            ws.active().tree().fullscreen(),
+            ws.workspace(W1).tree().fullscreen(),
             None,
             "an explicit drop trumps a stale fullscreen"
         );

@@ -742,7 +742,7 @@ fn switching_workspaces_cancels_an_open_command_line(cx: &mut gpui::TestAppConte
         "and the strip should not be painted either"
     );
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.workspaces(cx).active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         2,
         "the switch itself still happened"
     );

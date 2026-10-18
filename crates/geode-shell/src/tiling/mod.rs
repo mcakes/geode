@@ -26,5 +26,6 @@ pub use dropzones::{
 };
 pub use tree::{Direction, DividerAddress, Node, Orientation, Rect, TileId, Tree};
 pub use workspaces::{
-    RESIZE_STEP, WindowKey, Workspace, WorkspaceIx, Workspaces, apply_workspace_action,
+    Added, RESIZE_STEP, Switch, WindowKey, Workspace, WorkspaceIx, Workspaces,
+    apply_workspace_action,
 };

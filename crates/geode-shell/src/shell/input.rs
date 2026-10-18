@@ -321,13 +321,14 @@ impl ShellView {
         }
 
         // The workspace router ignores counts; the module fallback receives them.
-        let before = self.active_ix(cx);
-        let handled = self.with_workspaces(cx, |w| apply_workspace_action(w, action));
+        let before = self.shown_ix(cx);
+        let key = self.key;
+        let handled = self.with_workspaces(cx, |w| apply_workspace_action(w, key, action));
         if handled {
             self.mark_session_dirty(cx);
             // A switch shows another workspace's lane: the flip baseline and
             // the scope field must follow it before anything reads them.
-            if self.active_ix(cx) != before {
+            if self.shown_ix(cx) != before {
                 self.on_workspace_switched(before, window, cx);
             }
             // Reconcile focus after every recognized workspace action, including no-ops

@@ -484,7 +484,7 @@ pub struct ShellView {
     /// The app-level owner of the services, config directories and
     /// workspaces this window reads; see [`ShellApp`].
     app: Entity<ShellApp>,
-    /// This window's identity in `app`, issued by `ShellApp::register_window`.
+    /// This window's identity in `app`, issued by `ShellApp::add_window`.
     key: WindowKey,
     /// The window this view is the root of. The app's watcher asks whether
     /// it is still open: a host (the bridge's closures, the quit hooks) can
@@ -1141,7 +1141,13 @@ impl ShellView {
         // `on_frame_changed`.
         let last_flip_versions = frame
             .read(cx)
-            .view(app.read(cx).services.workspaces.active_ix())
+            .view(
+                app.read(cx)
+                    .services
+                    .workspaces
+                    .shown(key)
+                    .expect("the window was added to the workspaces before its view"),
+            )
             .versions();
         let last_flip_groups = frame.read(cx).group_scope_gens();
         let last_emit_generation = frame.read(cx).generation();
@@ -1358,7 +1364,7 @@ impl ShellView {
         // opens against the active lane, not a dialog's target lane. A link
         // group's scope is part of what its followers show, so a change to
         // it flips them as well.
-        let ws = self.active_ix(cx);
+        let ws = self.shown_ix(cx);
         let (lane_now, groups_now) = {
             let f = frame.read(cx);
             (f.view(ws).versions(), f.group_scope_gens())
@@ -1681,14 +1687,14 @@ impl ShellView {
         self.with_services(cx, |s| f(&mut s.workspaces))
     }
 
-    /// This window's workspace: the active one, until each window keys
-    /// its own.
+    /// The workspace this window shows.
     pub(crate) fn workspace<'a>(&self, cx: &'a App) -> &'a Workspace {
-        self.workspaces(cx).active()
+        self.workspaces(cx).workspace(self.key)
     }
 
     pub(crate) fn with_workspace<R>(&self, cx: &mut App, f: impl FnOnce(&mut Workspace) -> R) -> R {
-        self.with_workspaces(cx, |w| f(w.active_mut()))
+        let key = self.key;
+        self.with_workspaces(cx, |w| f(w.workspace_mut(key)))
     }
 
     /// The current config, for the app bridge to read the new `views` doc
@@ -1713,8 +1719,11 @@ impl ShellView {
         &self.frame
     }
 
-    pub(crate) fn active_ix(&self, cx: &App) -> WorkspaceIx {
-        self.workspaces(cx).active_ix()
+    /// The index of the workspace this window shows.
+    pub(crate) fn shown_ix(&self, cx: &App) -> WorkspaceIx {
+        self.workspaces(cx)
+            .shown(self.key)
+            .expect("a view's window is open on the workspaces")
     }
 
     pub(crate) fn frame_at(&self, ws: WorkspaceIx) -> FrameRef {
@@ -1729,7 +1738,7 @@ impl ShellView {
             .modals
             .first()
             .map(|m| m.workspace)
-            .unwrap_or_else(|| self.active_ix(cx));
+            .unwrap_or_else(|| self.shown_ix(cx));
         self.frame_at(ws)
     }
 
@@ -1756,9 +1765,9 @@ impl ShellView {
         })
     }
 
-    /// The active workspace's frame, for the app's catalog as-of.
+    /// The shown workspace's frame, for the app's catalog as-of.
     pub fn active_frame(&self, cx: &App) -> FrameRef {
-        self.frame_at(self.active_ix(cx))
+        self.frame_at(self.shown_ix(cx))
     }
 
     /// The shared diagnostics entity available to occupants.

@@ -391,6 +391,23 @@ pub(super) fn ws<'a>(shell: &Entity<ShellView>, cx: &'a App) -> &'a Workspaces {
     shell.read(cx).workspaces(cx)
 }
 
+/// Build into `ws` before any window exists, as a restored session's
+/// tiles are: a scratch window opens on the initial index, `f` builds
+/// through it, and it closes again, leaving the workspaces materialised
+/// and unhosted for the shell's first window to take. `ShellApp` issues
+/// keys from 1, so the scratch key never collides with a real window's.
+pub(super) fn before_any_window<R>(
+    ws: &mut Workspaces,
+    f: impl FnOnce(&mut Workspaces, WindowKey) -> R,
+) -> R {
+    const SCRATCH: WindowKey = WindowKey(0);
+    let n = ws.initial_index();
+    ws.add_window(SCRATCH, n);
+    let out = f(ws, SCRATCH);
+    ws.remove_window(SCRATCH);
+    out
+}
+
 /// A `ShellView` over a fresh `ShellApp` for one window — the shape of
 /// `main`'s `open_window` closure, for the fixtures here that open their
 /// window themselves rather than through [`open_shell`].
@@ -401,7 +418,7 @@ pub(super) fn view_for_test(
     cx: &mut App,
 ) -> Entity<ShellView> {
     let app = cx.new(|cx| ShellApp::new(services, None, user_dir, cx));
-    let key = app.update(cx, |a, _| a.register_window());
+    let key = app.update(cx, |a, _| a.add_window(None));
     cx.new(|cx| ShellView::new(app, key, window, cx))
 }
 
@@ -436,7 +453,7 @@ fn open_window_on(
 ) -> gpui::WindowHandle<Root> {
     cx.update(|cx| {
         cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-            let key = app.update(cx, |a, _| a.register_window());
+            let key = app.update(cx, |a, _| a.add_window(None));
             let view = cx.new(|cx| ShellView::new(app, key, window, cx));
             cx.new(|cx| Root::new(view, window, cx))
         })

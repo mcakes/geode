@@ -326,7 +326,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
     let restored = session::from_toml(&table).unwrap();
     assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
     assert_eq!(
-        restored.workspaces.active_index(),
+        restored.workspaces.initial_index(),
         1,
         "sanity: workspace 1, not 2, is active"
     );
@@ -688,7 +688,7 @@ fn a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame(
     // … and the keyboard is alive again, through the real pipeline.
     cx.simulate_keystrokes("alt-2");
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.workspaces(cx).active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         2,
         "keys reach the shell again once the net reclaimed focus"
     );
@@ -730,7 +730,7 @@ fn a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell(
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.workspaces(cx).active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         2,
         "sanity: the switch itself happened"
     );
@@ -742,7 +742,7 @@ fn a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell(
     );
     cx.simulate_keystrokes("alt-1");
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.workspaces(cx).active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         1,
         "and the keyboard still reaches the shell afterwards"
     );
@@ -780,8 +780,9 @@ fn a_tile_leaving_the_visible_set_without_a_dispatch_hands_focus_back(
     // reach — but not through `dispatch`, so nothing arms the restore.
     cx.update(|_window, cx| {
         shell.update(cx, |shell, cx| {
-            assert!(
-                shell.with_workspaces(cx, |w| w.switch(2)),
+            assert_eq!(
+                shell.with_workspaces(cx, |w| w.switch(shell.key(), 2)),
+                crate::tiling::Switch::Shown,
                 "sanity: it switched"
             );
             cx.notify();
@@ -804,7 +805,7 @@ fn a_tile_leaving_the_visible_set_without_a_dispatch_hands_focus_back(
     );
     cx.simulate_keystrokes("alt-1");
     assert_eq!(
-        shell.read_with(&cx, |s, cx| s.workspaces(cx).active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         1,
         "and the keyboard still reaches the shell afterwards"
     );
@@ -1101,13 +1102,13 @@ fn add_on_an_empty_workspace_creates_the_root_tile_of_that_kind(cx: &mut gpui::T
 #[gpui::test]
 fn add_on_a_placeholder_tile_fills_it_in_place(cx: &mut gpui::TestAppContext) {
     // `test_services`'s default kind is "placeholder", so a tile created
-    // by a bare `split_active` — no pending request of its own — is one;
+    // by a bare `split_in` — no pending request of its own — is one;
     // the fixture's recorder is what "Rec: Split" fills it with.
     let (services, log) = test_services_with_log();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     shell.update(&mut cx, |s, cx| {
-        s.with_workspaces(cx, |w| w.split_active(Orientation::Horizontal));
+        s.with_workspaces(cx, |w| w.split_in(s.key(), Orientation::Horizontal));
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -1270,11 +1271,11 @@ fn duplicate_on_an_empty_workspace_or_a_placeholder_is_a_no_op(cx: &mut gpui::Te
         let _ = window.draw(cx);
     });
     assert!(shell.read_with(&cx, |s, cx| s.workspace(cx).is_empty()));
-    // A placeholder — what a bare `split_active` leaves behind, since
+    // A placeholder — what a bare `split_in` leaves behind, since
     // the fixture's default kind is "placeholder" — has nothing to
     // duplicate either.
     shell.update(&mut cx, |s, cx| {
-        s.with_workspaces(cx, |w| w.split_active(Orientation::Horizontal));
+        s.with_workspaces(cx, |w| w.split_in(s.key(), Orientation::Horizontal));
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -1327,7 +1328,7 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
             // A plain split (no request of its own), then an
             // `open_module` that splits again: two tiles go
             // occupant-less in one render pass.
-            s.with_workspaces(cx, |w| w.split_active(Orientation::Horizontal));
+            s.with_workspaces(cx, |w| w.split_in(s.key(), Orientation::Horizontal));
             s.open_module("probe", window, cx);
         });
     });
@@ -1974,7 +1975,7 @@ fn a_tile_restored_into_a_hidden_workspace_is_framed_by_it(cx: &mut gpui::TestAp
     let restored = session::from_toml(&table).unwrap();
     assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
     assert_eq!(
-        restored.workspaces.active_index(),
+        restored.workspaces.initial_index(),
         1,
         "sanity: workspace 1, not 2, is active"
     );

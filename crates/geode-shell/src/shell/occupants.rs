@@ -126,13 +126,13 @@ impl ShellView {
         }
     }
 
-    /// Every tile id in every workspace, main trees and docks, written
-    /// into `out` (cleared first). A method rather than a `HashSet`
-    /// return so `ensure_occupants` can reuse a scratch allocation across
-    /// frames instead of allocating one every render.
+    /// Every tile id in every workspace this window hosts, main trees
+    /// and docks, written into `out` (cleared first). A method rather
+    /// than a `HashSet` return so `ensure_occupants` can reuse a scratch
+    /// allocation across frames instead of allocating one every render.
     fn fill_all_tiles(&self, out: &mut HashSet<TileId>, cx: &App) {
         out.clear();
-        for (_, ws) in self.workspaces(cx).spaces() {
+        for (_, ws) in self.workspaces(cx).hosted_by(self.key) {
             out.extend(ws.tree().tiles());
             for (_, dock) in ws.docks().iter() {
                 out.extend(dock.tree().tiles());
@@ -316,7 +316,7 @@ impl ShellView {
             // The tile's own workspace, not the active one: an occupant
             // restored into a hidden workspace reads that workspace's lane.
             // Every tile reaching here is placed in some workspace's tree;
-            // the active fallback only keeps a release build running.
+            // the shown fallback only keeps a release build running.
             debug_assert!(
                 self.workspaces(cx).workspace_of(*id).is_some(),
                 "occupant for unplaced tile {id:?}"
@@ -324,7 +324,7 @@ impl ShellView {
             let ws = self
                 .workspaces(cx)
                 .workspace_of(*id)
-                .unwrap_or_else(|| self.workspaces(cx).active_ix());
+                .unwrap_or_else(|| self.shown_ix(cx));
             // Bound to the tile as well, so the link group it follows
             // decides the scope it reads.
             let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);

@@ -46,7 +46,7 @@ use crate::palette_usage::PaletteUsage;
 use crate::reload;
 use crate::session::{PageRecords, TileRecords};
 use crate::tileadd::AddDirection;
-use crate::tiling::WindowKey;
+use crate::tiling::{WindowKey, WorkspaceIx};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, LayerDoc};
 
@@ -66,7 +66,7 @@ pub struct ShellApp {
     /// load/reload. Each window observes it for the requests its surfaces
     /// drain.
     pub(super) diagnostics: Entity<Diagnostics>,
-    /// The last key issued by [`Self::register_window`]; keys count up
+    /// The last key issued by [`Self::add_window`]; keys count up
     /// from 1 and are never reused.
     next_window: u64,
     /// Every window's view, registered at the end of `ShellView::new`.
@@ -469,11 +469,32 @@ impl ShellApp {
         app
     }
 
-    /// Issue the next window key. Called once per window, before its
-    /// `ShellView` is built.
-    pub fn register_window(&mut self) -> WindowKey {
+    /// Issue the next window key and open it on a workspace. Called once
+    /// per window, before its `ShellView` is built. `index` names the
+    /// workspace; `None` picks the session's initial index for the first
+    /// window and the lowest index no window shows after that.
+    ///
+    /// A refusal is a programming error here: the initial index is free
+    /// while no window is open, and `lowest_free` is free by definition.
+    /// A caller asking for an index another window shows is expected to
+    /// have checked `Workspaces::shown_in` first; until the second-window
+    /// path exists, that refusal is reported by the `expect`.
+    pub fn add_window(&mut self, index: Option<WorkspaceIx>) -> WindowKey {
         self.next_window += 1;
-        WindowKey(self.next_window)
+        let key = WindowKey(self.next_window);
+        let workspaces = &mut self.services.workspaces;
+        let n = match index {
+            Some(ix) => ix.get(),
+            None if workspaces.windows().next().is_none() => workspaces.initial_index(),
+            None => workspaces
+                .lowest_free()
+                .expect("nine windows already show every workspace")
+                .get(),
+        };
+        workspaces
+            .add_window(key, n)
+            .unwrap_or_else(|| panic!("workspace {n} is shown by another window"));
+        key
     }
 
     /// Record the view built for `key`, at the end of `ShellView::new`, so

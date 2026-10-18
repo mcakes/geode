@@ -228,7 +228,7 @@ fn main() {
                 // matching window options when creating its native window.
                 let window = cx
                     .open_window(TitleBar::window_options(), |window, cx| {
-                        let key = app.update(cx, |app, _| app.register_window());
+                        let key = app.update(cx, |app, _| app.add_window(None));
                         let view = cx.new(|cx| ShellView::new(app.clone(), key, window, cx));
                         cx.new(|cx| Root::new(view, window, cx))
                     })
@@ -1858,7 +1858,7 @@ label = "skew"
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                     let view = {
                         let app = cx.new(|cx| ShellApp::new(services, None, None, cx));
-                        let key = app.update(cx, |a, _| a.register_window());
+                        let key = app.update(cx, |a, _| a.add_window(None));
                         cx.new(|cx| ShellView::new(app, key, window, cx))
                     };
                     cx.new(|cx| Root::new(view, window, cx))

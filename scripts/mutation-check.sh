@@ -8967,13 +8967,64 @@ run_mutation "add-tile: a focused placeholder is filled in place, not split" \
   '            && self.occupant_kind(tile) == Some("never")' \
   geode-shell add_on_a_placeholder_tile_fills_it_in_place
 
-run_mutation "add-tile: the pending request is keyed by the id split_active returned" \
+run_mutation "add-tile: the pending request is keyed by the id split_in returned" \
   crates/geode-shell/src/tiling/workspaces.rs \
   '        id
     }' \
   '        TileId(id.0 + 1)
     }' \
   geode-shell a_pending_request_lands_on_exactly_the_tile_that_asked
+
+# Windows map onto workspaces: a workspace is on at most one screen, so a
+# second window asking for a shown index must be refused, not doubled up.
+run_mutation "workspaces: add_window refuses an index another window shows" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        if !(1..=9).contains(&n) || self.shower(n).is_some() {' \
+  '        if !(1..=9).contains(&n) {' \
+  geode-shell add_window_refuses_an_index_shown_elsewhere
+
+# The first window builds the occupants of every restored workspace; if it
+# hosted only the one it opened on, a restored hidden workspace's tiles
+# would have no window to build them.
+run_mutation "workspaces: the first window hosts every restored index" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        if self.host.is_empty() {' \
+  '        if false {' \
+  geode-shell the_first_window_hosts_every_materialised_index
+
+# A switch to an index another window shows raises that window; taking the
+# index would put one workspace on two screens.
+run_mutation "workspaces: a switch to an index shown elsewhere raises" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        if let Some(v) = self.shower(n) {
+            return Switch::Raise(v);
+        }' \
+  '        let _ = self.shower(n);' \
+  geode-shell switch_to_an_index_shown_elsewhere_raises
+
+# A switch to an index hidden in another window reports where it came from,
+# so the caller moves that window's occupants instead of building a second set.
+run_mutation "workspaces: a switch to an index hidden elsewhere moves it" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        let moved_from = self.host.get(&n).copied().filter(|v| *v != key);' \
+  '        let moved_from: Option<WindowKey> = None;' \
+  geode-shell switch_to_an_index_hosted_elsewhere_moves_it
+
+# A new window may open on an index hidden in another window (it moves);
+# only a shown index is taken. Counting hosts would skip free indexes.
+run_mutation "workspaces: lowest_free counts only shown indexes" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        (1..=9).find(|n| self.shower(*n).is_none()).map(WorkspaceIx)' \
+  '        (1..=9).find(|n| !self.host.contains_key(n)).map(WorkspaceIx)' \
+  geode-shell lowest_free_skips_a_hidden_hosted_index_only_if_shown
+
+# The session's `active` follows the oldest open window, so a restart reopens
+# where the trader was; a frozen restore-time value would reopen elsewhere.
+run_mutation "session: active follows the oldest window" \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        self.shown.values().next().copied().unwrap_or(self.initial)' \
+  '        self.initial' \
+  geode-shell to_toml_writes_the_initial_index_as_active
 
 run_mutation "add-tile: duplicate carries the focused tile's serialized state" \
   crates/geode-shell/src/shell/add_tile.rs \
@@ -17868,7 +17919,7 @@ run_mutation "occupants: a tile leaving keeps a painted tile's input focused" \
 run_mutation "occupants: a tile is framed by its own workspace" \
   crates/geode-shell/src/shell/occupants.rs \
   '            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);' \
-  '            let frame = FrameRef::for_tile(self.frame.clone(), self.workspaces(cx).active_ix(), *id);' \
+  '            let frame = FrameRef::for_tile(self.frame.clone(), self.shown_ix(cx), *id);' \
   geode-shell \
   a_tile_restored_into_a_hidden_workspace_is_framed_by_it
 

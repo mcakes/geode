@@ -205,8 +205,18 @@ pub fn locate_drop_target(workspace: &Workspace, area: Rect, x: f32, y: f32) -> 
 mod tests {
     use super::super::docks::DockSide;
     use super::super::tree::Orientation;
-    use super::super::workspaces::Workspaces;
+    use super::super::workspaces::{WindowKey, Workspaces};
     use super::*;
+
+    /// The shell's first window, standing in for the fixtures here.
+    const W1: WindowKey = WindowKey(1);
+
+    /// A fresh collection with `W1` open on workspace 1.
+    fn one_window() -> Workspaces {
+        let mut ws = Workspaces::new();
+        ws.add_window(W1, 1);
+        ws
+    }
 
     const RECT: Rect = Rect {
         x: 100.0,
@@ -372,11 +382,11 @@ mod tests {
     /// left dock — built through the real `Workspaces` verbs so every
     /// invariant holds.
     fn workspace_with_dock() -> Workspaces {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal); // tile 1
-        ws.split_active(Orientation::Horizontal); // tile 2
-        ws.split_active(Orientation::Horizontal); // tile 3 → dock it
-        ws.active_mut().move_to_dock(DockSide::Left);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal); // tile 1
+        ws.split_in(W1, Orientation::Horizontal); // tile 2
+        ws.split_in(W1, Orientation::Horizontal); // tile 3 → dock it
+        ws.workspace_mut(W1).move_to_dock(DockSide::Left);
         ws
     }
 
@@ -385,7 +395,7 @@ mod tests {
         let ws = workspace_with_dock();
         // Left dock (default size 0.25) takes x 0..250; the two main tiles
         // split x 250..1000 at 625.
-        let target = locate_drop_target(ws.active(), AREA, 400.0, 400.0);
+        let target = locate_drop_target(ws.workspace(W1), AREA, 400.0, 400.0);
         assert_eq!(
             target,
             Some(DropTarget::Tile {
@@ -394,7 +404,7 @@ mod tests {
             })
         );
         // Deep in tile 2's right band, vertically centered.
-        let target = locate_drop_target(ws.active(), AREA, 990.0, 400.0);
+        let target = locate_drop_target(ws.workspace(W1), AREA, 990.0, 400.0);
         assert_eq!(
             target,
             Some(DropTarget::Tile {
@@ -409,7 +419,7 @@ mod tests {
         let ws = workspace_with_dock();
         // The docked tile fills the dock frame, so any point in the dock
         // hits the tile, not the background.
-        let target = locate_drop_target(ws.active(), AREA, 125.0, 400.0);
+        let target = locate_drop_target(ws.workspace(W1), AREA, 125.0, 400.0);
         assert_eq!(
             target,
             Some(DropTarget::Tile {
@@ -421,10 +431,10 @@ mod tests {
 
     #[test]
     fn locate_reports_an_empty_visible_docks_background() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.active_mut().toggle_dock(DockSide::Right); // visible, empty
-        let target = locate_drop_target(ws.active(), AREA, 900.0, 400.0);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.workspace_mut(W1).toggle_dock(DockSide::Right); // visible, empty
+        let target = locate_drop_target(ws.workspace(W1), AREA, 900.0, 400.0);
         assert_eq!(
             target,
             Some(DropTarget::DockBackground {
@@ -436,12 +446,24 @@ mod tests {
     #[test]
     fn locate_returns_none_outside_everything_and_for_junk_input() {
         let ws = workspace_with_dock();
-        assert_eq!(locate_drop_target(ws.active(), AREA, -5.0, 400.0), None);
-        assert_eq!(locate_drop_target(ws.active(), AREA, 500.0, 5000.0), None);
-        assert_eq!(locate_drop_target(ws.active(), AREA, f32::NAN, 400.0), None);
+        assert_eq!(
+            locate_drop_target(ws.workspace(W1), AREA, -5.0, 400.0),
+            None
+        );
+        assert_eq!(
+            locate_drop_target(ws.workspace(W1), AREA, 500.0, 5000.0),
+            None
+        );
+        assert_eq!(
+            locate_drop_target(ws.workspace(W1), AREA, f32::NAN, 400.0),
+            None
+        );
         // Empty main tree, no docks: nothing anywhere.
-        let empty = Workspaces::new();
-        assert_eq!(locate_drop_target(empty.active(), AREA, 500.0, 400.0), None);
+        let empty = one_window();
+        assert_eq!(
+            locate_drop_target(empty.workspace(W1), AREA, 500.0, 400.0),
+            None
+        );
     }
 
     /// The release helper and resolver supplied with render geometry must agree.
@@ -449,7 +471,7 @@ mod tests {
     #[test]
     fn render_path_resolution_agrees_with_locate_drop_target_everywhere() {
         let ws = workspace_with_dock();
-        let workspace = ws.active();
+        let workspace = ws.workspace(W1);
         // The render pass's own geometry: dock frames carved out of the
         // area, each visible dock's tiles laid into its frame, the main
         // tree laid into what's left.
@@ -495,10 +517,10 @@ mod tests {
     /// background target.
     #[test]
     fn resolve_drop_target_returns_the_rect_it_resolved_in() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.active_mut().toggle_dock(DockSide::Right); // visible, empty
-        let workspace = ws.active();
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.workspace_mut(W1).toggle_dock(DockSide::Right); // visible, empty
+        let workspace = ws.workspace(W1);
         let (tree_area, dock_rects) = dock_layout(workspace.docks(), AREA);
         let dock_cells: super::OwnedDockCells = dock_rects
             .into_iter()
@@ -549,10 +571,13 @@ mod tests {
 
     #[test]
     fn locate_returns_none_while_fullscreen() {
-        let mut ws = Workspaces::new();
-        ws.split_active(Orientation::Horizontal);
-        ws.split_active(Orientation::Horizontal);
-        ws.active_mut().toggle_fullscreen();
-        assert_eq!(locate_drop_target(ws.active(), AREA, 500.0, 400.0), None);
+        let mut ws = one_window();
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.split_in(W1, Orientation::Horizontal);
+        ws.workspace_mut(W1).toggle_fullscreen();
+        assert_eq!(
+            locate_drop_target(ws.workspace(W1), AREA, 500.0, 400.0),
+            None
+        );
     }
 }

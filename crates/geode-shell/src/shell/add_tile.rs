@@ -58,7 +58,7 @@ impl ShellView {
             return;
         }
         if placement == AddPlacement::Stacked
-            && let Some(id) = self.with_workspaces(cx, |w| w.stack_active())
+            && let Some(id) = self.with_workspaces(cx, |w| w.stack_in(self.key))
         {
             self.pending_tiles.insert(
                 id,
@@ -84,7 +84,7 @@ impl ShellView {
             None
         };
         let orientation = add_direction.resolve(direction, rect);
-        let id = self.with_workspaces(cx, |w| w.split_active(orientation));
+        let id = self.with_workspaces(cx, |w| w.split_in(self.key, orientation));
         self.pending_tiles.insert(
             id,
             PendingTile {

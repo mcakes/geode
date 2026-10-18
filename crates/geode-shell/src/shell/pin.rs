@@ -16,7 +16,7 @@ impl ShellView {
     /// ends before the field moves to the new lane. On an unpin the pinned
     /// lane, session included, is dropped anyway.
     pub(super) fn toggle_workspace_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ws = self.active_ix(cx);
+        let ws = self.shown_ix(cx);
         self.frame.update(cx, |f, cx| {
             f.view_mut(ws).end_scope_session();
             if !f.unpin(ws) {
@@ -39,7 +39,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let active = self.active_ix(cx);
+        let active = self.shown_ix(cx);
         let lane_changed = {
             let f = self.frame.read(cx);
             f.is_pinned(prev) || f.is_pinned(active)

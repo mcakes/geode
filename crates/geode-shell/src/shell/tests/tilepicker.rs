@@ -10,7 +10,7 @@ use crate::module::placeholder::PLACEHOLDER_KIND;
 use crate::shell::choicedialog::Target;
 use crate::tiling::Orientation;
 
-/// A shell whose one main tile is a placeholder (a bare `split_active`
+/// A shell whose one main tile is a placeholder (a bare `split_in`
 /// carries no add request, so `ensure_occupants` gives it the
 /// placeholder — `add_on_a_placeholder_tile_fills_it_in_place`'s own
 /// fixture).
@@ -19,7 +19,7 @@ fn shell_with_a_placeholder(
 ) -> (gpui::VisualTestContext, Entity<ShellView>, TileId) {
     let (mut cx, shell) = dock_test_shell(cx);
     shell.update(&mut cx, |s, cx| {
-        s.with_workspaces(cx, |w| w.split_active(Orientation::Horizontal));
+        s.with_workspaces(cx, |w| w.split_in(s.key(), Orientation::Horizontal));
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -257,7 +257,7 @@ fn a_second_click_on_an_unfocused_placeholder_is_a_plain_click(cx: &mut gpui::Te
     });
     let real = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     shell.update(&mut cx, |s, cx| {
-        s.with_workspaces(cx, |w| w.split_active(Orientation::Horizontal));
+        s.with_workspaces(cx, |w| w.split_in(s.key(), Orientation::Horizontal));
         cx.notify();
     });
     cx.update(|window, cx| {

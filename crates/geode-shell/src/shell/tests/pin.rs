@@ -106,7 +106,7 @@ fn switching_and_pinning_are_refused_behind_a_dialog(cx: &mut gpui::TestAppConte
             "{id} must be refused with the notice"
         );
         assert_eq!(
-            shell.read_with(&vcx, |s, cx| s.active_ix(cx)),
+            shell.read_with(&vcx, |s, cx| s.shown_ix(cx)),
             WorkspaceIx::FIRST,
             "{id} must not switch the workspace"
         );
@@ -435,7 +435,7 @@ fn a_switch_between_unpinned_workspaces_keeps_the_field_session(cx: &mut gpui::T
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&vcx, |s, cx| s.active_ix(cx)),
+        shell.read_with(&vcx, |s, cx| s.shown_ix(cx)),
         ws(3),
         "the chord switched workspaces, so the kept session is not vacuous"
     );

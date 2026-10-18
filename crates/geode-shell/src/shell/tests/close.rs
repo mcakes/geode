@@ -26,8 +26,12 @@ fn draw(cx: &mut gpui::VisualTestContext) {
 /// Two placeholder tiles side by side, the second (`b`) focused.
 fn two_placeholders() -> (ShellServices, TileId, TileId) {
     let mut services = test_services();
-    let a = services.workspaces.split_active(Orientation::Horizontal);
-    let b = services.workspaces.split_active(Orientation::Horizontal);
+    let (a, b) = before_any_window(&mut services.workspaces, |w, k| {
+        (
+            w.split_in(k, Orientation::Horizontal),
+            w.split_in(k, Orientation::Horizontal),
+        )
+    });
     (services, a, b)
 }
 
@@ -35,9 +39,13 @@ fn two_placeholders() -> (ShellServices, TileId, TileId) {
 /// with focus moved to it first would land focus on `b`, its neighbour.
 fn three_placeholders() -> (ShellServices, TileId, TileId, TileId) {
     let mut services = test_services();
-    let a = services.workspaces.split_active(Orientation::Horizontal);
-    let b = services.workspaces.split_active(Orientation::Horizontal);
-    let c = services.workspaces.split_active(Orientation::Horizontal);
+    let (a, b, c) = before_any_window(&mut services.workspaces, |w, k| {
+        (
+            w.split_in(k, Orientation::Horizontal),
+            w.split_in(k, Orientation::Horizontal),
+            w.split_in(k, Orientation::Horizontal),
+        )
+    });
     (services, a, b, c)
 }
 
@@ -303,7 +311,9 @@ fn picker_open(s: &ShellView) -> bool {
 #[gpui::test]
 fn a_double_click_on_the_last_tiles_close_button_opens_nothing(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
-    let a = services.workspaces.split_active(Orientation::Horizontal);
+    let a = before_any_window(&mut services.workspaces, |w, k| {
+        w.split_in(k, Orientation::Horizontal)
+    });
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     let at = cx.debug_bounds(sel(a)).expect("× painted").center();
@@ -339,7 +349,9 @@ fn a_double_click_on_the_left_close_button_reaches_no_neighbour(cx: &mut gpui::T
 #[gpui::test]
 fn a_fresh_double_click_after_a_close_still_reaches_its_gesture(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
-    let a = services.workspaces.split_active(Orientation::Horizontal);
+    let a = before_any_window(&mut services.workspaces, |w, k| {
+        w.split_in(k, Orientation::Horizontal)
+    });
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     let at = cx.debug_bounds(sel(a)).expect("× painted").center();

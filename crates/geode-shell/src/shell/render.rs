@@ -138,7 +138,7 @@ impl Render for ShellView {
                 || self.modal_open()
                 || page_open
                 // Epoch, not index — see `DividerDrag::epoch`.
-                || drag.epoch != self.workspaces(cx).switch_epoch()
+                || drag.epoch != self.workspaces(cx).switch_epoch(self.key)
                 || self.workspace(cx)
                     .tree()
                     .fullscreen()
@@ -162,7 +162,7 @@ impl Render for ShellView {
                 || page_open
                 || !self.matcher.pending().is_empty()
                 // Epoch, not index — see `DividerDrag::epoch`.
-                || drag.epoch != self.workspaces(cx).switch_epoch()
+                || drag.epoch != self.workspaces(cx).switch_epoch(self.key)
                 || self.workspace(cx)
                     .tree()
                     .fullscreen()
@@ -275,7 +275,7 @@ impl Render for ShellView {
         // tile, its group or the group's scope moved. A field write, ahead
         // of the borrows the bar's other arguments take.
         self.refresh_link_label(cx);
-        let active_index = self.workspaces(cx).active_index();
+        let active_index = self.shown_ix(cx).get();
         let non_empty = self.workspaces(cx).non_empty_indices();
         // Share the cached scope bar model between toolbar and status bar.
         // Use the poll-updated date and configured clock, avoiding a fresh
@@ -487,7 +487,7 @@ impl Render for ShellView {
         let scope_dialog_open = self.scope_dialog.is_some();
         // The pin glyph names the active workspace, whose tiles are the
         // ones on screen, not a dialog's target.
-        let ws = self.active_ix(cx);
+        let ws = self.shown_ix(cx);
         let pin = toolbar::PinState {
             ws,
             pinned: self.frame.read(cx).is_pinned(ws),
@@ -1510,7 +1510,7 @@ impl ShellView {
                                 // to (read at mouse-down, not paint): a
                                 // mod+N switch mid-drag cancels rather
                                 // than retargeting — see `DividerDrag`.
-                                epoch: view.workspaces(cx).switch_epoch(),
+                                epoch: view.workspaces(cx).switch_epoch(view.key),
                                 moved: false,
                             });
                             cx.stop_propagation();

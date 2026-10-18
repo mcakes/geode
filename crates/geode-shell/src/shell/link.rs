@@ -113,7 +113,7 @@ impl ShellView {
         let ws = self
             .workspaces(cx)
             .workspace_of(tile)
-            .unwrap_or_else(|| self.active_ix(cx));
+            .unwrap_or_else(|| self.shown_ix(cx));
         let changed = self.frame.update(cx, |f, cx| {
             let changed = f.follow(tile, group);
             if changed {
@@ -251,7 +251,7 @@ impl ShellView {
         let ws = self
             .workspaces(cx)
             .workspace_of(tile)
-            .unwrap_or_else(|| self.active_ix(cx));
+            .unwrap_or_else(|| self.shown_ix(cx));
         let include_layer = self.app.read(cx).link_include_tile_filter();
         self.frame.update(cx, |f, cx| {
             let base = f.emit_base(ws, tile);
