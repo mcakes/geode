@@ -17868,7 +17868,7 @@ run_mutation "occupants: a tile leaving keeps a painted tile's input focused" \
 run_mutation "occupants: a tile is framed by its own workspace" \
   crates/geode-shell/src/shell/occupants.rs \
   '            let frame = FrameRef::for_tile(self.frame.clone(), ws, *id);' \
-  '            let frame = FrameRef::for_tile(self.frame.clone(), self.services.workspaces.active_ix(), *id);' \
+  '            let frame = FrameRef::for_tile(self.frame.clone(), self.workspaces(cx).active_ix(), *id);' \
   geode-shell \
   a_tile_restored_into_a_hidden_workspace_is_framed_by_it
 
@@ -18509,7 +18509,7 @@ run_mutation "scope dialog: a Saved scope loads through the undoable load_saved_
   crates/geode-shell/src/shell/scopedialog/saved_view.rs \
   '        SavedId::Scope(name) => shell.load_saved_scope(name, cx).err().map(|_| SCOPE_GONE),' \
   '        SavedId::Scope(name) => shell
-            .target_frame()
+            .target_frame(cx)
             .update(cx, |f, _| {
                 let s = f.saved_scopes().get(name.as_str()).cloned();
                 s.map(|s| {
@@ -18528,7 +18528,7 @@ run_mutation "scope dialog: a Saved scope loads through the undoable load_saved_
 run_mutation "scope dialog: Saved rows are the frame's live saved scopes" \
   crates/geode-shell/src/shell/rows.rs \
   '                    view.saved_scopes(),' \
-  '                    &super::hot_reload::rebuild_saved_scopes(&self.services.config, false),' \
+  '                    &super::hot_reload::rebuild_saved_scopes(&services.config, false),' \
   geode-shell \
   a_scope_saved_after_startup_is_listed_and_loads
 
@@ -19288,7 +19288,7 @@ run_mutation "scope dialog: the definition step offers no named rows" \
             completion: {
                 let mut c = ExprCompletion::default();
                 let offers = shell
-                    .target_frame()
+                    .target_frame(cx)
                     .read(cx)
                     .named_expressions()
                     .names()
@@ -34514,7 +34514,7 @@ run_mutation "link: duplication copies no membership" \
             cx,
         );
         let link = self.frame.read(cx).membership(tile);
-        if let Some(copy) = self.services.workspaces.active().focused_tile() {
+        if let Some(copy) = self.workspace(cx).focused_tile() {
             self.frame.update(cx, |f, _| {
                 f.follow(copy, link.follow);
                 f.emit(copy, link.emit);
