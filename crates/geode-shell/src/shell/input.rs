@@ -406,25 +406,48 @@ impl ShellView {
             return;
         }
 
-        // The window verbs. A tear-out switches this window to the lowest
-        // free index inside the app (`ShellApp::tear_out`), so on success
-        // this window runs the same post-switch work a `Shown` switch
-        // does; the new window's occupants arrive through `Park` and
-        // `Parked`. `window::open` changes nothing here but the title,
-        // which `WindowsChanged` sets. A refusal leaves a notice and
-        // nothing else: the app changed nothing.
-        if action.0 == "window::tear_out" {
+        // The window verbs. Both open a window beside this one, and the
+        // opener reads this window's frame through its handle, which a
+        // window under update refuses (gpui holds it out of its slot for
+        // the update's duration), so the verb runs when this update's
+        // effects flush, with no window on the stack; the app is changed
+        // by nothing in between. A tear-out switches this window to the
+        // lowest free index inside the app (`ShellApp::tear_out`), so on
+        // success this window runs the same post-switch work a `Shown`
+        // switch does, re-entered through its handle; the new window's
+        // occupants arrive through `Park` and `Parked`. `window::open`
+        // changes nothing here but the title, which `WindowsChanged` sets.
+        // A refusal leaves a notice and nothing else: the app changed
+        // nothing.
+        if action.0 == "window::tear_out" || action.0 == "window::open" {
+            let tear_out = action.0 == "window::tear_out";
             let before = self.shown_ix(cx);
-            match super::app::ShellApp::tear_out(&self.app, self.key, cx) {
-                Ok(_) => self.after_shown_changed(before, window, cx),
-                Err(refusal) => self.refuse_window_open("tear out", refusal),
-            }
-            return;
-        }
-        if action.0 == "window::open" {
-            if let Err(refusal) = super::app::ShellApp::open_fresh(&self.app, self.key, cx) {
-                self.refuse_window_open("open", refusal);
-            }
+            let key = self.key;
+            let app = self.app.clone();
+            let view = cx.weak_entity();
+            cx.defer(move |cx| {
+                let opened = if tear_out {
+                    super::app::ShellApp::tear_out(&app, key, cx)
+                } else {
+                    super::app::ShellApp::open_fresh(&app, key, cx)
+                };
+                match opened {
+                    Ok(_) if tear_out => {
+                        if let Some(handle) = app.read(cx).handle(key) {
+                            let _ = handle.update(cx, |_, window, cx| {
+                                let _ = view.update(cx, |view, cx| {
+                                    view.after_shown_changed(before, window, cx)
+                                });
+                            });
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(refusal) => {
+                        let verb = if tear_out { "tear out" } else { "open" };
+                        let _ = view.update(cx, |view, _| view.refuse_window_open(verb, refusal));
+                    }
+                }
+            });
             return;
         }
 

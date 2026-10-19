@@ -731,3 +731,27 @@ fn window_records_follow_registration_order(cx: &mut gpui::TestAppContext) {
     let saved: Vec<u8> = restored.windows.iter().map(|r| r.workspace).collect();
     assert_eq!(saved, vec![1, 2], "the file lists windows.1 then windows.2");
 }
+
+/// A move or resize changes the window's `[windows.K]` record, so it marks
+/// the session dirty for the periodic snapshot through the view's bounds
+/// observer, a platform event path. The test platform drives the same
+/// resize callback a real window's platform does.
+#[gpui::test]
+fn a_window_move_marks_the_session_dirty(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, test_services(), None);
+    let (_w1, vcx1) = open_shell_on(cx, app.clone());
+    vcx1.run_until_parked();
+    cx.update(|cx| app.update(cx, |a, _| a.session_dirty = false));
+    assert!(
+        !app.read_with(&vcx1, |a, _| a.session_dirty),
+        "sanity: clean after the constructor's marks"
+    );
+
+    vcx1.simulate_resize(gpui::size(px(900.), px(700.)));
+    vcx1.run_until_parked();
+
+    assert!(
+        app.read_with(&vcx1, |a, _| a.session_dirty),
+        "a resize marks the session dirty"
+    );
+}

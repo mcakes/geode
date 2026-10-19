@@ -38,12 +38,16 @@ use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::{
-    DIAGNOSTICS_KEY, REFERENCE_KEY, ShellApp, ShellEvent, ShellView, is_shell_key, is_watchlist_key,
+    DIAGNOSTICS_KEY, Placement, REFERENCE_KEY, ShellApp, ShellEvent, ShellView, WindowOpener,
+    WindowSpec, is_shell_key, is_watchlist_key,
 };
 use geode_shell::tiling::WindowKey;
 use geode_shell::vimfind::FindStyle;
 use geode_watchlist::{WatchlistConfig, WatchlistFactory};
-use gpui::{AnyWindowHandle, App, AsyncApp, Entity};
+use gpui::{
+    AnyWindowHandle, App, AppContext as _, AsyncApp, Bounds, Entity, Pixels, WindowOptions,
+};
+use gpui_component::Root;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -2090,9 +2094,89 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
     .detach();
 }
 
+/// The one `WindowOpener` (`ShellApp::set_window_opener`): how every
+/// window opens, the first included, in production (`main`, over
+/// `TitleBar::window_options`) and in the tests of the close and placement
+/// paths (over default options). For the key the app reserved it places
+/// the window (`placement::options_for` over the spec's `Placement`, with
+/// the facts gathered here: the spawning window's frame and display read
+/// through its handle, the attached displays, the primary), opens a
+/// `Root` over a `ShellView` for the key, and installs the window's own
+/// hooks ([`attach_window`], with the bridge when there is one). `base`
+/// builds the options the placement is written over; `WindowOptions` is
+/// not `Clone`, so it is built per window.
+///
+/// The closure runs with no lease on the app (the view it builds registers
+/// itself), and reads the spawner only through a window update: a window
+/// under update cannot be read again (gpui takes it out of its slot), so a
+/// verb that opens beside its own window must run from no window's update
+/// (the shell defers its window verbs for this); when the read fails, the
+/// platform places the window and a debug line says so. `None` (the
+/// platform refused the window) rolls the reservation back.
+pub fn window_opener(
+    app: Entity<ShellApp>,
+    bridge: Option<Rc<Bridge>>,
+    base: impl Fn() -> WindowOptions + 'static,
+) -> WindowOpener {
+    Rc::new(move |key, spec: &WindowSpec, cx: &mut App| {
+        let spawner = match &spec.placement {
+            Placement::Beside(from) => {
+                let handle = app.read(cx).handle(*from);
+                handle.and_then(|handle| {
+                    handle
+                        .update(cx, |_, window, cx| {
+                            (
+                                window.window_bounds().get_bounds(),
+                                window.display(cx).map(|d| u64::from(d.id())),
+                            )
+                        })
+                        .inspect_err(|e| {
+                            tracing::debug!(
+                                target: "geode::shell",
+                                "window {from:?} cannot be read to place a window beside it; \
+                                 the platform places it: {e}"
+                            );
+                        })
+                        .ok()
+                })
+            }
+            Placement::Restored { .. } | Placement::Default => None,
+        };
+        let displays: Vec<(u64, Bounds<Pixels>)> = cx
+            .displays()
+            .iter()
+            .map(|d| (u64::from(d.id()), d.bounds()))
+            .collect();
+        let primary = cx.primary_display().map(|d| u64::from(d.id()));
+        let (display_id, window_bounds) =
+            crate::placement::options_for(&spec.placement, spawner, &displays, primary);
+        let mut options = base();
+        if display_id.is_some() {
+            options.display_id = display_id;
+        }
+        if window_bounds.is_some() {
+            options.window_bounds = window_bounds;
+        }
+
+        let view_app = app.clone();
+        let handle: AnyWindowHandle = cx
+            .open_window(options, |window, cx| {
+                let view = cx.new(|cx| ShellView::new(view_app, key, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+            .inspect_err(|e| {
+                tracing::error!(target: "geode::shell", "could not open a window: {e:#}");
+            })
+            .ok()?
+            .into();
+        attach_window(bridge.as_deref(), &app, key, handle, cx);
+        Some(handle)
+    })
+}
+
 /// A window's own hooks, installed by the opener once the window exists
 /// and its view has registered with the app: the should-close hook that
-/// decides what its close means ([`install_close_hook`]). `main`'s opener
+/// decides what its close means ([`install_close_hook`]). [`window_opener`]
 /// calls this for each window it opens, with the bridge when there is one
 /// (its pricer's unsaved sheets are flushed at the last close); [`attach`]
 /// runs once for the process.
@@ -2190,12 +2274,10 @@ mod tests {
     use geode_shell::module::recording::{Recorded, RecordingFactory};
     use geode_shell::module::{ModuleFactory, ModuleRoster, PageFactory};
     use geode_shell::session::TileRecords;
-    use geode_shell::shell::{ShellApp, ShellServices, WindowOpener, WindowSpec};
+    use geode_shell::shell::ShellServices;
+    use geode_shell::theme;
     use geode_shell::tiling::{TileId, Workspaces};
-    use geode_shell::{theme, vimfind::FindStyle};
-    use gpui::AppContext as _;
     use gpui::WindowHandle;
-    use gpui_component::Root;
     use std::cell::RefCell;
     use std::path::Path;
 
@@ -7153,23 +7235,189 @@ grain = "underlying"
             "bounds read from the hook's window"
         );
     }
-    /// The opener `main` installs, for the tests of the close path: a
-    /// default test window over a `ShellView` for the reserved key, with
-    /// the window's close hook installed as the production opener installs
-    /// it (`attach_window`, here with no bridge).
+    /// The opener `main` installs ([`window_opener`]), for the tests of
+    /// the close and placement paths: the production closure over default
+    /// test window options, with no bridge.
     fn test_opener(app: Entity<ShellApp>) -> WindowOpener {
-        Rc::new(move |key, _spec: &WindowSpec, cx: &mut App| {
-            let view_app = app.clone();
-            let handle: AnyWindowHandle = cx
-                .open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(view_app, key, window, cx));
-                    cx.new(|cx| Root::new(view, window, cx))
+        window_opener(app, None, gpui::WindowOptions::default)
+    }
+
+    /// Startup opens one window per restored `[windows.K]` record, in K
+    /// order (the first record's window is the oldest: it writes `active`
+    /// and hosts the restored-but-unshown indexes), each on the index its
+    /// record names and at the frame it recorded, through the production
+    /// opener (`window_opener`) and `startup::open_startup_windows`.
+    #[gpui::test]
+    fn startup_reopens_one_window_per_restored_record(cx: &mut gpui::TestAppContext) {
+        use geode_shell::session::{WindowBoundsRecord, WindowRecord};
+        let (mut services, _log) = test_shell_services_with_rec_roster();
+        services.restored_windows = vec![
+            WindowRecord {
+                workspace: 3,
+                display: Some(1),
+                bounds: Some(WindowBoundsRecord {
+                    x: 100.,
+                    y: 100.,
+                    w: 800.,
+                    h: 600.,
+                }),
+                maximized: false,
+            },
+            WindowRecord {
+                workspace: 1,
+                display: Some(1),
+                bounds: Some(WindowBoundsRecord {
+                    x: 200.,
+                    y: 150.,
+                    w: 640.,
+                    h: 480.,
+                }),
+                maximized: false,
+            },
+        ];
+        cx.update(gpui_component::init);
+        let app = cx.update(|cx| cx.new(|cx| ShellApp::new(services, None, None, cx)));
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                a.set_window_opener(window_opener(
+                    app.clone(),
+                    None,
+                    gpui::WindowOptions::default,
+                ))
+            })
+        });
+
+        let opened = cx.update(|cx| crate::startup::open_startup_windows(&app, cx));
+
+        assert_eq!(opened.len(), 2, "one window per record");
+        let (shown, frames): (Vec<u8>, Vec<gpui::Bounds<gpui::Pixels>>) = cx.update(|cx| {
+            let keys: Vec<WindowKey> = app.read(cx).windows().iter().map(|(k, _)| *k).collect();
+            assert_eq!(keys, opened, "registered in K order");
+            keys.iter()
+                .map(|k| {
+                    let shown = app.read(cx).services().workspaces.shown(*k).unwrap().get();
+                    let handle = app.read(cx).handle(*k).unwrap();
+                    let frame = handle.update(cx, |_, window, _| window.bounds()).unwrap();
+                    (shown, frame)
                 })
-                .ok()?
-                .into();
-            attach_window(None, &app, key, handle, cx);
-            Some(handle)
-        })
+                .unzip()
+        });
+        assert_eq!(
+            shown,
+            vec![3, 1],
+            "each window on its record's index, K order"
+        );
+        assert_eq!(
+            frames,
+            vec![
+                gpui::Bounds::new(
+                    gpui::point(gpui::px(100.), gpui::px(100.)),
+                    gpui::size(gpui::px(800.), gpui::px(600.))
+                ),
+                gpui::Bounds::new(
+                    gpui::point(gpui::px(200.), gpui::px(150.)),
+                    gpui::size(gpui::px(640.), gpui::px(480.))
+                ),
+            ],
+            "each window at its recorded frame"
+        );
+        assert!(
+            cx.update(|cx| app.update(cx, |a, _| a.take_restored_windows()).is_empty()),
+            "the records were taken"
+        );
+    }
+
+    /// With no record (no session, or none usable) startup opens one
+    /// window on the initial index, at the platform's default placement.
+    #[gpui::test]
+    fn startup_with_no_records_opens_one_window_on_the_initial_index(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let (mut services, _log) = test_shell_services_with_rec_roster();
+        services.workspaces = Workspaces::from_parts(std::collections::BTreeMap::new(), 4)
+            .expect("4 is in range")
+            .0;
+        cx.update(gpui_component::init);
+        let app = cx.update(|cx| cx.new(|cx| ShellApp::new(services, None, None, cx)));
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                a.set_window_opener(window_opener(
+                    app.clone(),
+                    None,
+                    gpui::WindowOptions::default,
+                ))
+            })
+        });
+
+        let opened = cx.update(|cx| crate::startup::open_startup_windows(&app, cx));
+
+        assert_eq!(opened.len(), 1);
+        let shown = cx.update(|cx| {
+            app.read(cx)
+                .services()
+                .workspaces
+                .shown(opened[0])
+                .unwrap()
+                .get()
+        });
+        assert_eq!(shown, 4, "the initial index");
+        assert_eq!(cx.update(|cx| app.read(cx).windows().len()), 1);
+    }
+
+    /// A window opened beside another, from no window's update (the verbs
+    /// defer out of theirs), cascades from it by `CASCADE` on both axes
+    /// through the production opener. The spawner opens at a recorded
+    /// frame (a `Restored` placement, honoured by the test platform) with
+    /// room to cascade, so no clamp applies.
+    #[gpui::test]
+    fn a_window_opened_beside_another_cascades_from_it(cx: &mut gpui::TestAppContext) {
+        use geode_shell::shell::{Placement, WindowSpec};
+        use geode_shell::tiling::WorkspaceIx;
+        let (services, _log) = test_shell_services_with_rec_roster();
+        cx.update(gpui_component::init);
+        let app = cx.update(|cx| cx.new(|cx| ShellApp::new(services, None, None, cx)));
+        let frame = gpui::Bounds::new(
+            gpui::point(gpui::px(100.), gpui::px(100.)),
+            gpui::size(gpui::px(800.), gpui::px(600.)),
+        );
+        let first = cx.update(|cx| {
+            app.update(cx, |a, _| a.set_window_opener(test_opener(app.clone())));
+            let spec = WindowSpec {
+                workspace: WorkspaceIx::new(1).unwrap(),
+                placement: Placement::Restored {
+                    display: Some(1),
+                    bounds: Some(frame),
+                    maximized: false,
+                },
+            };
+            ShellApp::open_window(&app, spec, cx).expect("the opener opens")
+        });
+        let (a, b) = cx.update(|cx| {
+            let a = app.read(cx).handle(first).unwrap();
+            let a = a.update(cx, |_, window, _| window.bounds()).unwrap();
+            // App level: no window is under update, so the opener can read
+            // the spawner's frame through its handle.
+            let second = ShellApp::open_fresh(&app, first, cx).expect("a free workspace");
+            let b = app.read(cx).handle(second).unwrap();
+            let b = b.update(cx, |_, window, _| window.bounds()).unwrap();
+            (a, b)
+        });
+        assert_eq!(a, frame, "the spawner opened at its recorded frame");
+        let cascade = crate::placement::CASCADE;
+        assert_eq!(
+            b.size, a.size,
+            "the same size as the spawner: {a:?} -> {b:?}"
+        );
+        assert_eq!(
+            b.origin.x,
+            a.origin.x + cascade,
+            "shifted right by CASCADE: {a:?} -> {b:?}"
+        );
+        assert_eq!(
+            b.origin.y,
+            a.origin.y + cascade,
+            "shifted down by CASCADE: {a:?} -> {b:?}"
+        );
     }
 
     /// A second window on `app`, opened as the `window::open` verb opens

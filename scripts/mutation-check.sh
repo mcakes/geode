@@ -7233,13 +7233,13 @@ run_mutation "shell app: save_session writes nothing with no window registered" 
 # were opened; reversed, the first window's record is the last's.
 run_mutation "shell app: window records follow registration order" \
   crates/geode-shell/src/shell/app.rs \
-  '            self.windows
-                .iter()
-                .map(|(key, handle)| {' \
-  '            self.windows
-                .iter()
-                .rev()
-                .map(|(key, handle)| {' \
+  '            .windows
+            .iter()
+            .filter_map(|(key, handle)| match self.services.workspaces.shown(*key) {' \
+  '            .windows
+            .iter()
+            .rev()
+            .filter_map(|(key, handle)| match self.services.workspaces.shown(*key) {' \
   geode-shell \
   window_records_follow_registration_order
 
@@ -7365,10 +7365,8 @@ run_mutation "shell: the title follows the window count" \
 # lane it left.
 run_mutation "shell: tear_out runs the post-switch work in its window" \
   crates/geode-shell/src/shell/input.rs \
-  '                Ok(_) => self.after_shown_changed(before, window, cx),' \
-  '                Ok(_) => {
-                    let _ = before;
-                }' \
+  '                                    view.after_shown_changed(before, window, cx)' \
+  '                                    let _ = (before, window, view, cx);' \
   geode-shell \
   tear_out_reseeds_the_dispatching_window
 
@@ -26066,6 +26064,50 @@ run_mutation "app: a non-last close deregisters the window" \
             let _ = key;
             true' \
   geode-app closing_a_non_last_window_keeps_the_first_window_open
+
+# ---- geode-app: placement and the startup windows
+
+# A record's display may be unplugged since the save; opening on it
+# anyway puts the window off every attached screen. The fallback is the
+# primary, at its origin plus the cascade.
+run_mutation "placement: a missing display falls back to the primary" \
+  crates/geode-app/src/placement.rs \
+  '            if displays.iter().any(|(id, _)| *id == d) {' \
+  '            if true {' \
+  geode-app a_restored_window_on_a_missing_display_opens_on_the_primary
+
+# A window opened beside one near the display's far corner must be
+# shifted back inside it; without the clamp it opens partly off screen.
+run_mutation "placement: beside cascades and clamps into the display" \
+  crates/geode-app/src/placement.rs \
+  '                    Some(WindowBounds::Windowed(clamp_into(cascaded, screen))),' \
+  '                    Some(WindowBounds::Windowed(cascaded)),' \
+  geode-app beside_cascades_and_clamps_into_the_display
+
+# `maximized = true` in the record reopens the window maximized, with the
+# recorded frame as its restore frame; always `Windowed` loses the state.
+run_mutation "placement: a restored maximized window is maximized" \
+  crates/geode-app/src/placement.rs \
+  '    if maximized {' \
+  '    if false {' \
+  geode-app a_restored_maximized_window_is_maximized
+
+# Every restored record reopens; opening only the first leaves the other
+# windows' workspaces unshown (their records would be rehosted hidden in
+# the one window, their placements lost).
+run_mutation "app: startup opens one window per restored record" \
+  crates/geode-app/src/startup.rs \
+  '    for record in records {' \
+  '    for record in records.into_iter().take(1) {' \
+  geode-app startup_reopens_one_window_per_restored_record
+
+# With no usable record there must still be one window: without the
+# fallback the app runs with none and quits at once.
+run_mutation "app: startup falls back to one window on the initial index" \
+  crates/geode-app/src/startup.rs \
+  '    if opened.is_empty() {' \
+  '    if false {' \
+  geode-app startup_with_no_records_opens_one_window_on_the_initial_index
 
 run_mutation "pricer: flush_all flushes no tile" \
   crates/geode-pricer/src/content.rs \

@@ -1005,18 +1005,24 @@ impl ShellApp {
     ) -> Vec<WindowRecord> {
         // The registry and the shown map agree by construction: a window
         // registers after `add_window` gave it an index and leaves both in
-        // `window_closed`. A disagreement is a programming error.
-        let placements: Vec<(WindowKey, WorkspaceIx, AnyWindowHandle)> =
-            self.windows
-                .iter()
-                .map(|(key, handle)| {
-                    let shown =
-                        self.services.workspaces.shown(*key).unwrap_or_else(|| {
-                            panic!("registered window {key:?} shows no workspace")
-                        });
-                    (*key, shown, *handle)
-                })
-                .collect();
+        // `window_closed`. A disagreement is a programming error, but this
+        // runs on the save paths (the quit hook, the should-close hook, the
+        // watcher), where a panic would lose the session; the window is
+        // skipped with a warning, as one whose handle is gone is below.
+        let placements: Vec<(WindowKey, WorkspaceIx, AnyWindowHandle)> = self
+            .windows
+            .iter()
+            .filter_map(|(key, handle)| match self.services.workspaces.shown(*key) {
+                Some(shown) => Some((*key, shown, *handle)),
+                None => {
+                    tracing::warn!(
+                        target: "geode::session",
+                        "registered window {key:?} shows no workspace; no session record"
+                    );
+                    None
+                }
+            })
+            .collect();
         placements
             .into_iter()
             .filter_map(|(key, shown, handle)| {

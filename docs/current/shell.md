@@ -166,11 +166,19 @@ reads the app's parked records.
 `WindowOpener` (`set_window_opener`, a closure the composition root
 installs once, before the first window: it builds the platform window and
 a `ShellView` for a key, installs the window's own hooks, and returns the
-window's handle, or `None`). At startup the composition root opens one
-window on the session's initial index (the one the oldest window showed
-when the session was last saved; 1 without a session) at the platform's
-default placement, and a refusal there ends the run: without a window
-there is nothing to run. `ShellApp::open_window(app,
+window's handle, or `None`). At startup the composition root
+(`startup::open_startup_windows` in `geode-app`) opens one window per
+restored `[windows.K]` record, in K order, each on the index its record
+names and placed where the record says, so the first record's window is
+the oldest (it writes `active` at the next save and hosts the restored
+indexes no window shows); a record whose open is refused (its index is
+shown by an earlier record's window, which the session reader already
+prevents; the opener failed) is skipped with a warning and the rest still
+open. With no record, or none that opened, one window opens on the
+session's initial index (the one the oldest window showed when the session
+was last saved; 1 without a session) at the platform's default placement,
+and a refusal there ends the run: without a window there is nothing to
+run. `ShellApp::open_window(app,
 spec, cx)` takes a `WindowSpec` (the workspace to show and a `Placement`:
 beside a window, where a restored session recorded it, or the platform's
 default) and runs three steps. Reserve, under one app update: the key is
@@ -205,11 +213,35 @@ post-switch work on the verb's path: the same `after_shown_changed` a
 baseline and scope field, focus, title). `activate_window(key, cx)` asks a
 registered window forward (`Switch::Raise`). None of these runs from render.
 
+The opener maps the spec's `Placement` to the platform's `display_id` and
+`window_bounds` through `placement::options_for` in `geode-app`, a pure
+function over facts the opener gathers: the spawning window's frame and
+display (read through its handle), the attached displays with their
+bounds, and the primary. `Beside(k)` asks for window `k`'s display and
+its frame shifted by `CASCADE` (28 logical pixels) in x and y, clamped so
+the whole window stays inside that display: shifted back by the overflow
+on each axis, and at the display's origin when it is larger than the
+display; with `k` gone, or its display unknown, the platform places the
+window or the shifted frame alone is asked for. `Restored` asks for the
+recorded display and frame, maximized when the record says so; a recorded
+display no longer attached falls back to the primary, with the recorded
+size at the primary's origin plus `CASCADE`, so a window saved on a
+monitor since unplugged comes back on screen rather than off it; no
+recorded display leaves the frame alone to the platform, and no recorded
+frame leaves the size to it. `Default` asks for nothing. Every coordinate
+is a logical pixel in the global space, so a display to the left of the
+primary has a negative origin and the clamp needs no special case for it.
+
 The trader reaches the two through the palette: `window::tear_out` ("Tear
 out into a new window") and `window::open` ("New window"), category
 Workspace, with no default chord. Each acts on the window it was
-dispatched in; a `window::open` changes nothing in that window but its
-title. Under a modal both are refused with the dialog's notice, as a
+dispatched in, and runs when that dispatch's update has flushed its
+effects, with no window on the stack: the opener reads the dispatching
+window's frame through its handle to place the new window beside it, and
+a window under update cannot be read again (gpui holds it out of its slot
+for the update); the tear-out's post-switch work re-enters the window
+through its handle. A `window::open` changes nothing in that window but
+its title. Under a modal both are refused with the dialog's notice, as a
 workspace switch and the pin toggle are: a tear-out would switch the
 window under a dialog bound to its lane, and either opens a window while
 that dialog holds the lane. Over a page both are refused with `close the
@@ -1829,6 +1861,8 @@ a later save replaces it with the current state.
 | A `windows` key that is not an integer, a record that is not a table, or a record whose `workspace` is missing, not an integer, or outside 1–9 | Warn and skip the record |
 | A window record claims a workspace a lower K already claimed | Warn and skip the later record: two windows cannot show one workspace. Records are read in K order, whatever their order in the file |
 | A window record's `display` is not a non-negative integer; its `bounds` is not a table or lacks a numeric `x`, `y`, `w` or `h` (integer or float); its `maximized` is not a boolean | Warn and read that field as unknown, unknown, or `false`; keep the record |
+| A window record's open is refused at startup (its index is shown by an earlier record's window; the opener failed) | Warn and skip the record; the other records still open. With none opened, one window opens on `active` |
+| A window record's display is no longer attached | Open the window on the primary display, its recorded size at the primary's origin plus the cascade offset (see [Opening windows](#opening-windows)) |
 
 Frame restoration parses scope expressions but does not validate columns
 against the current schema. Invalid slots, expression syntax, date strings,
@@ -1912,9 +1946,12 @@ update the call runs inside: the should-close hook passes its own, whose
 bounds are read from the `Window` it holds because a window cannot be
 updated again from within its own update, and without which the usual way
 of quitting would record no window; the quit hook and the watcher pass
-`None`. A window move or resize alone marks nothing dirty; the new bounds
-reach the file with the next snapshot written for another reason, or with
-the final save.
+`None`. A window move or resize marks the session dirty through the
+view's bounds observer (`observe_window_bounds`, a platform event path,
+never the draw pass), so the new bounds reach the file with the next
+periodic snapshot or the final save. A registered window that shows no
+workspace, or whose handle no longer updates, is skipped with a warning or
+a debug line rather than failing the save.
 
 Snapshot collection and TOML serialization run on the UI thread. The watcher
 awaits the file write on the background executor before continuing its loop.

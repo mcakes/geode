@@ -9,6 +9,8 @@ mod crash;
 #[cfg(test)]
 mod demo_tests;
 mod events;
+mod placement;
+mod startup;
 mod watchlists;
 
 use std::path::{Path, PathBuf};
@@ -29,16 +31,13 @@ use geode_shell::keymap::build_keymap;
 use geode_shell::keymap::fragments;
 use geode_shell::module::{ModuleRoster, PageRoster};
 use geode_shell::session;
-use geode_shell::shell::{
-    LogServices, Placement, ShellApp, ShellServices, ShellView, WindowOpener, WindowSpec,
-    pickable_columns, saved_scopes,
-};
+use geode_shell::shell::{LogServices, ShellApp, ShellServices, pickable_columns, saved_scopes};
 use geode_shell::theme;
-use geode_shell::tiling::{WorkspaceIx, Workspaces};
+use geode_shell::tiling::Workspaces;
 use geode_shell::vimfind::FindStyle;
+use gpui::App;
 use gpui::prelude::*;
-use gpui::{AnyWindowHandle, App, WindowOptions};
-use gpui_component::{Root, TitleBar};
+use gpui_component::TitleBar;
 
 fn main() {
     // Installer callbacks must exit before logging, argument parsing or opening
@@ -237,50 +236,28 @@ fn main() {
             }
 
             // How every window opens, the first included: the app reserves a
-            // key and a workspace (`ShellApp::open_window`), this opener
-            // builds the platform window over a `ShellView` for the key and
-            // installs the window's own hooks (`bridge::attach_window`: the
-            // should-close hook that parks a non-last window and saves at
-            // the last; the quit hooks above cover an explicit application
-            // quit), and the app confirms the registration. The closure runs
-            // with no lease on the app: the view it builds registers itself.
-            // `None` (the platform refused the window) rolls the reservation
-            // back.
-            let opener: WindowOpener = Rc::new({
-                let app = app.clone();
-                let bridge = bridge.clone();
-                move |key, spec: &WindowSpec, cx: &mut App| {
-                    let view_app = app.clone();
-                    let handle: AnyWindowHandle = cx
-                        .open_window(window_options(&spec.placement), |window, cx| {
-                            let view = cx.new(|cx| ShellView::new(view_app, key, window, cx));
-                            cx.new(|cx| Root::new(view, window, cx))
-                        })
-                        .inspect_err(|e| {
-                            tracing::error!(target: "geode::shell", "could not open a window: {e:#}");
-                        })
-                        .ok()?
-                        .into();
-                    bridge::attach_window(bridge.as_deref(), &app, key, handle, cx);
-                    Some(handle)
-                }
-            });
+            // key and a workspace (`ShellApp::open_window`), the opener
+            // (`bridge::window_opener`) places and builds the platform
+            // window over a `ShellView` for the key and installs the
+            // window's own hooks (`bridge::attach_window`: the should-close
+            // hook that parks a non-last window and saves at the last; the
+            // quit hooks above cover an explicit application quit), and the
+            // app confirms the registration. The title-bar options are the
+            // shell toolbar's: it owns the title-bar controls and drag
+            // gestures, so AppKit must not treat the bar as a system move
+            // region.
+            let opener =
+                bridge::window_opener(app.clone(), bridge.clone(), TitleBar::window_options);
             app.update(cx, |app, _| app.set_window_opener(opener));
 
             cx.spawn(async move |cx| {
-                // The first window shows the session's initial workspace (the
-                // one the oldest window showed when the session was last
-                // saved; 1 without a session) where the platform puts it.
-                // Without a window there is nothing to run.
+                // The startup windows: one per restored record, where each
+                // was; else one on the session's initial workspace (the one
+                // the oldest window showed when the session was last saved;
+                // 1 without a session) where the platform puts it. Without
+                // a window there is nothing to run.
                 cx.update(|cx| {
-                    let initial = app.read(cx).services().workspaces.initial_index();
-                    let workspace = WorkspaceIx::new(initial).expect("the initial index is 1–9");
-                    let spec = WindowSpec {
-                        workspace,
-                        placement: Placement::Default,
-                    };
-                    ShellApp::open_window(&app, spec, cx)
-                        .expect("the first window could not be opened; nothing to run");
+                    startup::open_startup_windows(&app, cx);
                 });
 
                 // Refresh diagnostic configuration independently of the data bridge.
@@ -308,22 +285,6 @@ fn main() {
             })
             .detach();
         });
-}
-
-/// The platform options for a window at `placement`, over the title-bar
-/// options the shell toolbar needs (it owns the title-bar controls and
-/// drag gestures, so AppKit must not treat the bar as a system move
-/// region). Every placement opens with the platform's default position and
-/// size for now; a window placed beside another or where a restored
-/// session recorded one will fill `display_id` and `window_bounds` in its
-/// arm.
-fn window_options(placement: &Placement) -> WindowOptions {
-    let options = TitleBar::window_options();
-    match placement {
-        Placement::Beside(_) => options,
-        Placement::Restored { .. } => options,
-        Placement::Default => options,
-    }
 }
 
 /// Parse no arguments or `--demo [rows]`, defaulting to 100,000 demo rows.
@@ -673,6 +634,8 @@ mod tests {
     use super::*;
     use geode_core::config::Config;
     use geode_shell::module::ModuleFactory as _;
+    use geode_shell::shell::ShellView;
+    use gpui_component::Root;
     use std::time::Duration;
 
     /// A second CVI panel over the same dataset: another title and forward

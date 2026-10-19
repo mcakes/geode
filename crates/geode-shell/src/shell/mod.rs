@@ -1062,6 +1062,15 @@ impl ShellView {
         })
         .detach();
 
+        // A move or resize changes this window's `[windows.K]` record
+        // (display, bounds, maximized), so it marks the session for the
+        // next periodic snapshot. The platform's resize and move callbacks
+        // drive this, never the draw pass.
+        cx.observe_window_bounds(window, |view, _window, cx| {
+            view.mark_session_dirty(cx);
+        })
+        .detach();
+
         // What the app announces to every window: a reload's per-window
         // work, a date change, and later a park. The watcher that reloads
         // is the app's (`ShellApp::spawn_watcher`); this window only reacts.
