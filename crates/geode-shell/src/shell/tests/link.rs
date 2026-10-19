@@ -1349,6 +1349,7 @@ fn restored_layout(mut services: ShellServices, workspaces: &[(u8, &str)]) -> Sh
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
         for (ix, body) in workspaces {
@@ -1528,7 +1529,8 @@ fn save_session_writes_the_groups_scopes(cx: &mut gpui::TestAppContext) {
     vcx.run_until_parked();
     assert!(session_text(&shell, &mut vcx).is_none(), "nothing periodic");
 
-    shell.read_with(&vcx, |s, cx| s.app().read(cx).save_session(cx));
+    let shell_app = shell.read_with(&vcx, |s, _| s.app().clone());
+    cx.update(|cx| ShellApp::save_session(&shell_app, None, cx));
 
     let restored = crate::session::load(&path);
     assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);

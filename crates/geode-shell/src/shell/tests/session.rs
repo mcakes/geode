@@ -401,6 +401,7 @@ fn current_tiles_reflects_live_occupants_and_restored_state_reaches_the_factory(
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     let ws1: toml::Table = r#"
         focused = 1
@@ -685,7 +686,7 @@ fn a_session_save_includes_every_window_and_the_parked_records(cx: &mut gpui::Te
             );
         })
     });
-    vcx.update(|_, cx| app.read(cx).save_session(cx));
+    cx.update(|cx| ShellApp::save_session(&app, None, cx));
     let text = std::fs::read_to_string(dir.path().join("session.toml")).unwrap();
     assert!(
         text.contains(&format!("[workspaces.1.tiles.{}]", live.0)),
@@ -713,7 +714,7 @@ fn save_session_writes_nothing_with_every_window_closed(cx: &mut gpui::TestAppCo
     let app = test_app(cx, services, None);
     let (window, mut vcx) = open_shell_on(cx, app.clone());
     let key = shell_of(&window, &mut vcx).read_with(&vcx, |s, _| s.key());
-    vcx.update(|_, cx| app.read(cx).save_session(cx));
+    cx.update(|cx| ShellApp::save_session(&app, None, cx));
     assert!(path.exists(), "sanity: a save with the window open writes");
     std::fs::remove_file(&path).unwrap();
 
@@ -730,7 +731,7 @@ fn save_session_writes_nothing_with_every_window_closed(cx: &mut gpui::TestAppCo
         app.read_with(&vcx, |a, _| a.views().next().is_none()),
         "sanity: the closed window's view is gone"
     );
-    app.read_with(&vcx, |a, cx| a.save_session(cx));
+    cx.update(|cx| ShellApp::save_session(&app, None, cx));
     assert!(
         !path.exists(),
         "a save with no window registered wrote: {}",

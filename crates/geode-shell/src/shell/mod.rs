@@ -163,6 +163,11 @@ pub struct ShellServices {
     /// `[pages.<kind>]` tables from the loaded session, consumed by the
     /// page's first open. Unmatched tables are carried to the next save.
     pub restored_pages: std::collections::BTreeMap<String, toml::Table>,
+    /// The last run's window records from `session.toml`'s `[windows.K]`,
+    /// in K order; empty for a fresh session and in every test setup that
+    /// doesn't opt in. `ShellApp::new` takes them for the startup that
+    /// opens a window per record (`ShellApp::take_restored_windows`).
+    pub restored_windows: Vec<crate::session::WindowRecord>,
 }
 
 /// Runtime logging services: the diagnostics ring, the palette's level

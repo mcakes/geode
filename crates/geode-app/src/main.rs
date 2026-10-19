@@ -197,10 +197,11 @@ fn main() {
             // is the one save. After the last window's close its own hook
             // (`bridge::attach_window`) has saved and deregistered it, so
             // this finds the registry empty and writes nothing
-            // (`ShellApp::save_session`).
+            // (`ShellApp::save_session`). The hook runs in no window's
+            // update, so no window is `current`.
             let quit_app = app.clone();
             cx.on_app_quit(move |cx| {
-                quit_app.read(cx).save_session(cx);
+                ShellApp::save_session(&quit_app, None, cx);
                 async {}
             })
             .detach();
@@ -631,12 +632,14 @@ fn build_shell_services(
         composition_diagnostics,
         pages,
         restored_pages: std::collections::BTreeMap::new(),
+        restored_windows: Vec::new(),
     };
     (services, desk, user, bridge, diagnostics_factory)
 }
 
 /// Load layout, module records, frame state, link group scopes, palette
-/// usage and page state from the session file before the shell is constructed. Recovery warnings are
+/// usage, page state and window records from the session file before the
+/// shell is constructed. Recovery warnings are
 /// logged; a missing or unreadable session starts fresh.
 fn restore_session(services: &mut ShellServices) {
     let Some(path) = &services.session_path else {
@@ -653,6 +656,7 @@ fn restore_session(services: &mut ShellServices) {
     services.restored_links = restored.links;
     services.restored_palette_usage = restored.palette_usage;
     services.restored_pages = restored.pages;
+    services.restored_windows = restored.windows;
 }
 
 /// Log a configuration or keymap diagnostic at `geode::config`, using its
@@ -1882,6 +1886,7 @@ label = "skew"
             &session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = format!(
             "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
@@ -1965,7 +1970,8 @@ label = "skew"
             Some("guide")
         );
         vcx.simulate_keystrokes("]");
-        shell.read_with(&vcx, |s, cx| s.app().read(cx).save_session(cx));
+        let shell_app = shell.read_with(&vcx, |s, _| s.app().clone());
+        cx.update(|cx| ShellApp::save_session(&shell_app, None, cx));
         let saved: toml::Table = std::fs::read_to_string(user.path().join("session.toml"))
             .unwrap()
             .parse()
@@ -2182,7 +2188,8 @@ label = "skew"
             shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
             Some(geode_shell::module::placeholder::PLACEHOLDER_KIND)
         );
-        shell.read_with(&vcx, |s, cx| s.app().read(cx).save_session(cx));
+        let shell_app = shell.read_with(&vcx, |s, _| s.app().clone());
+        cx.update(|cx| ShellApp::save_session(&shell_app, None, cx));
         assert_eq!(
             session::load(&path).tiles.get(&1).map(|r| r.kind.as_str()),
             Some("cvi"),

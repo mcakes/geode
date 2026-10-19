@@ -7228,6 +7228,21 @@ run_mutation "shell app: save_session writes nothing with no window registered" 
   geode-shell \
   save_session_writes_nothing_with_every_window_closed
 
+# The session's window records are in registration order: K is the 1-based
+# position in the registry, so the next run reopens the windows as they
+# were opened; reversed, the first window's record is the last's.
+run_mutation "shell app: window records follow registration order" \
+  crates/geode-shell/src/shell/app.rs \
+  '            self.windows
+                .iter()
+                .map(|(key, handle)| {' \
+  '            self.windows
+                .iter()
+                .rev()
+                .map(|(key, handle)| {' \
+  geode-shell \
+  window_records_follow_registration_order
+
 # ---- ShellApp: the window registry and opener
 
 # A tear-out with no free index must refuse before it touches anything.
@@ -9271,6 +9286,32 @@ run_mutation "session: active follows the oldest window" \
   '        self.shown.values().next().copied().unwrap_or(self.initial)' \
   '        self.initial' \
   geode-shell to_toml_writes_the_initial_index_as_active
+
+# Two windows cannot show one workspace: a window record claiming an index
+# a lower K already claimed is skipped, or the startup would open a second
+# window on it and have it refused.
+run_mutation "session: a window record claiming a taken index is skipped" \
+  crates/geode-shell/src/session.rs \
+  '        if let Some((_, earlier)) = claimed.iter().find(|(ix, _)| *ix == workspace) {' \
+  '        if let Some((_, earlier)) = claimed.iter().find(|(ix, _)| *ix == workspace && false) {' \
+  geode-shell a_window_record_claiming_a_taken_index_is_skipped
+
+# A window record's workspace is an index 1..=9; anything else is skipped,
+# or a window would open on a workspace that cannot exist.
+run_mutation "session: a window record with a bad index is skipped" \
+  crates/geode-shell/src/session.rs \
+  '            Some(toml::Value::Integer(n)) if (1..=9).contains(n) => *n as u8,' \
+  '            Some(toml::Value::Integer(n)) if true => *n as u8,' \
+  geode-shell a_window_record_with_a_bad_index_is_skipped_with_a_warning
+
+# A bounds table missing a side reads as no bounds, never as a frame with
+# a guessed side: a window placed by a guess lands where the trader never
+# put it.
+run_mutation "session: bounds missing a field read as none" \
+  crates/geode-shell/src/session.rs \
+  '        h: field("h")?,' \
+  '        h: field("h").unwrap_or(0.0),' \
+  geode-shell a_bounds_table_missing_a_field_reads_as_none
 
 run_mutation "add-tile: duplicate carries the focused tile's serialized state" \
   crates/geode-shell/src/shell/add_tile.rs \
@@ -25952,8 +25993,8 @@ run_mutation "quit: the data hook stops the service without flushing sheets" \
 # the quit hook that follows finds no registered window and writes nothing.
 run_mutation "close: the should-close hook saves no session" \
   crates/geode-app/src/bridge.rs \
-  '                app.read(cx).save_session(cx);' \
-  '                let _ = &app;' \
+  '                ShellApp::save_session(&app, Some((key, &*window)), cx);' \
+  '                let _ = (&app, &*window);' \
   geode-app closing_the_window_saves_the_session_and_lets_the_close_proceed
 
 # Closing the last window queues every unsaved sheet ahead of the service's
@@ -25987,7 +26028,10 @@ run_mutation "app: only the last window's close saves the session" \
 run_mutation "app: the last close saves before it deregisters" \
   crates/geode-app/src/bridge.rs \
   '            if app.read(cx).is_last_window(key) {
-                app.read(cx).save_session(cx);
+                // The hook runs inside the update of this window, so its
+                // own placement is read from `window`; the save cannot
+                // update it again through its handle.
+                ShellApp::save_session(&app, Some((key, &*window)), cx);
                 if let Some(factory) = &pricer {
                     factory.flush_all(cx);
                 }
@@ -25995,12 +26039,21 @@ run_mutation "app: the last close saves before it deregisters" \
             app.update(cx, |a, cx| a.window_closed(key, cx));' \
   '            app.update(cx, |a, cx| a.window_closed(key, cx));
             if app.read(cx).is_last_window(key) {
-                app.read(cx).save_session(cx);
+                ShellApp::save_session(&app, Some((key, &*window)), cx);
                 if let Some(factory) = &pricer {
                     factory.flush_all(cx);
                 }
             }' \
   geode-app closing_the_last_window_saves_once
+
+# The should-close hook runs inside the closing window's update, where that
+# window cannot be updated again: its record must come from the `Window`
+# the hook holds, or the usual way of quitting records no window at all.
+run_mutation "app: the last close records the closing window" \
+  crates/geode-shell/src/shell/app.rs \
+  '                    Some((k, window)) if k == key => Ok(placement_of(window, cx)),' \
+  '                    Some((k, window)) if k == key && false => Ok(placement_of(window, cx)),' \
+  geode-app closing_the_last_window_records_its_own_placement
 
 # A non-last close deregisters the window while it stands; skipping it
 # leaves a closed window in the registry and its tiles unparked.

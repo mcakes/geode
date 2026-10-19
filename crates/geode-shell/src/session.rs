@@ -45,12 +45,16 @@
 //! whose scope is empty writes no table, and an absent table reads as an
 //! empty scope. `[palette.usage]`
 //! stores usage counts and timestamps; `[pages.<kind>]` stores one opaque
-//! table per page kind (whether a page was open is not recorded). Unknown
+//! table per page kind (whether a page was open is not recorded).
+//! `[windows.K]` stores one open window per record, K its 1-based
+//! registration position: the `workspace` it showed, its `display` id and
+//! `bounds` when known, and `maximized` when it was. A file with no usable
+//! record opens one window on `active`. Unknown
 //! keys are ignored on read and not preserved on save.
 //!
 //! An invalid main tree or session header rejects the entire session. Docks,
-//! tile records, frame fields, link group scopes, palette usage, and page
-//! tables recover locally where possible;
+//! tile records, frame fields, link group scopes, palette usage, page
+//! tables and window records recover locally where possible;
 //! see [`from_toml`]. [`load`] returns a fresh session on read or parse failure.
 //! Neither loading nor healing rewrites the file, but subsequent saves replace
 //! it with current state, without retaining a backup.
@@ -113,6 +117,191 @@ pub type PinnedRecords = BTreeMap<WorkspaceIx, FrameRecord>;
 /// has no table.
 pub type GroupScopes = [Scope; 4];
 
+/// One open window's placement, written as `[windows.K]` with K the
+/// window's 1-based registration position; the next run reopens one window
+/// per record, each on its `workspace`. `display` is the id of the platform
+/// display the window was on, when known. `bounds` is the window's frame in
+/// logical pixels, origin and size, as `Window::window_bounds` reports it:
+/// while the window is maximized or fullscreen that is its restore frame.
+/// `maximized` is written only while the window is maximized; fullscreen is
+/// not recorded and reopens windowed at the restore frame.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowRecord {
+    /// The workspace index, 1–9, the window showed.
+    pub workspace: u8,
+    pub display: Option<u64>,
+    pub bounds: Option<WindowBoundsRecord>,
+    pub maximized: bool,
+}
+
+/// A window's frame in logical pixels: origin `x`, `y` and size `w`, `h`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowBoundsRecord {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+impl WindowRecord {
+    /// The record's table: `workspace` always, `display` and `bounds` when
+    /// known, `maximized` only when set. The bounds are written as floats
+    /// so a fractional origin on a scaled display round-trips.
+    fn to_toml(&self) -> toml::Table {
+        let mut t = toml::Table::new();
+        t.insert(
+            "workspace".into(),
+            toml::Value::Integer(i64::from(self.workspace)),
+        );
+        // A display id TOML cannot hold as an integer is not written; the
+        // window then reopens on the default display.
+        if let Some(id) = self.display.and_then(|id| i64::try_from(id).ok()) {
+            t.insert("display".into(), toml::Value::Integer(id));
+        }
+        if let Some(b) = self.bounds {
+            let mut bounds = toml::Table::new();
+            for (name, value) in [("x", b.x), ("y", b.y), ("w", b.w), ("h", b.h)] {
+                bounds.insert(name.into(), toml::Value::Float(f64::from(value)));
+            }
+            t.insert("bounds".into(), toml::Value::Table(bounds));
+        }
+        if self.maximized {
+            t.insert("maximized".into(), toml::Value::Boolean(true));
+        }
+        t
+    }
+}
+
+/// Read `[windows.K]` into records ordered by K. A `windows` that is not a
+/// table warns and reads as none. A key that is not an integer, a record
+/// that is not a table, and a record whose `workspace` is missing, not an
+/// integer or outside 1..=9 each warn and are skipped, as is a record
+/// claiming an index a lower K already claimed: two windows cannot show one
+/// workspace. `display`, `bounds` and `maximized` heal independently to
+/// `None`, `None` and `false` with a warning. K is read numerically, so
+/// "earlier" means the lower K, whatever the file's order.
+fn windows_from_toml(value: Option<&toml::Value>, warnings: &mut Vec<String>) -> Vec<WindowRecord> {
+    let table = match value {
+        None => return Vec::new(),
+        Some(toml::Value::Table(t)) => t,
+        Some(_) => {
+            warnings.push("windows is not a table; no window record is restored".to_string());
+            return Vec::new();
+        }
+    };
+    let mut keyed: Vec<(u64, &toml::Value)> = Vec::new();
+    for (key, value) in table {
+        match key.parse::<u64>() {
+            Ok(k) => keyed.push((k, value)),
+            Err(_) => warnings.push(format!("windows.{key} is not an integer key; skipped")),
+        }
+    }
+    keyed.sort_by_key(|(k, _)| *k);
+
+    let mut records = Vec::new();
+    // Each claimed index with the K that claimed it, for the warning.
+    let mut claimed: Vec<(u8, u64)> = Vec::new();
+    for (k, value) in keyed {
+        let Some(t) = value.as_table() else {
+            warnings.push(format!("windows.{k} is not a table; skipped"));
+            continue;
+        };
+        let workspace = match t.get("workspace") {
+            Some(toml::Value::Integer(n)) if (1..=9).contains(n) => *n as u8,
+            Some(toml::Value::Integer(n)) => {
+                warnings.push(format!(
+                    "windows.{k}.workspace {n} is out of range 1..=9; skipped"
+                ));
+                continue;
+            }
+            Some(_) => {
+                warnings.push(format!("windows.{k}.workspace is not an integer; skipped"));
+                continue;
+            }
+            None => {
+                warnings.push(format!("windows.{k} has no workspace; skipped"));
+                continue;
+            }
+        };
+        if let Some((_, earlier)) = claimed.iter().find(|(ix, _)| *ix == workspace) {
+            warnings.push(format!(
+                "windows.{k} claims workspace {workspace}, already shown by windows.{earlier}; skipped"
+            ));
+            continue;
+        }
+        claimed.push((workspace, k));
+
+        let display = match t.get("display") {
+            None => None,
+            Some(toml::Value::Integer(n)) => match u64::try_from(*n) {
+                Ok(id) => Some(id),
+                Err(_) => {
+                    warnings.push(format!(
+                        "windows.{k}.display {n} is not a display id; ignored"
+                    ));
+                    None
+                }
+            },
+            Some(_) => {
+                warnings.push(format!("windows.{k}.display is not an integer; ignored"));
+                None
+            }
+        };
+        let bounds = match t.get("bounds") {
+            None => None,
+            Some(toml::Value::Table(b)) => {
+                let bounds = bounds_from_toml(b);
+                if bounds.is_none() {
+                    warnings.push(format!(
+                        "windows.{k}.bounds needs numeric x, y, w and h; ignored"
+                    ));
+                }
+                bounds
+            }
+            Some(_) => {
+                warnings.push(format!("windows.{k}.bounds is not a table; ignored"));
+                None
+            }
+        };
+        let maximized = match t.get("maximized") {
+            None => false,
+            Some(toml::Value::Boolean(b)) => *b,
+            Some(_) => {
+                warnings.push(format!(
+                    "windows.{k}.maximized is not a boolean; read as false"
+                ));
+                false
+            }
+        };
+        records.push(WindowRecord {
+            workspace,
+            display,
+            bounds,
+            maximized,
+        });
+    }
+    records
+}
+
+/// A bounds table's four fields, each an integer or a float; `None` when
+/// any is missing or not a number, since a frame with a guessed side would
+/// place the window somewhere the trader never put it.
+fn bounds_from_toml(t: &toml::Table) -> Option<WindowBoundsRecord> {
+    let field = |name: &str| -> Option<f32> {
+        match t.get(name)? {
+            toml::Value::Integer(n) => Some(*n as f32),
+            toml::Value::Float(f) => Some(*f as f32),
+            _ => None,
+        }
+    };
+    Some(WindowBoundsRecord {
+        x: field("x")?,
+        y: field("y")?,
+        w: field("w")?,
+        h: field("h")?,
+    })
+}
+
 /// What [`load`]/[`from_toml`] hand back: the restored layout, each tile's
 /// module record, the frame's own restored state if the file had one, page
 /// state, and any non-fatal warnings accumulated healing any of it.
@@ -130,6 +319,10 @@ pub struct Restored {
     pub palette_usage: PaletteUsage,
     /// Page state from `[pages.<kind>]`; an absent table restores as empty.
     pub pages: PageRecords,
+    /// Every window the last run had open, in registration order, from
+    /// `[windows.K]`; empty when the file has no usable record, and then
+    /// the caller opens one window on `active`.
+    pub windows: Vec<WindowRecord>,
     pub warnings: Vec<String>,
 }
 
@@ -465,9 +658,10 @@ impl FrameRecord {
 /// Write tile records only under the workspace whose main or dock tree
 /// contains the ID; omit stale records. Include `[frame]` whenever `frame`
 /// is `Some`, even if its table is empty, `workspaces.N.frame` for exactly
-/// the workspaces in `pinned`, and palette usage and pages only when
-/// nonempty. Link group scopes are not written here: [`insert_links`] adds
-/// them.
+/// the workspaces in `pinned`, and palette usage, pages and window
+/// records only when nonempty: `windows.K` is each record's 1-based
+/// position in `windows`, the registration order of the open windows. Link
+/// group scopes are not written here: [`insert_links`] adds them.
 pub fn to_toml(
     workspaces: &Workspaces,
     tiles: &TileRecords,
@@ -475,6 +669,7 @@ pub fn to_toml(
     pinned: &PinnedRecords,
     palette_usage: &PaletteUsage,
     pages: &PageRecords,
+    windows: &[WindowRecord],
 ) -> toml::Table {
     let mut root = toml::Table::new();
     root.insert(
@@ -595,6 +790,20 @@ pub fn to_toml(
     }
     root.insert("workspaces".to_string(), toml::Value::Table(spaces_table));
 
+    // One record per open window, keyed by registration position. None
+    // writes no table, and a file without one opens a single window on
+    // `active`.
+    if !windows.is_empty() {
+        let mut table = toml::Table::new();
+        for (position, record) in windows.iter().enumerate() {
+            table.insert(
+                (position + 1).to_string(),
+                toml::Value::Table(record.to_toml()),
+            );
+        }
+        root.insert("windows".to_string(), toml::Value::Table(table));
+    }
+
     if let Some(record) = frame {
         root.insert("frame".to_string(), toml::Value::Table(record.to_toml()));
     }
@@ -635,7 +844,7 @@ pub fn to_toml(
 /// a visible empty dock remains a valid focus target.
 ///
 /// Malformed or locally dangling tile records warn and are dropped. Frame,
-/// link group, palette, and page fields recover independently; a non-table
+/// link group, palette, page and window fields recover independently; a non-table
 /// `workspaces.N.frame` warns and that workspace restores unpinned, while a
 /// table recovers its usable fields like `[frame]`; a missing version warns
 /// but still loads. Recovery does not imply schema validation of module, page,
@@ -763,6 +972,10 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         Some(_) => warnings.push("pages is not a table; ignored".to_string()),
     }
 
+    // Absent window records are none: the caller opens one window on
+    // `active`. Each record heals or is skipped on its own.
+    let windows = windows_from_toml(table.get("windows"), &mut warnings);
+
     Ok(Restored {
         workspaces,
         tiles,
@@ -771,6 +984,7 @@ pub fn from_toml(table: &toml::Table) -> Result<Restored, Vec<String>> {
         links,
         palette_usage,
         pages,
+        windows,
         warnings,
     })
 }
@@ -1217,6 +1431,7 @@ pub fn to_string_pretty(
     pinned: &PinnedRecords,
     palette_usage: &PaletteUsage,
     pages: &PageRecords,
+    windows: &[WindowRecord],
 ) -> Result<String, String> {
     table_to_string(&to_toml(
         workspaces,
@@ -1225,6 +1440,7 @@ pub fn to_string_pretty(
         pinned,
         palette_usage,
         pages,
+        windows,
     ))
 }
 
@@ -1265,8 +1481,17 @@ pub fn save(
     links: &GroupScopes,
     palette_usage: &PaletteUsage,
     pages: &PageRecords,
+    windows: &[WindowRecord],
 ) -> std::io::Result<()> {
-    let mut table = to_toml(workspaces, tiles, frame, pinned, palette_usage, pages);
+    let mut table = to_toml(
+        workspaces,
+        tiles,
+        frame,
+        pinned,
+        palette_usage,
+        pages,
+        windows,
+    );
     insert_links(&mut table, links);
     let text = table_to_string(&table)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -1286,6 +1511,7 @@ pub fn load(path: &Path) -> Restored {
         links: GroupScopes::default(),
         palette_usage: PaletteUsage::new(),
         pages: PageRecords::new(),
+        windows: Vec::new(),
         warnings,
     };
 
@@ -1377,6 +1603,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         assert_eq!(table.get("active").and_then(|v| v.as_integer()), Some(4));
         // Once a window is open, the file follows what it shows, so a
@@ -1391,6 +1618,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         assert_eq!(table.get("active").and_then(|v| v.as_integer()), Some(6));
     }
@@ -1432,6 +1660,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         )
         .unwrap();
         assert!(
@@ -1466,6 +1695,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         // Force the stray record in under workspace 1 regardless of what
         // `to_toml` filtered.
@@ -1500,6 +1730,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws_table = table["workspaces"]["1"].as_table_mut().unwrap();
         let mut tiles_table = toml::Table::new();
@@ -1530,6 +1761,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         )
     }
 
@@ -1627,6 +1859,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         )
         .unwrap();
         let at = |needle: &str| {
@@ -1809,6 +2042,7 @@ mod tests {
             &links,
             &no_usage(),
             &no_pages(),
+            &[],
         )
         .unwrap();
         let restored = load_opened(&path);
@@ -1827,6 +2061,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         )
         .unwrap();
         assert!(!text.contains("tiles"), "{text}");
@@ -1856,6 +2091,7 @@ mod tests {
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let text = toml::to_string(&table).unwrap();
         assert!(text.contains("kind = \"stack\""), "{text}");
@@ -1950,6 +2186,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let Restored {
             workspaces: restored,
@@ -1979,6 +2216,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let Restored {
             workspaces: restored,
@@ -2026,6 +2264,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let mut extra_table = toml::Table::new();
         extra_table.insert(
@@ -2053,6 +2292,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         table.insert(
             "some_future_field".to_string(),
@@ -2366,6 +2606,7 @@ members = [1, -4]
             &GroupScopes::default(),
             &no_usage(),
             &no_pages(),
+            &[],
         )
         .unwrap();
         assert!(path.exists());
@@ -2408,6 +2649,7 @@ members = [1, -4]
             &GroupScopes::default(),
             &no_usage(),
             &no_pages(),
+            &[],
         )
         .unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -2428,6 +2670,7 @@ members = [1, -4]
             &GroupScopes::default(),
             &no_usage(),
             &no_pages(),
+            &[],
         )
         .unwrap();
         assert!(path.exists());
@@ -2446,6 +2689,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let Restored {
             workspaces: mut restored,
@@ -2498,6 +2742,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let Restored {
             workspaces: restored,
@@ -2563,6 +2808,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let Restored {
             workspaces: restored,
@@ -2596,6 +2842,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         )
         .unwrap();
         assert!(!text.contains("docks"), "{text}");
@@ -2612,6 +2859,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let Restored {
             workspaces: mut restored,
@@ -2652,6 +2900,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1_text = r#"
             focused = 1
@@ -2701,6 +2950,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -2733,6 +2983,7 @@ members = [1, -4]
                 &PinnedRecords::new(),
                 &no_usage(),
                 &no_pages(),
+                &[],
             );
             let ws1: toml::Table = format!(
                 r#"
@@ -2776,6 +3027,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -2820,6 +3072,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"region = "sideways""#.parse().unwrap();
         if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
@@ -2848,6 +3101,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             [node]
@@ -2949,6 +3203,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             [docks.left]
@@ -2991,6 +3246,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             [docks.bottom]
@@ -3032,6 +3288,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -3086,6 +3343,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -3150,6 +3408,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             [docks.left]
@@ -3200,6 +3459,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws1: toml::Table = r#"
             [docks.left]
@@ -3401,6 +3661,7 @@ members = [1, -4]
             &pinned,
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let ws2 = table["workspaces"]["2"].as_table().unwrap();
         assert!(ws2.contains_key("frame"));
@@ -3424,6 +3685,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         table["workspaces"]["1"]
             .as_table_mut()
@@ -3448,6 +3710,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let frame: toml::Table = r#"
             slot = 2
@@ -3485,6 +3748,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         assert!(table.contains_key("frame"), "{table:?}");
 
@@ -3557,6 +3821,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         assert!(!table.contains_key("frame"), "{table:?}");
         let Restored { frame, .. } = from_toml_opened(&table).unwrap();
@@ -3577,6 +3842,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &usage,
             &no_pages(),
+            &[],
         )
         .unwrap();
         assert!(text.contains("[palette.usage"), "{text}");
@@ -3598,6 +3864,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         assert!(!table.contains_key("palette"), "{table:?}");
     }
@@ -3612,6 +3879,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         assert!(!table.contains_key("palette"), "{table:?}");
         let Restored {
@@ -3632,6 +3900,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         table.insert("palette".to_string(), toml::Value::Integer(3));
         let Restored {
@@ -3649,6 +3918,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &no_usage(),
             &no_pages(),
+            &[],
         );
         let mut palette = toml::Table::new();
         palette.insert("usage".to_string(), toml::Value::Boolean(true));
@@ -3678,6 +3948,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &PaletteUsage::new(),
             &pages,
+            &[],
         )
         .unwrap();
         assert!(text.contains("[pages.diagnostics]"), "{text}");
@@ -3696,6 +3967,7 @@ members = [1, -4]
             &PinnedRecords::new(),
             &PaletteUsage::new(),
             &PageRecords::new(),
+            &[],
         )
         .unwrap();
         assert!(!text.contains("[pages"), "{text}");
@@ -3732,5 +4004,201 @@ members = [1, -4]
             restored.scope.dimensions,
             sample_frame_record().scope.dimensions
         );
+    }
+
+    // --- Window records ------------------------------------------------
+
+    /// Two windows as the registry would list them: the first with a
+    /// known display and bounds, the second maximized with neither.
+    fn two_window_records() -> Vec<WindowRecord> {
+        vec![
+            WindowRecord {
+                workspace: 1,
+                display: Some(7),
+                bounds: Some(WindowBoundsRecord {
+                    x: 10.5,
+                    y: 20.0,
+                    w: 1200.0,
+                    h: 800.25,
+                }),
+                maximized: false,
+            },
+            WindowRecord {
+                workspace: 3,
+                display: None,
+                bounds: None,
+                maximized: true,
+            },
+        ]
+    }
+
+    fn windows_of(text: &str) -> Restored {
+        from_toml(&text.parse::<toml::Table>().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn windows_round_trip() {
+        let windows = two_window_records();
+        let table = to_toml(
+            &one_window(),
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+            &windows,
+        );
+        // Through text, so the bounds survive the float encoding.
+        let text = table_to_string(&table).unwrap();
+        assert!(text.contains("[windows.1]"), "{text}");
+        assert!(text.contains("[windows.2]"), "{text}");
+        assert!(text.contains("maximized = true"), "{text}");
+        let restored = windows_of(&text);
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(restored.windows, windows);
+    }
+
+    #[test]
+    fn a_window_record_with_a_bad_index_is_skipped_with_a_warning() {
+        let text = "config_version = 1\nactive = 1\n\
+            [windows.1]\nworkspace = 12\n\
+            [windows.2]\nworkspace = \"two\"\n\
+            [windows.3]\nmaximized = true\n\
+            [windows.4]\nworkspace = 0\n\
+            [windows.5]\nworkspace = 2\n";
+        let restored = windows_of(text);
+        let kept: Vec<u8> = restored.windows.iter().map(|w| w.workspace).collect();
+        assert_eq!(kept, vec![2], "{:?}", restored.warnings);
+        let warned = |needle: &str| restored.warnings.iter().any(|w| w.contains(needle));
+        assert!(warned("windows.1"), "{:?}", restored.warnings);
+        assert!(warned("windows.2"), "{:?}", restored.warnings);
+        assert!(warned("windows.3"), "{:?}", restored.warnings);
+        assert!(warned("windows.4"), "{:?}", restored.warnings);
+        assert!(!warned("windows.5"), "{:?}", restored.warnings);
+    }
+
+    #[test]
+    fn a_window_record_claiming_a_taken_index_is_skipped() {
+        // Records are ordered by K, not by their place in the file.
+        let text = "config_version = 1\nactive = 1\n\
+            [windows.2]\nworkspace = 2\n\
+            [windows.1]\nworkspace = 2\n\
+            [windows.3]\nworkspace = 4\n";
+        let restored = windows_of(text);
+        let kept: Vec<u8> = restored.windows.iter().map(|w| w.workspace).collect();
+        assert_eq!(kept, vec![2, 4], "{:?}", restored.warnings);
+        assert!(
+            restored
+                .warnings
+                .iter()
+                .any(|w| w.contains("windows.2") && w.contains("windows.1")),
+            "the later record is the one skipped: {:?}",
+            restored.warnings
+        );
+    }
+
+    #[test]
+    fn a_non_integer_window_key_is_skipped_with_a_warning() {
+        let text = "config_version = 1\nactive = 1\n\
+            [windows.first]\nworkspace = 1\n\
+            [windows.2]\nworkspace = 3\n\
+            [windows.1]\nworkspace = 2\n";
+        let restored = windows_of(text);
+        let kept: Vec<u8> = restored.windows.iter().map(|w| w.workspace).collect();
+        assert_eq!(kept, vec![2, 3], "{:?}", restored.warnings);
+        assert!(
+            restored
+                .warnings
+                .iter()
+                .any(|w| w.contains("windows.first")),
+            "{:?}",
+            restored.warnings
+        );
+    }
+
+    #[test]
+    fn an_absent_windows_table_restores_no_windows() {
+        let restored = windows_of("config_version = 1\nactive = 5\n");
+        assert!(restored.windows.is_empty());
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(
+            restored.workspaces.initial_index(),
+            5,
+            "active is still read"
+        );
+
+        // A `windows` that is not a table reads as none, with a warning.
+        let restored = windows_of("config_version = 1\nactive = 5\nwindows = 3\n");
+        assert!(restored.windows.is_empty());
+        assert!(
+            restored.warnings.iter().any(|w| w.contains("windows")),
+            "{:?}",
+            restored.warnings
+        );
+        assert_eq!(restored.workspaces.initial_index(), 5);
+
+        // No record writes no table.
+        let table = to_toml(
+            &one_window(),
+            &TileRecords::new(),
+            None,
+            &PinnedRecords::new(),
+            &no_usage(),
+            &no_pages(),
+            &[],
+        );
+        assert!(table.get("windows").is_none());
+    }
+
+    #[test]
+    fn a_bounds_table_missing_a_field_reads_as_none() {
+        let text = "config_version = 1\nactive = 1\n\
+            [windows.1]\nworkspace = 1\nbounds = { x = 1, y = 2.5, w = 3 }\n\
+            [windows.2]\nworkspace = 2\nbounds = 4\n\
+            [windows.3]\nworkspace = 3\nbounds = { x = 1, y = \"two\", w = 3, h = 4 }\n\
+            [windows.4]\nworkspace = 4\nbounds = { x = 1, y = 2, w = 3, h = 4 }\n";
+        let restored = windows_of(text);
+        assert_eq!(restored.windows.len(), 4, "{:?}", restored.warnings);
+        assert_eq!(restored.windows[0].bounds, None);
+        assert_eq!(restored.windows[1].bounds, None);
+        assert_eq!(restored.windows[2].bounds, None);
+        assert_eq!(
+            restored.windows[3].bounds,
+            Some(WindowBoundsRecord {
+                x: 1.0,
+                y: 2.0,
+                w: 3.0,
+                h: 4.0
+            }),
+            "integers are accepted"
+        );
+        let bounds_warnings = restored
+            .warnings
+            .iter()
+            .filter(|w| w.contains("bounds"))
+            .count();
+        assert_eq!(bounds_warnings, 3, "{:?}", restored.warnings);
+    }
+
+    #[test]
+    fn a_bad_display_or_maximized_heals_with_a_warning() {
+        let text = "config_version = 1\nactive = 1\n\
+            [windows.1]\nworkspace = 1\ndisplay = \"main\"\nmaximized = \"yes\"\n\
+            [windows.2]\nworkspace = 2\ndisplay = -1\n\
+            [windows.3]\nworkspace = 3\ndisplay = 9\nmaximized = true\n";
+        let restored = windows_of(text);
+        assert_eq!(restored.windows.len(), 3, "{:?}", restored.warnings);
+        assert_eq!(restored.windows[0].display, None);
+        assert!(!restored.windows[0].maximized);
+        assert_eq!(
+            restored.windows[1].display, None,
+            "a negative is no display id"
+        );
+        assert_eq!(restored.windows[2].display, Some(9));
+        assert!(restored.windows[2].maximized);
+        let warned = |needle: &str| restored.warnings.iter().any(|w| w.contains(needle));
+        assert!(warned("windows.1.display"), "{:?}", restored.warnings);
+        assert!(warned("windows.1.maximized"), "{:?}", restored.warnings);
+        assert!(warned("windows.2.display"), "{:?}", restored.warnings);
     }
 }

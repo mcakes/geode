@@ -1,14 +1,17 @@
 //! Session snapshots for periodic background writes and synchronous shutdown,
 //! made by the app-level owner: one writer for every window, over the union
-//! of each live window's records and the records no window has taken.
+//! of each live window's records and the records no window has taken, plus
+//! one placement record per registered window, read from the live windows
+//! before the text is built.
 //! Snapshot comparison happens on the UI thread. A returned snapshot is marked
 //! handled before I/O, so these baselines do not acknowledge a successful save.
 
-use gpui::{App, Context};
+use gpui::{App, Context, Entity, Window};
 use std::path::PathBuf;
 
 use crate::frame::GroupingChoice;
-use crate::session::{self, FrameRecord};
+use crate::session::{self, FrameRecord, WindowRecord};
+use crate::tiling::WindowKey;
 use geode_core::link::Group;
 
 use super::ShellApp;
@@ -79,6 +82,11 @@ impl ShellApp {
     ///
     /// The records are read from every live window (`current_tiles`,
     /// `current_pages`); a handle whose window has closed is dropped here.
+    /// The window records (`window_records`) are read from the live
+    /// windows once a write is due, never inside a window's update: the
+    /// watcher runs from this entity's, so no window is `current`. A move
+    /// or resize alone marks nothing dirty; the new bounds reach the file
+    /// with the next snapshot written for another reason, or the final save.
     pub(crate) fn take_dirty_session_write(
         &mut self,
         cx: &mut Context<Self>,
@@ -102,6 +110,7 @@ impl ShellApp {
         }
         self.session_dirty = false;
         let path = self.services.session_path.clone()?;
+        let windows = self.window_records(None, cx);
         let record = self.frame_record(cx);
         let mut table = session::to_toml(
             &self.services.workspaces,
@@ -110,6 +119,7 @@ impl ShellApp {
             &self.pinned_records(cx),
             &self.palette_usage,
             &pages,
+            &windows,
         );
         let serialized = session::table_to_string(&table).and_then(|bare| {
             // Compared before the groups' scopes are added: see the method's
@@ -149,13 +159,40 @@ impl ShellApp {
     /// failures are logged.
     /// It does not wait for an in-flight periodic write, which may rename last.
     ///
+    /// An associated function, not a method: the window records are read
+    /// from the live windows (`window_records`), which updates each window
+    /// and so needs `&mut App`, which no read lease on the app can share.
+    /// The records are collected first, under a short update of the app
+    /// with nothing else inside; the app is then read once to build the
+    /// text and write it. `current` is the window whose update this runs
+    /// inside: the should-close hook passes its own, which cannot be
+    /// updated again from within; the quit hook passes `None`, as it runs
+    /// in no window's update.
+    pub fn save_session(
+        app: &Entity<ShellApp>,
+        current: Option<(WindowKey, &Window)>,
+        cx: &mut App,
+    ) {
+        // With no session path nothing will be written, so no window is
+        // touched for it.
+        if app.read(cx).services.session_path.is_none() {
+            return;
+        }
+        let windows = app.update(cx, |a, cx| a.window_records(current, cx));
+        app.read(cx).write_session(&windows, cx);
+    }
+
+    /// The write behind [`Self::save_session`]: the guard, then one
+    /// synchronous [`session::save`] over this app's records and
+    /// `windows`.
+    ///
     /// While no window is registered nothing is written: a closed
     /// window's occupants are gone with it, and a snapshot taken then
     /// would replace their records with placeholders. The should-close
     /// hook saved while the window still stood; the quit hook that follows
     /// a close finds the registry empty and leaves that save alone, as an
     /// explicit quit's windows are still registered when its hook runs.
-    pub fn save_session(&self, cx: &App) {
+    fn write_session(&self, windows: &[WindowRecord], cx: &App) {
         let Some(path) = self.services.session_path.as_ref() else {
             return;
         };
@@ -173,6 +210,7 @@ impl ShellApp {
             &self.group_scopes(cx),
             &self.palette_usage,
             &self.current_pages(cx),
+            windows,
         ) {
             tracing::warn!(target: "geode::session", "failed to save session: {e}");
         }

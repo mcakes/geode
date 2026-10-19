@@ -684,3 +684,50 @@ fn picker_tags_are_unique_across_windows(cx: &mut gpui::TestAppContext) {
         "both opens drew from the app's one counter"
     );
 }
+
+/// The session's window records follow the registry: K is a window's
+/// 1-based registration position and each record names the index that
+/// window shows, whichever window is the one under update. The test
+/// platform's one display is id 1, and every live window has bounds.
+#[gpui::test]
+fn window_records_follow_registration_order(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.toml");
+    let mut services = test_services();
+    services.session_path = Some(path.clone());
+    let app = test_app(cx, services, None);
+    let (_w1, _vcx1) = open_shell_on(cx, app.clone());
+    let (_w2, _vcx2) = open_shell_on(cx, app.clone());
+    let shown: Vec<u8> = cx.update(|cx| {
+        app.read(cx)
+            .windows()
+            .iter()
+            .map(|(key, _)| {
+                app.read(cx)
+                    .services()
+                    .workspaces
+                    .shown(*key)
+                    .unwrap()
+                    .get()
+            })
+            .collect()
+    });
+    assert_eq!(shown, vec![1, 2], "sanity: the first shows 1, the second 2");
+
+    let records = cx.update(|cx| app.update(cx, |a, cx| a.window_records(None, cx)));
+    let workspaces: Vec<u8> = records.iter().map(|r| r.workspace).collect();
+    assert_eq!(workspaces, vec![1, 2], "K order is registration order");
+    assert!(
+        records.iter().all(|r| r.bounds.is_some()),
+        "a live window has bounds: {records:?}"
+    );
+    assert_eq!(records[0].display, Some(1), "the test platform's display");
+    assert!(!records[0].maximized);
+
+    // The same order through the production save.
+    cx.update(|cx| ShellApp::save_session(&app, None, cx));
+    let restored = crate::session::load(&path);
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    let saved: Vec<u8> = restored.windows.iter().map(|r| r.workspace).collect();
+    assert_eq!(saved, vec![1, 2], "the file lists windows.1 then windows.2");
+}

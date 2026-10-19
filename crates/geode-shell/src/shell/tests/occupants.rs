@@ -191,6 +191,7 @@ fn services_with_an_unknown_restored_kind() -> (
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     let ws1: toml::Table = r#"
         focused = 1
@@ -305,6 +306,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     // Workspace 1 (the default active one) stays empty. Workspace 2
     // gets one tile, restored with the recorder's own kind — this is
@@ -1993,6 +1995,7 @@ fn a_tile_restored_into_a_hidden_workspace_is_framed_by_it(cx: &mut gpui::TestAp
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     let ws2: toml::Table = r#"
         focused = 1
@@ -2089,6 +2092,7 @@ fn services_with_a_following_rec_in_workspace_3() -> (
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     let ws3: toml::Table = r#"
         focused = 1

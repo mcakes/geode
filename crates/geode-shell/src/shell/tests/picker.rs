@@ -71,6 +71,7 @@ pub(super) fn services_with_pickable() -> ShellServices {
         composition_diagnostics: Vec::new(),
         pages: crate::module::PageRoster::new(),
         restored_pages: std::collections::BTreeMap::new(),
+        restored_windows: Vec::new(),
     }
 }
 

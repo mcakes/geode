@@ -38,6 +38,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyWindowHandle, App, AppContext, Context, Entity, EventEmitter, SharedString, WeakEntity,
+    Window, WindowBounds,
 };
 
 use super::{ShellEvent, ShellServices, ShellView, hot_reload};
@@ -48,7 +49,7 @@ use crate::linenumbers::LineNumbers;
 use crate::module::Delivery;
 use crate::palette_usage::PaletteUsage;
 use crate::reload;
-use crate::session::{PageRecords, TileRecords};
+use crate::session::{PageRecords, TileRecords, WindowBoundsRecord, WindowRecord};
 use crate::tileadd::AddDirection;
 use crate::tiling::{Added, Switch, TileId, WindowKey, WorkspaceIx};
 use crate::vimfind::FindStyle;
@@ -259,6 +260,11 @@ pub struct ShellApp {
     /// here is written back by every save, after the live records, so a
     /// tile no window hosts keeps its module and state across a restart.
     pub(super) parked_tiles: TileRecords,
+    /// The last run's window records (`[windows.K]`), kept from the
+    /// restored session for the startup that opens a window per record
+    /// ([`Self::take_restored_windows`]). Empty once taken, and empty for
+    /// a session with no usable record, which opens one window on `active`.
+    restored_windows: Vec<WindowRecord>,
     /// How often and how recently each palette row was chosen
     /// (`crate::palette_usage`): read once per palette open to rank the
     /// rows (`PaletteState::with_usage`), written by every palette
@@ -468,6 +474,7 @@ impl ShellApp {
         // history becomes the live one.
         let parked_tiles = std::mem::take(&mut services.restored_tiles);
         let palette_usage = std::mem::take(&mut services.restored_palette_usage);
+        let restored_windows = std::mem::take(&mut services.restored_windows);
 
         // The app-wide settings, each re-derived by `apply_reload`, and
         // the globals that mirror them: `UiSettings`, `SeriesSettings`,
@@ -546,6 +553,7 @@ impl ShellApp {
             pricing_baseline,
             vol_baseline,
             parked_tiles,
+            restored_windows,
             palette_usage,
             palette_usage_version: 0,
             last_palette_usage_written: 0,
@@ -972,6 +980,64 @@ impl ShellApp {
         &self.windows
     }
 
+    /// The restored session's window records, once: the startup that
+    /// opens a window per record takes them. Afterwards, and for a session
+    /// with no record, this is empty.
+    pub fn take_restored_windows(&mut self) -> Vec<WindowRecord> {
+        std::mem::take(&mut self.restored_windows)
+    }
+
+    /// One session record per registered window, in registration order:
+    /// K in `[windows.K]` is the 1-based position in [`Self::windows`],
+    /// whichever window is `current`. Each record names the index the
+    /// window shows, its display and its bounds. `current` is the window
+    /// whose update this runs inside, if any (the should-close hook's own),
+    /// read straight from the `Window` it holds: a window cannot be
+    /// updated again from within its own update, so asking its handle
+    /// would fail and the usual way of quitting would record no window.
+    /// Every other window is asked through its handle; one whose handle no
+    /// longer updates (gone) is skipped with a debug line. Never from
+    /// render: it updates windows.
+    pub fn window_records(
+        &self,
+        current: Option<(WindowKey, &Window)>,
+        cx: &mut App,
+    ) -> Vec<WindowRecord> {
+        // The registry and the shown map agree by construction: a window
+        // registers after `add_window` gave it an index and leaves both in
+        // `window_closed`. A disagreement is a programming error.
+        let placements: Vec<(WindowKey, WorkspaceIx, AnyWindowHandle)> =
+            self.windows
+                .iter()
+                .map(|(key, handle)| {
+                    let shown =
+                        self.services.workspaces.shown(*key).unwrap_or_else(|| {
+                            panic!("registered window {key:?} shows no workspace")
+                        });
+                    (*key, shown, *handle)
+                })
+                .collect();
+        placements
+            .into_iter()
+            .filter_map(|(key, shown, handle)| {
+                let placement = match current {
+                    Some((k, window)) if k == key => Ok(placement_of(window, cx)),
+                    _ => handle.update(cx, |_, window, cx| placement_of(window, cx)),
+                };
+                match placement {
+                    Ok((bounds, display)) => Some(window_record(shown, bounds, display)),
+                    Err(e) => {
+                        tracing::debug!(
+                            target: "geode::session",
+                            "window {key:?} is gone; no session record: {e}"
+                        );
+                        None
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// The platform handle of window `key`; `None` once it closed.
     pub fn handle(&self, key: WindowKey) -> Option<AnyWindowHandle> {
         self.windows
@@ -1175,5 +1241,36 @@ impl ShellApp {
     #[cfg(any(test, feature = "test-support"))]
     pub fn parked_tiles_for_test(&self) -> &TileRecords {
         &self.parked_tiles
+    }
+}
+
+/// What a window says about its placement: its bounds and the id of the
+/// display it is on, `None` while the platform lists no display for it.
+fn placement_of(window: &Window, cx: &App) -> (WindowBounds, Option<u64>) {
+    (
+        window.window_bounds(),
+        window.display(cx).map(|d| u64::from(d.id())),
+    )
+}
+
+/// The record for a window showing `shown`. `Maximized` records the
+/// restore frame with the flag; `Fullscreen` records the restore frame
+/// without it, so the window reopens windowed at that frame.
+fn window_record(shown: WorkspaceIx, bounds: WindowBounds, display: Option<u64>) -> WindowRecord {
+    let (maximized, frame) = match bounds {
+        WindowBounds::Windowed(b) => (false, b),
+        WindowBounds::Maximized(b) => (true, b),
+        WindowBounds::Fullscreen(b) => (false, b),
+    };
+    WindowRecord {
+        workspace: shown.get(),
+        display,
+        bounds: Some(WindowBoundsRecord {
+            x: f32::from(frame.origin.x),
+            y: f32::from(frame.origin.y),
+            w: f32::from(frame.size.width),
+            h: f32::from(frame.size.height),
+        }),
+        maximized,
     }
 }

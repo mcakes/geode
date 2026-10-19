@@ -1773,6 +1773,7 @@ The writer emits `config_version = 1` and these records:
 | `links.<letter>` | One link group's scope, under `scope`, in the encoding `frame` uses for its own (dimension selections, text, expression, named-expression references); written only for a group whose scope is not empty, and an absent table reads as an empty scope |
 | `palette.usage` | Per-row usage count and last-used timestamp |
 | `pages.<kind>` | One opaque table per page kind from `PageContent::serialize`, kept for kinds that never opened this session; the diagnostics page writes its `section` |
+| `windows.K` | One open window per record, K its 1-based registration position (the order in `ShellApp::windows`): `workspace`, the index it showed; `display`, the platform display id, when known; `bounds = { x, y, w, h }`, the window's frame in logical pixels, what `Window::window_bounds` reports, which is the restore frame while maximized or fullscreen, when known; and `maximized = true` while it was. Fullscreen is not recorded. A file with no usable record opens one window on `active` |
 
 `ad_hoc` holds the lane's stored chain whenever one exists; `slot` is
 omitted while the chain is active. A malformed `ad_hoc` warns and is
@@ -1790,7 +1791,8 @@ its own provenance, or none, never the shared lane's.
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
 children, and ratios; stacks store tile IDs and the active member index. All
 materialized workspaces are saved, including empty ones. Default docks, empty
-module state, empty usage history, and an empty pages table are omitted. Only
+module state, empty usage history, an empty pages table and a window table
+with no record are omitted. Only
 tile records whose IDs belong to the workspace's main or dock trees are
 written. Whether a page was open is not recorded.
 
@@ -1823,6 +1825,10 @@ a later save replaces it with the current state.
 | `links` is not a table, a key under it names no group, a group's entry or its `scope` is not a table | Warn and read that group's scope as empty; the other groups and the rest of the file still read. A scope's own fields recover as `frame`'s do |
 | Invalid optional frame or palette data | Retain usable fields/entries and warn for the errors their readers report |
 | `workspaces.N.frame` is not a table | Warn; the workspace restores unpinned |
+| `windows` is not a table | Warn; no window record is restored |
+| A `windows` key that is not an integer, a record that is not a table, or a record whose `workspace` is missing, not an integer, or outside 1–9 | Warn and skip the record |
+| A window record claims a workspace a lower K already claimed | Warn and skip the later record: two windows cannot show one workspace. Records are read in K order, whatever their order in the file |
+| A window record's `display` is not a non-negative integer; its `bounds` is not a table or lacks a numeric `x`, `y`, `w` or `h` (integer or float); its `maximized` is not a boolean | Warn and read that field as unknown, unknown, or `false`; keep the record |
 
 Frame restoration parses scope expressions but does not validate columns
 against the current schema. Invalid slots, expression syntax, date strings,
@@ -1893,6 +1899,22 @@ snapshot is compared, as text without the `links` tables, with the last one
 extracted, and an equal one is not written again. A group's scope alone
 therefore never causes a write; the text handed to the file includes the
 `links` tables whenever one is written.
+
+Each snapshot and each final save first collects one placement record per
+registered window from the live windows (`ShellApp::window_records`: the
+shown index, display and bounds, in registration order), then builds the
+text. Reading a window's bounds updates it and needs `&mut App`, which no
+read lease on the app can share, so the final save is an associated
+function, `ShellApp::save_session(app, current, cx)`: the records are
+collected under a short update of the app with nothing else inside, then
+the app is read once to build and write. `current` is the window whose
+update the call runs inside: the should-close hook passes its own, whose
+bounds are read from the `Window` it holds because a window cannot be
+updated again from within its own update, and without which the usual way
+of quitting would record no window; the quit hook and the watcher pass
+`None`. A window move or resize alone marks nothing dirty; the new bounds
+reach the file with the next snapshot written for another reason, or with
+the final save.
 
 Snapshot collection and TOML serialization run on the UI thread. The watcher
 awaits the file write on the background executor before continuing its loop.

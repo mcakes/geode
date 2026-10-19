@@ -500,6 +500,7 @@ fn a_level_persist_and_reload_leaves_the_config_error_count_unchanged(
         composition_diagnostics: Vec::new(),
         pages: crate::module::PageRoster::new(),
         restored_pages: std::collections::BTreeMap::new(),
+        restored_windows: Vec::new(),
     };
 
     let window = cx

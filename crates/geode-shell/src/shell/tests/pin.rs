@@ -610,7 +610,8 @@ fn a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it(cx: &mut gpui
         "the pinned lane's scope is not the shared record's"
     );
 
-    shell.read_with(&vcx, |s, cx| s.app().read(cx).save_session(cx));
+    let shell_app = shell.read_with(&vcx, |s, _| s.app().clone());
+    cx.update(|cx| ShellApp::save_session(&shell_app, None, cx));
     let saved = crate::session::load(&session_path);
     assert_eq!(saved.pinned.get(&ws(2)), Some(record), "the quit save too");
 

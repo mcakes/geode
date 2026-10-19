@@ -2141,9 +2141,12 @@ fn install_close_hook(
     cx: &mut App,
 ) {
     let _ = window.update(cx, |_, window, cx| {
-        window.on_window_should_close(cx, move |_window, cx| {
+        window.on_window_should_close(cx, move |window, cx| {
             if app.read(cx).is_last_window(key) {
-                app.read(cx).save_session(cx);
+                // The hook runs inside the update of this window, so its
+                // own placement is read from `window`; the save cannot
+                // update it again through its handle.
+                ShellApp::save_session(&app, Some((key, &*window)), cx);
                 if let Some(factory) = &pricer {
                     factory.flush_all(cx);
                 }
@@ -2403,6 +2406,7 @@ role = "key"
             composition_diagnostics: Vec::new(),
             pages: geode_shell::module::PageRoster::new(),
             restored_pages: std::collections::BTreeMap::new(),
+            restored_windows: Vec::new(),
         }
     }
 
@@ -2448,6 +2452,7 @@ role = "key"
             composition_diagnostics: Vec::new(),
             pages: geode_shell::module::PageRoster::new(),
             restored_pages: std::collections::BTreeMap::new(),
+            restored_windows: Vec::new(),
         };
         (services, log)
     }
@@ -3590,6 +3595,7 @@ grain = "underlying"
                 &geode_shell::session::PinnedRecords::new(),
                 &geode_shell::palette_usage::PaletteUsage::new(),
                 &geode_shell::session::PageRecords::new(),
+                &[],
             );
             let ws1: toml::Table = r#"
                 focused = 1
@@ -4424,6 +4430,7 @@ grain = "underlying"
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -5240,6 +5247,7 @@ grain = "underlying"
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = format!(
             r#"
@@ -5384,6 +5392,7 @@ grain = "underlying"
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = format!(
             r#"
@@ -5576,6 +5585,7 @@ grain = "underlying"
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -5936,6 +5946,7 @@ grain = "underlying"
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 2
@@ -6328,6 +6339,7 @@ grain = "underlying"
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -7107,6 +7119,40 @@ grain = "underlying"
         );
     }
 
+    /// The last window's close records its own placement. The should-close
+    /// hook runs inside the closing window's update, where that window
+    /// cannot be updated again, so the save reads the closing window's
+    /// bounds and display from the `Window` the hook holds; without that
+    /// the file written by the usual way of quitting would list no window
+    /// at all.
+    #[gpui::test]
+    fn closing_the_last_window_records_its_own_placement(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let (mut services, _log) = test_shell_services_with_rec_roster();
+        services.session_path = Some(path.clone());
+        let window = open_test_window(cx, services);
+        let app = app_of(window, cx);
+        let key = cx.update(|cx| app.read(cx).windows()[0].0);
+        cx.update(|cx| attach_window(None, &app, key, window.into(), cx));
+        let shown = cx.update(|cx| app.read(cx).services().workspaces.shown(key).unwrap());
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        assert!(vcx.simulate_close(), "the close was refused");
+        let restored = geode_shell::session::load(&path);
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(
+            restored.windows.len(),
+            1,
+            "the closing window's record: {}",
+            std::fs::read_to_string(&path).unwrap_or_default()
+        );
+        assert_eq!(restored.windows[0].workspace, shown.get());
+        assert!(
+            restored.windows[0].bounds.is_some(),
+            "bounds read from the hook's window"
+        );
+    }
     /// The opener `main` installs, for the tests of the close path: a
     /// default test window over a `ShellView` for the reserved key, with
     /// the window's close hook installed as the production opener installs
@@ -7249,7 +7295,7 @@ grain = "underlying"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("session.toml");
         let (app, first, second) = two_windows_with_hooks(cx, &path);
-        cx.update(|cx| app.read(cx).save_session(cx));
+        cx.update(|cx| ShellApp::save_session(&app, None, cx));
         assert!(
             path.exists(),
             "sanity: a save with both windows open writes"
@@ -7317,7 +7363,7 @@ grain = "underlying"
         );
         std::fs::remove_file(&path).unwrap();
         // The quit hook's save, after gpui removed the last window.
-        cx.update(|cx| app.read(cx).save_session(cx));
+        cx.update(|cx| ShellApp::save_session(&app, None, cx));
         assert!(
             !path.exists(),
             "the quit hook saved again after the last close: {}",
@@ -8230,6 +8276,7 @@ grain = "underlying"
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = r#"
             focused = 1
@@ -11407,6 +11454,7 @@ grain = "underlying"
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = format!(
             "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
