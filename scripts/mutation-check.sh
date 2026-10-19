@@ -7357,6 +7357,29 @@ run_mutation "shell: tear_out runs the post-switch work in its window" \
   geode-shell \
   tear_out_reseeds_the_dispatching_window
 
+# A `Raise` outcome is the dispatching window's cue to bring the window
+# showing the index forward; without the call, `mod+N` for a workspace
+# another window shows does nothing the trader can see.
+run_mutation "shell: a raise brings the showing window forward" \
+  crates/geode-shell/src/shell/input.rs \
+  '                Switch::Raise(other) => {
+                    self.app
+                        .update(cx, |app, cx| app.activate_window(other, cx));
+                }' \
+  '                Switch::Raise(_) => {}' \
+  geode-shell \
+  a_switch_to_a_shown_index_moves_nothing_and_asks_to_raise
+
+# The two-window title is `Geode · N`, separator included; the guard
+# entry above proves the index appears, this one that it is spelled as
+# the guides say.
+run_mutation "shell app: the title separator is the middle dot" \
+  crates/geode-shell/src/shell/app.rs \
+  '            Some(ix) if self.windows.len() >= 2 => format!("Geode · {}", ix.get()),' \
+  '            Some(ix) if self.windows.len() >= 2 => format!("Geode {}", ix.get()),' \
+  geode-shell \
+  window_title_names_the_index_only_with_two_windows
+
 run_mutation "catalog: a GiB memory limit reads as GB" \
   crates/geode-data/src/query/catalog.rs \
   '        "gib" => 1024f64.powi(3),' \

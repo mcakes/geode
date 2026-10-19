@@ -161,7 +161,7 @@ a window or a view). Each answer is routed when it arrives
 |---|---|---|
 | Keyed by a tile (query, series, pricing, vol slices, upload, text file, a tile's distinct values) | The one window hosting the tile's workspace (`Workspaces::window_of`), shown or hidden | A tile has one occupant, in the window that hosts its workspace; a hidden workspace's tile still holds its occupant and takes the answer. |
 | Keyless (a fetch finished) or under a shell-owned key (the picker, expression suggestions, action values, diagnostics, the reference and watchlist lanes) | Every registered window, each handed its own copy (`Delivery` is `Clone`; the last window takes the original) | Nothing names the asking window; each window applies the answer only where its own tag matches, and tags come from the app's one counter (`ShellApp::next_tag`), so one window's reply can never fill another's picker. |
-| Keyed by a tile no window hosts (parked by a window close, awaiting the next window to show its index) | Dropped, with a `trace` line on `geode::query` | There is no occupant to read it; the tile requeries when a window builds it again. |
+| Keyed by a tile no window hosts (parked by a window close, awaiting the next window to show its index) | Dropped, with a `trace` line on `geode::query` | There is no occupant to read it, and nothing is lost: the tile's record holds its query, not its answer, and the next window to show the index rebuilds the occupant from the record, as a restore does, so it requeries at the lane it is shown under. |
 
 The route is resolved under one short read of the app and the lease is
 released before any window is updated: a tile's `deliver` may reach back

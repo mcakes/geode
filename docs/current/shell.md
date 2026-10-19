@@ -209,9 +209,14 @@ The trader reaches the two through the palette: `window::tear_out` ("Tear
 out into a new window") and `window::open` ("New window"), category
 Workspace, with no default chord. Each acts on the window it was
 dispatched in; a `window::open` changes nothing in that window but its
-title. Under a modal or over a page both are refused with the dialog's or
-page's notice, as every other workspace verb is: a tear-out would switch
-the window under a dialog bound to its lane. A refusal from the app leaves
+title. Under a modal both are refused with the dialog's notice, as a
+workspace switch and the pin toggle are: a tear-out would switch the
+window under a dialog bound to its lane, and either opens a window while
+that dialog holds the lane. Over a page both are refused with `close the
+page first (esc)`, as the layout verbs are (every `workspace::`, `dock::`
+and `stack::` action but the switches, which close the page and then
+switch): a tear-out would move the tiles the page covers to a window the
+trader is not looking at. A refusal from the app leaves
 a notice and nothing else: `NoFreeWorkspace` shows `all nine workspaces
 are on screen`; `NoOpener` and `OpenerFailed` are the composition root's
 fault, logged under `geode::shell`, and show `could not open a window`.
@@ -340,17 +345,17 @@ router's action: the shell dispatches it through `ShellApp::switch` and
 acts on what `Workspaces::switch` answers. `Unchanged`, the window
 already shows N: focus is reconciled as after any workspace action.
 `Shown`, N was free, hidden in this window or not yet created: the window
-shows it (and now hosts it), re-seeds its flip baseline from N's lane and
-pulls any records already parked for what it hosts. `Raise`, another
+shows it (and now hosts it), pulls any records already parked for what it
+hosts, then re-seeds its flip baseline from N's lane. `Raise`, another
 window shows N: nothing changes, and that window is asked forward
 instead (`ShellApp::activate_window`). `Moved`, another window hosted N
 hidden: this window now shows and hosts it, and N's occupants are parked
 in the window they leave and rebuilt here, under [workspaces moving
 between windows](#workspaces-moving-between-windows). `Invalid`, an
-index outside 1–9, does nothing. Only `Shown` and `Moved` advance the
-window's switch generation. The map's own rules (`add_window`,
-`remove_window`, `lowest_free`) are under [windows, shown and
-hosted](tiling.md#windows-shown-and-hosted).
+index outside 1–9 or a window the map does not list, does nothing. Only
+`Shown` and `Moved` advance the window's switch generation. The map's own
+rules (`add_window`, `remove_window`, `lowest_free`) are under [windows,
+shown and hosted](tiling.md#windows-shown-and-hosted).
 
 A stack occupies one layout slot and keeps two or more leaf tiles alive. Only
 its active member is visible. Focusing a member activates it, so structural
@@ -736,6 +741,22 @@ One logical command has one action or owner method. Keyboard bindings, palette
 rows, toolbar controls, and pointer handlers route to that command instead of
 copying its mutation. Every pointer command exposed to the user must have a
 keyboard route.
+
+The workspace and window verbs are application-wide and live in the
+registry. `workspace::switch_N` (`mod+N`) is dispatched through
+`ShellApp::switch` and acts on the outcome (see [tiles, workspaces, and
+stacks](#tiles-workspaces-and-stacks)): a window already showing N is
+brought forward (`Switch::Raise`, `ShellApp::activate_window`) and the
+dispatching window changes nothing. `window::tear_out` ("Tear out into a
+new window") and `window::open` ("New window"), category Workspace with
+no default chord, open windows through the app's opener (see [opening
+windows](#opening-windows)). Under a modal the switches, the pin toggle
+and the window verbs are refused with the dialog's notice; over a page the
+window verbs are refused with `close the page first (esc)` as the layout
+verbs are, while a switch closes the page and then switches. A window
+verb the app refuses leaves only a notice: `all nine workspaces are on
+screen` when every index is shown, `could not open a window` when the
+opener is missing or failed.
 
 The per-tile `:` command line is local to that tile. It may change the tile's
 query, presentation, cursor, or draft. Frame-wide and application-wide
@@ -1887,31 +1908,32 @@ application quits. Every window carries the same should-close hook,
 installed by the opener as the window opens (`bridge::attach_window`), and
 what a close means depends on whether another window stays open
 (`ShellApp::is_last_window`). A close that leaves another window open
-parks and saves nothing: the hook deregisters the window while it still
+parks and writes nothing: the hook deregisters the window while it still
 stands (`ShellApp::window_closed`), so its occupants park with a live
-context (park, record, closed) and their records wait in the app's parked
-tiles for the next window to show the workspace or for the next save;
-the remaining windows carry on, and the session file changes only at the
-next periodic snapshot or the last close. The last window's close saves:
-the session first, then unsaved pricer sheets, in the order the quit hooks
-run them, and only then deregisters the window; the close then proceeds
-and Geode quits on every platform (`QuitMode::LastWindowClosed`). The
-order matters because gpui removes a closing window before it runs the
-quit hooks, and the window's view and occupants go with it unless a host
-still holds the view, so a snapshot taken then would write the layout with
-that window's tile records missing, and the next start would restore empty
-tiles over the close's save: `ShellApp::save_session` writes nothing while
-no window is registered, and a save after the deregistration would be
-that nothing. The last close's save includes the records earlier closes
-parked, so a workspace closed with its window earlier in the run is
-restored with its tiles. The quit hook saves once, from the app entity,
-and walks no windows: on an explicit application quit (Dock Quit, logout)
-no should-close runs, every window is still registered with its occupants
-live, and that one save covers all of them; after the last window's close
-the hook finds the registry empty and writes nothing, so the session is
-written once either way. A view a host still holds past its window keeps
-its occupants with it, so a save it does reach writes that window's own
-records, not placeholders.
+context (`park`, which lets a module queue its unsaved work, then the
+record, then `closed`); their records wait in the app's parked tiles for
+the next window to show the workspace or for the next save, the remaining
+windows carry on, and the session file changes only at the next periodic
+snapshot or the last close. The last window's close saves: the session
+first, then unsaved pricer sheets, in the order the quit hooks run them,
+and only then deregisters the window; the close then proceeds and Geode
+quits on every platform (`QuitMode::LastWindowClosed`). The order is the
+guard against an empty save: gpui removes a closing window before it runs
+the quit hooks, and the window's view and occupants go with it unless a
+host still holds the view, so a snapshot taken then would write the layout
+with that window's tile records missing, and the next start would restore
+empty tiles over the close's save. `ShellApp::save_session` therefore
+writes nothing while no window is registered, and a save after the
+deregistration would be that nothing. The last close's save includes the
+records earlier closes parked, so a workspace closed with its window
+earlier in the run is restored with its tiles. The quit hook saves once,
+from the app entity, and walks no windows: on an explicit application quit
+(Dock Quit, logout) no should-close runs, every window is still registered
+with its occupants live, and that one save covers all of them; after the
+last window's close the hook finds the registry empty and writes nothing,
+so the session is written once either way. A view a host still holds past
+its window keeps its occupants with it, so a save it does reach writes
+that window's own records, not placeholders.
 
 Limit: on Linux with client-drawn decorations, gpui-component's `TitleBar`
 close button removes the window directly and never runs should-close, so a

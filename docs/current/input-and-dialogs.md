@@ -5,6 +5,15 @@ consulting the ordinary keymap matcher. Dialog state owns the query, selection,
 and editing stage; GPUI inputs and scroll handles reflect that state. This guide
 describes those boundaries and the behavior of the shell's transient surfaces.
 
+Every window owns its own transient surfaces: the palette, the dialog
+stack, the per-tile command line and the matcher's pending chord and
+sequence state are a `ShellView`'s, so a dialog open in one window owns no
+keys in another, and a chord begun in one window is not finished in the
+next. The vocabulary is shared (the registry and keymap are the app's),
+and so is the frame a dialog commits to, which is why the window verbs
+`window::tear_out` and `window::open` are refused under a modal as a
+workspace switch is (see [palette and which-key](#palette-and-which-key)).
+
 See [keymaps and actions](keymaps.md) for binding resolution and
 [configuration dialogs](configuration-dialogs.md) for object drafts and writes.
 
@@ -269,11 +278,14 @@ opens a window while this one's dialog is bound to its lane.
 
 While a page is open the three transient-chrome actions above are refused
 with `close the page first (esc)`, and so are `tile::add`, every per-kind add action,
-`tile::open_with`, `tile::autosize_columns`, `tile::link_group`, and every `workspace::`,
+`tile::open_with`, `tile::autosize_columns`, `tile::link_group`, the window
+verbs (`window::tear_out`, `window::open`), and every `workspace::`,
 `dock::`, and `stack::` action except the workspace switches: the page
 covers the tile surface they would open on or change, and a layout edited
 behind a page is a change the trader cannot see (`Close tile` would destroy
-an unseen tile with no undo). A switch closes the page and then switches.
+an unseen tile with no undo; a tear-out would move the covered tiles to a
+window the trader is not looking at). A switch closes the page and then
+switches.
 The palette reaches every other action over a page.
 
 [`palette`](../../crates/geode-shell/src/palette.rs) matches action title and

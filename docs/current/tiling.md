@@ -159,8 +159,8 @@ asks the other window forward; `Moved` tells the window it came from to
 park its occupants for the index, which the new host rebuilds from their
 records (see [workspaces moving between
 windows](shell.md#workspaces-moving-between-windows)); `Shown` and `Moved`
-re-seed the window's flip baseline and pull any records already parked for
-what it now hosts; `Unchanged` reconciles focus as any recognised workspace
+pull any records already parked for what it now hosts, then re-seed the
+window's flip baseline; `Unchanged` reconciles focus as any recognised workspace
 action does; `Invalid` does nothing.
 
 Each window has its own switch generation (`switch_epoch`), advanced only by
