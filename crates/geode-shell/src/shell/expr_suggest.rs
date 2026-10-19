@@ -118,8 +118,9 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
         return;
     };
     let as_of = view.target_frame(cx).read(cx).as_of().clone();
-    view.next_picker_tag += 1;
-    let tag = view.next_picker_tag;
+    // The app's one tag counter, so no window's reply matches another's;
+    // an input event or dispatch path, never render.
+    let tag = view.with_app(cx, |app| app.next_tag());
     let vocab = view.expr_vocab.clone();
     let resolved = scope.resolve(view.frame.read(cx).named_expressions());
     let Some(c) = completion_mut(view) else {

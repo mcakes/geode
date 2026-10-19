@@ -37,10 +37,13 @@ pub enum FindEvent {
 }
 
 /// An asynchronous outcome routed by the shell. A keyed delivery goes to
-/// its tile; a keyless delivery goes to every visible tile. This is an enum
-/// so a new outcome forces every occupant to make an explicit compile-time
+/// its tile, in the window hosting the tile's workspace; a keyless
+/// delivery goes to every window and every visible tile in it
+/// (`ShellApp::deliver`), so it is `Clone`: the app copies it once per
+/// window, and a keyed one is moved, never copied. This is an enum so a
+/// new outcome forces every occupant to make an explicit compile-time
 /// decision. Matches must remain exhaustive and avoid wildcard arms.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Delivery {
     Query(QueryOutcome),
     Price(PriceOutcome),
@@ -73,7 +76,7 @@ pub enum Delivery {
 
 /// [`Delivery::Upload`]'s fields, mirroring `geode_data::egress::
 /// UploadOutcome` one for one.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UploadDelivery {
     pub key: QueryKey,
     /// The tile's upload counter, echoed back so a stale outcome (an

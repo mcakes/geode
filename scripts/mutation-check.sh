@@ -4777,47 +4777,21 @@ run_mutation "demo: the sources doc's paths glob is rewritten onto the emitted d
   geode-compose \
   the_demo_layer_is_complete_and_points_sources_at_the_directory
 
-# Data events must update through the window so the drain stops when the
-# window closes. The mutation captures a separate ShellView entity clone
-# and routes Health through it, continuing before window.update. Entity
-# updates can succeed after the window is gone, so the named test sends a
-# Health event after closing the window to expose this bypass.
+# Every data event checks the app's registry so the drain stops when the
+# last window closes. The mutation lets a Health event through the check:
+# the app and diagnostics entities outlive the window, so the update
+# succeeds, and the named test sends a Health event after closing the
+# window to expose this bypass.
 run_mutation "bridge: every event branch, not just Query, ends the drain task on a closed window" \
   crates/geode-app/src/bridge.rs \
-  '    cx.spawn(async move |cx: &mut AsyncApp| {
-        let diagnostics = diagnostics_for_drain;
-        let catalog_refresh = catalog_refresh_for_drain;
-        let reference_refresh = reference_refresh_for_drain;
-        // The handle for the retry lanes (`window` below is the `&mut Window`).
-        let retry_window = window;
-        let mut last_dropped = 0u64;
-        let mut last_refused = 0u64;
-        while let Ok(event) = rx.recv().await {
-            let now_dropped = dropped.load(Ordering::Relaxed);
-            let now_refused = refused_handle.dropped_requests();' \
-  '    let shell_direct = shell.clone();
-    cx.spawn(async move |cx: &mut AsyncApp| {
-        let diagnostics = diagnostics_for_drain;
-        let catalog_refresh = catalog_refresh_for_drain;
-        let reference_refresh = reference_refresh_for_drain;
-        // The handle for the retry lanes (`window` below is the `&mut Window`).
-        let retry_window = window;
-        let mut last_dropped = 0u64;
-        let mut last_refused = 0u64;
-        while let Ok(event) = rx.recv().await {
-            let now_dropped = dropped.load(Ordering::Relaxed);
-            let now_refused = refused_handle.dropped_requests();
-            if let DataEvent::Health { source, worst, detail } = &event {
-                shell_direct.update(cx, |s, cx| {
-                    s.diagnostics().update(cx, |d, cx| {
-                        d.note_health(source, worst.clone(), detail.clone(), std::time::SystemTime::now());
-                        cx.notify();
-                    });
-                });
-                last_dropped = now_dropped;
-                last_refused = now_refused;
-                continue;
-            }' \
+  '            let handled = cx.update(|cx| {
+                if !app.read(cx).any_window_open() {
+                    return false;
+                }' \
+  '            let handled = cx.update(|cx| {
+                if !app.read(cx).any_window_open() && !matches!(event, DataEvent::Health { .. }) {
+                    return false;
+                }' \
   geode-app \
   the_drain_task_ends_on_the_first_event_after_the_window_closes
 
@@ -4827,7 +4801,7 @@ run_mutation "bridge: every event branch, not just Query, ends the drain task on
 # stays empty until the dataset's next publish.
 run_mutation "reference global: attach reads each reference dataset" \
   crates/geode-app/src/bridge.rs \
-  '        reference_cache.refresh(dataset, window, cx);' \
+  '        reference_cache.refresh(dataset, app, cx);' \
   '        let _ = dataset;' \
   geode-app attach_reads_each_reference_dataset_live
 
@@ -4890,18 +4864,19 @@ run_mutation "reference global: a failed read keeps the last table" \
 
 run_mutation "reference global: a busy refusal arms a retry" \
   crates/geode-app/src/bridge.rs \
-  '            Err(Refusal::Busy) => self.retry(dataset, window, cx),' \
+  '            Err(Refusal::Busy) => self.retry(dataset, app, cx),' \
   '            Err(Refusal::Busy) => {}' \
   geode-app a_busy_refusal_retries_and_keeps_the_cache
 
 # The drain holds the cache until its next event, so the weak handle alone
-# does not end the retry lane when the window closes.
+# does not end the retry lane when the last window closes; the app's
+# registry does.
 run_mutation "reference global: a retry ends with its window" \
   crates/geode-app/src/bridge.rs \
-  '                    if window.read(cx).is_ok() {
-                        cache.refresh(&dataset, window, cx);' \
+  '                    if app.read(cx).any_window_open() {
+                        cache.refresh(&dataset, &app, cx);' \
   '                    if true {
-                        cache.refresh(&dataset, window, cx);' \
+                        cache.refresh(&dataset, &app, cx);' \
   geode-app a_refused_reread_does_not_retry_after_window_closure
 
 run_mutation "reference global: one retry timer per dataset" \
@@ -6459,9 +6434,8 @@ run_mutation "M2: a text session that ends where it began pops its own undo entr
 
 run_mutation "M5: the picker's tag is session-wide, not per-open" \
   crates/geode-shell/src/shell/picker.rs \
-  '    view.next_picker_tag += 1;
-    let tag = view.next_picker_tag;' \
-  '    let tag = view.next_picker_tag;' \
+  '    let tag = view.with_app(cx, |app| app.next_tag());' \
+  '    let tag: u64 = 1;' \
   geode-shell a_second_open_on_the_same_column_carries_a_larger_tag_than_the_first
 
 run_mutation "M7: the flip barrier is swept on the reload-poll tick" \
@@ -7294,6 +7268,50 @@ run_mutation "shell app: a rolled-back tear-out parks nothing" \
   '                if *window == self.key && true' \
   geode-shell \
   a_failing_opener_rolls_the_tear_out_back
+
+# A keyed answer has one home, the window hosting its tile's workspace.
+# Broadcasting it would hand every window an answer for a tile it does
+# not host, and read every window for each tile's every query.
+run_mutation "shell app: a keyed delivery reaches only the hosting window" \
+  crates/geode-shell/src/shell/app.rs \
+  '            Some(host) => Route::Window(host),' \
+  '            Some(_) => Route::Broadcast,' \
+  geode-shell \
+  a_keyed_delivery_reaches_the_hosting_window_only
+
+# An answer for a tile no window hosts (parked by a close) is dropped;
+# routed anywhere it would be read, or panic, for a tile nobody shows.
+run_mutation "shell app: an answer for a parked tile is dropped" \
+  crates/geode-shell/src/shell/app.rs \
+  '            None => Route::Drop,' \
+  '            None => Route::Broadcast,' \
+  geode-shell \
+  an_answer_for_a_parked_tile_is_dropped
+
+# The pickers' distinct requests share a few reserved keys and their
+# answers are broadcast, so a tag must never repeat across windows: one
+# window's reply would fill another's picker.
+run_mutation "shell app: picker tags are unique across windows" \
+  crates/geode-shell/src/shell/app.rs \
+  '    pub fn next_tag(&mut self) -> u64 {
+        self.next_tag += 1;
+        self.next_tag
+    }' \
+  '    pub fn next_tag(&mut self) -> u64 {
+        1
+    }' \
+  geode-shell \
+  picker_tags_are_unique_across_windows
+
+# The bridge attaches ahead of the first window; its drain and lanes must
+# run until the last window closes, not end on the first event before a
+# window registers.
+run_mutation "bridge: the lanes run before the first window registers" \
+  crates/geode-shell/src/shell/app.rs \
+  '        !self.has_registered_view || !self.windows.is_empty()' \
+  '        !self.windows.is_empty()' \
+  geode-app \
+  the_drain_delivers_before_the_first_window_registers
 
 # A window verb refused for want of a free index names the trader's
 # situation; the generic failure notice would send him looking for a
@@ -21637,17 +21655,15 @@ run_mutation "bridge: a SeriesFetched event reaches the shell" \
                         identity,
                         result,
                     } => {
-                        shell.update(cx, |s, cx| {
-                            s.deliver(
-                                Delivery::SeriesFetched {
-                                    source,
-                                    identity,
-                                    result,
-                                },
-                                window,
-                                cx,
-                            )
-                        });
+                        ShellApp::deliver(
+                            &app,
+                            Delivery::SeriesFetched {
+                                source,
+                                identity,
+                                result,
+                            },
+                            cx,
+                        );
                     }' \
   '                    DataEvent::SeriesFetched { .. } => {}' \
   geode-app \
@@ -23916,13 +23932,13 @@ run_mutation "catalog refresh: old as-of results are discarded" \
 
 run_mutation "catalog refresh: refused submissions retry" \
   crates/geode-app/src/bridge.rs \
-  'refresh.retry(&diagnostics, request, window, cx);' \
-  '// Refused demand is lost.' \
+  '                    refresh.retry(&diagnostics, request, &app, cx);' \
+  '                    // Refused demand is lost.' \
   geode-app catalog_refusal_and_failure_retry_without_new_events
 
 run_mutation "catalog refresh: failed reads retry" \
   crates/geode-app/src/bridge.rs \
-  'catalog_refresh.retry(&diagnostics, request, retry_window, cx);' \
+  'catalog_refresh.retry(&diagnostics, request, &app, cx);' \
   '// Failed read leaves no retry.' \
   geode-app catalog_refusal_and_failure_retry_without_new_events
 
@@ -23948,27 +23964,30 @@ run_mutation "catalog refresh: retry wakes the observer" \
 # timer's wake of the surviving diagnostics entity instead.
 run_mutation "catalog refresh: retry ends with its window" \
   crates/geode-app/src/bridge.rs \
-  'let _ = window.update(cx, |_, _, cx| {' \
-  'let _ = cx.update(|cx| {' \
+  '            cx.update(|cx| {
+                if !app.read(cx).any_window_open() {
+                    return;
+                }' \
+  '            cx.update(|cx| {' \
   geode-app catalog_refusal_and_failure_retry_without_new_events
 
-# The bridge's observers keep the shell and diagnostics entities alive past
-# the window, so a late notify (the shell's poll did this while it outlived
-# the window) must not turn queued demand into a submission.
+# The bridge's observers keep the app and diagnostics entities alive past
+# the last window, so a late notify (the shell's poll did this while it
+# outlived the window) must not turn queued demand into a submission.
 run_mutation "catalog refresh: a closed window submits nothing" \
   crates/geode-app/src/bridge.rs \
-  '            // into a read for a window nobody sees.
-            if window.read(cx).is_err() {' \
-  '            // into a read for a window nobody sees.
-            if false && window.read(cx).is_err() {' \
+  '            // demand into a read for a window nobody sees.
+            if !app.read(cx).any_window_open() {' \
+  '            // demand into a read for a window nobody sees.
+            if false && !app.read(cx).any_window_open() {' \
   geode-app catalog_refusal_and_failure_retry_without_new_events
 
 run_mutation "diagnostics reads: a closed window submits no poll or reference read" \
   crates/geode-app/src/bridge.rs \
-  '            // As the catalog lane: no submission for a closed window.
-            if window.read(cx).is_err() {' \
-  '            // As the catalog lane: no submission for a closed window.
-            if false && window.read(cx).is_err() {' \
+  '            // As the catalog lane: no submission once every window closed.
+            if !app.read(cx).any_window_open() {' \
+  '            // As the catalog lane: no submission once every window closed.
+            if false && !app.read(cx).any_window_open() {' \
   geode-app a_closed_window_submits_no_poll_or_reference_read
 
 run_mutation "catalog refresh: explicit demand survives the last watcher" \
@@ -24087,18 +24106,16 @@ run_mutation "shell: an upload delivery routes by key" \
 run_mutation "bridge: a DataEvent::Upload reaches the shell" \
   crates/geode-app/src/bridge.rs \
   '                    DataEvent::Upload(outcome) => {
-                        shell.update(cx, |s, cx| {
-                            s.deliver(
-                                Delivery::Upload(UploadDelivery {
-                                    key: outcome.key,
-                                    tag: outcome.tag,
-                                    target: outcome.target,
-                                    result: outcome.result,
-                                }),
-                                window,
-                                cx,
-                            )
-                        });
+                        ShellApp::deliver(
+                            &app,
+                            Delivery::Upload(UploadDelivery {
+                                key: outcome.key,
+                                tag: outcome.tag,
+                                target: outcome.target,
+                                result: outcome.result,
+                            }),
+                            cx,
+                        );
                     }' \
   '                    DataEvent::Upload(_) => {}' \
   geode-app \
@@ -33096,7 +33113,7 @@ run_mutation "action confirm: no runs the action" \
 # A position command's answer reaches the status notice through the drain.
 run_mutation "command outcome: the drain drops the answer" \
   crates/geode-app/src/bridge.rs \
-  '                        shell.update(cx, |s, cx| s.note_command(&outcome, cx));' \
+  '                        ShellApp::note_command(&app, &outcome, cx);' \
   '                        let _ = &outcome;' \
   geode-app a_command_answer_reaches_the_status_notice
 

@@ -49,7 +49,7 @@ mod value_color;
 pub mod whichkey;
 
 pub use crate::tiling::WindowKey;
-pub use app::{OpenRefusal, Placement, ShellApp, WindowOpener, WindowSpec};
+pub use app::{OpenRefusal, Placement, Route, ShellApp, WindowOpener, WindowSpec};
 pub use keys::convert_keystroke;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -759,9 +759,6 @@ pub struct ShellView {
     /// State for the open dimension picker. Created by `picker::open` and
     /// cleared when its kind pops.
     picker: Option<picker::PickerState>,
-    /// Next distinct-request tag. Shared across picker opens so a late reply
-    /// from a closed picker cannot match a fresh request for the same column.
-    next_picker_tag: u64,
     /// Scroll handle for the picker's virtualized Values list. Selection-change
     /// paths call `picker::sync_picker_scroll` to keep keyboard navigation
     /// visible; virtualization alone does not move the viewport.
@@ -1241,7 +1238,6 @@ impl ShellView {
             text_dims,
             expr_vocab,
             picker: None,
-            next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             as_of_scroll: ScrollHandle::new(),

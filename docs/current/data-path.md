@@ -1695,11 +1695,12 @@ Non-local publication events advance matching dataset/document watches; a
 document watch on a key prefix advances for every document under it, at the
 same key-part boundary a prefix read uses. Local publications update
 diagnostics without advancing frame revisions. Query
-results are addressed to the requesting key. Series fetch completion is
-broadcast to visible occupants by `(identity, source)` so modules watching
+results are addressed to the requesting key and delivered to the window
+hosting that tile's workspace. Series fetch completion is broadcast to
+every window's visible occupants by `(identity, source)` so modules watching
 that pair can react, including when a fetch appended zero rows. See
-[window routing](request-delivery.md#routing-into-the-window) for delivery
-filters and catalog refresh behavior.
+[routing into the windows](request-delivery.md#routing-into-the-windows) for
+delivery filters and catalog refresh behavior.
 
 Ingest and discovery workers continue after event refusal and do not retry
 individual events. The app mailbox retains terminal outcomes and publication

@@ -377,7 +377,7 @@ pub struct PriceParams {
 
 /// The answer, addressed to the key that asked. A cancelled batch
 /// carries the lines priced before the cancel landed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PriceOutcome {
     pub key: QueryKey,
     pub tag: u64,

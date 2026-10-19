@@ -45,6 +45,7 @@ use crate::diagnostics::Diagnostics;
 use crate::fontsize::FontSize;
 use crate::frame::Frame;
 use crate::linenumbers::LineNumbers;
+use crate::module::Delivery;
 use crate::palette_usage::PaletteUsage;
 use crate::reload;
 use crate::session::{PageRecords, TileRecords};
@@ -52,6 +53,8 @@ use crate::tileadd::AddDirection;
 use crate::tiling::{Added, Switch, TileId, WindowKey, WorkspaceIx};
 use crate::vimfind::FindStyle;
 use geode_core::config::{Config, LayerDoc};
+use geode_core::positions::CommandOutcome;
+use geode_core::query::{DistinctOutcome, QueryKey};
 
 impl EventEmitter<ShellEvent> for ShellApp {}
 
@@ -86,6 +89,20 @@ pub struct WindowSpec {
 /// (`register_view`, `take_parked_records`). `None` means no window was
 /// opened and the caller rolls the reservation back.
 pub type WindowOpener = Rc<dyn Fn(WindowKey, &WindowSpec, &mut App) -> Option<AnyWindowHandle>>;
+
+/// Where an asynchronous answer goes ([`ShellApp::route`]). A keyed
+/// answer has one home, the window hosting its tile's workspace, shown or
+/// hidden; a keyless answer and one under a shell-owned key (a picker, the
+/// diagnostics page, the reference and watchlist lanes) concern every
+/// window, each of which checks its own tag; an answer for a tile no
+/// window hosts (parked by a close, awaiting the next window to show its
+/// index) has nowhere to go and is dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    Window(WindowKey),
+    Broadcast,
+    Drop,
+}
 
 /// Why a window was not opened. Each leaves the app as it was.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,10 +147,17 @@ pub struct ShellApp {
     /// removed with it. Weak, so this owner never keeps a view alive;
     /// [`Self::views`] skips a handle whose view is gone.
     pub(super) views: Vec<(WindowKey, WeakEntity<ShellView>)>,
-    /// Whether any view has registered yet. The watcher ends once the
-    /// registry is empty, but not before the first window registers: the
-    /// loop starts with this entity, ahead of its first window.
+    /// Whether any view has registered yet. The watcher and the bridge's
+    /// lanes end once the registry is empty, but not before the first
+    /// window registers: both start with this entity, ahead of its first
+    /// window ([`Self::any_window_open`]).
     has_registered_view: bool,
+    /// The last distinct-request tag issued by [`Self::next_tag`]. One
+    /// counter for every window's pickers, expression fields and action
+    /// value choices: their requests share a few reserved keys and their
+    /// answers are broadcast, so a tag must never repeat across windows or
+    /// one window's reply would fill another's picker.
+    next_tag: u64,
     /// What opens a window for a reserved key, installed once by the
     /// composition root. `None` until then: `open_window` refuses
     /// `NoOpener` before it reserves anything.
@@ -499,6 +523,7 @@ impl ShellApp {
             windows: Vec::new(),
             views: Vec::new(),
             has_registered_view: false,
+            next_tag: 0,
             window_opener: None,
             font_size,
             find_style,
@@ -795,11 +820,149 @@ impl ShellApp {
         self.views.iter().filter_map(|(_, view)| view.upgrade())
     }
 
-    /// Whether the watcher has work left: until the first window
-    /// registers, and then while the registry lists a window. A tick with
-    /// none would wake diagnostics and write a session for nobody.
+    /// Whether the watcher has work left: [`Self::any_window_open`]. A
+    /// tick with no window would wake diagnostics and write a session for
+    /// nobody.
     pub(super) fn watcher_runs(&self) -> bool {
+        self.any_window_open()
+    }
+
+    /// Whether anything is, or is about to be, on screen: true until the
+    /// first window registers, and then while the registry lists a
+    /// window. The liveness every app-lifetime loop checks (the watcher,
+    /// the bridge's drain and its retry lanes): each starts with this
+    /// entity, ahead of its first window, and ends when the last window
+    /// has deregistered. Neither `cx.windows()` nor a view entity's
+    /// liveness decides, since the bridge's closures and the quit hooks
+    /// hold a view past its window.
+    pub fn any_window_open(&self) -> bool {
         !self.has_registered_view || !self.windows.is_empty()
+    }
+
+    /// Issue the next distinct-request tag: counts up from 1, never
+    /// repeats within a run, and is shared by every window (see the
+    /// field). An event, dispatch or constructor path only, as every app
+    /// update is.
+    pub fn next_tag(&mut self) -> u64 {
+        self.next_tag += 1;
+        self.next_tag
+    }
+
+    /// Where `delivery` goes — see [`Route`]. Keyless → every window; a
+    /// shell-owned key (`is_shell_key`, `REFERENCE_KEY`, a watchlist key)
+    /// → every window; otherwise the key is a tile id and the answer goes
+    /// to the window hosting the tile's workspace (`Workspaces::
+    /// window_of`), or nowhere while none does.
+    pub fn route(&self, delivery: &Delivery) -> Route {
+        self.route_key(delivery.key())
+    }
+
+    /// [`Self::route`] on a bare key: what a distinct answer, which
+    /// carries no `Delivery` under a shell key, is routed by.
+    pub fn route_key(&self, key: Option<QueryKey>) -> Route {
+        let Some(key) = key else {
+            return Route::Broadcast;
+        };
+        if super::is_shell_key(key) || key == super::REFERENCE_KEY || super::is_watchlist_key(key) {
+            return Route::Broadcast;
+        }
+        match self.services.workspaces.window_of(TileId(key.0)) {
+            Some(host) => Route::Window(host),
+            None => Route::Drop,
+        }
+    }
+
+    /// The windows `route` names, each as its platform handle and live
+    /// view, in opening order: one for `Window`, every registered one for
+    /// `Broadcast`, none for `Drop`. A window whose view is gone (a
+    /// fixture that removed it without `window_closed`) is skipped.
+    fn targets(&self, route: Route) -> Vec<(AnyWindowHandle, Entity<ShellView>)> {
+        let pair = |key: WindowKey| {
+            let handle = self.handle(key)?;
+            let view = self
+                .views
+                .iter()
+                .find(|(k, _)| *k == key)
+                .and_then(|(_, view)| view.upgrade())?;
+            Some((handle, view))
+        };
+        match route {
+            Route::Drop => Vec::new(),
+            Route::Window(key) => pair(key).into_iter().collect(),
+            Route::Broadcast => self.windows.iter().filter_map(|(k, _)| pair(*k)).collect(),
+        }
+    }
+
+    /// Hand `delivery` to the window(s) its route names: inside each
+    /// window's update, so the view has its `Window`, through
+    /// `ShellView::deliver`. A `Broadcast` is cloned per window but the
+    /// last; a `Window` route moves it; a `Drop` is logged at `trace` on
+    /// `geode::query` and discarded, as is a route whose window is gone.
+    ///
+    /// An associated function, not a method: the route is resolved under
+    /// one short read of the app and the lease is released before any
+    /// window is updated, because a tile's `deliver` may reach back into
+    /// the app (a flip barrier releasing, a session mark) and an update
+    /// of a leased entity is refused.
+    pub fn deliver(app: &Entity<ShellApp>, delivery: Delivery, cx: &mut App) {
+        let (route, targets) = {
+            let app = app.read(cx);
+            let route = app.route(&delivery);
+            (route, app.targets(route))
+        };
+        let Some((last, rest)) = targets.split_last() else {
+            tracing::trace!(
+                target: "geode::query",
+                "dropped an answer for key {:?}: {}",
+                delivery.key(),
+                if route == Route::Drop { "no window hosts its tile" } else { "its window is gone" }
+            );
+            return;
+        };
+        for (handle, view) in rest {
+            let copy = delivery.clone();
+            let _ = handle.update(cx, |_, window, cx| {
+                view.update(cx, |v, cx| v.deliver(copy, window, cx))
+            });
+        }
+        let (handle, view) = last;
+        let _ = handle.update(cx, |_, window, cx| {
+            view.update(cx, |v, cx| v.deliver(delivery, window, cx))
+        });
+    }
+
+    /// Route a distinct answer under a shell-owned key (a picker's, an
+    /// expression field's, an action value choice's) the way
+    /// [`Self::deliver`] routes a `Delivery`: to every window, each of
+    /// which applies it only to the surface holding the answer's tag
+    /// (`ShellView::deliver_distinct`). A tile's key takes the
+    /// `Delivery::Distinct` route instead. Same lease discipline as
+    /// `deliver`.
+    pub fn deliver_distinct(app: &Entity<ShellApp>, outcome: DistinctOutcome, cx: &mut App) {
+        if !super::is_shell_key(outcome.key) {
+            Self::deliver(app, Delivery::Distinct(outcome), cx);
+            return;
+        }
+        let views: Vec<Entity<ShellView>> = app.read(cx).views().collect();
+        let Some((last, rest)) = views.split_last() else {
+            return;
+        };
+        for view in rest {
+            let copy = outcome.clone();
+            view.update(cx, |v, cx| v.deliver_distinct(copy, cx));
+        }
+        last.update(cx, |v, cx| v.deliver_distinct(outcome, cx));
+    }
+
+    /// Show a position command's answer as every window's status notice
+    /// (`ShellView::note_command`): the command was sent from one window,
+    /// but nothing names it, and the answer is informational. Same lease
+    /// discipline as `deliver`.
+    pub fn note_command(app: &Entity<ShellApp>, outcome: &CommandOutcome, cx: &mut App) {
+        let views: Vec<Entity<ShellView>> = app.read(cx).views().collect();
+        for view in views {
+            view.update(cx, |v, cx| v.note_command(outcome, cx));
+        }
     }
 
     /// The open windows, in opening order: each key and its platform

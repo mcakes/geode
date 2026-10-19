@@ -31,16 +31,19 @@ use geode_pricer::core::{
 };
 use geode_pricer::store::DuckSheetStore;
 use geode_scenario::ScenarioFactory;
-use geode_shell::diagnostics::{CatalogRequest, Diagnostics, ReferenceLane, SourceSummary};
+use geode_shell::diagnostics::{
+    CatalogRequest, DIAGNOSTICS_PAGE_KIND, Diagnostics, ReferenceLane, SourceSummary,
+};
 use geode_shell::module::placeholder::PLACEHOLDER_KIND;
 use geode_shell::module::{Delivery, UploadDelivery};
 use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::{
     DIAGNOSTICS_KEY, REFERENCE_KEY, ShellApp, ShellEvent, ShellView, is_shell_key, is_watchlist_key,
 };
+use geode_shell::tiling::WindowKey;
 use geode_shell::vimfind::FindStyle;
 use geode_watchlist::{WatchlistConfig, WatchlistFactory};
-use gpui::{App, AsyncApp, Entity, WindowHandle};
+use gpui::{AnyWindowHandle, App, AsyncApp, Entity, WindowHandle};
 use gpui_component::Root;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1029,19 +1032,12 @@ pub fn save_on_close(
     cx: &mut App,
 ) {
     let pricer = bridge.map(|bridge| Rc::clone(&bridge.pricer));
-    let _ = window.update(cx, |_, window, cx| {
-        window.on_window_should_close(cx, move |_window, cx| {
-            app.read(cx).save_session(cx);
-            if let Some(factory) = &pricer {
-                factory.flush_all(cx);
-            }
-            true
-        });
-    });
+    install_save_on_close(window.into(), app, pricer, cx);
 }
 
-/// Window-local request lifecycle. The diagnostics entity owns the single
-/// pending refresh bit; only the bridge owns submissions and their replies.
+/// The catalog request lifecycle, one per app. The diagnostics entity owns
+/// the single pending refresh bit; only the bridge owns submissions and
+/// their replies.
 #[derive(Default)]
 struct CatalogRefresh {
     tag: Cell<u64>,
@@ -1053,12 +1049,15 @@ const CATALOG_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 impl CatalogRefresh {
     /// Retain demand after refusal/error without spinning the observer. At most
-    /// one timer exists, and it neither retains the window nor the data handle.
+    /// one timer exists, and it retains neither the data handle nor the
+    /// diagnostics entity; it wakes diagnostics only while a window is open
+    /// (`ShellApp::any_window_open`), so a late timer cannot turn queued
+    /// demand into a read for nobody.
     fn retry(
         self: &Rc<Self>,
         diagnostics: &Entity<Diagnostics>,
         request: CatalogRequest,
-        window: WindowHandle<Root>,
+        app: &Entity<ShellApp>,
         cx: &mut App,
     ) {
         let pending = diagnostics.update(cx, |d, _| {
@@ -1073,10 +1072,14 @@ impl CatalogRefresh {
         }
         let refresh = self.clone();
         let diagnostics = diagnostics.downgrade();
+        let app = app.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             cx.background_executor().timer(CATALOG_RETRY_DELAY).await;
             refresh.retry_pending.set(false);
-            let _ = window.update(cx, |_, _, cx| {
+            cx.update(|cx| {
+                if !app.read(cx).any_window_open() {
+                    return;
+                }
                 let _ = diagnostics.update(cx, |d, cx| {
                     if d.pending_catalog_request() {
                         cx.notify();
@@ -1085,6 +1088,27 @@ impl CatalogRefresh {
             });
         })
         .detach();
+    }
+}
+
+/// The as-of the diagnostics lanes (the catalog and the page's reference
+/// reads) submit under and compare an answer against. Both serve the
+/// diagnostics page, which reads its window's shown lane, so the window
+/// with the page open answers; with none open (an identity picker's
+/// catalog request, a watched refresh after the page hid), the oldest
+/// window's shown lane; with no window at all, the shared lane. A pinned
+/// workspace has its own as-of, which is why the app's frame alone cannot
+/// answer.
+fn lanes_as_of(app: &Entity<ShellApp>, cx: &App) -> AsOf {
+    let app = app.read(cx);
+    let views: Vec<Entity<ShellView>> = app.views().collect();
+    let asking = views
+        .iter()
+        .find(|v| v.read(cx).open_page_kind() == Some(DIAGNOSTICS_PAGE_KIND))
+        .or(views.first());
+    match asking {
+        Some(view) => view.read(cx).active_frame(cx).read(cx).as_of().clone(),
+        None => app.frame().read(cx).shared().as_of().clone(),
     }
 }
 
@@ -1140,9 +1164,9 @@ impl ReferenceCache {
 
     /// Read `dataset`'s live table under a new tag, superseding any read in
     /// flight. `Busy` arms a retry; `Stopped` drops the demand, since nothing
-    /// would ever serve it. `window` is the window the cache serves; its
-    /// closure ends a retry.
-    fn refresh(self: &Rc<Self>, dataset: &str, window: WindowHandle<Root>, cx: &mut App) {
+    /// would ever serve it. `app` is the app the cache serves; the last
+    /// window's closure ends a retry.
+    fn refresh(self: &Rc<Self>, dataset: &str, app: &Entity<ShellApp>, cx: &mut App) {
         // The tag becomes the latest only once submitted: a refused read
         // sends nothing, and advancing the tag anyway would drop the answer
         // to the read still in flight.
@@ -1156,29 +1180,30 @@ impl ReferenceCache {
             Ok(()) => {
                 self.tags.borrow_mut().insert(dataset.to_string(), tag);
             }
-            Err(Refusal::Busy) => self.retry(dataset, window, cx),
+            Err(Refusal::Busy) => self.retry(dataset, app, cx),
             Err(Refusal::Stopped) => {}
         }
     }
 
     /// Reread after the delay. A dataset already waiting keeps its one timer,
     /// so a burst of refused publishes cannot pile up reads. The timer holds
-    /// the cache weakly and checks the window: the drain keeps the cache
-    /// alive until its next event, so only the window's closure reliably
-    /// ends the lane.
-    fn retry(self: &Rc<Self>, dataset: &str, window: WindowHandle<Root>, cx: &mut App) {
+    /// the cache weakly and checks the app's registry: the drain keeps the
+    /// cache alive until its next event, so only the last window's closure
+    /// (`ShellApp::any_window_open`) reliably ends the lane.
+    fn retry(self: &Rc<Self>, dataset: &str, app: &Entity<ShellApp>, cx: &mut App) {
         if !self.retry.borrow_mut().insert(dataset.to_string()) {
             return;
         }
         let cache = Rc::downgrade(self);
         let dataset = dataset.to_string();
+        let app = app.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             cx.background_executor().timer(REFERENCE_RETRY_DELAY).await;
             cx.update(|cx| {
                 if let Some(cache) = cache.upgrade() {
                     cache.retry.borrow_mut().remove(&dataset);
-                    if window.read(cx).is_ok() {
-                        cache.refresh(&dataset, window, cx);
+                    if app.read(cx).any_window_open() {
+                        cache.refresh(&dataset, &app, cx);
                     }
                 }
             });
@@ -1235,12 +1260,19 @@ impl ReferenceCache {
     }
 }
 
-/// Route mailbox events through the window and forward reloads. Awaiting the
-/// receiver wakes the foreground task on arrival; scheduling and UI work still
-/// determine delivery latency. The task checks window liveness on each event.
-/// Reloads are heard from `app`, the one emitter of `ShellEvent`; the window
-/// stays for delivery.
-pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root>, cx: &mut App) {
+/// Route mailbox events to the app's windows and forward reloads. Awaiting
+/// the receiver wakes the foreground task on arrival; scheduling and UI work
+/// still determine delivery latency. The bridge holds the app, never a
+/// window or a view: each answer is routed when it arrives
+/// (`ShellApp::deliver`: a keyed one to the window hosting its tile, a
+/// keyless or shell-keyed one to every window, one for a parked tile
+/// dropped), so a window opened after attach is served and one closed
+/// before an answer is not read. The task and the retry lanes check
+/// `ShellApp::any_window_open` on each event: they run from attach, ahead
+/// of the first window, and end once the last window has deregistered.
+/// Reloads are heard from `app`, the one emitter of `ShellEvent`. Call
+/// once per process; [`attach_window`] adds each window's own hooks.
+pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
     let rx = bridge.events.clone();
     let dropped = bridge.dropped.clone();
     let handle = bridge.handle.clone();
@@ -1248,12 +1280,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
     let panels = bridge.panels.clone();
     let timeseries = bridge.timeseries.clone();
 
-    let shell = window
-        .read(cx)
-        .ok()
-        .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
-        .expect("the window's root view is the shell");
-    let diagnostics = shell.read(cx).diagnostics().clone();
+    let diagnostics = app.read(cx).diagnostics().clone();
 
     // Describe startup sources once using shared summary values, keeping shell
     // independent of geode-data types.
@@ -1300,13 +1327,13 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
     cx.observe(&diagnostics, {
         let handle = handle.clone();
         let diagnostics = diagnostics.clone();
-        let shell = shell.clone();
+        let app = app.clone();
         let refresh = catalog_refresh.clone();
         move |_entity, cx| {
             // This observer and the drain keep the diagnostics entity alive
-            // past the window, and a late notify must not turn queued demand
-            // into a read for a window nobody sees.
-            if window.read(cx).is_err() {
+            // past the last window, and a late notify must not turn queued
+            // demand into a read for a window nobody sees.
+            if !app.read(cx).any_window_open() {
                 return;
             }
             if refresh.in_flight.get().is_some() || refresh.retry_pending.get() {
@@ -1317,7 +1344,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
             };
             let tag = refresh.tag.get() + 1;
             refresh.tag.set(tag);
-            let as_of = shell.read(cx).active_frame(cx).read(cx).as_of().clone();
+            let as_of = lanes_as_of(&app, cx);
             match handle.catalog(CatalogParams {
                 key: DIAGNOSTICS_KEY,
                 tag,
@@ -1329,7 +1356,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                         target: "geode::query",
                         "catalog request refused: the data service is busy; retrying"
                     );
-                    refresh.retry(&diagnostics, request, window, cx);
+                    refresh.retry(&diagnostics, request, &app, cx);
                 }
                 // Nothing will serve a retry, and the stopped segment already
                 // says why: keeping the demand would re-ask on every notify.
@@ -1345,17 +1372,17 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
     cx.observe(&diagnostics, {
         let handle = handle.clone();
         let diagnostics = diagnostics.clone();
-        let shell = shell.clone();
+        let app = app.clone();
         let refresh = reference_refresh.clone();
         move |_entity, cx| {
-            // As the catalog lane: no submission for a closed window.
-            if window.read(cx).is_err() {
+            // As the catalog lane: no submission once every window closed.
+            if !app.read(cx).any_window_open() {
                 return;
             }
             if let Some(dataset) = diagnostics.update(cx, |d, _| d.take_reference_request()) {
                 let tag = refresh.tag.get() + 1;
                 refresh.tag.set(tag);
-                let as_of = shell.read(cx).active_frame(cx).read(cx).as_of().clone();
+                let as_of = lanes_as_of(&app, cx);
                 if let Err(refusal) = handle.reference(ReferenceParams {
                     key: DIAGNOSTICS_KEY,
                     tag,
@@ -1404,7 +1431,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
         &bridge.reference_datasets,
     ));
     for (dataset, _) in &bridge.reference_datasets {
-        reference_cache.refresh(dataset, window, cx);
+        reference_cache.refresh(dataset, app, cx);
     }
 
     // Resolved watchlists for `WatchlistGlobal`: fold every list now against
@@ -1413,7 +1440,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
     // doc's, as the service read them.
     let watchlist_cache = Rc::new(WatchlistCache::new(handle.clone()));
     let (folded, watchlist_diags) = {
-        let config = shell.read(cx).config(cx);
+        let config = app.read(cx).config();
         let (dims, _) = config
             .doc(DIMENSIONS_DOC)
             .map(DerivedDimensions::from_doc)
@@ -1432,13 +1459,14 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
             }
         });
     }
-    watchlist_cache.set_definitions(folded, window, cx);
+    watchlist_cache.set_definitions(folded, app, cx);
     // `watchlist::refresh` on a tile resolves its list now, through the
     // cache's own lane: the factory's hook is the tile's only route to the
     // bridge.
     bridge.watchlist.set_refresh(Rc::new({
         let cache = watchlist_cache.clone();
-        move |name: &str, cx: &mut App| cache.refresh(name, window, cx)
+        let app = app.clone();
+        move |name: &str, cx: &mut App| cache.refresh(name, &app, cx)
     }));
 
     // Reloads: new views to the data thread and to the factory.
@@ -1455,7 +1483,6 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
         let scenarios = bridge.scenarios.clone();
         let scenario_views = bridge.scenario_views.clone();
         let scenario_cells = bridge.scenario_cells.clone();
-        let shell = shell.clone();
         move |app, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
                 let config = app.read(cx).config();
@@ -1564,7 +1591,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                 // diagnostics can now be updated through cx.
                 classifications.set_config(classification_config, cx);
                 watchlist.set_config(watchlist_config, cx);
-                watchlist_cache.set_definitions(folded, window, cx);
+                watchlist_cache.set_definitions(folded, &app, cx);
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
                     .chain(colour_diags)
@@ -1597,7 +1624,9 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                             Refusal::Stopped => "the data service has stopped".into(),
                         }),
                     };
-                    shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                    // Routed as the service's own answer would be: to every
+                    // window under a shell key, whichever asked.
+                    ShellApp::deliver_distinct(&app, outcome, cx);
                 }
             }
             // Queued before the frame's revision notification, so the new
@@ -1636,8 +1665,8 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
         let underlyings = bridge.underlyings.clone();
         let schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
-        let shell = shell.clone();
-        let frame = shell.read(cx).frame().clone();
+        let app = app.clone();
+        let frame = app.read(cx).frame().clone();
         let last = Rc::new(Cell::new(frame.read(cx).config_version()));
         // Seeded with the key the factory was built from; `None` (a factory
         // built from an unknown config) lets the first reload through.
@@ -1651,7 +1680,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
             // Read everything out of the config before the factory takes
             // `cx` mutably.
             let (views, templates, colours, dims, mut diags, refresh, stale_after, payout) = {
-                let config = shell.read(cx).config(cx);
+                let config = app.read(cx).config();
                 let key = pricer_config_key(config);
                 if last_key.borrow().as_ref() == Some(&key) {
                     return;
@@ -1724,24 +1753,29 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
     let local_datasets = Rc::clone(&bridge.local_datasets);
     // The pricer's sheet writes are answered through the drain.
     let pricer = Rc::clone(&bridge.pricer);
+    let app = app.clone();
     cx.spawn(async move |cx: &mut AsyncApp| {
         let diagnostics = diagnostics_for_drain;
         let catalog_refresh = catalog_refresh_for_drain;
         let reference_refresh = reference_refresh_for_drain;
-        // The handle for the retry lanes (`window` below is the `&mut Window`).
-        let retry_window = window;
         let mut last_dropped = 0u64;
         let mut last_refused = 0u64;
         while let Ok(event) = rx.recv().await {
             let now_dropped = dropped.load(Ordering::Relaxed);
             let now_refused = refused_handle.dropped_requests();
-            // Check window liveness for every event variant. Updating a retained shell
-            // entity alone would keep succeeding after the window closes and retain this
-            // task's captures. With no new event, the task can remain awaiting the mailbox.
-            let handled = window.update(cx, |root, window, cx| {
-                let Ok(shell) = root.view().clone().downcast::<ShellView>() else {
-                    return;
-                };
+            // Check the registry for every event variant: the app entity
+            // and its views outlive the last window (the quit hooks hold
+            // the app), so updating them alone would keep succeeding after
+            // every window closed and retain this task's captures. Until a
+            // window registers the lanes run: an answer arriving before
+            // the first window is routed (and dropped) rather than ending
+            // the drain. With no new event, the task can remain awaiting
+            // the mailbox. `true` means the event was handled and the drain
+            // goes on; `false` ends it.
+            let handled = cx.update(|cx| {
+                if !app.read(cx).any_window_open() {
+                    return false;
+                }
                 if now_dropped != last_dropped {
                     diagnostics.update(cx, |d, cx| {
                         let before = d.version();
@@ -1767,33 +1801,27 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                     // failure. `geode_data::egress` already logs the
                     // outcome under `geode::ingest`.
                     DataEvent::Upload(outcome) => {
-                        shell.update(cx, |s, cx| {
-                            s.deliver(
-                                Delivery::Upload(UploadDelivery {
-                                    key: outcome.key,
-                                    tag: outcome.tag,
-                                    target: outcome.target,
-                                    result: outcome.result,
-                                }),
-                                window,
-                                cx,
-                            )
-                        });
+                        ShellApp::deliver(
+                            &app,
+                            Delivery::Upload(UploadDelivery {
+                                key: outcome.key,
+                                tag: outcome.tag,
+                                target: outcome.target,
+                                result: outcome.result,
+                            }),
+                            cx,
+                        );
                     }
                     // Routed by the requesting tile's key, like an upload.
                     DataEvent::TextFile(outcome) => {
-                        shell.update(cx, |s, cx| s.deliver(Delivery::TextFile(outcome), window, cx));
+                        ShellApp::deliver(&app, Delivery::TextFile(outcome), cx);
                     }
                     DataEvent::Query(outcome) => {
-                        shell.update(cx, |s, cx| {
-                            s.deliver(Delivery::Query(outcome), window, cx)
-                        });
+                        ShellApp::deliver(&app, Delivery::Query(outcome), cx);
                     }
                     // Route a series answer by requester key, as for Query.
                     DataEvent::Series(outcome) => {
-                        shell.update(cx, |s, cx| {
-                            s.deliver(Delivery::Series(outcome), window, cx)
-                        });
+                        ShellApp::deliver(&app, Delivery::Series(outcome), cx);
                     }
                     DataEvent::Published {
                         dataset,
@@ -1802,7 +1830,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                         ..
                     } => {
                         if reference_cache.is_reference(&dataset) {
-                            reference_cache.refresh(&dataset, retry_window, cx);
+                            reference_cache.refresh(&dataset, &app, cx);
                         }
                         // Record publication in diagnostics and request catalog refresh when watched.
                         // The service owns the detailed publication log; do not duplicate it here.
@@ -1815,8 +1843,8 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                             // recent-publication history.
                         } else {
                             // A local publish never re-resolves a watchlist.
-                            watchlist_cache.on_published(&dataset, retry_window, cx);
-                            let frame = shell.read(cx).frame().clone();
+                            watchlist_cache.on_published(&dataset, &app, cx);
+                            let frame = app.read(cx).frame().clone();
                             // Recent-publication history uses arrival time; this event has no source
                             // timestamp and cannot establish source freshness.
                             let publish = geode_shell::frame::Publish {
@@ -1866,24 +1894,22 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                     // tile's, delivered like a query.
                     DataEvent::Distinct(outcome) => {
                         if is_shell_key(outcome.key) {
-                            shell.update(cx, |s, cx| s.deliver_distinct(outcome, cx));
+                            ShellApp::deliver_distinct(&app, outcome, cx);
                         } else {
-                            shell.update(cx, |s, cx| {
-                                s.deliver(Delivery::Distinct(outcome), window, cx)
-                            });
+                            ShellApp::deliver(&app, Delivery::Distinct(outcome), cx);
                         }
                     }
                     DataEvent::Catalog(outcome) => {
                         let Some((tag, request)) = catalog_refresh.in_flight.get() else {
-                            return;
+                            return true;
                         };
                         if outcome.key != DIAGNOSTICS_KEY || tag != outcome.tag {
-                            return;
+                            return true;
                         }
                         catalog_refresh.in_flight.set(None);
                         match outcome.snapshot {
                             Ok(snapshot) => {
-                                let current_as_of = shell.read(cx).active_frame(cx).read(cx).as_of().clone();
+                                let current_as_of = lanes_as_of(&app, cx);
                                 diagnostics.update(cx, |d, cx| {
                                     let before = d.version();
                                     // A publication while reading schedules another read, but
@@ -1907,7 +1933,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                             }
                             Err(e) => {
                                 tracing::warn!(target: "geode::query", "catalog request failed: {e}");
-                                catalog_refresh.retry(&diagnostics, request, retry_window, cx);
+                                catalog_refresh.retry(&diagnostics, request, &app, cx);
                             }
                         }
                     }
@@ -1944,17 +1970,15 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                         identity,
                         result,
                     } => {
-                        shell.update(cx, |s, cx| {
-                            s.deliver(
-                                Delivery::SeriesFetched {
-                                    source,
-                                    identity,
-                                    result,
-                                },
-                                window,
-                                cx,
-                            )
-                        });
+                        ShellApp::deliver(
+                            &app,
+                            Delivery::SeriesFetched {
+                                source,
+                                identity,
+                                result,
+                            },
+                            cx,
+                        );
                     }
                     // Clear the single ingest progress record. The writer runs one job at a time;
                     // extra end events, including queue drain, are harmless when already idle.
@@ -2011,15 +2035,11 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                     }
                     // Route pricing to the keyed occupant; the shell discards absent recipients.
                     DataEvent::Price(outcome) => {
-                        shell.update(cx, |s, cx| {
-                            s.deliver(Delivery::Price(outcome), window, cx)
-                        });
+                        ShellApp::deliver(&app, Delivery::Price(outcome), cx);
                     }
                     // Route vol slices to the keyed occupant; the shell discards absent recipients.
                     DataEvent::VolSlices(outcome) => {
-                        shell.update(cx, |s, cx| {
-                            s.deliver(Delivery::VolSlices(outcome), window, cx)
-                        });
+                        ShellApp::deliver(&app, Delivery::VolSlices(outcome), cx);
                     }
                     // Each list's lane keeps `WatchlistGlobal`; see `WatchlistCache`.
                     DataEvent::Watchlist(outcome) if is_watchlist_key(outcome.key) => {
@@ -2038,18 +2058,18 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                         if outcome.key != DIAGNOSTICS_KEY
                             || outcome.tag != reference_refresh.tag.get()
                         {
-                            return;
+                            return true;
                         }
                         diagnostics.update(cx, |d, cx| {
                             d.set_reference(outcome);
                             cx.notify();
                         });
                     }
-                    // A position command's answer becomes the status notice;
-                    // `geode_data::positions` already logs it under
-                    // `geode::ingest`.
+                    // A position command's answer becomes every window's
+                    // status notice; `geode_data::positions` already logs
+                    // it under `geode::ingest`.
                     DataEvent::Command(outcome) => {
-                        shell.update(cx, |s, cx| s.note_command(&outcome, cx));
+                        ShellApp::note_command(&app, &outcome, cx);
                     }
                     // A data thread died despite containment, or the request
                     // loop never opened. Its segment and the diagnostics row
@@ -2086,15 +2106,54 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
                         });
                     }
                 }
+                true
             });
-            if handled.is_err() {
-                return; // the window is gone
+            if !handled {
+                return; // the last window is gone
             }
             last_dropped = now_dropped;
             last_refused = now_refused;
         }
     })
     .detach();
+}
+
+/// A window's own hooks, installed once it exists and its view has
+/// registered with the app: the should-close hook that saves the session
+/// and unsaved sheets while the window still stands (the behaviour of
+/// [`save_on_close`], which remains the route with no bridge). `main`
+/// calls this for each window it opens; [`attach`] runs once for the
+/// process.
+pub fn attach_window(
+    bridge: &Bridge,
+    app: &Entity<ShellApp>,
+    key: WindowKey,
+    window: AnyWindowHandle,
+    cx: &mut App,
+) {
+    debug_assert!(
+        app.read(cx).handle(key).is_some(),
+        "window {key:?} is attached before its view registered"
+    );
+    install_save_on_close(window, app.clone(), Some(Rc::clone(&bridge.pricer)), cx);
+}
+
+/// The should-close hook [`save_on_close`] and [`attach_window`] share.
+fn install_save_on_close(
+    window: AnyWindowHandle,
+    app: Entity<ShellApp>,
+    pricer: Option<Rc<PricerFactory>>,
+    cx: &mut App,
+) {
+    let _ = window.update(cx, |_, window, cx| {
+        window.on_window_should_close(cx, move |_window, cx| {
+            app.read(cx).save_session(cx);
+            if let Some(factory) = &pricer {
+                factory.flush_all(cx);
+            }
+            true
+        });
+    });
 }
 
 #[cfg(test)]
@@ -2415,6 +2474,29 @@ role = "key"
             })
         })
         .unwrap()
+    }
+
+    /// Close `window` as the close path does: the app deregisters it
+    /// while it still stands (`ShellApp::window_closed`, which parks what
+    /// it hosted), then gpui removes it. A removal alone leaves the window
+    /// in the registry, and the app's lanes read the registry, not gpui.
+    fn close_window(window: WindowHandle<Root>, cx: &mut gpui::TestAppContext) {
+        let app = app_of(window, cx);
+        cx.update(|cx| {
+            let key = window
+                .read(cx)
+                .expect("the window is open")
+                .view()
+                .clone()
+                .downcast::<ShellView>()
+                .expect("the root view is the shell")
+                .read(cx)
+                .key();
+            app.update(cx, |a, cx| a.window_closed(key, cx));
+            window
+                .update(cx, |_, window, _| window.remove_window())
+                .unwrap();
+        });
     }
 
     /// The app behind `window`'s shell, as `main` holds it for the hooks.
@@ -3076,7 +3158,7 @@ role = "attribute"
             "fixture: built with no dimensions"
         );
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3115,7 +3197,7 @@ role = "attribute"
             "fixture: built with the bundled views"
         );
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3165,7 +3247,7 @@ role = "attribute"
             "fixture: built with no value mapping"
         );
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3253,7 +3335,7 @@ role = "attribute"
             "fixture: built with nothing pushed"
         );
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3373,7 +3455,7 @@ role = "attribute"
             "fixture: built with no snapshot"
         );
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3550,7 +3632,7 @@ grain = "underlying"
                 })
                 .unwrap();
             let app = app_of(window, cx);
-            cx.update(|cx| attach(&bridge, &app, window, cx));
+            cx.update(|cx| attach(&bridge, &app, cx));
             let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
             let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
                 root.view().clone().downcast::<ShellView>().unwrap()
@@ -3923,7 +4005,7 @@ grain = "underlying"
             "fixture: built with the builtin set"
         );
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -3972,7 +4054,7 @@ grain = "underlying"
             source.revision(cx)
         });
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -4014,7 +4096,7 @@ grain = "underlying"
         bridge.schema = Rc::new(underlyings_schema());
         assert_eq!(bridge.pricer.settings().payout, None, "fixture");
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -4105,7 +4187,7 @@ grain = "underlying"
         bridge.underlyings.set(&["SPX".to_string()]);
         let source = bridge.pricer.underlying_source();
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -4203,7 +4285,7 @@ grain = "underlying"
         let (handle, _rx) = DataHandle::for_tests();
         let bridge = test_bridge(handle);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -4269,7 +4351,7 @@ grain = "underlying"
         let mut bridge = test_bridge(handle);
         bridge.pricer_key = Some(vcx.update(|_, cx| pricer_config_key(shell.read(cx).config(cx))));
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         vcx.update(|_, cx| {
             let frame = shell.read(cx).frame().clone();
             frame.update(cx, |f, cx| {
@@ -5217,7 +5299,6 @@ grain = "underlying"
         vcx: gpui::VisualTestContext,
         tile: Entity<geode_blotter::tile::BlotterTile>,
         shell: Entity<ShellView>,
-        window: WindowHandle<Root>,
         /// The handle the tile and the roster hook were given.
         handle: DataHandle,
         /// What the tile and the shell's actions asked the data service
@@ -5352,7 +5433,6 @@ grain = "underlying"
             vcx,
             tile,
             shell,
-            window,
             handle,
             requests: rx,
         }
@@ -5892,7 +5972,7 @@ grain = "underlying"
         cx.update(geode_pricer::init);
         let window = open_shell_window(cx, services);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let draw = |vcx: &mut gpui::VisualTestContext| {
             vcx.run_until_parked();
@@ -6278,7 +6358,7 @@ grain = "underlying"
         init_grid_modules(cx);
         let window = open_shell_window(cx, services);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let draw = |vcx: &mut gpui::VisualTestContext| {
             vcx.run_until_parked();
@@ -6460,10 +6540,9 @@ grain = "underlying"
     fn move_lhu_to_the_confirm(cx: &mut gpui::TestAppContext) -> (ShellBlotter, Bridge) {
         let (mut f, _) = nemo_blotter(cx);
         let bridge = test_bridge(f.handle.clone());
-        let window = f.window;
-        // Outside the window's update: `attach` reads the window's root.
+        // Outside the window's update, as `main` attaches: to the app alone.
         let app = gpui::TestAppContext::update(&f.vcx, |cx| f.shell.read(cx).app().clone());
-        gpui::TestAppContext::update(&f.vcx, |cx| attach(&bridge, &app, window, cx));
+        gpui::TestAppContext::update(&f.vcx, |cx| attach(&bridge, &app, cx));
         f.type_keys("j j j shift-v k");
         f.right_press("blotter-cell-3-2");
         f.type_keys("j enter");
@@ -6569,7 +6648,7 @@ grain = "underlying"
         let mut bridge = test_bridge(handle);
         bridge.events = rx;
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -6651,7 +6730,7 @@ grain = "underlying"
         let window = open_pricer_test_window(cx, services);
         let (bridge, tx) = test_bridge_with_pricer(handle, pricer);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         vcx.update(|window, cx| {
             let _ = window.draw(cx);
@@ -6847,7 +6926,7 @@ grain = "underlying"
         );
         let window = open_pricer_test_window(cx, services);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         (bridge, window, tiles)
     }
 
@@ -6929,7 +7008,7 @@ grain = "underlying"
     }
 
     /// Closing the window runs the should-close hook `main` registers
-    /// (`save_on_close`): an unsaved sheet is queued while the window still
+    /// (`attach_window`): an unsaved sheet is queued while the window still
     /// exists, ahead of the data service's shutdown, and the close
     /// proceeds. The tile is held past the close so its own release-time
     /// flush cannot be what saved the line.
@@ -6946,7 +7025,10 @@ grain = "underlying"
         let (bridge, window, tiles) =
             open_app_with_a_pricer_tile(cx, sources(), db.clone(), "book");
         let app = app_of(window, cx);
-        cx.update(|cx| save_on_close(window, app, Some(&bridge), cx));
+        // The route `main` takes with a bridge: the window's hooks through
+        // `attach_window`, under the key its view registered.
+        let key = cx.update(|cx| app.read(cx).windows()[0].0);
+        cx.update(|cx| attach_window(&bridge, &app, key, window.into(), cx));
         {
             let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
             vcx.update(|window, cx| {
@@ -7381,7 +7463,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -7498,7 +7580,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         RecordingTile {
             vcx,
             log,
@@ -7558,6 +7640,222 @@ grain = "underlying"
         );
     }
 
+    /// A window over `app`, opened as `main` opens its first and the
+    /// fixtures here open theirs: the app issues the key (the session's
+    /// initial index for the first window, the lowest free index after),
+    /// and the view registers itself.
+    fn open_window_over(
+        cx: &mut gpui::TestAppContext,
+        app: &Entity<ShellApp>,
+    ) -> WindowHandle<Root> {
+        let app = app.clone();
+        cx.update(|cx| {
+            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+                let key = app.update(cx, |a, cx| a.add_window(None, cx));
+                let view = cx.new(|cx| ShellView::new(app.clone(), key, window, cx));
+                cx.new(|cx| Root::new(view, window, cx))
+            })
+        })
+        .unwrap()
+    }
+
+    /// Two windows over one app, a blotter tile in each (`FLAT_VIEW`'s one
+    /// view), with a real bridge attached: each tile's first query is
+    /// answered through the drain with its own snapshot, three rows for the
+    /// first window's tile and two for the second's, and each window paints
+    /// its own tile's rows and not the other's.
+    #[gpui::test]
+    fn two_windows_each_receive_their_own_outcomes(cx: &mut gpui::TestAppContext) {
+        use geode_core::snapshot::TestColumn;
+        let (handle, rx) = DataHandle::for_tests();
+        let views = geode_core::view::ViewSpec::from_doc(&geode_core::config::merge_docs(
+            "views",
+            &[LayerDoc::builtin("views", FLAT_VIEW).unwrap()],
+        ))
+        .0;
+        let tiles = BlotterTiles::default();
+        let mut services = test_shell_services();
+        let mut roster = ModuleRoster::new();
+        roster.add(Box::new(KeepingBlotter {
+            factory: BlotterFactory::new(
+                handle.clone(),
+                views,
+                NamedColours::default(),
+                SchemaSpec::default(),
+                DerivedDimensions::default(),
+                FindStyle::default(),
+                Duration::from_secs(900),
+            ),
+            tiles: tiles.clone(),
+        }));
+        roster.register_actions(&mut services.registry);
+        services.roster = roster;
+        cx.update(gpui_component::init);
+        cx.update(geode_blotter::init);
+        let app = cx.update(|cx| cx.new(|cx| ShellApp::new(services, None, None, cx)));
+
+        // A blotter in each window: `open_module` on each window's shown
+        // (empty) workspace, as the palette's add row would.
+        let open_blotter = |cx: &mut gpui::TestAppContext| {
+            let window = open_window_over(cx, &app);
+            let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+            let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+                root.view().clone().downcast::<ShellView>().unwrap()
+            });
+            vcx.update(|window, cx| {
+                shell.update(cx, |s, cx| s.open_module("blotter", window, cx));
+            });
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+            (vcx, shell)
+        };
+        // The app's one allocator numbers the tiles 1 and 2.
+        let (t1, t2) = (TileId(1), TileId(2));
+        let (mut vcx1, s1) = open_blotter(cx);
+        let (mut vcx2, s2) = open_blotter(cx);
+        assert_eq!(tiles.borrow().len(), 2, "fixture: one blotter per window");
+        for (vcx, shell, tile) in [(&vcx1, &s1, t1), (&vcx2, &s2, t2)] {
+            assert_eq!(
+                shell.read_with(vcx, |s, _| s.occupant_kind(tile)),
+                Some("blotter"),
+                "fixture: {tile:?} is this window's blotter"
+            );
+        }
+        assert_eq!(
+            cx.update(|cx| app.read(cx).windows().len()),
+            2,
+            "fixture: both windows registered"
+        );
+
+        let bridge = test_bridge(handle);
+        let (tx, events) = crate::events::channel();
+        let bridge = Bridge { events, ..bridge };
+        cx.update(|cx| attach(&bridge, &app, cx));
+
+        // Each tile's first query, by its key.
+        let query_of = |tile: TileId| -> geode_data::QueryParams {
+            loop {
+                match rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("the tile asks for its rows")
+                {
+                    geode_data::Request::Query(p) if p.key == QueryKey(tile.0) => return p,
+                    _ => continue,
+                }
+            }
+        };
+        let q1 = query_of(t1);
+        let q2 = query_of(t2);
+        let meta = shell_blotter_meta;
+        let dict =
+            |v: &[Option<&str>]| TestColumn::Dict(v.iter().map(|s| s.map(String::from)).collect());
+        // Three rows for the first window's tile (root, L1, L2), two for
+        // the second's (root, L1).
+        let three = Arc::new(geode_core::snapshot::Snapshot::for_tests(
+            vec![
+                (meta("lhu"), dict(&[None, Some("L1"), Some("L2")])),
+                (
+                    meta("underlying_ref"),
+                    dict(&[None, Some("SPX"), Some("NDX")]),
+                ),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1, 1])),
+                (
+                    meta("delta01"),
+                    TestColumn::F64(vec![Some(9.0), Some(5.0), Some(4.0)]),
+                ),
+            ],
+            1,
+        ));
+        let two = Arc::new(geode_core::snapshot::Snapshot::for_tests(
+            vec![
+                (meta("lhu"), dict(&[None, Some("L1")])),
+                (meta("underlying_ref"), dict(&[None, Some("DAX")])),
+                (meta("row_depth"), TestColumn::I32(vec![0, 1])),
+                (meta("delta01"), TestColumn::F64(vec![Some(2.0), Some(2.0)])),
+            ],
+            1,
+        ));
+        for (q, snapshot) in [(&q1, three), (&q2, two)] {
+            tx.try_send(DataEvent::Query(geode_core::query::QueryOutcome {
+                key: q.key,
+                tag: q.tag,
+                snapshot: Ok(snapshot),
+                submitted: std::time::Instant::now(),
+            }))
+            .unwrap();
+        }
+        for vcx in [&mut vcx1, &mut vcx2] {
+            vcx.run_until_parked();
+            vcx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            vcx.run_until_parked();
+        }
+
+        assert!(
+            vcx1.debug_bounds("blotter-cell-2-0").is_some(),
+            "the first window painted its tile's third row"
+        );
+        assert!(
+            vcx2.debug_bounds("blotter-cell-1-0").is_some(),
+            "the second window painted its tile's second row"
+        );
+        assert!(
+            vcx2.debug_bounds("blotter-cell-2-0").is_none(),
+            "the second window's tile has two rows, not the first's three"
+        );
+        drop(bridge);
+    }
+
+    /// The drain delivers before any window registers: the bridge is
+    /// attached to the app alone, as `main` attaches it, and an event
+    /// arriving ahead of the first window still reaches diagnostics; the
+    /// first window then opens and the drain is still running for it.
+    #[gpui::test]
+    fn the_drain_delivers_before_the_first_window_registers(cx: &mut gpui::TestAppContext) {
+        let services = test_shell_services();
+        let app = cx.update(|cx| cx.new(|cx| ShellApp::new(services, None, None, cx)));
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = test_bridge(handle);
+        let (tx, events) = crate::events::channel();
+        let bridge = Bridge { events, ..bridge };
+        cx.update(|cx| attach(&bridge, &app, cx));
+        let diagnostics = cx.update(|cx| app.read(cx).diagnostics().clone());
+        let version =
+            |cx: &mut gpui::TestAppContext| cx.update(|cx| diagnostics.read(cx).version());
+        let health = |source: &str| DataEvent::Health {
+            source: source.into(),
+            worst: geode_data::health::Health::Ok,
+            detail: String::new(),
+        };
+
+        let before = version(cx);
+        tx.try_send(health("early")).unwrap();
+        cx.run_until_parked();
+        assert!(
+            version(cx) > before,
+            "a health event ahead of the first window reached diagnostics"
+        );
+
+        cx.update(gpui_component::init);
+        let window = open_window_over(cx, &app);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let before = version(cx);
+        tx.try_send(health("later")).unwrap();
+        cx.run_until_parked();
+        assert!(
+            version(cx) > before,
+            "the drain is still running once the first window registered"
+        );
+        drop(bridge);
+    }
+
     /// Send a Health event after closing the window and verify the drain exits.
     /// The dropped-counter Arc is captured only by the drain within attach, so
     /// releasing that clone proves exit without adding production test flags.
@@ -7608,7 +7906,7 @@ grain = "underlying"
         };
 
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         // This test's own `dropped`, `bridge.dropped`, and the drain
         // task's own clone (captured at `attach` time) — three, while
@@ -7619,11 +7917,7 @@ grain = "underlying"
             "the drain task holds its own clone of `dropped` while it runs"
         );
 
-        cx.update(|cx| {
-            window
-                .update(cx, |_, window, _| window.remove_window())
-                .unwrap();
-        });
+        close_window(window, cx);
         cx.run_until_parked();
 
         // A health event must trigger the same closed-window check as query results.
@@ -7735,7 +8029,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         tx.try_send(DataEvent::SeriesFetched {
             source: "demo_kdb".into(),
@@ -7805,7 +8099,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         // The restored workspace's one tile is id 1, so that is the key
         // this outcome is addressed to.
@@ -7881,7 +8175,7 @@ grain = "underlying"
             local_datasets: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         // The restored workspace's one tile is id 1, so that is the key
         // this outcome is addressed to.
@@ -7951,7 +8245,7 @@ grain = "underlying"
         };
 
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
@@ -8052,7 +8346,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8108,7 +8402,7 @@ grain = "underlying"
             ..test_bridge(handle.clone())
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8188,7 +8482,7 @@ grain = "underlying"
         let (handle, _rx) = DataHandle::for_tests();
         let bridge = test_bridge(handle);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8272,7 +8566,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8360,7 +8654,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8448,7 +8742,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8491,7 +8785,7 @@ grain = "underlying"
         let (handle, _rx) = DataHandle::for_tests();
         let bridge = test_bridge(handle);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -8562,7 +8856,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8667,7 +8961,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8739,7 +9033,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8896,7 +9190,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -8970,7 +9264,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -9018,7 +9312,7 @@ grain = "underlying"
             SourceShape::Subscribed,
         )];
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -9216,7 +9510,7 @@ grain = "underlying"
         let (handle, _rx) = DataHandle::for_tests();
         let bridge = test_bridge(handle);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -9652,7 +9946,7 @@ grain = "underlying"
             underlyings: Default::default(),
         };
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
 
         CatalogFixture {
             window,
@@ -9856,7 +10150,7 @@ grain = "underlying"
             cx.notify();
         });
         vcx.run_until_parked();
-        vcx.update(|window, _| window.remove_window());
+        close_window(f.window, cx);
         vcx.run_until_parked();
         while f.requests.try_recv().is_ok() {}
         diagnostics.update(&mut vcx, |d, cx| {
@@ -10118,12 +10412,12 @@ grain = "underlying"
     #[gpui::test]
     fn a_refused_reread_does_not_retry_after_window_closure(cx: &mut gpui::TestAppContext) {
         let f = fixture_with_reference(cx, vec!["underlyings".into()]);
-        let mut vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
+        let vcx = gpui::VisualTestContext::from_window(f.window.into(), cx);
         assert!(next_live_reference(&f).is_some());
         f.bridge.handle.fill_for_tests();
         f.events.try_send(published("underlyings")).unwrap();
         vcx.run_until_parked();
-        vcx.update(|window, _| window.remove_window());
+        close_window(f.window, cx);
         vcx.run_until_parked();
         while f.requests.try_recv().is_ok() {}
         vcx.executor().advance_clock(REFERENCE_RETRY_DELAY);
@@ -10537,7 +10831,7 @@ grain = "underlying"
         handle.shutdown();
         let bridge = test_bridge(handle);
         let app = app_of(window, cx);
-        cx.update(|cx| attach(&bridge, &app, window, cx));
+        cx.update(|cx| attach(&bridge, &app, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
         });
@@ -11453,9 +11747,10 @@ grain = "underlying"
         #[gpui::test]
         fn an_answer_for_a_removed_list_is_dropped(cx: &mut gpui::TestAppContext) {
             let window = open_test_window(cx, test_shell_services());
+            let app = app_of(window, cx);
             let (handle, rx) = DataHandle::for_tests();
             let cache = Rc::new(WatchlistCache::new(handle));
-            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), &app, cx));
             let tag = watchlist_tag(&rx);
             cx.read(|cx| {
                 let state = &cx.global::<WatchlistGlobal>().0.lists["a"];
@@ -11463,7 +11758,7 @@ grain = "underlying"
                 assert_eq!(state.definition.include, vec!["SPX"]);
                 assert_eq!(state.layer, Some(Layer::User));
             });
-            cx.update(|cx| cache.set_definitions(BTreeMap::new(), window, cx));
+            cx.update(|cx| cache.set_definitions(BTreeMap::new(), &app, cx));
             cx.read(|cx| {
                 assert!(
                     cx.global::<WatchlistGlobal>().0.lists.is_empty(),
@@ -11483,11 +11778,12 @@ grain = "underlying"
         #[gpui::test]
         fn only_the_latest_tag_is_applied(cx: &mut gpui::TestAppContext) {
             let window = open_test_window(cx, test_shell_services());
+            let app = app_of(window, cx);
             let (handle, rx) = DataHandle::for_tests();
             let cache = Rc::new(WatchlistCache::new(handle));
-            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), &app, cx));
             let first = watchlist_tag(&rx);
-            cx.update(|cx| cache.on_published("risk", window, cx));
+            cx.update(|cx| cache.on_published("risk", &app, cx));
             let second = watchlist_tag(&rx);
             assert!(second > first);
             let key = cache.key_of("a").unwrap();
@@ -11526,13 +11822,14 @@ grain = "underlying"
         #[gpui::test]
         fn a_failed_resolution_keeps_the_last_members(cx: &mut gpui::TestAppContext) {
             let window = open_test_window(cx, test_shell_services());
+            let app = app_of(window, cx);
             let (handle, rx) = DataHandle::for_tests();
             let cache = Rc::new(WatchlistCache::new(handle));
-            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), &app, cx));
             let first = watchlist_tag(&rx);
             let key = cache.key_of("a").unwrap();
             cx.update(|cx| cache.answer(ok(key, first, "a", "SPX"), cx));
-            cx.update(|cx| cache.on_published("risk", window, cx));
+            cx.update(|cx| cache.on_published("risk", &app, cx));
             let second = watchlist_tag(&rx);
             cx.update(|cx| {
                 cache.answer(
@@ -11551,7 +11848,7 @@ grain = "underlying"
                 assert_eq!(state.members, vec![manual("SPX")], "the last members stay");
             });
             // A rule the data layer could not run joins the list's rule errors.
-            cx.update(|cx| cache.on_published("risk", window, cx));
+            cx.update(|cx| cache.on_published("risk", &app, cx));
             let third = watchlist_tag(&rx);
             cx.update(|cx| {
                 cache.answer(
@@ -11579,15 +11876,16 @@ grain = "underlying"
         #[gpui::test]
         fn a_busy_refusal_arms_one_retry_per_list(cx: &mut gpui::TestAppContext) {
             let window = open_test_window(cx, test_shell_services());
+            let app = app_of(window, cx);
             let (handle, rx) = DataHandle::for_tests();
             let cache = Rc::new(WatchlistCache::new(handle.clone()));
             // Fill the queue so every submission is refused Busy.
             for _ in 0..REQUEST_BOUND {
                 assert!(handle.cancel(QueryKey(1)));
             }
-            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), &app, cx));
             for _ in 0..10 {
-                cx.update(|cx| cache.on_published("risk", window, cx));
+                cx.update(|cx| cache.on_published("risk", &app, cx));
             }
             assert_eq!(
                 cache.retry_count(),
@@ -11608,16 +11906,17 @@ grain = "underlying"
             cx: &mut gpui::TestAppContext,
         ) {
             let window = open_test_window(cx, test_shell_services());
+            let app = app_of(window, cx);
             let (handle, rx) = DataHandle::for_tests();
             let cache = Rc::new(WatchlistCache::new(handle.clone()));
-            cx.update(|cx| cache.set_definitions(folded_over("risk"), window, cx));
+            cx.update(|cx| cache.set_definitions(folded_over("risk"), &app, cx));
             let t = watchlist_tag(&rx);
             let key = cache.key_of("a").unwrap();
             // The queue is full when the changed definition is refreshed.
             for _ in 0..REQUEST_BOUND {
                 assert!(handle.cancel(QueryKey(1)));
             }
-            cx.update(|cx| cache.set_definitions(folded_over("cvi"), window, cx));
+            cx.update(|cx| cache.set_definitions(folded_over("cvi"), &app, cx));
             assert_eq!(cache.retry_count(), 1, "the refused refresh waits");
             cx.update(|cx| cache.answer(ok(key, t, "a", "OLD"), cx));
             cx.read(|cx| {
@@ -11649,12 +11948,13 @@ grain = "underlying"
             cx: &mut gpui::TestAppContext,
         ) {
             let window = open_test_window(cx, test_shell_services());
+            let app = app_of(window, cx);
             let (handle, rx) = DataHandle::for_tests();
             let cache = Rc::new(WatchlistCache::new(handle));
             let mut map = BTreeMap::new();
             folded("a", "risk", &mut map);
             folded("b", "cvi", &mut map);
-            cx.update(|cx| cache.set_definitions(map.clone(), window, cx));
+            cx.update(|cx| cache.set_definitions(map.clone(), &app, cx));
             let first = watchlist_request(&rx);
             let second = watchlist_request(&rx);
             assert!(rx.try_recv().is_err(), "one request per list");
@@ -11670,7 +11970,7 @@ grain = "underlying"
             assert_eq!(a.rules[0].dataset, "risk");
             assert_eq!(a.include, vec!["SPX"]);
 
-            cx.update(|cx| cache.on_published("cvi", window, cx));
+            cx.update(|cx| cache.on_published("cvi", &app, cx));
             let again = watchlist_request(&rx);
             assert_eq!(again.name, "b");
             assert_eq!(again.key, b.key, "the key is the list's for the run");
@@ -11679,13 +11979,13 @@ grain = "underlying"
 
             // A reload that changes only provenance resolves nothing again;
             // one that changes a rule resolves that list only.
-            cx.update(|cx| cache.set_definitions(map.clone(), window, cx));
+            cx.update(|cx| cache.set_definitions(map.clone(), &app, cx));
             assert!(
                 rx.try_recv().is_err(),
                 "unchanged definitions submit nothing"
             );
             map.get_mut("b").unwrap().layer = Some(Layer::Builtin);
-            cx.update(|cx| cache.set_definitions(map.clone(), window, cx));
+            cx.update(|cx| cache.set_definitions(map.clone(), &app, cx));
             assert!(rx.try_recv().is_err(), "provenance alone submits nothing");
             cx.read(|cx| {
                 assert_eq!(
@@ -11695,7 +11995,7 @@ grain = "underlying"
                 )
             });
             map.get_mut("b").unwrap().rules[0].dataset = "risk".into();
-            cx.update(|cx| cache.set_definitions(map, window, cx));
+            cx.update(|cx| cache.set_definitions(map, &app, cx));
             let changed = watchlist_request(&rx);
             assert_eq!((changed.name.as_str(), changed.key), ("b", b.key));
             assert!(rx.try_recv().is_err());
@@ -11750,7 +12050,7 @@ grain = "underlying"
                 ..test_bridge(handle)
             };
             let app = app_of(window, cx);
-            cx.update(|cx| attach(&bridge, &app, window, cx));
+            cx.update(|cx| attach(&bridge, &app, cx));
             let shell = cx.update(|cx| {
                 window
                     .read(cx)

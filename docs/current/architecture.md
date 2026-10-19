@@ -122,8 +122,14 @@ globals, and the one 500 ms watcher loop. Each window contains one
 `ShellView` over that one `ShellApp`, wrapped by gpui-component's `Root` for
 window-level component facilities; the view is one window's transient state,
 reads the owner through `&App` accessors under its own `WindowKey`, and reacts
-to the owner's `ShellEvent`s (a reload, a day change). See
-[state ownership](shell.md#state-ownership).
+to the owner's `ShellEvent`s (a reload, a day change). The app bridge
+(`geode-app`) holds the `ShellApp` too, never a window: a data answer is
+routed by the app when it arrives, a keyed one to the window hosting its
+tile's workspace, a keyless or shell-keyed one to every window, one for a
+parked tile dropped, and the bridge's lanes run while the app's window
+registry says anything is open. See
+[state ownership](shell.md#state-ownership) and
+[routing into the windows](request-delivery.md#routing-into-the-windows).
 
 `DataService` runs on its own thread and accepts bounded, nonblocking requests
 through `DataHandle`. One ingest runner owns the DuckDB writer. A read pool

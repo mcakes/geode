@@ -94,8 +94,9 @@ impl ActionCx<'_, '_> {
         exclude: Option<String>,
         empty: &'static str,
     ) {
-        self.shell.next_picker_tag += 1;
-        let tag = self.shell.next_picker_tag;
+        // The app's one tag counter (a menu action runs on a dispatch
+        // path, so the app may be updated here).
+        let tag = self.shell.with_app(self.cx, |app| app.next_tag());
         let opened = choicedialog::open_action_values(
             self.shell,
             self.action,

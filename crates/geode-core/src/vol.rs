@@ -171,7 +171,7 @@ pub enum VolResult {
 
 /// The answer, one entry per job in request order. A cancelled batch
 /// carries the jobs finished before the cancel landed.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct VolSliceOutcome {
     pub key: QueryKey,
     pub tag: u64,

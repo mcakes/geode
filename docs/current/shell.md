@@ -55,9 +55,15 @@ announcement), never from its draw. Each `ShellView` registers
 itself with the app at the end of its constructor (`register_view`: its
 key, its window's handle and a weak handle to the view). That is the
 window registry (`ShellApp::windows`, `handle`, `is_last_window`), and it
-is what "open" means to the app: the watcher runs while it lists a window
-(`watcher_runs`), the session is saved only while it does, the diagnostics
-histogram sums the views it lists, and the title names an index only when
+is what "open" means to the app (`any_window_open`: true until the first
+window registers, then while the registry lists one): the watcher and the
+app bridge's drain and retry lanes run while it says so, the session is
+saved only while it lists a window, the diagnostics histogram sums the
+views it lists, a data answer is routed through it (`ShellApp::deliver`:
+a keyed answer to the window hosting its tile's workspace, a keyless or
+shell-keyed one to every window, one for a parked tile dropped, see
+[routing into the windows](request-delivery.md#routing-into-the-windows)),
+and the title names an index only when
 it lists two (`window_title`: `Geode`, or `Geode · N` with N the shown
 index). A window sets its own title (`ShellView::sync_title`) where it can
 have changed and a `Window` is at hand — the end of its constructor, the
@@ -83,7 +89,12 @@ called from event, dispatch and constructor paths only; the one render-time
 case, a divider drag cancelled because an overlay, page, fullscreen or
 workspace switch hid its boundary, defers the mark to the effects that flush
 after the draw. The palette records a chosen row the same way
-(`ShellApp::note_palette_use`).
+(`ShellApp::note_palette_use`), and the distinct-request tags the dimension
+pickers, the expression suggestions and a row action's value choice submit
+under come from the app's one counter (`ShellApp::next_tag`, drawn on those
+dispatch paths): their requests share a few reserved keys and their answers
+reach every window, so a tag that repeated across windows would let one
+window's reply fill another's picker.
 
 `ShellApp` also owns the app-wide settings a reload or a settings row changes
 (`font_size`, `find_style`, `add_direction`, `line_numbers`, `default_source`,

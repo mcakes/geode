@@ -255,7 +255,7 @@ pub struct SeriesResult {
 }
 
 /// One series query's answer, addressed to the key that asked.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SeriesOutcome {
     pub key: QueryKey,
     pub tag: u64,

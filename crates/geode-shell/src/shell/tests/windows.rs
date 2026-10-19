@@ -490,3 +490,197 @@ fn tear_out_reseeds_the_dispatching_window(cx: &mut gpui::TestAppContext) {
     assert_eq!(field, "spx", "the scope field shows lane 2's text");
     assert_eq!(app.read_with(&vcx1, |a, _| a.windows().len()), 2);
 }
+
+/// A keyed delivery for `tile`, in flight from the data thread.
+fn query_for(tile: TileId, tag: u64) -> crate::module::Delivery {
+    crate::module::Delivery::Query(geode_core::query::QueryOutcome {
+        key: geode_core::query::QueryKey(tile.0),
+        tag,
+        snapshot: Err("no rows".into()),
+        submitted: std::time::Instant::now(),
+    })
+}
+
+fn delivered_in(log: &std::rc::Rc<std::cell::RefCell<Vec<Recorded>>>) -> Vec<(TileId, u64)> {
+    log.borrow()
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::Delivered(t, tag) => Some((*t, *tag)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A keyed answer goes to the window hosting the tile's workspace, shown
+/// or hidden, and to no other: W1 hosts tile 1 hidden in workspace 2 and
+/// W2 shows 3 with its own tile; the answer for tile 1 is routed to W1
+/// alone and reaches tile 1 once.
+#[gpui::test]
+fn a_keyed_delivery_reaches_the_hosting_window_only(cx: &mut gpui::TestAppContext) {
+    use crate::shell::app::{Placement, Route, WindowSpec};
+    let (services, log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    dispatch_and_draw(&s1, &mut vcx1, "workspace::switch_2");
+    dispatch_and_draw(&s1, &mut vcx1, "tile::add_rec");
+    let hidden = s1.read_with(&vcx1, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    dispatch_and_draw(&s1, &mut vcx1, "workspace::switch_1");
+    assert_eq!(shown(&app, &vcx1, k1), Some(1), "sanity: 2 is hidden in W1");
+
+    let k2 = cx
+        .update(|cx| {
+            ShellApp::open_window(
+                &app,
+                WindowSpec {
+                    workspace: WorkspaceIx::new(3).unwrap(),
+                    placement: Placement::Default,
+                },
+                cx,
+            )
+        })
+        .expect("3 is free");
+    let (s2, mut vcx2) = context_for(cx, &app, k2);
+    dispatch_and_draw(&s2, &mut vcx2, "tile::add_rec");
+    let other = s2.read_with(&vcx2, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    assert_ne!(hidden, other);
+    log.borrow_mut().clear();
+
+    let delivery = query_for(hidden, 7);
+    assert_eq!(
+        app.read_with(&vcx1, |a, _| a.route(&delivery)),
+        Route::Window(k1),
+        "the host of the tile's workspace, not every window"
+    );
+    cx.update(|cx| ShellApp::deliver(&app, delivery, cx));
+    vcx1.run_until_parked();
+
+    assert_eq!(
+        delivered_in(&log),
+        vec![(hidden, 7)],
+        "tile 1 heard its answer once and tile 2 heard nothing: {:?}",
+        log.borrow()
+    );
+}
+
+/// A keyless delivery (a fetch finished) reaches every window: each
+/// window's visible recorder tile hears the same pair.
+#[gpui::test]
+fn a_keyless_delivery_reaches_every_window(cx: &mut gpui::TestAppContext) {
+    use crate::shell::app::Route;
+    let (services, log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    dispatch_and_draw(&s1, &mut vcx1, "tile::add_rec");
+    let t1 = s1.read_with(&vcx1, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    let k2 = cx
+        .update(|cx| ShellApp::open_fresh(&app, k1, cx))
+        .expect("a free index");
+    let (s2, mut vcx2) = context_for(cx, &app, k2);
+    dispatch_and_draw(&s2, &mut vcx2, "tile::add_rec");
+    let t2 = s2.read_with(&vcx2, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    log.borrow_mut().clear();
+
+    let delivery = crate::module::Delivery::SeriesFetched {
+        source: "demo_kdb".into(),
+        identity: "VIX".into(),
+        result: Ok(3),
+    };
+    assert_eq!(
+        app.read_with(&vcx1, |a, _| a.route(&delivery)),
+        Route::Broadcast
+    );
+    cx.update(|cx| ShellApp::deliver(&app, delivery, cx));
+    vcx1.run_until_parked();
+
+    let mut heard: Vec<TileId> = log
+        .borrow()
+        .iter()
+        .filter_map(|r| match r {
+            Recorded::SeriesFetched(t, pair) if pair == "VIX@demo_kdb" => Some(*t),
+            _ => None,
+        })
+        .collect();
+    heard.sort();
+    let mut both = vec![t1, t2];
+    both.sort();
+    assert_eq!(
+        heard,
+        both,
+        "each window's tile heard the fetch: {:?}",
+        log.borrow()
+    );
+}
+
+/// An answer for a tile whose workspace no window hosts (its window closed
+/// and parked it) is dropped: no panic, no delivery, and the record still
+/// waits in `parked_tiles`.
+#[gpui::test]
+fn an_answer_for_a_parked_tile_is_dropped(cx: &mut gpui::TestAppContext) {
+    use crate::shell::app::Route;
+    let (services, log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let k1 = shell_of(&w1, &mut vcx1).read_with(&vcx1, |s, _| s.key());
+    let k2 = cx
+        .update(|cx| ShellApp::open_fresh(&app, k1, cx))
+        .expect("a free index");
+    let (s2, mut vcx2) = context_for(cx, &app, k2);
+    dispatch_and_draw(&s2, &mut vcx2, "tile::add_rec");
+    let tile = s2.read_with(&vcx2, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    app.update(&mut vcx2, |a, cx| a.window_closed(k2, cx));
+    vcx2.run_until_parked();
+    assert!(
+        app.read_with(&vcx1, |a, _| a.parked_tiles.contains_key(&tile.0)),
+        "sanity: the tile was parked"
+    );
+    log.borrow_mut().clear();
+
+    let delivery = query_for(tile, 9);
+    assert_eq!(app.read_with(&vcx1, |a, _| a.route(&delivery)), Route::Drop);
+    cx.update(|cx| ShellApp::deliver(&app, delivery, cx));
+    vcx1.run_until_parked();
+
+    assert!(
+        delivered_in(&log).is_empty(),
+        "nothing heard the answer: {:?}",
+        log.borrow()
+    );
+    assert!(
+        app.read_with(&vcx1, |a, _| a.parked_tiles.contains_key(&tile.0)),
+        "the record still waits for a window"
+    );
+    vcx2.update(|window, _| window.remove_window());
+}
+
+/// Picker tags come from the app, so two windows' pickers never share
+/// one: a picker opened in each window carries a distinct tag, the later
+/// open's the larger, and both came from the app's one counter.
+#[gpui::test]
+fn picker_tags_are_unique_across_windows(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, super::picker::services_with_pickable(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    let k2 = cx
+        .update(|cx| ShellApp::open_fresh(&app, k1, cx))
+        .expect("a free index");
+    let (s2, mut vcx2) = context_for(cx, &app, k2);
+
+    dispatch_action(&s1, "frame::pick_book", &mut vcx1);
+    let first = s1.read_with(&vcx1, |s, _| s.picker.as_ref().expect("picker open").tag);
+    dispatch_action(&s2, "frame::pick_book", &mut vcx2);
+    let second = s2.read_with(&vcx2, |s, _| s.picker.as_ref().expect("picker open").tag);
+    assert!(
+        second > first,
+        "the second window's open must not repeat the first's tag: {first} then {second}"
+    );
+    assert_eq!(
+        app.update(&mut vcx1, |a, _| a.next_tag()),
+        second + 1,
+        "both opens drew from the app's one counter"
+    );
+}

@@ -203,8 +203,13 @@ fn main() {
             // Unsaved sheets are saved, then the data service stops off the
             // UI thread (`bridge::stop_at_quit`), never as a side effect of a
             // `DataHandle` simply dropping on `main`'s own thread at quit.
+            // The bridge attaches to the app, ahead of any window: service
+            // outcomes are routed to whichever window hosts their tile when
+            // they arrive, and configuration changes are forwarded, for the
+            // life of the app.
             if let Some(bridge) = &bridge {
                 bridge::stop_at_quit(bridge, cx);
+                bridge::attach(bridge, &app, cx);
             }
 
             // Stop the demo producer on a background executor so joining its thread
@@ -234,16 +239,23 @@ fn main() {
                     })
                     .expect("failed to open window");
 
-                // Route service outcomes into the shell and forward configuration
-                // changes once the window exists.
-                if let Some(bridge) = &bridge {
-                    cx.update(|cx| bridge::attach(bridge, &app, window, cx));
-                }
-
-                // Save the session and unsaved sheets when the window closes,
-                // while it still exists; the quit hooks above cover an
-                // explicit application quit (Dock Quit, logout).
-                cx.update(|cx| bridge::save_on_close(window, app.clone(), bridge.as_ref(), cx));
+                // The window's own hooks: save the session and unsaved
+                // sheets when it closes, while it still exists; the quit
+                // hooks above cover an explicit application quit (Dock
+                // Quit, logout). The view registered its key with the app
+                // as it was built.
+                cx.update(|cx| match &bridge {
+                    Some(bridge) => {
+                        let key = window
+                            .read(cx)
+                            .ok()
+                            .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
+                            .map(|shell| shell.read(cx).key())
+                            .expect("the window's root view is the shell");
+                        bridge::attach_window(bridge, &app, key, window.into(), cx);
+                    }
+                    None => bridge::save_on_close(window, app.clone(), None, cx),
+                });
 
                 // Refresh diagnostic configuration independently of the data bridge.
                 // The frame's config counter changes on every applied reload, including

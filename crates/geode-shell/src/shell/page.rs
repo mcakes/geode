@@ -21,7 +21,10 @@ impl ShellView {
         self.page.as_ref().is_some_and(|p| p.open)
     }
 
-    pub(crate) fn open_page_kind(&self) -> Option<&'static str> {
+    /// The kind of the page this window has open, or `None` while none
+    /// is. Public for the app bridge, which reads the diagnostics lanes'
+    /// as-of from the window whose diagnostics page is asking.
+    pub fn open_page_kind(&self) -> Option<&'static str> {
         self.page
             .as_ref()
             .filter(|p| p.open)

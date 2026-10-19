@@ -260,10 +260,11 @@ pub fn open(
 /// for this column. Remove every selection for the column from the request
 /// scope so counts measure the effect of each value under the other filters.
 fn request_values(view: &mut ShellView, column: &str, cx: &mut Context<ShellView>) {
-    // Tags span picker opens, preventing an outcome from a closed picker
-    // from matching a new request for the same column.
-    view.next_picker_tag += 1;
-    let tag = view.next_picker_tag;
+    // Tags span picker opens and windows (the app's one counter),
+    // preventing an outcome from a closed picker, or another window's,
+    // from matching a new request for the same column. A dispatch path:
+    // the app is updated from no render.
+    let tag = view.with_app(cx, |app| app.next_tag());
     let frame = view.target_frame(cx);
     let Some(p) = view.picker.as_mut() else {
         return;
