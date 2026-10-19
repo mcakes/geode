@@ -7086,10 +7086,14 @@ run_mutation "perf model: a limit just under a petabyte reads as unlimited" \
   'pub const UNLIMITED_LIMIT_BYTES: u64 = (1 << 50) - 1;' \
   geode-diagnostics perf_model_formats_process_memory_and_duckdb_memory_detail
 
-run_mutation "shell: the watcher sums a closed window's histogram" \
-  crates/geode-shell/src/shell/hot_reload.rs \
-  '        for view in self.open_views(cx) {' \
-  '        for view in self.views() {' \
+# The closing window leaves the view list with the registry; a view that
+# stays listed keeps feeding its frozen frame histogram into the
+# diagnostics sum for the rest of the run.
+run_mutation "shell app: window_closed forgets the closing window's view" \
+  crates/geode-shell/src/shell/app.rs \
+  '        self.views.retain(|(k, _)| *k != key);
+        cx.emit(ShellEvent::WindowsChanged);' \
+  '        cx.emit(ShellEvent::WindowsChanged);' \
   geode-shell the_watcher_sums_only_open_windows_histograms
 
 run_mutation "shell: the reload poll never copies process memory into diagnostics" \
@@ -7109,8 +7113,8 @@ run_mutation "shell: the reload poll logs process memory only while watched" \
 # memory readings into diagnostics after the window closed.
 run_mutation "shell: the watcher ends when the last window closes" \
   crates/geode-shell/src/shell/hot_reload.rs \
-  '                let Ok(runs) = this.update(cx, |app, cx| app.watcher_runs(cx)) else {' \
-  '                let Ok(runs) = this.update(cx, |app, cx| app.watcher_runs(cx) || true) else {' \
+  '                let Ok(runs) = this.update(cx, |app, _cx| app.watcher_runs()) else {' \
+  '                let Ok(runs) = this.update(cx, |app, _cx| app.watcher_runs() || true) else {' \
   geode-shell the_watcher_ends_when_the_last_window_closes
 
 # ---- ShellApp: the one owner behind every window
@@ -7241,14 +7245,55 @@ run_mutation "shell app: a window opening on a hidden index parks it" \
   a_window_opening_on_a_hidden_workspace_takes_it_through_park
 
 # gpui removes a closing window before the quit hooks run: a save then,
-# with no live view, would write the layout without the closed window's
-# tile records over the should-close hook's save.
-run_mutation "shell app: save_session writes nothing with no live view" \
+# with no window registered, would write the layout without the closed
+# window's tile records over the should-close hook's save.
+run_mutation "shell app: save_session writes nothing with no window registered" \
   crates/geode-shell/src/shell/session_io.rs \
-  '        if self.views().next().is_none() {' \
+  '        if self.windows().is_empty() {' \
   '        if false {' \
   geode-shell \
   save_session_writes_nothing_with_every_window_closed
+
+# ---- ShellApp: the window registry and opener
+
+# A tear-out with no free index must refuse before it touches anything.
+# Without the early refusal the window is switched to its own index,
+# which cannot land (`unreachable!`): the verb then panics instead of
+# refusing.
+run_mutation "shell app: tear_out refuses before anything changes with nine shown" \
+  crates/geode-shell/src/shell/app.rs \
+  '            let Some(next) = workspaces.lowest_free() else {' \
+  '            let Some(next) = workspaces.lowest_free().or(Some(old)) else {' \
+  geode-shell \
+  both_verbs_refuse_with_nine_shown
+
+# A closing window parks every index it hosted, hidden ones included;
+# parking only the first leaves a hidden workspace's tiles with no
+# record anywhere.
+run_mutation "shell app: window_closed parks every index the window hosted" \
+  crates/geode-shell/src/shell/app.rs \
+  '        for workspace in self.services.workspaces.remove_window(key) {' \
+  '        for workspace in self.services.workspaces.remove_window(key).into_iter().take(1) {' \
+  geode-shell \
+  window_closed_parks_and_forgets
+
+# The title names the shown index only once two windows are registered.
+run_mutation "shell app: the title names the index only with two windows" \
+  crates/geode-shell/src/shell/app.rs \
+  '            Some(ix) if self.windows.len() >= 2 => format!("Geode · {}", ix.get()),' \
+  '            Some(ix) => format!("Geode · {}", ix.get()),' \
+  geode-shell \
+  window_title_names_the_index_only_with_two_windows
+
+# A tear-out whose opener fails is rolled back before its queued park is
+# delivered; without the shown-workspace guard the window parks the
+# occupants of a workspace that never left it.
+run_mutation "shell app: a rolled-back tear-out parks nothing" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '                if *window == self.key && self.workspaces(cx).shown(self.key) != Some(*workspace)' \
+  '                if *window == self.key && true' \
+  geode-shell \
+  a_failing_opener_rolls_the_tear_out_back
 
 run_mutation "catalog: a GiB memory limit reads as GB" \
   crates/geode-data/src/query/catalog.rs \

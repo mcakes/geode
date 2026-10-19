@@ -431,6 +431,10 @@ pub(super) fn open_shell(
 
 /// Open a window over an existing app entity — what a test of two windows
 /// sharing one `ShellApp` needs; [`open_shell`] builds the app itself.
+/// Every window here opens through the production route: the test opener
+/// is installed on the app and `ShellApp::open_window` reserves, opens
+/// and confirms, the first window on the session's initial index and
+/// each later one on `lowest_free`, as `add_window(None)` chose.
 pub(super) fn open_shell_on(
     cx: &mut gpui::TestAppContext,
     app: Entity<ShellApp>,
@@ -445,20 +449,52 @@ pub(super) fn open_shell_on(
     (window, vcx)
 }
 
-/// Register a window key on `app` and open a `Root` over a `ShellView`
-/// for it; the one window-opening route every fixture here takes.
+/// The harness's `WindowOpener`: a `Root` over a `ShellView` for the
+/// reserved key, in a default test window. The closure captures the app
+/// entity; it runs with no lease on it, as the production opener does.
+pub(super) fn test_opener(app: Entity<ShellApp>) -> crate::shell::WindowOpener {
+    std::rc::Rc::new(move |key, _spec, cx: &mut App| {
+        let app = app.clone();
+        cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+            let view = cx.new(|cx| ShellView::new(app, key, window, cx));
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .ok()
+        .map(Into::into)
+    })
+}
+
+/// Install the test opener on `app` (again is harmless: the closure is
+/// the same) and open a window through `ShellApp::open_window`; the one
+/// window-opening route every fixture here takes. The typed handle comes
+/// back from the registry, which the opened view's constructor filled.
 fn open_window_on(
     cx: &mut gpui::TestAppContext,
     app: Entity<ShellApp>,
 ) -> gpui::WindowHandle<Root> {
     cx.update(|cx| {
-        cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-            let key = app.update(cx, |a, cx| a.add_window(None, cx));
-            let view = cx.new(|cx| ShellView::new(app, key, window, cx));
-            cx.new(|cx| Root::new(view, window, cx))
-        })
+        app.update(cx, |a, _| a.set_window_opener(test_opener(app.clone())));
+        let workspace = {
+            let workspaces = &app.read(cx).services().workspaces;
+            if workspaces.windows().next().is_none() {
+                WorkspaceIx::new(workspaces.initial_index()).expect("1–9")
+            } else {
+                workspaces
+                    .lowest_free()
+                    .expect("nine windows already show every workspace")
+            }
+        };
+        let spec = crate::shell::WindowSpec {
+            workspace,
+            placement: crate::shell::Placement::Default,
+        };
+        let key = ShellApp::open_window(&app, spec, cx).expect("the test opener opens");
+        app.read(cx)
+            .handle(key)
+            .expect("the opened window registered")
+            .downcast::<Root>()
+            .expect("a Root over the ShellView")
     })
-    .unwrap()
 }
 
 /// [`open_shell`] with a real, writable user config directory — the one
@@ -780,3 +816,4 @@ mod session;
 mod stacks;
 mod tilepicker;
 mod tiling_keys;
+mod windows;

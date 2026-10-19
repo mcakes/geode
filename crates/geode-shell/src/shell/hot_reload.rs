@@ -142,13 +142,13 @@ impl ShellApp {
             loop {
                 cx.background_executor().timer(RELOAD_POLL_INTERVAL).await;
 
-                // The loop ends with the last window, not with this entity or
-                // its views: the quit hooks hold the app and the bridge's
-                // closures a view past the windows, and a tick then would
-                // still copy memory into diagnostics, write the session and
-                // reload config for nobody, its notifies waking data
-                // submissions.
-                let Ok(runs) = this.update(cx, |app, cx| app.watcher_runs(cx)) else {
+                // The loop ends with the last registered window, not with
+                // this entity or its views: the quit hooks hold the app and
+                // the bridge's closures a view past the windows, and a tick
+                // then would still copy memory into diagnostics, write the
+                // session and reload config for nobody, its notifies waking
+                // data submissions.
+                let Ok(runs) = this.update(cx, |app, _cx| app.watcher_runs()) else {
                     return; // app gone; stop polling
                 };
                 if !runs {
@@ -298,13 +298,14 @@ impl ShellApp {
         .detach();
     }
 
-    /// Every open window's frame-interval histogram, summed: the one
-    /// histogram the diagnostics page shows. A closed window's view, held
-    /// by a host, contributes nothing: its frozen counts would otherwise
-    /// sit in the page for the rest of the run.
+    /// Every registered window's frame-interval histogram, summed: the
+    /// one histogram the diagnostics page shows. A closed window's view,
+    /// held by a host, left the registry with `window_closed` and
+    /// contributes nothing: its frozen counts would otherwise sit in the
+    /// page for the rest of the run.
     fn frame_histogram(&self, cx: &App) -> FrameHistogram {
         let mut merged = FrameHistogram::new();
-        for view in self.open_views(cx) {
+        for view in self.views() {
             merged.merge(&view.read(cx).perf);
         }
         merged
@@ -707,14 +708,20 @@ impl ShellView {
             // what was built for it, then tell the app, which announces
             // `Parked` for the destination to pull. The move is already
             // committed, so this window's next draw finds nothing of it.
+            // Not when this window shows the workspace again by the time
+            // the event arrives: a tear-out whose opener failed was rolled
+            // back before its queued park was delivered, and parking now
+            // would drop the occupants of a workspace that never left.
             ShellEvent::Park { window, workspace } => {
-                if *window == self.key {
+                if *window == self.key && self.workspaces(cx).shown(self.key) != Some(*workspace) {
                     let workspace = *workspace;
                     self.park_workspace(workspace, cx);
                     self.app
                         .update(cx, |app, cx| app.records_parked(workspace, cx));
                 }
             }
+            // Nothing in a window reads the count yet; the title bar will.
+            ShellEvent::WindowsChanged => {}
             // The records for the workspace this window shows are parked:
             // take them, and the next draw rebuilds their occupants.
             ShellEvent::Parked { workspace } => {

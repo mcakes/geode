@@ -33,9 +33,12 @@
 //! each in its own `on_app_event`.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, SharedString, WeakEntity};
+use gpui::{
+    AnyWindowHandle, App, AppContext, Context, Entity, EventEmitter, SharedString, WeakEntity,
+};
 
 use super::{ShellEvent, ShellServices, ShellView, hot_reload};
 use crate::diagnostics::Diagnostics;
@@ -52,6 +55,51 @@ use geode_core::config::{Config, LayerDoc};
 
 impl EventEmitter<ShellEvent> for ShellApp {}
 
+/// Where a new window should appear. The opener (the composition root's
+/// closure) maps it to platform window options; the app never reads it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Placement {
+    /// Next to the named window, as a verb dispatched there asks.
+    Beside(WindowKey),
+    /// Where a restored session recorded the window, when it did.
+    Restored {
+        display: Option<u64>,
+        bounds: Option<gpui::Bounds<gpui::Pixels>>,
+        maximized: bool,
+    },
+    /// Wherever the platform puts a window by default.
+    Default,
+}
+
+/// What [`ShellApp::open_window`] opens: the workspace the window shows
+/// first and where it appears.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowSpec {
+    pub workspace: WorkspaceIx,
+    pub placement: Placement,
+}
+
+/// The one routine that opens a platform window over a `ShellView` for a
+/// key the app has already reserved, installed once by the composition
+/// root ([`ShellApp::set_window_opener`]) and by the test harness. It runs
+/// with no lease on the app: the view it builds updates the app itself
+/// (`register_view`, `take_parked_records`). `None` means no window was
+/// opened and the caller rolls the reservation back.
+pub type WindowOpener = Rc<dyn Fn(WindowKey, &WindowSpec, &mut App) -> Option<AnyWindowHandle>>;
+
+/// Why a window was not opened. Each leaves the app as it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenRefusal {
+    /// No index is free for the window, or the asked-for index is shown
+    /// by another window.
+    NoFreeWorkspace,
+    /// No opener is installed; nothing can open a window.
+    NoOpener,
+    /// The opener opened nothing, or opened a window whose view did not
+    /// register for the key.
+    OpenerFailed,
+}
+
 pub struct ShellApp {
     pub(crate) services: ShellServices,
     /// Config directories read by each watcher poll; `None` layers are
@@ -66,18 +114,30 @@ pub struct ShellApp {
     /// load/reload. Each window observes it for the requests its surfaces
     /// drain.
     pub(super) diagnostics: Entity<Diagnostics>,
-    /// The last key issued by [`Self::add_window`]; keys count up
-    /// from 1 and are never reused.
+    /// The last key issued by [`Self::reserve`]; keys count up from 1
+    /// and are never reused.
     next_window: u64,
-    /// Every window's view, registered at the end of `ShellView::new`.
-    /// Weak, so this owner never keeps a closed window's view alive;
-    /// [`Self::views`] skips a handle whose view is gone and
-    /// [`Self::register_view`] drops such handles as it adds the next.
+    /// The window registry: every open window's key and platform handle,
+    /// in opening order. An entry is made by [`Self::register_view`] at
+    /// the end of `ShellView::new` and removed by [`Self::window_closed`]
+    /// from the close path; nothing else adds or drops one. This list is
+    /// what "open" means to the app: the watcher runs, the session is
+    /// saved and the title names an index by it, not by `cx.windows()`
+    /// and not by whether a view's entity is still alive, since the
+    /// bridge's closures and the quit hooks hold a view past its window.
+    windows: Vec<(WindowKey, AnyWindowHandle)>,
+    /// Every registered window's view, kept beside [`Self::windows`] and
+    /// removed with it. Weak, so this owner never keeps a view alive;
+    /// [`Self::views`] skips a handle whose view is gone.
     pub(super) views: Vec<(WindowKey, WeakEntity<ShellView>)>,
-    /// Whether any view has registered yet. The watcher ends once every
-    /// registered view is gone, but not before the first registers: the
+    /// Whether any view has registered yet. The watcher ends once the
+    /// registry is empty, but not before the first window registers: the
     /// loop starts with this entity, ahead of its first window.
     has_registered_view: bool,
+    /// What opens a window for a reserved key, installed once by the
+    /// composition root. `None` until then: `open_window` refuses
+    /// `NoOpener` before it reserves anything.
+    window_opener: Option<WindowOpener>,
     /// The effective UI font size (small/medium/large — `[ui] font_size`).
     /// Applied as each window's rem size at the top of its `render`, the
     /// one place with a `Window` on every path that can change it
@@ -436,8 +496,10 @@ impl ShellApp {
             frame,
             diagnostics,
             next_window: 0,
+            windows: Vec::new(),
             views: Vec::new(),
             has_registered_view: false,
+            window_opener: None,
             font_size,
             find_style,
             add_direction,
@@ -472,27 +534,20 @@ impl ShellApp {
         app
     }
 
-    /// Issue the next window key and open it on a workspace. Called once
-    /// per window, before its `ShellView` is built. `index` names the
-    /// workspace; `None` picks the session's initial index for the first
-    /// window and the lowest index no window shows after that.
+    /// Issue the next window key and open it on a workspace, for a caller
+    /// that builds the window itself (the composition root's first
+    /// window, the fixtures that open a window by hand). `index` names
+    /// the workspace; `None` picks the session's initial index for the
+    /// first window and the lowest index no window shows after that.
+    /// [`Self::open_window`] reserves through the same [`Self::reserve`].
     ///
     /// A refusal is a programming error here: the initial index is free
     /// while no window is open, and `lowest_free` is free by definition.
     /// A caller asking for an index another window shows is expected to
-    /// have checked `Workspaces::shown_in` first; until the second-window
-    /// path exists, that refusal is reported by the `expect`.
-    ///
-    /// An index another window hosted hidden (`Added::TakenFrom`) leaves
-    /// it through the same park a `Moved` switch uses: that window hears
-    /// [`ShellEvent::Park`] and parks what it built for the index, and
-    /// the new window pulls the records when `Parked` follows. The event
-    /// is delivered when this update's effects flush, after the new
-    /// window's view exists to hear the answer.
+    /// have checked `Workspaces::shown_in` first; `open_window` refuses
+    /// that case instead of panicking.
     pub fn add_window(&mut self, index: Option<WorkspaceIx>, cx: &mut Context<Self>) -> WindowKey {
-        self.next_window += 1;
-        let key = WindowKey(self.next_window);
-        let workspaces = &mut self.services.workspaces;
+        let workspaces = &self.services.workspaces;
         let n = match index {
             Some(ix) => ix.get(),
             None if workspaces.windows().next().is_none() => workspaces.initial_index(),
@@ -501,9 +556,25 @@ impl ShellApp {
                 .expect("nine windows already show every workspace")
                 .get(),
         };
-        let added = workspaces
-            .add_window(key, n)
-            .unwrap_or_else(|| panic!("workspace {n} is shown by another window"));
+        self.reserve(n, cx)
+            .unwrap_or_else(|| panic!("workspace {n} is shown by another window"))
+    }
+
+    /// The one place a key is issued and an index reserved for it: open
+    /// index `n` in `Workspaces` under the next key. `None`, with the key
+    /// counter and the workspaces untouched, when `n` is outside 1–9 or
+    /// shown by another window.
+    ///
+    /// An index another window hosted hidden (`Added::TakenFrom`) leaves
+    /// it through the same park a `Moved` switch uses: that window hears
+    /// [`ShellEvent::Park`] and parks what it built for the index, and
+    /// the new window pulls the records when `Parked` follows. The event
+    /// is delivered when the outermost update's effects flush, after the
+    /// new window's view exists to hear the answer.
+    fn reserve(&mut self, n: u8, cx: &mut Context<Self>) -> Option<WindowKey> {
+        let key = WindowKey(self.next_window + 1);
+        let added = self.services.workspaces.add_window(key, n)?;
+        self.next_window = key.0;
         if let Added::TakenFrom(host) = added {
             let workspace = WorkspaceIx::new(n).expect("add_window accepted the index");
             cx.emit(ShellEvent::Park {
@@ -511,7 +582,153 @@ impl ShellApp {
                 workspace,
             });
         }
-        key
+        Some(key)
+    }
+
+    /// Install what opens windows for reserved keys. Set once by the
+    /// composition root before any verb can run; a later call replaces
+    /// the opener for the windows opened after it.
+    pub fn set_window_opener(&mut self, opener: WindowOpener) {
+        self.window_opener = Some(opener);
+    }
+
+    /// Open a window showing `spec.workspace`, in three steps. Reserve,
+    /// under one app update: issue the key and open the index in
+    /// `Workspaces` ([`Self::reserve`]), refusing `NoFreeWorkspace` with
+    /// nothing changed when the index is shown elsewhere. Open, with no
+    /// lease on the app: the opener builds the platform window and its
+    /// `ShellView`, which updates the app itself (`register_view`,
+    /// `take_parked_records`); an update of a leased entity is refused,
+    /// so this cannot run inside the reserve step. Confirm, under a
+    /// second update: the registry must now list the key (the view
+    /// registered it), and `WindowsChanged` tells every window the count
+    /// moved; otherwise the reservation is rolled back
+    /// (`Workspaces::remove_window`) and `OpenerFailed` is returned. With
+    /// no opener installed, `NoOpener` is refused before anything is
+    /// reserved.
+    ///
+    /// An associated function rather than a method for the lease reason
+    /// above: the caller holds no `&mut ShellApp` while the opener runs.
+    pub fn open_window(
+        app: &Entity<ShellApp>,
+        spec: WindowSpec,
+        cx: &mut App,
+    ) -> Result<WindowKey, OpenRefusal> {
+        let Some(opener) = app.read(cx).window_opener.clone() else {
+            return Err(OpenRefusal::NoOpener);
+        };
+        let key = app.update(cx, |app, cx| {
+            app.reserve(spec.workspace.get(), cx)
+                .ok_or(OpenRefusal::NoFreeWorkspace)
+        })?;
+        let opened = opener(key, &spec, cx);
+        app.update(cx, |app, cx| app.confirm_open(key, opened.is_some(), cx))?;
+        Ok(key)
+    }
+
+    /// Open a new window on the lowest index no window shows, placed
+    /// beside the window that asked. `NoFreeWorkspace` once nine windows
+    /// show every index.
+    pub fn open_fresh(
+        app: &Entity<ShellApp>,
+        beside: WindowKey,
+        cx: &mut App,
+    ) -> Result<WindowKey, OpenRefusal> {
+        let Some(workspace) = app.read(cx).services.workspaces.lowest_free() else {
+            return Err(OpenRefusal::NoFreeWorkspace);
+        };
+        Self::open_window(
+            app,
+            WindowSpec {
+                workspace,
+                placement: Placement::Beside(beside),
+            },
+            cx,
+        )
+    }
+
+    /// Move the workspace window `from` shows into a new window beside
+    /// it, and show the lowest free index in `from` instead. Refused with
+    /// nothing changed when no index is free (`from`'s own index is still
+    /// shown, so it is not free) or `from` is not open.
+    ///
+    /// Reserve, under one app update: switch `from` to the free index
+    /// (always `Shown` or `Moved`: nobody shows it; a `Moved` parks it
+    /// out of the window that hid it, as any switch does), then reserve
+    /// the index `from` showed for the new key, which `Workspaces`
+    /// answers `TakenFrom(from)`: `from` is told to park its occupants
+    /// for it through the ordinary [`ShellEvent::Park`], and the new
+    /// window rebuilds them. Open and confirm as [`Self::open_window`].
+    /// If the opener fails, `from` is switched back to its index
+    /// (`Shown`: the reservation was removed, so nobody hosts it) before
+    /// the queued `Park` is delivered; `from` then shows that workspace
+    /// again and its `Park` arm ignores the event.
+    pub fn tear_out(
+        app: &Entity<ShellApp>,
+        from: WindowKey,
+        cx: &mut App,
+    ) -> Result<WindowKey, OpenRefusal> {
+        if app.read(cx).window_opener.is_none() {
+            return Err(OpenRefusal::NoOpener);
+        }
+        let (old, key) = app.update(cx, |app, cx| {
+            let workspaces = &app.services.workspaces;
+            let Some(old) = workspaces.shown(from) else {
+                return Err(OpenRefusal::NoFreeWorkspace);
+            };
+            let Some(next) = workspaces.lowest_free() else {
+                return Err(OpenRefusal::NoFreeWorkspace);
+            };
+            match app.switch(from, next.get(), cx) {
+                Switch::Shown | Switch::Moved { .. } => {}
+                // `next` is shown by nobody and differs from `old`, and
+                // nothing ran between the check and the switch.
+                other => unreachable!("a switch to a free index landed as {other:?}"),
+            }
+            let key = app
+                .reserve(old.get(), cx)
+                .expect("the index this window just left is shown by nobody");
+            Ok((old, key))
+        })?;
+        let spec = WindowSpec {
+            workspace: old,
+            placement: Placement::Beside(from),
+        };
+        let opener = app
+            .read(cx)
+            .window_opener
+            .clone()
+            .expect("checked before the reservation");
+        let opened = opener(key, &spec, cx);
+        app.update(cx, |app, cx| {
+            let confirmed = app.confirm_open(key, opened.is_some(), cx);
+            if confirmed.is_err() {
+                let back = app.services.workspaces.switch(from, old.get());
+                debug_assert_eq!(back, Switch::Shown, "the rolled-back index is unhosted");
+            }
+            confirmed
+        })?;
+        Ok(key)
+    }
+
+    /// The confirm step of an open: the opener opened a window and its
+    /// view registered under `key`. Otherwise the reservation is undone
+    /// (`remove_window`, and any registry entry the key left behind) and
+    /// `OpenerFailed` is returned.
+    fn confirm_open(
+        &mut self,
+        key: WindowKey,
+        opened: bool,
+        cx: &mut Context<Self>,
+    ) -> Result<(), OpenRefusal> {
+        if opened && self.handle(key).is_some() {
+            cx.emit(ShellEvent::WindowsChanged);
+            return Ok(());
+        }
+        self.services.workspaces.remove_window(key);
+        self.windows.retain(|(k, _)| *k != key);
+        self.views.retain(|(k, _)| *k != key);
+        Err(OpenRefusal::OpenerFailed)
     }
 
     /// Show index `n` in window `key` (`Workspaces::switch`), and start
@@ -542,51 +759,101 @@ impl ShellApp {
     }
 
     /// Bring window `key` to the front: a switch asked for an index that
-    /// window shows (`Switch::Raise`). Not yet implemented; the request is
-    /// logged until the window-activation path exists.
-    pub fn activate_window(&mut self, key: WindowKey, _cx: &mut Context<Self>) {
-        tracing::debug!(
-            target: "geode::shell",
-            window = key.0,
-            "activate_window: not yet implemented"
-        );
+    /// window shows (`Switch::Raise`). A key the registry does not list
+    /// (closed, or never opened) is ignored.
+    pub fn activate_window(&self, key: WindowKey, cx: &mut App) {
+        if let Some(handle) = self.handle(key) {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
     }
 
-    /// Record the view built for `key`, at the end of `ShellView::new`, so
-    /// the session writer can ask it for its occupants' records. Handles
-    /// whose view has gone are dropped here, as the next window registers.
-    pub fn register_view(&mut self, key: WindowKey, view: WeakEntity<ShellView>) {
-        self.views.retain(|(_, v)| v.upgrade().is_some());
+    /// Record the window built for `key`, at the end of `ShellView::new`:
+    /// its platform handle in the registry and its view, so the session
+    /// writer can ask the view for its occupants' records. Every window
+    /// registers here, the composition root's first window as much as one
+    /// the opener builds, which is what makes [`Self::windows`] truthful.
+    pub fn register_view(
+        &mut self,
+        key: WindowKey,
+        view: WeakEntity<ShellView>,
+        handle: AnyWindowHandle,
+    ) {
+        debug_assert!(
+            self.handle(key).is_none(),
+            "window {key:?} registered twice"
+        );
+        self.windows.push((key, handle));
         self.views.push((key, view));
         self.has_registered_view = true;
     }
 
-    /// Every window's view that is still alive, in registration order. A
-    /// closed window's handle no longer upgrades and is skipped.
+    /// Every registered window's view that is still alive, in opening
+    /// order. A window leaves this list through [`Self::window_closed`];
+    /// a view that is gone without that (a window a fixture removed
+    /// directly) is skipped.
     pub fn views(&self) -> impl Iterator<Item = Entity<ShellView>> + '_ {
         self.views.iter().filter_map(|(_, view)| view.upgrade())
     }
 
-    /// The views whose window is still open, in registration order. The
-    /// window decides, not the entity: the bridge's closures and the quit
-    /// hooks hold a view past its window. What the watcher gathers for
-    /// the diagnostics page and whether it ticks at all read this; the
-    /// session union reads [`Self::views`] (see `current_tiles`).
-    pub(super) fn open_views<'a>(
-        &'a self,
-        cx: &'a App,
-    ) -> impl Iterator<Item = Entity<ShellView>> + 'a {
-        let open = cx.windows();
-        self.views()
-            .filter(move |view| open.contains(&view.read(cx).window_handle))
+    /// Whether the watcher has work left: until the first window
+    /// registers, and then while the registry lists a window. A tick with
+    /// none would wake diagnostics and write a session for nobody.
+    pub(super) fn watcher_runs(&self) -> bool {
+        !self.has_registered_view || !self.windows.is_empty()
     }
 
-    /// Whether the watcher has work left: until the first view registers,
-    /// and then while any registered view's window is still open. A tick
-    /// for a closed window would wake its diagnostics and write its
-    /// session for nobody.
-    pub(super) fn watcher_runs(&self, cx: &App) -> bool {
-        !self.has_registered_view || self.open_views(cx).next().is_some()
+    /// The open windows, in opening order: each key and its platform
+    /// handle.
+    pub fn windows(&self) -> &[(WindowKey, AnyWindowHandle)] {
+        &self.windows
+    }
+
+    /// The platform handle of window `key`; `None` once it closed.
+    pub fn handle(&self, key: WindowKey) -> Option<AnyWindowHandle> {
+        self.windows
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, handle)| *handle)
+    }
+
+    /// Whether no window other than `key` is registered: the close that
+    /// quits, rather than one that parks.
+    pub fn is_last_window(&self, key: WindowKey) -> bool {
+        !self.windows.iter().any(|(k, _)| *k != key)
+    }
+
+    /// Window `key` is closing: the close path calls this while the
+    /// window still stands (inside should-close), so its view is alive to
+    /// hear the parks. Every index the window hosted leaves `Workspaces`
+    /// (`remove_window`) and is parked through the ordinary
+    /// [`ShellEvent::Park`], so a tile in a workspace the window showed
+    /// or hid keeps its record in `parked_tiles` for the next window that
+    /// shows the index, or for the session file. The key then leaves the
+    /// registry and the view list, and `WindowsChanged` tells every
+    /// window the count moved.
+    pub fn window_closed(&mut self, key: WindowKey, cx: &mut Context<Self>) {
+        for workspace in self.services.workspaces.remove_window(key) {
+            cx.emit(ShellEvent::Park {
+                window: key,
+                workspace,
+            });
+        }
+        self.windows.retain(|(k, _)| *k != key);
+        self.views.retain(|(k, _)| *k != key);
+        cx.emit(ShellEvent::WindowsChanged);
+    }
+
+    /// The title of window `key`: `Geode` while it is the only registered
+    /// window, `Geode · N` (N the index it shows) once there are two or
+    /// more, so each window on a screen says which workspace it is. A
+    /// pure read, for the event paths that set the title; never from
+    /// render.
+    pub fn window_title(&self, key: WindowKey) -> String {
+        let shown = self.services.workspaces.shown(key);
+        match shown {
+            Some(ix) if self.windows.len() >= 2 => format!("Geode · {}", ix.get()),
+            _ => "Geode".to_string(),
+        }
     }
 
     /// Hand window `key` the parked records it should host, removing them
@@ -637,10 +904,10 @@ impl ShellApp {
     /// parked record for the same tile.
     pub(super) fn current_tiles(&self, cx: &App) -> TileRecords {
         let mut tiles = TileRecords::new();
-        // Deliberately every registered view, open window or not: until the
-        // close path parks a closed window's tiles and deregisters its view,
-        // skipping an entity-alive closed view would drop its tiles from the
-        // file.
+        // Every registered view: a window leaves the registry through
+        // `window_closed`, which parked its tiles first, so a view still
+        // listed here holds live records and one that left has its records
+        // in `parked_tiles`.
         for view in self.views() {
             for (id, record) in view.read(cx).current_tiles(cx) {
                 tiles.entry(id).or_insert(record);

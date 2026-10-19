@@ -1013,10 +1013,11 @@ pub fn stop_at_quit(bridge: &Bridge, cx: &mut App) {
 /// The quit hooks cannot do this for a window close: gpui removes the
 /// window before it quits, and the window's occupants go with it. They
 /// still run afterwards: the session hook asks the app, which writes
-/// nothing without a live window (`ShellApp::save_session`), and the sheet
-/// flush finds no dirty sheet, so nothing is done twice. On an explicit
-/// application quit (Dock Quit, logout) no should-close runs and the quit
-/// hooks do the work alone.
+/// nothing while no window is registered (`ShellApp::save_session`; the
+/// close path deregisters a window through `ShellApp::window_closed`),
+/// and the sheet flush finds no dirty sheet, so nothing is done twice. On an
+/// explicit application quit (Dock Quit, logout) no should-close runs and
+/// the quit hooks do the work alone.
 ///
 /// The platform keeps one should-close callback per window, so this
 /// replaces any earlier one; neither gpui-component's `Root` nor its
@@ -1620,7 +1621,8 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, window: WindowHandle<Root
             ShellEvent::Reloaded { .. }
             | ShellEvent::DayChanged
             | ShellEvent::Park { .. }
-            | ShellEvent::Parked { .. } => {}
+            | ShellEvent::Parked { .. }
+            | ShellEvent::WindowsChanged => {}
         }
     })
     .detach();
@@ -10645,6 +10647,10 @@ grain = "underlying"
             }))
             .unwrap();
         vcx.run_until_parked();
+        // The close path: the app deregisters the window while it stands,
+        // then gpui removes it.
+        let key = shell.read_with(&vcx, |s, _| s.key());
+        app_of(f.window, cx).update(&mut vcx, |a, cx| a.window_closed(key, cx));
         vcx.update(|window, _| window.remove_window());
         vcx.run_until_parked();
         // Count wakes of the surviving entity: the retry timer itself must

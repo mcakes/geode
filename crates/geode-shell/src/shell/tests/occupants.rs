@@ -2245,8 +2245,14 @@ fn a_switch_to_a_shown_index_moves_nothing_and_asks_to_raise(cx: &mut gpui::Test
     let s2 = shell_of(&w2, &mut vcx2);
     dispatch_and_draw(&s2, &mut vcx2, "tile::add_rec");
     let tile = s2.read_with(&vcx2, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    // The first window is the active one when it asks for 2.
+    vcx1.update(|window, _| window.activate_window());
+    vcx1.run_until_parked();
+    assert_eq!(cx.update(|cx| w1.is_active(cx)), Some(true), "sanity");
+    assert_eq!(cx.update(|cx| w2.is_active(cx)), Some(false), "sanity");
 
     dispatch_action(&s1, "workspace::switch_2", &mut vcx1);
+    vcx1.run_until_parked();
     vcx1.update(|window, cx| {
         let _ = window.draw(cx);
     });
@@ -2254,6 +2260,12 @@ fn a_switch_to_a_shown_index_moves_nothing_and_asks_to_raise(cx: &mut gpui::Test
         let _ = window.draw(cx);
     });
 
+    assert_eq!(
+        cx.update(|cx| w2.is_active(cx)),
+        Some(true),
+        "the window showing 2 was brought forward"
+    );
+    assert_eq!(cx.update(|cx| w1.is_active(cx)), Some(false));
     assert_eq!(
         s1.read_with(&vcx1, |s, cx| s.shown_ix(cx)),
         WorkspaceIx::new(1).unwrap(),

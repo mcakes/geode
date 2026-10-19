@@ -72,6 +72,15 @@ impl Render for ShellView {
         }
         self.last_render_started = Some(render_started);
 
+        // A window the close path has deregistered (`ShellApp::window_closed`)
+        // is no longer open on the workspaces, yet it can be drawn once more
+        // between that and gpui removing it: the parks the deregistration
+        // triggered notify this view. Nothing of it is left to paint, and
+        // every workspace accessor below would panic for its key.
+        if self.workspaces(cx).shown(self.key).is_none() {
+            return div().into_any_element();
+        }
+
         // Restore focus for deferred paths that lack a `Window`, before any
         // painting. Preserve a focused tile's own insert-mode input using the
         // same predicate as key routing, so a mouse-opened editor keeps focus.
@@ -973,6 +982,7 @@ impl Render for ShellView {
             // component dialog and notification layers after shell content.
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
+            .into_any_element()
     }
 }
 

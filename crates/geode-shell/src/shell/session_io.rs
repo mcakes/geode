@@ -149,18 +149,18 @@ impl ShellApp {
     /// failures are logged.
     /// It does not wait for an in-flight periodic write, which may rename last.
     ///
-    /// With no live window nothing is written: a closed window's occupants
-    /// are gone with it, and a snapshot taken then would replace their
-    /// records with placeholders. The should-close hook saved while the
-    /// window still stood; the quit hook that follows a close finds no
-    /// window and leaves that save alone, as an explicit quit's windows are
-    /// still open when its hook runs.
+    /// While no window is registered nothing is written: a closed
+    /// window's occupants are gone with it, and a snapshot taken then
+    /// would replace their records with placeholders. The should-close
+    /// hook saved while the window still stood; the quit hook that follows
+    /// a close finds the registry empty and leaves that save alone, as an
+    /// explicit quit's windows are still registered when its hook runs.
     pub fn save_session(&self, cx: &App) {
         let Some(path) = self.services.session_path.as_ref() else {
             return;
         };
-        if self.views().next().is_none() {
-            tracing::debug!(target: "geode::session", "no live window; the session is not saved");
+        if self.windows().is_empty() {
+            tracing::debug!(target: "geode::session", "no window registered; the session is not saved");
             return;
         }
         let record = self.frame_record(cx);

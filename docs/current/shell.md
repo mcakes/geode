@@ -52,19 +52,28 @@ every other record stays parked for the window that hosts it. A window
 pulls at construction and on the event and dispatch paths that make it
 host more (a switch that `Shown` or `Moved` a workspace to it, a `Parked`
 announcement), never from its draw. Each `ShellView` registers
-itself with the app at the end of its constructor (`register_view`, a weak
-handle). The app knows two sets of windows: its registered views whose
-entity is still alive (`views`), and among those the ones whose window is
-still open (`open_views`, by `cx.windows()`; a view can outlive its window
-while a host such as the bridge holds it). The writer unions every
-registered view's records (`ShellView::current_tiles`: its non-placeholder
-occupants, then its own unplaced records and the records it has pulled but
-not yet built, which left the parked set when they were taken) with the
-parked ones, earlier sources winning an id; page records are each view's, a
-later view winning a kind. It deliberately reads every registered view, open window or not: until
-the window-close path parks a closed window's tiles and deregisters its view,
-skipping a closed window whose view is still alive would drop its tiles from
-the file. A window marks the session dirty through
+itself with the app at the end of its constructor (`register_view`: its
+key, its window's handle and a weak handle to the view). That is the
+window registry (`ShellApp::windows`, `handle`, `is_last_window`), and it
+is what "open" means to the app: the watcher runs while it lists a window
+(`watcher_runs`), the session is saved only while it does, the diagnostics
+histogram sums the views it lists, and the title names an index only when
+it lists two (`window_title`: `Geode`, or `Geode · N` with N the shown
+index). Neither `cx.windows()` nor a view entity's liveness decides, since
+a host such as the bridge or the quit hooks holds a view or the app past
+its window. A window leaves the registry through `ShellApp::window_closed`,
+which the close path calls while the window still stands: every index the
+window hosted leaves `Workspaces` (`remove_window`) and is parked through
+the ordinary `Park` event, so its tiles' records wait in `parked_tiles`
+for the next window to show the index or for the session file; the key
+then leaves the registry and `WindowsChanged` is emitted. A deregistered
+window can be drawn once more before gpui removes it (the parks notify its
+view); its render paints nothing then. The writer unions every registered
+view's records (`ShellView::current_tiles`: its non-placeholder occupants,
+then its own unplaced records and the records it has pulled but not yet
+built, which left the parked set when they were taken) with the parked
+ones, earlier sources winning an id; page records are each view's, a later
+view winning a kind. A window marks the session dirty through
 `ShellView::mark_session_dirty`, which updates the app entity, so it is
 called from event, dispatch and constructor paths only; the one render-time
 case, a divider drag cancelled because an overlay, page, fullscreen or
@@ -80,11 +89,11 @@ compares against) and the cached date, each behind a read accessor the status
 bar, the settings rows and the prepared dialog rows use; a settings row writes
 them through `ShellView::with_app` on its dispatch path. The watcher loop is
 the app's too, started once by `ShellApp::new` (`spawn_watcher`) and ended
-once no registered view's window is open (`watcher_runs`: the window decides,
+once the window registry is empty (`watcher_runs`: the registry decides,
 not the entity, since the bridge's closures and the quit hooks hold a view
 or the app past its window; a tick for nobody would wake diagnostics and
 write a session no one reads): every tick sweeps the flip barrier, refreshes
-the diagnostics histogram (every open window's, summed) and the memory
+the diagnostics histogram (every registered window's, summed) and the memory
 sample, refreshes the date, writes a dirty session and scans config, applying
 a changed candidate through `ShellApp::apply_reload`. `ShellApp` is
 the one emitter of `ShellEvent`: the bridge subscribes to it for
@@ -104,10 +113,12 @@ sees a revision only after the bridge refreshed its views.
 A live module entity renders only in the window that created it. When a
 workspace changes window, its occupants are not handed over: the window it
 leaves parks them into records and the window it reaches rebuilds them from
-those records, as a restore does. Two routes move a workspace: a switch in
+those records, as a restore does. Three routes move a workspace: a switch in
 one window to an index another window hosts hidden (`Workspaces::switch`
-answers `Moved { from }`), and a new window opening on such an index
-(`Workspaces::add_window` answers `TakenFrom`). A switch within one window
+answers `Moved { from }`), a new window opening on such an index
+(`Workspaces::add_window` answers `TakenFrom`; a tear-out is this, for the
+index the old window showed), and a window closing (`ShellApp::window_closed`
+parks every index it hosted, for no destination yet). A switch within one window
 (`Shown`, `Unchanged`), a switch to an index another window shows
 (`Raise`, which asks that window forward and changes nothing) and a refused
 one (`Invalid`) move nothing and park nothing.
@@ -133,6 +144,44 @@ workspace }`; the window showing that workspace pulls the records
 restored-record map, and its next draw's `ensure_occupants` builds the
 occupants from them, under the same tile ids. The draw pass itself never
 reads the app's parked records.
+
+### Opening windows
+
+`ShellApp` opens every window but the first through one installed
+`WindowOpener` (`set_window_opener`, a closure the composition root
+installs once: it builds the platform window and a `ShellView` for a key
+and returns the window's handle, or `None`). `ShellApp::open_window(app,
+spec, cx)` takes a `WindowSpec` (the workspace to show and a `Placement`:
+beside a window, where a restored session recorded it, or the platform's
+default) and runs three steps. Reserve, under one app update: the key is
+issued and the index opened in `Workspaces` (one code path with
+`add_window`, which the hand-built first window still uses), refusing
+`NoFreeWorkspace` with nothing changed when the index is shown elsewhere;
+an index hidden in another window emits that window's `Park`. Open, with
+no lease on the app: the opener's `ShellView::new` updates the app itself
+(`register_view`, `take_parked_records`), and an update of an entity
+already leased is refused, so the opener cannot run inside the reserve
+step; this is why `open_window`, `open_fresh` and `tear_out` are
+associated functions over the entity rather than methods. Confirm, under
+a second update: the registry must list the key (the view registered it),
+and `ShellEvent::WindowsChanged` is emitted; otherwise the reservation is
+removed (`Workspaces::remove_window`) and `OpenerFailed` returned. With no
+opener installed, `NoOpener` is refused before anything is reserved.
+
+`open_fresh(app, beside, cx)` opens on `lowest_free`, beside the asking
+window; nine windows exhaust it. `tear_out(app, from, cx)` moves the
+workspace `from` shows into a new window beside it: under the reserve
+update, `from` is switched to `lowest_free` (refused first if there is
+none, so nothing changes) and the index it showed is reserved for the new
+key, which `Workspaces` answers `TakenFrom(from)`, parking its occupants
+through the ordinary `Park` for the new window to rebuild. If the opener
+fails, `from` is switched back before the queued `Park` is delivered, and
+a window's `Park` arm ignores a park for the workspace it shows, so the
+rolled-back tear-out parks nothing. The window that dispatched a tear-out
+has been switched by the app, not by its own dispatch, and runs its own
+post-switch work (flip baseline, scope field, session mark) on the verb's
+path. `activate_window(key, cx)` asks a registered window forward
+(`Switch::Raise`). None of these runs from render.
 
 A draw can come before the records do: gpui draws a new window once inside
 `open_window`, before the effects carrying the two events flush, so a window
@@ -1802,15 +1851,17 @@ the quit hooks, and the window's view and occupants go with it unless a host
 still holds the view, so a snapshot taken then would write the layout with
 that window's tile records missing, and the next start would restore empty
 tiles over the should-close save: `ShellApp::save_session` writes nothing
-while no registered view is alive. The app's should-close hook on the main
+while no window is registered. The app's should-close hook on the main
 window (`bridge::save_on_close`) saves the session while the window still
-exists, then lets the close proceed. On an explicit application quit (Dock
+exists, then lets the close proceed; `ShellApp::window_closed` is the
+mechanism that deregisters a closing window (and parks what it hosted)
+while it still stands. On an explicit application quit (Dock
 Quit, logout) no should-close runs and the quit hook, which holds the app
-entity, saves alone with the windows still open. After a window close the
-quit hook still runs; with the closed window's view dropped it finds no live
-view and saves nothing, so the session is written once. A view a host still
-holds past its window keeps its occupants with it, so a save it does reach
-writes that window's own records, not placeholders.
+entity, saves alone with the windows still registered. After a window close
+the quit hook still runs; with the window deregistered it finds the
+registry empty and saves nothing, so the session is written once. A view a
+host still holds past its window keeps its occupants with it, so a save it
+does reach writes that window's own records, not placeholders.
 
 Limit: on Linux with client-drawn decorations, gpui-component's `TitleBar`
 close button removes the window directly and never runs should-close, so a

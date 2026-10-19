@@ -2032,7 +2032,8 @@ fn the_watcher_ends_when_the_last_window_closes(cx: &mut gpui::TestAppContext) {
     // Both held past the window's removal, as the hooks and the bridge hold them.
     let app = test_app(cx, services, None);
     let (window, mut vcx) = open_shell_on(cx, app.clone());
-    let _shell = shell_of(&window, &mut vcx);
+    let shell = shell_of(&window, &mut vcx);
+    let key = shell.read_with(&vcx, |s, _| s.key());
     vcx.run_until_parked();
     let real_today = vcx.update(|_, cx| {
         cx.global::<crate::clock::AppClock>()
@@ -2041,6 +2042,9 @@ fn the_watcher_ends_when_the_last_window_closes(cx: &mut gpui::TestAppContext) {
     });
     let stale = real_today - chrono::Duration::days(1);
     app.update(&mut vcx, |a, _| a.today = stale);
+    // The close path: deregister while the window stands, then gpui
+    // removes it.
+    app.update(&mut vcx, |a, cx| a.window_closed(key, cx));
     vcx.update(|window, _| window.remove_window());
     vcx.run_until_parked();
     vcx.executor().advance_clock(
@@ -2090,7 +2094,10 @@ fn the_watcher_sums_only_open_windows_histograms(cx: &mut gpui::TestAppContext) 
         "two open windows: both summed"
     );
 
-    // Close the second window; its view stays alive in `s2`.
+    // Close the second window by the close path (deregister, then gpui
+    // removes it); its view stays alive in `s2`.
+    let k2 = s2.read_with(&vcx2, |s, _| s.key());
+    app.update(&mut vcx2, |a, cx| a.window_closed(k2, cx));
     vcx2.update(|window, _| window.remove_window());
     tick(&mut vcx1);
     assert!(

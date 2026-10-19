@@ -697,11 +697,13 @@ fn a_session_save_includes_every_window_and_the_parked_records(cx: &mut gpui::Te
     );
 }
 
-/// With every window closed and its view dropped, `save_session` writes
-/// nothing: gpui removes a closing window before the quit hooks run, and a
-/// save then would write the layout without the closed window's tile
-/// records over the should-close hook's save. The sanity save before the
-/// close proves the path is configured and the file is the guard's doing.
+/// With every window closed, `save_session` writes nothing: gpui removes
+/// a closing window before the quit hooks run, and a save then would
+/// write the layout without the closed window's tile records over the
+/// should-close hook's save. The close path deregisters the window
+/// (`window_closed`, while it still stands) before gpui removes it; the
+/// guard reads that registry. The sanity save before the close proves the
+/// path is configured and the file is the guard's doing.
 #[gpui::test]
 fn save_session_writes_nothing_with_every_window_closed(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -709,14 +711,21 @@ fn save_session_writes_nothing_with_every_window_closed(cx: &mut gpui::TestAppCo
     let mut services = test_services();
     services.session_path = Some(path.clone());
     let app = test_app(cx, services, None);
-    let (_window, mut vcx) = open_shell_on(cx, app.clone());
+    let (window, mut vcx) = open_shell_on(cx, app.clone());
+    let key = shell_of(&window, &mut vcx).read_with(&vcx, |s, _| s.key());
     vcx.update(|_, cx| app.read(cx).save_session(cx));
     assert!(path.exists(), "sanity: a save with the window open writes");
     std::fs::remove_file(&path).unwrap();
 
-    // Nothing here holds the view: the window was its only owner.
+    // The close path: deregister while the window stands, then gpui
+    // removes it. Nothing here holds the view: the window was its only owner.
+    app.update(&mut vcx, |a, cx| a.window_closed(key, cx));
     vcx.update(|window, _| window.remove_window());
     vcx.run_until_parked();
+    assert!(
+        app.read_with(&vcx, |a, _| a.windows().is_empty()),
+        "sanity: the registry forgot the window"
+    );
     assert!(
         app.read_with(&vcx, |a, _| a.views().next().is_none()),
         "sanity: the closed window's view is gone"
@@ -724,7 +733,7 @@ fn save_session_writes_nothing_with_every_window_closed(cx: &mut gpui::TestAppCo
     app.read_with(&vcx, |a, cx| a.save_session(cx));
     assert!(
         !path.exists(),
-        "a save with no live view wrote: {}",
+        "a save with no window registered wrote: {}",
         std::fs::read_to_string(&path).unwrap_or_default()
     );
 }

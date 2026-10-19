@@ -49,7 +49,7 @@ mod value_color;
 pub mod whichkey;
 
 pub use crate::tiling::WindowKey;
-pub use app::ShellApp;
+pub use app::{OpenRefusal, Placement, ShellApp, WindowOpener, WindowSpec};
 pub use keys::convert_keystroke;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -228,6 +228,12 @@ pub enum ShellEvent {
     /// `Park`, because subscriber order is not a contract: one event could
     /// not order the source's park before the destination's pull.
     Parked { workspace: WorkspaceIx },
+    /// A window joined or left the registry (`ShellApp::open_window`
+    /// confirmed one, `ShellApp::window_closed` forgot one): every window
+    /// re-reads `ShellApp::window_title`, which names the shown index
+    /// only with two or more windows. The title is set from this event,
+    /// never from render.
+    WindowsChanged,
     /// Views, dimensions or groupings changed and were applied; the app
     /// bridge forwards the new views to the data thread.
     ConfigReloaded,
@@ -1248,7 +1254,9 @@ impl ShellView {
             config_write_seq: 0,
             config_write_error: None,
         };
-        view.app.update(cx, |app, _| app.register_view(key, weak));
+        let handle = window.window_handle();
+        view.app
+            .update(cx, |app, _| app.register_view(key, weak, handle));
         view
     }
 
