@@ -25934,12 +25934,12 @@ run_mutation "close: the should-close hook saves no session" \
   geode-app closing_the_window_saves_the_session_and_lets_the_close_proceed
 
 # Closing the last window queues every unsaved sheet ahead of the service's
-# stop.
-run_mutation "close: the should-close hook flushes no sheet" \
-  crates/geode-app/src/bridge.rs \
-  '                    factory.flush_all(cx);' \
-  '                    let _ = factory;' \
-  geode-app closing_the_window_saves_every_unsaved_sheet
+# stop (`closing_the_window_saves_every_unsaved_sheet`). The hook's own
+# `flush_all` is not what a test can isolate any more: the hook then
+# deregisters the window (`window_closed`), whose parks make every pricer
+# tile queue its dirty sheet itself, so removing the flush changes nothing
+# observable. The flush stays for the quit hooks' order; there is no entry
+# for it.
 
 # The should-close hook lets the close proceed; false would keep the window.
 run_mutation "close: the should-close hook refuses the close" \
