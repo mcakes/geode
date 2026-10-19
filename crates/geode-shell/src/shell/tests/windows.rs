@@ -53,7 +53,7 @@ fn open_fresh_opens_on_the_lowest_free_index(cx: &mut gpui::TestAppContext) {
     assert_eq!(shown(&app, &vcx1, k1), Some(1), "sanity");
 
     // From inside the first window's update, as a dispatched verb runs.
-    let opened = vcx1.update(|_, cx| ShellApp::open_fresh(&app, k1, cx));
+    let opened = vcx1.update(|_, cx| ShellApp::open_fresh(&app, k1, None, cx));
     let k2 = opened.expect("a free index and an installed opener");
     assert_ne!(k2, k1);
     assert_eq!(shown(&app, &vcx1, k2), Some(2));
@@ -87,7 +87,7 @@ fn tear_out_moves_the_shown_workspace_and_falls_back(cx: &mut gpui::TestAppConte
     assert!(s1.read_with(&vcx1, |s, _| s.occupants.contains_key(&tile)));
 
     let k2 = vcx1
-        .update(|_, cx| ShellApp::tear_out(&app, k1, cx))
+        .update(|_, cx| ShellApp::tear_out(&app, k1, None, cx))
         .expect("a free index and an installed opener");
     vcx1.run_until_parked();
 
@@ -130,7 +130,7 @@ fn both_verbs_refuse_with_nine_shown(cx: &mut gpui::TestAppContext) {
     let k1 = s1.read_with(&vcx1, |s, _| s.key());
     dispatch_and_draw(&s1, &mut vcx1, "tile::add_rec");
     for _ in 0..8 {
-        cx.update(|cx| ShellApp::open_fresh(&app, k1, cx))
+        cx.update(|cx| ShellApp::open_fresh(&app, k1, None, cx))
             .expect("an index is free");
     }
     let before: Vec<(WindowKey, WorkspaceIx)> =
@@ -138,11 +138,11 @@ fn both_verbs_refuse_with_nine_shown(cx: &mut gpui::TestAppContext) {
     assert_eq!(before.len(), 9, "sanity: nine windows show nine indexes");
 
     assert_eq!(
-        vcx1.update(|_, cx| ShellApp::open_fresh(&app, k1, cx)),
+        vcx1.update(|_, cx| ShellApp::open_fresh(&app, k1, None, cx)),
         Err(OpenRefusal::NoFreeWorkspace)
     );
     assert_eq!(
-        vcx1.update(|_, cx| ShellApp::tear_out(&app, k1, cx)),
+        vcx1.update(|_, cx| ShellApp::tear_out(&app, k1, None, cx)),
         Err(OpenRefusal::NoFreeWorkspace)
     );
     vcx1.run_until_parked();
@@ -232,7 +232,7 @@ fn window_title_names_the_index_only_with_two_windows(cx: &mut gpui::TestAppCont
     assert_eq!(app.read_with(&vcx1, |a, _| a.window_title(k1)), "Geode");
 
     let k2 = vcx1
-        .update(|_, cx| ShellApp::open_fresh(&app, k1, cx))
+        .update(|_, cx| ShellApp::open_fresh(&app, k1, None, cx))
         .unwrap();
     assert_eq!(app.read_with(&vcx1, |a, _| a.window_title(k1)), "Geode · 1");
     assert_eq!(app.read_with(&vcx1, |a, _| a.window_title(k2)), "Geode · 2");
@@ -259,7 +259,7 @@ fn a_failing_opener_rolls_the_tear_out_back(cx: &mut gpui::TestAppContext) {
     app.update(&mut vcx1, |a, _| a.set_window_opener(failing));
 
     assert_eq!(
-        vcx1.update(|_, cx| ShellApp::tear_out(&app, k1, cx)),
+        vcx1.update(|_, cx| ShellApp::tear_out(&app, k1, None, cx)),
         Err(OpenRefusal::OpenerFailed)
     );
     vcx1.run_until_parked();
@@ -394,7 +394,7 @@ fn a_full_house_shows_the_notice(cx: &mut gpui::TestAppContext) {
     let s1 = shell_of(&w1, &mut vcx1);
     let k1 = s1.read_with(&vcx1, |s, _| s.key());
     for _ in 0..8 {
-        cx.update(|cx| ShellApp::open_fresh(&app, k1, cx))
+        cx.update(|cx| ShellApp::open_fresh(&app, k1, None, cx))
             .expect("an index is free");
     }
     assert_eq!(app.read_with(&vcx1, |a, _| a.windows().len()), 9, "sanity");
@@ -429,7 +429,7 @@ fn the_title_follows_the_window_count(cx: &mut gpui::TestAppContext) {
     assert_eq!(title(&s1, &vcx1).as_deref(), Some("Geode"));
 
     let k2 = vcx1
-        .update(|_, cx| ShellApp::open_fresh(&app, k1, cx))
+        .update(|_, cx| ShellApp::open_fresh(&app, k1, None, cx))
         .expect("a free index");
     vcx1.run_until_parked();
     assert_eq!(title(&s1, &vcx1).as_deref(), Some("Geode · 1"));
@@ -577,7 +577,7 @@ fn a_keyless_delivery_reaches_every_window(cx: &mut gpui::TestAppContext) {
     dispatch_and_draw(&s1, &mut vcx1, "tile::add_rec");
     let t1 = s1.read_with(&vcx1, |s, cx| s.workspace(cx).focused_tile().unwrap());
     let k2 = cx
-        .update(|cx| ShellApp::open_fresh(&app, k1, cx))
+        .update(|cx| ShellApp::open_fresh(&app, k1, None, cx))
         .expect("a free index");
     let (s2, mut vcx2) = context_for(cx, &app, k2);
     dispatch_and_draw(&s2, &mut vcx2, "tile::add_rec");
@@ -626,7 +626,7 @@ fn an_answer_for_a_parked_tile_is_dropped(cx: &mut gpui::TestAppContext) {
     let (w1, mut vcx1) = open_shell_on(cx, app.clone());
     let k1 = shell_of(&w1, &mut vcx1).read_with(&vcx1, |s, _| s.key());
     let k2 = cx
-        .update(|cx| ShellApp::open_fresh(&app, k1, cx))
+        .update(|cx| ShellApp::open_fresh(&app, k1, None, cx))
         .expect("a free index");
     let (s2, mut vcx2) = context_for(cx, &app, k2);
     dispatch_and_draw(&s2, &mut vcx2, "tile::add_rec");
@@ -666,7 +666,7 @@ fn picker_tags_are_unique_across_windows(cx: &mut gpui::TestAppContext) {
     let s1 = shell_of(&w1, &mut vcx1);
     let k1 = s1.read_with(&vcx1, |s, _| s.key());
     let k2 = cx
-        .update(|cx| ShellApp::open_fresh(&app, k1, cx))
+        .update(|cx| ShellApp::open_fresh(&app, k1, None, cx))
         .expect("a free index");
     let (s2, mut vcx2) = context_for(cx, &app, k2);
 

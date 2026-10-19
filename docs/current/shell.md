@@ -215,14 +215,22 @@ registered window forward (`Switch::Raise`). None of these runs from render.
 
 The opener maps the spec's `Placement` to the platform's `display_id` and
 `window_bounds` through `placement::options_for` in `geode-app`, a pure
-function over facts the opener gathers: the spawning window's frame and
-display (read through its handle), the attached displays with their
-bounds, and the primary. `Beside(k)` asks for window `k`'s display and
-its frame shifted by `CASCADE` (28 logical pixels) in x and y, clamped so
-the whole window stays inside that display: shifted back by the overflow
-on each axis, and at the display's origin when it is larger than the
-display; with `k` gone, or its display unknown, the platform places the
-window or the shifted frame alone is asked for. `Restored` asks for the
+function over facts gathered for it: the spawning window's frame and
+display, which the verb reads from the window it was dispatched in and
+carries in `Beside` (a window under update cannot be read again through
+its handle, so the opener reads it that way only when the payload is
+absent, as an app-level caller leaves it), the attached displays with
+their bounds, and the primary. `Beside` asks for the spawning window's
+display and its frame shifted by `CASCADE` (28 logical pixels) in x and
+y, clamped so the whole window stays inside that display: shifted back by
+the overflow on each axis, and at the display's origin when it is larger
+than the display. The frame cascaded from is the spawner's restore frame
+(`WindowBounds::get_bounds`), so a maximized spawner's new window lands at
+its pre-maximize frame plus `CASCADE`; the clamp is against the display's
+bounds, not its visible frame, so a dock or taskbar may cover part of a
+window clamped to the display's edge. With the spawner gone, or its
+display unknown, the platform places the window or the shifted frame
+alone is asked for. `Restored` asks for the
 recorded display and frame, maximized when the record says so; a recorded
 display no longer attached falls back to the primary, with the recorded
 size at the primary's origin plus `CASCADE`, so a window saved on a
@@ -235,13 +243,10 @@ primary has a negative origin and the clamp needs no special case for it.
 The trader reaches the two through the palette: `window::tear_out` ("Tear
 out into a new window") and `window::open` ("New window"), category
 Workspace, with no default chord. Each acts on the window it was
-dispatched in, and runs when that dispatch's update has flushed its
-effects, with no window on the stack: the opener reads the dispatching
-window's frame through its handle to place the new window beside it, and
-a window under update cannot be read again (gpui holds it out of its slot
-for the update); the tear-out's post-switch work re-enters the window
-through its handle. A `window::open` changes nothing in that window but
-its title. Under a modal both are refused with the dialog's notice, as a
+dispatched in and carries that window's frame and display
+(`Spawner::of`, read from the `Window` the dispatch holds) for the opener
+to place the new window beside it; a `window::open` changes nothing in
+that window but its title. Under a modal both are refused with the dialog's notice, as a
 workspace switch and the pin toggle are: a tear-out would switch the
 window under a dialog bound to its lane, and either opens a window while
 that dialog holds the lane. Over a page both are refused with `close the

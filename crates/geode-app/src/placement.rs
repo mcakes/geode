@@ -39,7 +39,7 @@ pub fn options_for(
 ) -> (Option<DisplayId>, Option<WindowBounds>) {
     match placement {
         Placement::Default => (None, None),
-        Placement::Beside(_) => {
+        Placement::Beside { .. } => {
             let Some((frame, display)) = spawner else {
                 return (None, None);
             };
@@ -157,7 +157,10 @@ mod tests {
         ]
     }
 
-    const BESIDE: Placement = Placement::Beside(WindowKey(1));
+    const BESIDE: Placement = Placement::Beside {
+        from: WindowKey(1),
+        spawner: None,
+    };
 
     #[test]
     fn beside_cascades_and_clamps_into_the_display() {

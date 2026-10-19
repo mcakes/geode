@@ -63,8 +63,15 @@ impl EventEmitter<ShellEvent> for ShellApp {}
 /// closure) maps it to platform window options; the app never reads it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Placement {
-    /// Next to the named window, as a verb dispatched there asks.
-    Beside(WindowKey),
+    /// Next to the named window, as a verb dispatched there asks. The verb
+    /// reads the window's frame and display itself (`spawner`): a window
+    /// under update cannot be read again through its handle, and the verb
+    /// runs inside its window's update. An app-level caller passes `None`
+    /// and the opener reads the window through its handle instead.
+    Beside {
+        from: WindowKey,
+        spawner: Option<Spawner>,
+    },
     /// Where a restored session recorded the window, when it did.
     Restored {
         display: Option<u64>,
@@ -73,6 +80,28 @@ pub enum Placement {
     },
     /// Wherever the platform puts a window by default.
     Default,
+}
+
+/// What a window says about where it is, for a window opened beside it:
+/// its restore frame (`WindowBounds::get_bounds`, the windowed frame while
+/// maximized or fullscreen) and the id of the display it is on, `None`
+/// while the platform lists no display for it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Spawner {
+    pub frame: gpui::Bounds<gpui::Pixels>,
+    pub display: Option<u64>,
+}
+
+impl Spawner {
+    /// Read `window`'s placement; from the window's own update, where the
+    /// verbs run, or any other place that holds the `Window`.
+    pub fn of(window: &Window, cx: &App) -> Spawner {
+        let (bounds, display) = placement_of(window, cx);
+        Spawner {
+            frame: bounds.get_bounds(),
+            display,
+        }
+    }
 }
 
 /// What [`ShellApp::open_window`] opens: the workspace the window shows
@@ -661,11 +690,14 @@ impl ShellApp {
     }
 
     /// Open a new window on the lowest index no window shows, placed
-    /// beside the window that asked. `NoFreeWorkspace` once nine windows
-    /// show every index.
+    /// beside the window that asked (`spawner`: that window's frame and
+    /// display, read by the caller when it holds the `Window`; `None`
+    /// leaves the opener to read it through the handle). `NoFreeWorkspace`
+    /// once nine windows show every index.
     pub fn open_fresh(
         app: &Entity<ShellApp>,
         beside: WindowKey,
+        spawner: Option<Spawner>,
         cx: &mut App,
     ) -> Result<WindowKey, OpenRefusal> {
         let Some(workspace) = app.read(cx).services.workspaces.lowest_free() else {
@@ -675,7 +707,10 @@ impl ShellApp {
             app,
             WindowSpec {
                 workspace,
-                placement: Placement::Beside(beside),
+                placement: Placement::Beside {
+                    from: beside,
+                    spawner,
+                },
             },
             cx,
         )
@@ -700,6 +735,7 @@ impl ShellApp {
     pub fn tear_out(
         app: &Entity<ShellApp>,
         from: WindowKey,
+        spawner: Option<Spawner>,
         cx: &mut App,
     ) -> Result<WindowKey, OpenRefusal> {
         if app.read(cx).window_opener.is_none() {
@@ -726,7 +762,7 @@ impl ShellApp {
         })?;
         let spec = WindowSpec {
             workspace: old,
-            placement: Placement::Beside(from),
+            placement: Placement::Beside { from, spawner },
         };
         let opener = app
             .read(cx)

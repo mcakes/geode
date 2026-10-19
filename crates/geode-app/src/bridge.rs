@@ -2107,10 +2107,11 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
 /// not `Clone`, so it is built per window.
 ///
 /// The closure runs with no lease on the app (the view it builds registers
-/// itself), and reads the spawner only through a window update: a window
-/// under update cannot be read again (gpui takes it out of its slot), so a
-/// verb that opens beside its own window must run from no window's update
-/// (the shell defers its window verbs for this); when the read fails, the
+/// itself). The spawning window's frame and display come with the spec
+/// (`Placement::Beside { spawner }`, read by the verb from the window it
+/// ran in: a window under update cannot be read again through its
+/// handle); only when they are absent, as an app-level caller leaves them,
+/// are they read through the handle, and when that read fails the
 /// platform places the window and a debug line says so. `None` (the
 /// platform refused the window) rolls the reservation back.
 pub fn window_opener(
@@ -2120,24 +2121,26 @@ pub fn window_opener(
 ) -> WindowOpener {
     Rc::new(move |key, spec: &WindowSpec, cx: &mut App| {
         let spawner = match &spec.placement {
-            Placement::Beside(from) => {
-                let handle = app.read(cx).handle(*from);
-                handle.and_then(|handle| {
-                    handle
-                        .update(cx, |_, window, cx| {
-                            (
-                                window.window_bounds().get_bounds(),
-                                window.display(cx).map(|d| u64::from(d.id())),
-                            )
-                        })
-                        .inspect_err(|e| {
-                            tracing::debug!(
-                                target: "geode::shell",
-                                "window {from:?} cannot be read to place a window beside it; \
-                                 the platform places it: {e}"
-                            );
-                        })
-                        .ok()
+            Placement::Beside { from, spawner } => {
+                spawner.map(|s| (s.frame, s.display)).or_else(|| {
+                    let handle = app.read(cx).handle(*from);
+                    handle.and_then(|handle| {
+                        handle
+                            .update(cx, |_, window, cx| {
+                                (
+                                    window.window_bounds().get_bounds(),
+                                    window.display(cx).map(|d| u64::from(d.id())),
+                                )
+                            })
+                            .inspect_err(|e| {
+                                tracing::debug!(
+                                    target: "geode::shell",
+                                    "window {from:?} cannot be read to place a window beside it; \
+                                     the platform places it: {e}"
+                                );
+                            })
+                            .ok()
+                    })
                 })
             }
             Placement::Restored { .. } | Placement::Default => None,
@@ -2151,12 +2154,8 @@ pub fn window_opener(
         let (display_id, window_bounds) =
             crate::placement::options_for(&spec.placement, spawner, &displays, primary);
         let mut options = base();
-        if display_id.is_some() {
-            options.display_id = display_id;
-        }
-        if window_bounds.is_some() {
-            options.window_bounds = window_bounds;
-        }
+        options.display_id = display_id.or(options.display_id);
+        options.window_bounds = window_bounds.or(options.window_bounds);
 
         let view_app = app.clone();
         let handle: AnyWindowHandle = cx
@@ -7364,11 +7363,12 @@ grain = "underlying"
         assert_eq!(cx.update(|cx| app.read(cx).windows().len()), 1);
     }
 
-    /// A window opened beside another, from no window's update (the verbs
-    /// defer out of theirs), cascades from it by `CASCADE` on both axes
-    /// through the production opener. The spawner opens at a recorded
-    /// frame (a `Restored` placement, honoured by the test platform) with
-    /// room to cascade, so no clamp applies.
+    /// A window opened beside another from app level, with no spawner
+    /// payload (the opener's fallback: the spawner read through its
+    /// handle), cascades from it by `CASCADE` on both axes through the
+    /// production opener. The spawner opens at a recorded frame (a
+    /// `Restored` placement, honoured by the test platform) with room to
+    /// cascade, so no clamp applies.
     #[gpui::test]
     fn a_window_opened_beside_another_cascades_from_it(cx: &mut gpui::TestAppContext) {
         use geode_shell::shell::{Placement, WindowSpec};
@@ -7395,9 +7395,9 @@ grain = "underlying"
         let (a, b) = cx.update(|cx| {
             let a = app.read(cx).handle(first).unwrap();
             let a = a.update(cx, |_, window, _| window.bounds()).unwrap();
-            // App level: no window is under update, so the opener can read
-            // the spawner's frame through its handle.
-            let second = ShellApp::open_fresh(&app, first, cx).expect("a free workspace");
+            // App level with no payload: no window is under update, so the
+            // opener reads the spawner's frame through its handle.
+            let second = ShellApp::open_fresh(&app, first, None, cx).expect("a free workspace");
             let b = app.read(cx).handle(second).unwrap();
             let b = b.update(cx, |_, window, _| window.bounds()).unwrap();
             (a, b)
@@ -7430,7 +7430,7 @@ grain = "underlying"
     ) -> WindowHandle<Root> {
         cx.update(|cx| {
             app.update(cx, |a, _| a.set_window_opener(test_opener(app.clone())));
-            let key = ShellApp::open_fresh(app, first, cx).expect("a free workspace");
+            let key = ShellApp::open_fresh(app, first, None, cx).expect("a free workspace");
             app.read(cx)
                 .handle(key)
                 .expect("the opened window registered")

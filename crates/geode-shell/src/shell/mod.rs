@@ -49,7 +49,7 @@ mod value_color;
 pub mod whichkey;
 
 pub use crate::tiling::WindowKey;
-pub use app::{OpenRefusal, Placement, Route, ShellApp, WindowOpener, WindowSpec};
+pub use app::{OpenRefusal, Placement, Route, ShellApp, Spawner, WindowOpener, WindowSpec};
 pub use keys::convert_keystroke;
 
 use std::collections::{BTreeMap, HashMap, HashSet};

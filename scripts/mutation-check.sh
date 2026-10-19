@@ -7365,8 +7365,10 @@ run_mutation "shell: the title follows the window count" \
 # lane it left.
 run_mutation "shell: tear_out runs the post-switch work in its window" \
   crates/geode-shell/src/shell/input.rs \
-  '                                    view.after_shown_changed(before, window, cx)' \
-  '                                    let _ = (before, window, view, cx);' \
+  '                Ok(_) => self.after_shown_changed(before, window, cx),' \
+  '                Ok(_) => {
+                    let _ = before;
+                }' \
   geode-shell \
   tear_out_reseeds_the_dispatching_window
 
