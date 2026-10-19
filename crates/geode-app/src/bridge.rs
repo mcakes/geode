@@ -43,8 +43,7 @@ use geode_shell::shell::{
 use geode_shell::tiling::WindowKey;
 use geode_shell::vimfind::FindStyle;
 use geode_watchlist::{WatchlistConfig, WatchlistFactory};
-use gpui::{AnyWindowHandle, App, AsyncApp, Entity, WindowHandle};
-use gpui_component::Root;
+use gpui::{AnyWindowHandle, App, AsyncApp, Entity};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -1006,33 +1005,6 @@ pub fn stop_at_quit(bridge: &Bridge, cx: &mut App) {
         })
     })
     .detach();
-}
-
-/// Save what the window holds when the user closes it, while it still
-/// exists: the session first, then unsaved pricer sheets, in the order the
-/// quit hooks run them. The close then proceeds; with
-/// `QuitMode::LastWindowClosed` the app quits after it.
-///
-/// The quit hooks cannot do this for a window close: gpui removes the
-/// window before it quits, and the window's occupants go with it. They
-/// still run afterwards: the session hook asks the app, which writes
-/// nothing while no window is registered (`ShellApp::save_session`; the
-/// close path deregisters a window through `ShellApp::window_closed`),
-/// and the sheet flush finds no dirty sheet, so nothing is done twice. On an
-/// explicit application quit (Dock Quit, logout) no should-close runs and
-/// the quit hooks do the work alone.
-///
-/// The platform keeps one should-close callback per window, so this
-/// replaces any earlier one; neither gpui-component's `Root` nor its
-/// `TitleBar` registers one.
-pub fn save_on_close(
-    window: WindowHandle<Root>,
-    app: Entity<ShellApp>,
-    bridge: Option<&Bridge>,
-    cx: &mut App,
-) {
-    let pricer = bridge.map(|bridge| Rc::clone(&bridge.pricer));
-    install_save_on_close(window.into(), app, pricer, cx);
 }
 
 /// The catalog request lifecycle, one per app. The diagnostics entity owns
@@ -2118,14 +2090,14 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
     .detach();
 }
 
-/// A window's own hooks, installed once it exists and its view has
-/// registered with the app: the should-close hook that saves the session
-/// and unsaved sheets while the window still stands (the behaviour of
-/// [`save_on_close`], which remains the route with no bridge). `main`
-/// calls this for each window it opens; [`attach`] runs once for the
-/// process.
+/// A window's own hooks, installed by the opener once the window exists
+/// and its view has registered with the app: the should-close hook that
+/// decides what its close means ([`install_close_hook`]). `main`'s opener
+/// calls this for each window it opens, with the bridge when there is one
+/// (its pricer's unsaved sheets are flushed at the last close); [`attach`]
+/// runs once for the process.
 pub fn attach_window(
-    bridge: &Bridge,
+    bridge: Option<&Bridge>,
     app: &Entity<ShellApp>,
     key: WindowKey,
     window: AnyWindowHandle,
@@ -2135,25 +2107,66 @@ pub fn attach_window(
         app.read(cx).handle(key).is_some(),
         "window {key:?} is attached before its view registered"
     );
-    install_save_on_close(window, app.clone(), Some(Rc::clone(&bridge.pricer)), cx);
+    let pricer = bridge.map(|bridge| Rc::clone(&bridge.pricer));
+    install_close_hook(app.clone(), key, window, pricer, cx);
 }
 
-/// The should-close hook [`save_on_close`] and [`attach_window`] share.
-fn install_save_on_close(
-    window: AnyWindowHandle,
+/// The should-close hook of window `key`. A close that leaves another
+/// window open parks: the window leaves the registry while it still
+/// stands (`ShellApp::window_closed`), whose `Park` events reach its view
+/// with a live context, so each occupant queues its unsaved work and its
+/// record goes to the app's parked tiles, for the next window to show the
+/// workspace or for the session file; nothing is written to disk. The
+/// last window's close saves: the session first, then unsaved pricer
+/// sheets, in the order the quit hooks run them, and only then does the
+/// window leave the registry: `ShellApp::save_session` writes nothing
+/// once no window is registered, so saving after deregistering would
+/// save nothing. The close then proceeds (`true`); with
+/// `QuitMode::LastWindowClosed` the app quits after the last one, and its
+/// quit hooks find the registry empty: the session hook writes nothing
+/// and the sheet flush finds nothing dirty, so nothing is done twice. On
+/// an explicit application quit (Dock Quit, logout) no should-close runs,
+/// every window is still registered, and the quit hooks save alone.
+///
+/// The platform keeps one should-close callback per window, so this
+/// replaces any earlier one; neither gpui-component's `Root` nor its
+/// `TitleBar` registers one. The hook runs inside a window update, so
+/// the parks are delivered before it answers and the platform removes
+/// the window.
+fn install_close_hook(
     app: Entity<ShellApp>,
+    key: WindowKey,
+    window: AnyWindowHandle,
     pricer: Option<Rc<PricerFactory>>,
     cx: &mut App,
 ) {
     let _ = window.update(cx, |_, window, cx| {
         window.on_window_should_close(cx, move |_window, cx| {
-            app.read(cx).save_session(cx);
-            if let Some(factory) = &pricer {
-                factory.flush_all(cx);
+            if app.read(cx).is_last_window(key) {
+                app.read(cx).save_session(cx);
+                if let Some(factory) = &pricer {
+                    factory.flush_all(cx);
+                }
             }
+            app.update(cx, |a, cx| a.window_closed(key, cx));
             true
         });
     });
+}
+
+/// Run `window`'s should-close hook as the platform does when the trader
+/// closes it, and answer whether the close was allowed. gpui's test
+/// platform never emits a close itself; `VisualTestContext::simulate_close`
+/// runs the one should-close handler the test platform window holds,
+/// which is the closure [`install_close_hook`] installed, so this drives
+/// the production hook and no copy of it. The window is not removed: the
+/// caller removes it on `true`, as the platform does.
+#[cfg(test)]
+pub(crate) fn run_should_close_for_test(
+    window: AnyWindowHandle,
+    cx: &mut gpui::TestAppContext,
+) -> bool {
+    gpui::VisualTestContext::from_window(window, cx).simulate_close()
 }
 
 #[cfg(test)]
@@ -2174,10 +2187,12 @@ mod tests {
     use geode_shell::module::recording::{Recorded, RecordingFactory};
     use geode_shell::module::{ModuleFactory, ModuleRoster, PageFactory};
     use geode_shell::session::TileRecords;
-    use geode_shell::shell::{ShellApp, ShellServices};
+    use geode_shell::shell::{ShellApp, ShellServices, WindowOpener, WindowSpec};
     use geode_shell::tiling::{TileId, Workspaces};
     use geode_shell::{theme, vimfind::FindStyle};
     use gpui::AppContext as _;
+    use gpui::WindowHandle;
+    use gpui_component::Root;
     use std::cell::RefCell;
     use std::path::Path;
 
@@ -7028,7 +7043,7 @@ grain = "underlying"
         // The route `main` takes with a bridge: the window's hooks through
         // `attach_window`, under the key its view registered.
         let key = cx.update(|cx| app.read(cx).windows()[0].0);
-        cx.update(|cx| attach_window(&bridge, &app, key, window.into(), cx));
+        cx.update(|cx| attach_window(Some(&bridge), &app, key, window.into(), cx));
         {
             let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
             vcx.update(|window, cx| {
@@ -7053,10 +7068,10 @@ grain = "underlying"
         );
     }
 
-    /// Closing the window saves the session through the should-close hook,
-    /// while the window is still among the app's windows, and lets the
-    /// close proceed. Without it the quit hook would find no live window
-    /// and write nothing: gpui removes the window before quitting.
+    /// Closing the only window saves the session through its should-close
+    /// hook, while the window is still among the app's windows, and lets
+    /// the close proceed. Without it the quit hook would find no live
+    /// window and write nothing: gpui removes the window before quitting.
     #[gpui::test]
     fn closing_the_window_saves_the_session_and_lets_the_close_proceed(
         cx: &mut gpui::TestAppContext,
@@ -7067,7 +7082,8 @@ grain = "underlying"
         services.session_path = Some(path.clone());
         let window = open_test_window(cx, services);
         let app = app_of(window, cx);
-        cx.update(|cx| save_on_close(window, app, None, cx));
+        let key = cx.update(|cx| app.read(cx).windows()[0].0);
+        cx.update(|cx| attach_window(None, &app, key, window.into(), cx));
         let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -7088,6 +7104,262 @@ grain = "underlying"
             saved().contains("module = \"rec\""),
             "the layout opened before the close was not saved: {}",
             saved()
+        );
+    }
+
+    /// The opener `main` installs, for the tests of the close path: a
+    /// default test window over a `ShellView` for the reserved key, with
+    /// the window's close hook installed as the production opener installs
+    /// it (`attach_window`, here with no bridge).
+    fn test_opener(app: Entity<ShellApp>) -> WindowOpener {
+        Rc::new(move |key, _spec: &WindowSpec, cx: &mut App| {
+            let view_app = app.clone();
+            let handle: AnyWindowHandle = cx
+                .open_window(gpui::WindowOptions::default(), |window, cx| {
+                    let view = cx.new(|cx| ShellView::new(view_app, key, window, cx));
+                    cx.new(|cx| Root::new(view, window, cx))
+                })
+                .ok()?
+                .into();
+            attach_window(None, &app, key, handle, cx);
+            Some(handle)
+        })
+    }
+
+    /// A second window on `app`, opened as the `window::open` verb opens
+    /// one: through `ShellApp::open_fresh` and the installed opener, on
+    /// the lowest free index.
+    fn open_second_window(
+        cx: &mut gpui::TestAppContext,
+        app: &Entity<ShellApp>,
+        first: WindowKey,
+    ) -> WindowHandle<Root> {
+        cx.update(|cx| {
+            app.update(cx, |a, _| a.set_window_opener(test_opener(app.clone())));
+            let key = ShellApp::open_fresh(app, first, cx).expect("a free workspace");
+            app.read(cx)
+                .handle(key)
+                .expect("the opened window registered")
+                .downcast::<Root>()
+                .expect("a Root over the ShellView")
+        })
+    }
+
+    /// A window with a recording tile in it, and the handles a test of
+    /// its close needs.
+    struct Opened {
+        window: WindowHandle<Root>,
+        key: WindowKey,
+        vcx: gpui::VisualTestContext,
+        shell: Entity<ShellView>,
+        tile: TileId,
+    }
+
+    /// Open the recording module in `window` (the tile `open_module`
+    /// focuses) and verify the occupant.
+    fn opened(window: WindowHandle<Root>, key: WindowKey, cx: &mut gpui::TestAppContext) -> Opened {
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|window, cx| {
+            shell.update(cx, |s, cx| s.open_module("rec", window, cx));
+        });
+        vcx.run_until_parked();
+        let tile = shell
+            .read_with(&vcx, |s, cx| {
+                s.app()
+                    .read(cx)
+                    .services()
+                    .workspaces
+                    .workspace(s.key())
+                    .focused_tile()
+            })
+            .expect("open_module focused the new tile");
+        assert_eq!(
+            shell.read_with(&vcx, |s, _| s.occupant_kind(tile)),
+            Some("rec"),
+            "the recording module occupies the focused tile"
+        );
+        Opened {
+            window,
+            key,
+            vcx,
+            shell,
+            tile,
+        }
+    }
+
+    /// Two windows on one app, each hosting a recording tile and each with
+    /// `main`'s close hook: the first through `attach_window` on the
+    /// hand-opened window, the second through the opener. The session
+    /// path is `session`.
+    fn two_windows_with_hooks(
+        cx: &mut gpui::TestAppContext,
+        session: &Path,
+    ) -> (Entity<ShellApp>, Opened, Opened) {
+        let (mut services, _log) = test_shell_services_with_rec_roster();
+        services.session_path = Some(session.to_path_buf());
+        let w1 = open_test_window(cx, services);
+        let app = app_of(w1, cx);
+        let key1 = cx.update(|cx| app.read(cx).windows()[0].0);
+        cx.update(|cx| attach_window(None, &app, key1, w1.into(), cx));
+        let w2 = open_second_window(cx, &app, key1);
+        let key2 = cx.update(|cx| app.read(cx).windows()[1].0);
+        assert_ne!(key1, key2);
+        let first = opened(w1, key1, cx);
+        let second = opened(w2, key2, cx);
+        (app, first, second)
+    }
+
+    /// Close `window` as the platform does: run its should-close hook and,
+    /// when it allowed the close, remove the window. Answers what the hook
+    /// answered.
+    fn close_through_hook(window: WindowHandle<Root>, cx: &mut gpui::TestAppContext) -> bool {
+        let allowed = run_should_close_for_test(window.into(), cx);
+        if allowed {
+            cx.update(|cx| {
+                window
+                    .update(cx, |_, window, _| window.remove_window())
+                    .unwrap();
+            });
+        }
+        cx.executor().run_until_parked();
+        allowed
+    }
+
+    /// The parked tile records, as `(id, kind)`.
+    fn parked(app: &Entity<ShellApp>, cx: &mut gpui::TestAppContext) -> Vec<(u64, String)> {
+        cx.update(|cx| {
+            app.read(cx)
+                .parked_tiles_for_test()
+                .iter()
+                .map(|(id, record)| (*id, record.kind.clone()))
+                .collect()
+        })
+    }
+
+    /// With two windows open, closing one parks its tiles and saves
+    /// nothing: the window leaves the registry through its should-close
+    /// hook while it stands, its occupants park with a live context, and
+    /// the session file is untouched until the last window closes or a
+    /// snapshot is due.
+    #[gpui::test]
+    fn closing_a_non_last_window_parks_and_does_not_save(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let (app, first, second) = two_windows_with_hooks(cx, &path);
+        cx.update(|cx| app.read(cx).save_session(cx));
+        assert!(
+            path.exists(),
+            "sanity: a save with both windows open writes"
+        );
+        std::fs::remove_file(&path).unwrap();
+
+        assert!(
+            close_through_hook(second.window, cx),
+            "the close was refused"
+        );
+
+        assert!(
+            !path.exists(),
+            "a non-last close saved the session: {}",
+            std::fs::read_to_string(&path).unwrap_or_default()
+        );
+        let keys: Vec<WindowKey> =
+            cx.update(|cx| app.read(cx).windows().iter().map(|(k, _)| *k).collect());
+        assert_eq!(keys, vec![first.key], "the closed window left the registry");
+        assert_eq!(
+            parked(&app, cx),
+            vec![(second.tile.0, "rec".to_string())],
+            "the closed window's tile is parked, and only it"
+        );
+    }
+
+    /// The last window's close saves the session once, with the tiles
+    /// earlier closes parked, before the window leaves the registry. The
+    /// quit hook that follows (gpui quits once the last window is removed)
+    /// asks the app for the same save and, with no window registered,
+    /// writes nothing.
+    #[gpui::test]
+    fn closing_the_last_window_saves_once(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let (app, first, second) = two_windows_with_hooks(cx, &path);
+        assert!(
+            close_through_hook(second.window, cx),
+            "the close was refused"
+        );
+        assert!(!path.exists(), "sanity: the non-last close did not save");
+
+        assert!(
+            close_through_hook(first.window, cx),
+            "the close was refused"
+        );
+
+        let text = std::fs::read_to_string(&path).expect("the last close saved the session");
+        assert!(
+            text.contains(&format!("tiles.{}]", first.tile.0)),
+            "the closing window's own tile: {text}"
+        );
+        assert!(
+            text.contains(&format!("tiles.{}]", second.tile.0)),
+            "the tile the earlier close parked: {text}"
+        );
+        assert_eq!(
+            text.matches("module = \"rec\"").count(),
+            2,
+            "both tiles, once each: {text}"
+        );
+        assert!(
+            cx.update(|cx| app.read(cx).windows().is_empty()),
+            "the last window left the registry"
+        );
+        std::fs::remove_file(&path).unwrap();
+        // The quit hook's save, after gpui removed the last window.
+        cx.update(|cx| app.read(cx).save_session(cx));
+        assert!(
+            !path.exists(),
+            "the quit hook saved again after the last close: {}",
+            std::fs::read_to_string(&path).unwrap_or_default()
+        );
+    }
+
+    /// Closing one of two windows leaves the other open and untouched: it
+    /// is the one window registered, it still draws, and its own occupant
+    /// is live while only the closed window's tile is parked.
+    #[gpui::test]
+    fn closing_a_non_last_window_keeps_the_first_window_open(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.toml");
+        let (app, mut first, second) = two_windows_with_hooks(cx, &path);
+        assert_eq!(cx.update(|cx| app.read(cx).windows().len()), 2);
+
+        assert!(
+            close_through_hook(second.window, cx),
+            "the close was refused"
+        );
+
+        assert_eq!(
+            cx.update(|cx| app.read(cx).windows().len()),
+            1,
+            "one window remains registered"
+        );
+        assert_eq!(cx.windows().len(), 1, "one platform window remains");
+        first.vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(
+            first
+                .shell
+                .read_with(&first.vcx, |s, _| s.occupant_kind(first.tile)),
+            Some("rec"),
+            "the remaining window's occupant is still live"
+        );
+        assert_eq!(
+            parked(&app, cx),
+            vec![(second.tile.0, "rec".to_string())],
+            "only the closed window's tile is parked"
         );
     }
 

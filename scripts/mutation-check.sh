@@ -25925,31 +25925,71 @@ run_mutation "quit: the data hook stops the service without flushing sheets" \
   '        let _ = &pricer;' \
   geode-app quitting_saves_every_unsaved_sheet_before_the_data_service_stops
 
-# Closing the window saves the session while the window still exists: the
-# quit hook that follows a close finds no live window and writes nothing.
+# Closing the last window saves the session while the window still exists:
+# the quit hook that follows finds no registered window and writes nothing.
 run_mutation "close: the should-close hook saves no session" \
   crates/geode-app/src/bridge.rs \
-  '            app.read(cx).save_session(cx);' \
-  '            let _ = &app;' \
+  '                app.read(cx).save_session(cx);' \
+  '                let _ = &app;' \
   geode-app closing_the_window_saves_the_session_and_lets_the_close_proceed
 
-# Closing the window queues every unsaved sheet ahead of the service's stop.
+# Closing the last window queues every unsaved sheet ahead of the service's
+# stop.
 run_mutation "close: the should-close hook flushes no sheet" \
   crates/geode-app/src/bridge.rs \
-  '                factory.flush_all(cx);' \
-  '                let _ = factory;' \
+  '                    factory.flush_all(cx);' \
+  '                    let _ = factory;' \
   geode-app closing_the_window_saves_every_unsaved_sheet
 
 # The should-close hook lets the close proceed; false would keep the window.
 run_mutation "close: the should-close hook refuses the close" \
   crates/geode-app/src/bridge.rs \
-  '                factory.flush_all(cx);
-            }
+  '            app.update(cx, |a, cx| a.window_closed(key, cx));
             true' \
-  '                factory.flush_all(cx);
-            }
+  '            app.update(cx, |a, cx| a.window_closed(key, cx));
             false' \
   geode-app closing_the_window_saves_the_session_and_lets_the_close_proceed
+
+# Only the last window's close saves; a close that leaves another window
+# open parks its tiles and leaves the session file alone.
+run_mutation "app: only the last window's close saves the session" \
+  crates/geode-app/src/bridge.rs \
+  '            if app.read(cx).is_last_window(key) {' \
+  '            if true {' \
+  geode-app closing_a_non_last_window_parks_and_does_not_save
+
+# The last close saves before it deregisters the window: save_session
+# writes nothing once the registry is empty, so the swapped order saves
+# nothing at all.
+run_mutation "app: the last close saves before it deregisters" \
+  crates/geode-app/src/bridge.rs \
+  '            if app.read(cx).is_last_window(key) {
+                app.read(cx).save_session(cx);
+                if let Some(factory) = &pricer {
+                    factory.flush_all(cx);
+                }
+            }
+            app.update(cx, |a, cx| a.window_closed(key, cx));' \
+  '            app.update(cx, |a, cx| a.window_closed(key, cx));
+            if app.read(cx).is_last_window(key) {
+                app.read(cx).save_session(cx);
+                if let Some(factory) = &pricer {
+                    factory.flush_all(cx);
+                }
+            }' \
+  geode-app closing_the_last_window_saves_once
+
+# A non-last close deregisters the window while it stands; skipping it
+# leaves a closed window in the registry and its tiles unparked.
+run_mutation "app: a non-last close deregisters the window" \
+  crates/geode-app/src/bridge.rs \
+  '            }
+            app.update(cx, |a, cx| a.window_closed(key, cx));
+            true' \
+  '            }
+            let _ = key;
+            true' \
+  geode-app closing_a_non_last_window_keeps_the_first_window_open
 
 run_mutation "pricer: flush_all flushes no tile" \
   crates/geode-pricer/src/content.rs \

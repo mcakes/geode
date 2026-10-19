@@ -30,13 +30,14 @@ use geode_shell::keymap::fragments;
 use geode_shell::module::{ModuleRoster, PageRoster};
 use geode_shell::session;
 use geode_shell::shell::{
-    LogServices, ShellApp, ShellServices, ShellView, pickable_columns, saved_scopes,
+    LogServices, Placement, ShellApp, ShellServices, ShellView, WindowOpener, WindowSpec,
+    pickable_columns, saved_scopes,
 };
 use geode_shell::theme;
-use geode_shell::tiling::Workspaces;
+use geode_shell::tiling::{WorkspaceIx, Workspaces};
 use geode_shell::vimfind::FindStyle;
-use gpui::App;
 use gpui::prelude::*;
+use gpui::{AnyWindowHandle, App, WindowOptions};
 use gpui_component::{Root, TitleBar};
 
 fn main() {
@@ -190,9 +191,13 @@ fn main() {
             // Save current session state synchronously at quit, including changes
             // since the last periodic snapshot. This is best-effort and does not
             // join any in-flight periodic session write; their renames may race.
-            // A window close has already removed the window by the time this
-            // runs: `bridge::save_on_close` saves for that route, and the app
-            // writes nothing without a live window (`ShellApp::save_session`).
+            // One save, from the app, over every registered window's records
+            // and the parked ones; no walk of the windows. On an explicit quit
+            // (Dock Quit, logout) every window is still registered and this
+            // is the one save. After the last window's close its own hook
+            // (`bridge::attach_window`) has saved and deregistered it, so
+            // this finds the registry empty and writes nothing
+            // (`ShellApp::save_session`).
             let quit_app = app.clone();
             cx.on_app_quit(move |cx| {
                 quit_app.read(cx).save_session(cx);
@@ -206,7 +211,9 @@ fn main() {
             // The bridge attaches to the app, ahead of any window: service
             // outcomes are routed to whichever window hosts their tile when
             // they arrive, and configuration changes are forwarded, for the
-            // life of the app.
+            // life of the app. The bridge is shared with the opener below,
+            // which installs each window's hooks from it.
+            let bridge = bridge.map(Rc::new);
             if let Some(bridge) = &bridge {
                 bridge::stop_at_quit(bridge, cx);
                 bridge::attach(bridge, &app, cx);
@@ -228,33 +235,51 @@ fn main() {
                 .detach();
             }
 
-            cx.spawn(async move |cx| {
-                // The shell toolbar owns title-bar controls and drag gestures. Use the
-                // matching window options when creating its native window.
-                let window = cx
-                    .open_window(TitleBar::window_options(), |window, cx| {
-                        let key = app.update(cx, |app, cx| app.add_window(None, cx));
-                        let view = cx.new(|cx| ShellView::new(app.clone(), key, window, cx));
-                        cx.new(|cx| Root::new(view, window, cx))
-                    })
-                    .expect("failed to open window");
+            // How every window opens, the first included: the app reserves a
+            // key and a workspace (`ShellApp::open_window`), this opener
+            // builds the platform window over a `ShellView` for the key and
+            // installs the window's own hooks (`bridge::attach_window`: the
+            // should-close hook that parks a non-last window and saves at
+            // the last; the quit hooks above cover an explicit application
+            // quit), and the app confirms the registration. The closure runs
+            // with no lease on the app: the view it builds registers itself.
+            // `None` (the platform refused the window) rolls the reservation
+            // back.
+            let opener: WindowOpener = Rc::new({
+                let app = app.clone();
+                let bridge = bridge.clone();
+                move |key, spec: &WindowSpec, cx: &mut App| {
+                    let view_app = app.clone();
+                    let handle: AnyWindowHandle = cx
+                        .open_window(window_options(&spec.placement), |window, cx| {
+                            let view = cx.new(|cx| ShellView::new(view_app, key, window, cx));
+                            cx.new(|cx| Root::new(view, window, cx))
+                        })
+                        .inspect_err(|e| {
+                            tracing::error!(target: "geode::shell", "could not open a window: {e:#}");
+                        })
+                        .ok()?
+                        .into();
+                    bridge::attach_window(bridge.as_deref(), &app, key, handle, cx);
+                    Some(handle)
+                }
+            });
+            app.update(cx, |app, _| app.set_window_opener(opener));
 
-                // The window's own hooks: save the session and unsaved
-                // sheets when it closes, while it still exists; the quit
-                // hooks above cover an explicit application quit (Dock
-                // Quit, logout). The view registered its key with the app
-                // as it was built.
-                cx.update(|cx| match &bridge {
-                    Some(bridge) => {
-                        let key = window
-                            .read(cx)
-                            .ok()
-                            .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
-                            .map(|shell| shell.read(cx).key())
-                            .expect("the window's root view is the shell");
-                        bridge::attach_window(bridge, &app, key, window.into(), cx);
-                    }
-                    None => bridge::save_on_close(window, app.clone(), None, cx),
+            cx.spawn(async move |cx| {
+                // The first window shows the session's initial workspace (the
+                // one the oldest window showed when the session was last
+                // saved; 1 without a session) where the platform puts it.
+                // Without a window there is nothing to run.
+                cx.update(|cx| {
+                    let initial = app.read(cx).services().workspaces.initial_index();
+                    let workspace = WorkspaceIx::new(initial).expect("the initial index is 1–9");
+                    let spec = WindowSpec {
+                        workspace,
+                        placement: Placement::Default,
+                    };
+                    ShellApp::open_window(&app, spec, cx)
+                        .expect("the first window could not be opened; nothing to run");
                 });
 
                 // Refresh diagnostic configuration independently of the data bridge.
@@ -282,6 +307,22 @@ fn main() {
             })
             .detach();
         });
+}
+
+/// The platform options for a window at `placement`, over the title-bar
+/// options the shell toolbar needs (it owns the title-bar controls and
+/// drag gestures, so AppKit must not treat the bar as a system move
+/// region). Every placement opens with the platform's default position and
+/// size for now; a window placed beside another or where a restored
+/// session recorded one will fill `display_id` and `window_bounds` in its
+/// arm.
+fn window_options(placement: &Placement) -> WindowOptions {
+    let options = TitleBar::window_options();
+    match placement {
+        Placement::Beside(_) => options,
+        Placement::Restored { .. } => options,
+        Placement::Default => options,
+    }
 }
 
 /// Parse no arguments or `--demo [rows]`, defaulting to 100,000 demo rows.

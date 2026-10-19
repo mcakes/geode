@@ -560,11 +560,12 @@ impl ShellApp {
     }
 
     /// Issue the next window key and open it on a workspace, for a caller
-    /// that builds the window itself (the composition root's first
-    /// window, the fixtures that open a window by hand). `index` names
-    /// the workspace; `None` picks the session's initial index for the
-    /// first window and the lowest index no window shows after that.
-    /// [`Self::open_window`] reserves through the same [`Self::reserve`].
+    /// that builds the window itself (the fixtures that open a window by
+    /// hand; the composition root opens every window, the first included,
+    /// through [`Self::open_window`]). `index` names the workspace; `None`
+    /// picks the session's initial index for the first window and the
+    /// lowest index no window shows after that. `open_window` reserves
+    /// through the same [`Self::reserve`].
     ///
     /// A refusal is a programming error here: the initial index is free
     /// while no window is open, and `lowest_free` is free by definition.
@@ -1166,5 +1167,13 @@ impl ShellApp {
     #[cfg(any(test, feature = "test-support"))]
     pub fn apply_reload_for_test(&mut self, config: Config, cx: &mut Context<Self>) {
         self.apply_reload(config, cx);
+    }
+
+    /// The tile records no window holds an occupant for — cross-crate
+    /// test reach for `geode-app`'s close-path tests, which prove a closed
+    /// window's tiles parked here (`parked_tiles` is `pub(super)`).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn parked_tiles_for_test(&self) -> &TileRecords {
+        &self.parked_tiles
     }
 }

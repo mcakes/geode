@@ -162,15 +162,21 @@ reads the app's parked records.
 
 ### Opening windows
 
-`ShellApp` opens every window but the first through one installed
+`ShellApp` opens every window, the first included, through one installed
 `WindowOpener` (`set_window_opener`, a closure the composition root
-installs once: it builds the platform window and a `ShellView` for a key
-and returns the window's handle, or `None`). `ShellApp::open_window(app,
+installs once, before the first window: it builds the platform window and
+a `ShellView` for a key, installs the window's own hooks, and returns the
+window's handle, or `None`). At startup the composition root opens one
+window on the session's initial index (the one the oldest window showed
+when the session was last saved; 1 without a session) at the platform's
+default placement, and a refusal there ends the run: without a window
+there is nothing to run. `ShellApp::open_window(app,
 spec, cx)` takes a `WindowSpec` (the workspace to show and a `Placement`:
 beside a window, where a restored session recorded it, or the platform's
 default) and runs three steps. Reserve, under one app update: the key is
 issued and the index opened in `Workspaces` (one code path with
-`add_window`, which the hand-built first window still uses), refusing
+`add_window`, which the test fixtures that build a window by hand use),
+refusing
 `NoFreeWorkspace` with nothing changed when the index is shown elsewhere;
 an index hidden in another window emits that window's `Park`. Open, with
 no lease on the app: the opener's `ShellView::new` updates the app itself
@@ -1038,8 +1044,13 @@ is refused or has nothing to ask, through
 `geode_tile::following::DeferredDoor`: the arrival and its notify land after
 the draw, and the other tiles promote at once. Frame observers, deliveries and
 key handlers keep `FrameDoor`, which notifies in the same pass. `closed` fires
-only for removal while the window lives; closing the window or quitting the
-application calls it for no occupant. A tile with its own error and no query
+for removal while the window lives, and for every occupant of a closing
+window: the close hook deregisters the window while it still stands
+(`ShellApp::window_closed`), whose `Park` reaches the view with a live
+context, and the view parks each occupant (`park`, then its record, then
+`closed`) whether another window stays open or this was the last one.
+Quitting the application (Dock Quit, logout) runs no close hook and calls
+`closed` for no occupant. A tile with its own error and no query
 to send (a blotter whose view is no longer configured, or whose scope names an
 undefined expression) answers the barrier at once, as a failed query does.
 The pricer submits no frame query and answers every barrier at once.
@@ -1871,24 +1882,36 @@ leaves comparison baselines unchanged, but a layout-only change can lose its
 dirty flag. These baselines track extracted snapshots, not confirmed saves.
 
 The session is saved synchronously, regardless of dirty flags and with the
-link groups' scopes included, both when the window closes and when the
-application quits. Closing the window quits Geode on every platform
-(`QuitMode::LastWindowClosed`). gpui removes a closing window before it runs
-the quit hooks, and the window's view and occupants go with it unless a host
+link groups' scopes included, when the last window closes and when the
+application quits. Every window carries the same should-close hook,
+installed by the opener as the window opens (`bridge::attach_window`), and
+what a close means depends on whether another window stays open
+(`ShellApp::is_last_window`). A close that leaves another window open
+parks and saves nothing: the hook deregisters the window while it still
+stands (`ShellApp::window_closed`), so its occupants park with a live
+context (park, record, closed) and their records wait in the app's parked
+tiles for the next window to show the workspace or for the next save;
+the remaining windows carry on, and the session file changes only at the
+next periodic snapshot or the last close. The last window's close saves:
+the session first, then unsaved pricer sheets, in the order the quit hooks
+run them, and only then deregisters the window; the close then proceeds
+and Geode quits on every platform (`QuitMode::LastWindowClosed`). The
+order matters because gpui removes a closing window before it runs the
+quit hooks, and the window's view and occupants go with it unless a host
 still holds the view, so a snapshot taken then would write the layout with
 that window's tile records missing, and the next start would restore empty
-tiles over the should-close save: `ShellApp::save_session` writes nothing
-while no window is registered. The app's should-close hook on the main
-window (`bridge::save_on_close`) saves the session while the window still
-exists, then lets the close proceed; `ShellApp::window_closed` is the
-mechanism that deregisters a closing window (and parks what it hosted)
-while it still stands. On an explicit application quit (Dock
-Quit, logout) no should-close runs and the quit hook, which holds the app
-entity, saves alone with the windows still registered. After a window close
-the quit hook still runs; with the window deregistered it finds the
-registry empty and saves nothing, so the session is written once. A view a
-host still holds past its window keeps its occupants with it, so a save it
-does reach writes that window's own records, not placeholders.
+tiles over the close's save: `ShellApp::save_session` writes nothing while
+no window is registered, and a save after the deregistration would be
+that nothing. The last close's save includes the records earlier closes
+parked, so a workspace closed with its window earlier in the run is
+restored with its tiles. The quit hook saves once, from the app entity,
+and walks no windows: on an explicit application quit (Dock Quit, logout)
+no should-close runs, every window is still registered with its occupants
+live, and that one save covers all of them; after the last window's close
+the hook finds the registry empty and writes nothing, so the session is
+written once either way. A view a host still holds past its window keeps
+its occupants with it, so a save it does reach writes that window's own
+records, not placeholders.
 
 Limit: on Linux with client-drawn decorations, gpui-component's `TitleBar`
 close button removes the window directly and never runs should-close, so a
