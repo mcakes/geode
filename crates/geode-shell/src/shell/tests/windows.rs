@@ -755,3 +755,55 @@ fn a_window_move_marks_the_session_dirty(cx: &mut gpui::TestAppContext) {
         "a resize marks the session dirty"
     );
 }
+
+/// Both window verbs carry the dispatching window's own frame and display
+/// in `Placement::Beside`, read from the `Window` the dispatch holds: the
+/// opener cannot read a window under update through its handle, and
+/// without the payload the platform would place the new window instead of
+/// the cascade beside its spawner. A recording opener keeps every spec it
+/// is handed and then opens the window as the test opener does.
+#[gpui::test]
+fn the_window_verbs_carry_their_windows_frame(cx: &mut gpui::TestAppContext) {
+    use crate::shell::{Placement, WindowSpec};
+
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+
+    let specs: std::rc::Rc<std::cell::RefCell<Vec<WindowSpec>>> = Default::default();
+    let recording: WindowOpener = {
+        let specs = specs.clone();
+        let inner = test_opener(app.clone());
+        std::rc::Rc::new(move |key, spec, cx| {
+            specs.borrow_mut().push(spec.clone());
+            inner(key, spec, cx)
+        })
+    };
+    app.update(&mut vcx1, |a, _| a.set_window_opener(recording));
+    let frame = vcx1.update(|window, _| window.window_bounds().get_bounds());
+
+    dispatch_and_draw(&s1, &mut vcx1, "window::tear_out");
+    vcx1.run_until_parked();
+    dispatch_and_draw(&s1, &mut vcx1, "window::open");
+    vcx1.run_until_parked();
+
+    assert_eq!(app.read_with(&vcx1, |a, _| a.windows().len()), 3);
+    let specs = specs.borrow();
+    assert_eq!(specs.len(), 2, "one spec per verb: {specs:?}");
+    for spec in specs.iter() {
+        match &spec.placement {
+            Placement::Beside {
+                from,
+                spawner: Some(spawner),
+            } => {
+                assert_eq!(*from, k1, "beside the dispatching window");
+                assert_eq!(
+                    spawner.frame, frame,
+                    "the spawner's frame is the dispatching window's"
+                );
+            }
+            other => panic!("the verb carries its window's frame: {other:?}"),
+        }
+    }
+}

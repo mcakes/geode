@@ -9313,6 +9313,31 @@ run_mutation "session: bounds missing a field read as none" \
   '        h: field("h").unwrap_or(0.0),' \
   geode-shell a_bounds_table_missing_a_field_reads_as_none
 
+# The window verbs run inside their window's update, where the opener
+# cannot read that window through its handle; without the frame they
+# carry, the platform places the new window instead of the cascade.
+run_mutation "shell: the window verbs carry their window's frame" \
+  crates/geode-shell/src/shell/input.rs \
+  '            let spawner = Some(super::app::Spawner::of(window, cx));
+            match super::app::ShellApp::tear_out(&self.app, self.key, spawner, cx) {
+                Ok(_) => self.after_shown_changed(before, window, cx),
+                Err(refusal) => self.refuse_window_open("tear out", refusal),
+            }
+            return;
+        }
+        if action.0 == "window::open" {
+            let spawner = Some(super::app::Spawner::of(window, cx));' \
+  '            let spawner: Option<super::app::Spawner> = None;
+            match super::app::ShellApp::tear_out(&self.app, self.key, spawner, cx) {
+                Ok(_) => self.after_shown_changed(before, window, cx),
+                Err(refusal) => self.refuse_window_open("tear out", refusal),
+            }
+            return;
+        }
+        if action.0 == "window::open" {
+            let spawner: Option<super::app::Spawner> = None;' \
+  geode-shell the_window_verbs_carry_their_windows_frame
+
 run_mutation "add-tile: duplicate carries the focused tile's serialized state" \
   crates/geode-shell/src/shell/add_tile.rs \
   '        self.add_tile(

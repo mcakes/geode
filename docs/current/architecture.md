@@ -222,8 +222,11 @@ atomic write path. A module never writes configuration itself: it queues
 whole-object edits through its frame handle (`FrameRef::queue_config_edits`), and the
 shell folds them into the same debounced, user-layer batch the configuration
 dialogs use (see [the config door](shell.md#the-config-door)). The session
-file holds layout, occupants, frame state, and palette usage, with separate
-save ordering and recovery rules. See
+file holds layout, occupants, frame state, palette usage, and one record per
+open window (the workspace it shows, its display and its frame in logical
+pixels); startup reopens one window per record where it was, else one window
+on the active workspace. The file has separate save ordering and recovery
+rules. See
 [configuration](configuration.md) and [session persistence](shell.md#session-format)
 for those boundaries.
 

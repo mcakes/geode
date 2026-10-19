@@ -1868,6 +1868,7 @@ a later save replaces it with the current state.
 | A window record's `display` is not a non-negative integer; its `bounds` is not a table or lacks a numeric `x`, `y`, `w` or `h` (integer or float); its `maximized` is not a boolean | Warn and read that field as unknown, unknown, or `false`; keep the record |
 | A window record's open is refused at startup (its index is shown by an earlier record's window; the opener failed) | Warn and skip the record; the other records still open. With none opened, one window opens on `active` |
 | A window record's display is no longer attached | Open the window on the primary display, its recorded size at the primary's origin plus the cascade offset (see [Opening windows](#opening-windows)) |
+| A window record without `display`, or without `bounds` | Open the window with the platform choosing what the record lacks: no display, and the recorded frame alone is asked for; no frame, and the recorded display alone |
 
 Frame restoration parses scope expressions but does not validate columns
 against the current schema. Invalid slots, expression syntax, date strings,
