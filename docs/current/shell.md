@@ -59,7 +59,11 @@ is what "open" means to the app: the watcher runs while it lists a window
 (`watcher_runs`), the session is saved only while it does, the diagnostics
 histogram sums the views it lists, and the title names an index only when
 it lists two (`window_title`: `Geode`, or `Geode · N` with N the shown
-index). Neither `cx.windows()` nor a view entity's liveness decides, since
+index). A window sets its own title (`ShellView::sync_title`) where it can
+have changed and a `Window` is at hand — the end of its constructor, the
+`WindowsChanged` event, and its own switch or tear-out — comparing against
+the title it last set, so an unchanged title is never re-set; render never
+reads or sets it. Neither `cx.windows()` nor a view entity's liveness decides, since
 a host such as the bridge or the quit hooks holds a view or the app past
 its window. A window leaves the registry through `ShellApp::window_closed`,
 which the close path calls while the window still stands: every index the
@@ -179,9 +183,21 @@ fails, `from` is switched back before the queued `Park` is delivered, and
 a window's `Park` arm ignores a park for the workspace it shows, so the
 rolled-back tear-out parks nothing. The window that dispatched a tear-out
 has been switched by the app, not by its own dispatch, and runs its own
-post-switch work (flip baseline, scope field, session mark) on the verb's
-path. `activate_window(key, cx)` asks a registered window forward
-(`Switch::Raise`). None of these runs from render.
+post-switch work on the verb's path: the same `after_shown_changed` a
+`Shown` or `Moved` switch runs (pull parked records, session mark, flip
+baseline and scope field, focus, title). `activate_window(key, cx)` asks a
+registered window forward (`Switch::Raise`). None of these runs from render.
+
+The trader reaches the two through the palette: `window::tear_out` ("Tear
+out into a new window") and `window::open` ("New window"), category
+Workspace, with no default chord. Each acts on the window it was
+dispatched in; a `window::open` changes nothing in that window but its
+title. Under a modal or over a page both are refused with the dialog's or
+page's notice, as every other workspace verb is: a tear-out would switch
+the window under a dialog bound to its lane. A refusal from the app leaves
+a notice and nothing else: `NoFreeWorkspace` shows `all nine workspaces
+are on screen`; `NoOpener` and `OpenerFailed` are the composition root's
+fault, logged under `geode::shell`, and show `could not open a window`.
 
 A draw can come before the records do: gpui draws a new window once inside
 `open_window`, before the effects carrying the two events flush, so a window

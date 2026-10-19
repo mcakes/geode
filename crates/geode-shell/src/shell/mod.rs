@@ -716,6 +716,11 @@ pub struct ShellView {
     /// or a row menu action's report (`opened <url>`).
     /// Cleared at the start of the next dispatch.
     notice: Option<SharedString>,
+    /// The title last given to the platform window (`sync_title`), so the
+    /// event and dispatch paths that may have changed it set it only when
+    /// it differs. `None` until the constructor's first set. Render never
+    /// reads or sets the title.
+    last_title: Option<String>,
     /// The transient stack-member list, or
     /// `None` when closed — `open_stack_list`'s own contract, the same
     /// "nothing survives a close/reopen" shape `palette`/`command_line`
@@ -1179,7 +1184,7 @@ impl ShellView {
         // Registered with the app below, once the view is whole: the
         // session writer asks every registered view for its records.
         let weak = cx.weak_entity();
-        let view = Self {
+        let mut view = Self {
             app,
             key,
             window_handle: window.window_handle(),
@@ -1253,10 +1258,13 @@ impl ShellView {
             pending_config_write: None,
             config_write_seq: 0,
             config_write_error: None,
+            last_title: None,
         };
         let handle = window.window_handle();
         view.app
             .update(cx, |app, _| app.register_view(key, weak, handle));
+        // After registering: the title counts this window.
+        view.sync_title(window, cx);
         view
     }
 
@@ -1382,6 +1390,14 @@ impl ShellView {
         // opens against the active lane, not a dialog's target lane. A link
         // group's scope is part of what its followers show, so a change to
         // it flips them as well.
+        //
+        // A window the close path has deregistered (see `render`) is still
+        // notified until gpui removes it. It shows no workspace, so there is
+        // no lane to flip against, no field to reflect into, and the queues
+        // drained below are the frame's, which every live window drains.
+        if self.workspaces(cx).shown(self.key).is_none() {
+            return;
+        }
         let ws = self.shown_ix(cx);
         let (lane_now, groups_now) = {
             let f = frame.read(cx);
@@ -1577,6 +1593,13 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A window the close path has deregistered (see `render`) is still
+        // notified until gpui removes it; it shows no workspace, and a page
+        // opened here would read the shown lane. Another window drains the
+        // requests.
+        if self.workspaces(cx).shown(self.key).is_none() {
+            return;
+        }
         let (pending_level, pending_overlay, pending_page) = diagnostics.update(cx, |d, _cx| {
             (
                 d.take_pending_level(),
@@ -1745,6 +1768,32 @@ impl ShellView {
         self.workspaces(cx)
             .shown(self.key)
             .expect("a view's window is open on the workspaces")
+    }
+
+    /// Give the platform window its title (`ShellApp::window_title`:
+    /// `Geode`, or `Geode · N` once two windows are registered) when it
+    /// differs from the one last set. Called where the title can change
+    /// and a `Window` is at hand: the end of the constructor, the
+    /// `WindowsChanged` event, and this window's own switch and tear-out
+    /// (`after_shown_changed`). Never from render: a title is set, not
+    /// painted, and a per-frame compare would still format per frame. A
+    /// deregistered window (see `render`) is left as it was.
+    fn sync_title(&mut self, window: &mut Window, cx: &App) {
+        if self.workspaces(cx).shown(self.key).is_none() {
+            return;
+        }
+        let title = self.app.read(cx).window_title(self.key);
+        if self.last_title.as_deref() != Some(title.as_str()) {
+            window.set_window_title(&title);
+            self.last_title = Some(title);
+        }
+    }
+
+    /// The title last set on the platform window, or `None` before the
+    /// constructor's first set — test reach for the title rule.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn last_title(&self) -> Option<&str> {
+        self.last_title.as_deref()
     }
 
     pub(crate) fn frame_at(&self, ws: WorkspaceIx) -> FrameRef {

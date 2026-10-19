@@ -83,11 +83,57 @@ fn refused_over_a_page(id: &str) -> bool {
                 | "tile::context_menu"
                 | "tile::autosize_columns"
                 | "tile::link_group"
+                | "window::tear_out"
+                | "window::open"
         )
         || crate::defaults::parse_add_action(id).is_some()
 }
 
+/// The notice when a window verb finds every index shown by some window.
+pub(crate) const ALL_WORKSPACES_SHOWN: &str = "all nine workspaces are on screen";
+
+/// The notice when a window verb's opener opened nothing, or none is
+/// installed. The cause is logged; the trader sees only that it failed.
+pub(crate) const COULD_NOT_OPEN_WINDOW: &str = "could not open a window";
+
 impl ShellView {
+    /// What this window does once the index it shows has changed, on the
+    /// dispatch path that changed it: a `Shown` or `Moved` switch, or a
+    /// tear-out, which switches this window inside the app. Pull the
+    /// parked records it now hosts (a closed window's, or ones a move
+    /// parked before), mark the session, follow the new lane (flip
+    /// baseline and scope field, `on_workspace_switched`), reconcile
+    /// focus, and rename the window after the index. One method, so the
+    /// two paths cannot drift.
+    pub(super) fn after_shown_changed(
+        &mut self,
+        before: crate::tiling::WorkspaceIx,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pull_parked_records(cx);
+        self.mark_session_dirty(cx);
+        // Another workspace's lane: the flip baseline and the scope field
+        // must follow it before anything reads them.
+        self.on_workspace_switched(before, window, cx);
+        self.note_keyboard_focus_move(window, cx);
+        self.sync_title(window, cx);
+    }
+
+    /// A window verb was refused: say so in the notice. A full house is
+    /// the trader's situation and is named; a missing or failing opener
+    /// is the composition root's and is logged.
+    fn refuse_window_open(&mut self, verb: &str, refusal: super::app::OpenRefusal) {
+        use super::app::OpenRefusal;
+        self.notice = Some(match refusal {
+            OpenRefusal::NoFreeWorkspace => ALL_WORKSPACES_SHOWN.into(),
+            OpenRefusal::NoOpener | OpenRefusal::OpenerFailed => {
+                tracing::warn!(target: "geode::shell", "could not {verb} a window: {refusal:?}");
+                COULD_NOT_OPEN_WINDOW.into()
+            }
+        });
+    }
+
     /// Active contexts, outermost first: workspace, then tile and occupant when
     /// an occupant is focused, then palette while open. While a page is open
     /// it is `page`, then the page's own context, then palette: no workspace,
@@ -178,6 +224,8 @@ impl ShellView {
         // their keyboard route. Refuse workspace switches and the pin toggle
         // too: they would move the active lane under a dialog that commits
         // to the lane it opened in, and the toolbar would then mix the two.
+        // The window verbs likewise: a tear-out switches this window, and
+        // either opens a window over a dialog bound to this one's lane.
         // Other palette actions may run behind the stack.
         if self.modal_open()
             && (matches!(
@@ -187,6 +235,8 @@ impl ShellView {
                     | "stack::pick"
                     | "tile::context_menu"
                     | "frame::pin_workspace"
+                    | "window::tear_out"
+                    | "window::open"
             ) || id.starts_with("workspace::switch_"))
         {
             return Some(CLOSE_DIALOG_FIRST);
@@ -338,12 +388,7 @@ impl ShellView {
             let key = self.key;
             match self.app.update(cx, |app, cx| app.switch(key, n, cx)) {
                 Switch::Shown | Switch::Moved { .. } => {
-                    self.pull_parked_records(cx);
-                    self.mark_session_dirty(cx);
-                    // Another workspace's lane: the flip baseline and the
-                    // scope field must follow it before anything reads them.
-                    self.on_workspace_switched(before, window, cx);
-                    self.note_keyboard_focus_move(window, cx);
+                    self.after_shown_changed(before, window, cx);
                 }
                 // Re-selecting the shown index changes nothing, but it is
                 // still a recognized workspace action: the session is
@@ -357,6 +402,28 @@ impl ShellView {
                         .update(cx, |app, cx| app.activate_window(other, cx));
                 }
                 Switch::Invalid => {}
+            }
+            return;
+        }
+
+        // The window verbs. A tear-out switches this window to the lowest
+        // free index inside the app (`ShellApp::tear_out`), so on success
+        // this window runs the same post-switch work a `Shown` switch
+        // does; the new window's occupants arrive through `Park` and
+        // `Parked`. `window::open` changes nothing here but the title,
+        // which `WindowsChanged` sets. A refusal leaves a notice and
+        // nothing else: the app changed nothing.
+        if action.0 == "window::tear_out" {
+            let before = self.shown_ix(cx);
+            match super::app::ShellApp::tear_out(&self.app, self.key, cx) {
+                Ok(_) => self.after_shown_changed(before, window, cx),
+                Err(refusal) => self.refuse_window_open("tear out", refusal),
+            }
+            return;
+        }
+        if action.0 == "window::open" {
+            if let Err(refusal) = super::app::ShellApp::open_fresh(&self.app, self.key, cx) {
+                self.refuse_window_open("open", refusal);
             }
             return;
         }

@@ -7295,6 +7295,50 @@ run_mutation "shell app: a rolled-back tear-out parks nothing" \
   geode-shell \
   a_failing_opener_rolls_the_tear_out_back
 
+# A window verb refused for want of a free index names the trader's
+# situation; the generic failure notice would send him looking for a
+# fault in the composition root.
+run_mutation "shell: a full house shows the nine-workspaces notice" \
+  crates/geode-shell/src/shell/input.rs \
+  '            OpenRefusal::NoFreeWorkspace => ALL_WORKSPACES_SHOWN.into(),' \
+  '            OpenRefusal::NoFreeWorkspace => COULD_NOT_OPEN_WINDOW.into(),' \
+  geode-shell \
+  a_full_house_shows_the_notice
+
+# The window verbs are refused under a modal as a workspace switch is;
+# without their ids in the dialog-first list the palette would tear the
+# window out from under its dialog.
+run_mutation "shell: window verbs are refused under a modal" \
+  crates/geode-shell/src/shell/input.rs \
+  '                    | "window::tear_out"
+                    | "window::open"
+            ) || id.starts_with("workspace::switch_"))' \
+  '            ) || id.starts_with("workspace::switch_"))' \
+  geode-shell \
+  open_is_refused_under_a_modal
+
+# Every window renames itself on `WindowsChanged`; a window that does not
+# keeps saying `Geode` after a second one opens, or `Geode · N` after the
+# count falls back to one.
+run_mutation "shell: the title follows the window count" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            ShellEvent::WindowsChanged => self.sync_title(window, cx),' \
+  '            ShellEvent::WindowsChanged => {}' \
+  geode-shell \
+  the_title_follows_the_window_count
+
+# A tear-out switches the dispatching window inside the app; without the
+# post-switch work its flip baseline and scope field still describe the
+# lane it left.
+run_mutation "shell: tear_out runs the post-switch work in its window" \
+  crates/geode-shell/src/shell/input.rs \
+  '                Ok(_) => self.after_shown_changed(before, window, cx),' \
+  '                Ok(_) => {
+                    let _ = before;
+                }' \
+  geode-shell \
+  tear_out_reseeds_the_dispatching_window
+
 run_mutation "catalog: a GiB memory limit reads as GB" \
   crates/geode-data/src/query/catalog.rs \
   '        "gib" => 1024f64.powi(3),' \

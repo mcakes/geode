@@ -156,6 +156,10 @@ fn both_verbs_refuse_with_nine_shown(cx: &mut gpui::TestAppContext) {
         "nothing was parked: {:?}",
         log.borrow()
     );
+    assert!(
+        app.read_with(&vcx1, |a, _| a.parked_tiles.is_empty()),
+        "no record waits in parked_tiles"
+    );
     assert_eq!(
         app.read_with(&vcx1, |a, _| a.services().workspaces.switch_epoch(k1)),
         0,
@@ -310,4 +314,179 @@ fn open_window_refuses_without_an_opener(cx: &mut gpui::TestAppContext) {
         assert!(a.services().workspaces.windows().next().is_none());
         assert!(a.windows().is_empty());
     });
+}
+
+/// `window::tear_out` is a registered palette action (Workspace category,
+/// no chord), and dispatching it in a window opens a second window: the
+/// registry lists two and the dispatching window fell back to the free
+/// index.
+#[gpui::test]
+fn tear_out_is_a_registered_action_that_opens_a_window(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    for (id, title) in [
+        ("window::tear_out", "Tear out into a new window"),
+        ("window::open", "New window"),
+    ] {
+        let def = app.read_with(&vcx1, |a, _| {
+            a.services()
+                .registry
+                .get(&ActionId(id.to_string()))
+                .cloned()
+        });
+        let def = def.unwrap_or_else(|| panic!("{id} is registered"));
+        assert_eq!(def.title, title);
+        assert_eq!(def.category, "Workspace");
+    }
+
+    dispatch_and_draw(&s1, &mut vcx1, "window::tear_out");
+    vcx1.run_until_parked();
+
+    assert_eq!(app.read_with(&vcx1, |a, _| a.windows().len()), 2);
+    assert_eq!(shown(&app, &vcx1, k1), Some(2), "the old window fell back");
+    assert!(
+        s1.read_with(&vcx1, |s, _| s.notice.is_none()),
+        "no refusal notice"
+    );
+}
+
+/// Under a modal both window verbs are refused with the close-the-dialog
+/// notice, as a workspace switch is: no window opens, the dialog stays
+/// open and the window still shows its index.
+#[gpui::test]
+fn open_is_refused_under_a_modal(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    dispatch_and_draw(&s1, &mut vcx1, "settings::open");
+    assert!(s1.read_with(&vcx1, |s, _| s.modal_open()), "sanity");
+
+    for id in ["window::open", "window::tear_out"] {
+        dispatch_and_draw(&s1, &mut vcx1, id);
+        vcx1.run_until_parked();
+        assert_eq!(
+            s1.read_with(&vcx1, |s, _| s.notice.clone()).as_deref(),
+            Some(crate::shell::input::CLOSE_DIALOG_FIRST),
+            "{id} is refused with the notice"
+        );
+        assert_eq!(
+            app.read_with(&vcx1, |a, _| a.windows().len()),
+            1,
+            "{id} opened nothing"
+        );
+        assert!(
+            s1.read_with(&vcx1, |s, _| s.modal_open()),
+            "{id} left the dialog open"
+        );
+        assert_eq!(shown(&app, &vcx1, k1), Some(1), "{id} switched nothing");
+    }
+}
+
+/// With nine windows showing every index, either verb dispatched in a
+/// window shows the full-house notice and changes nothing.
+#[gpui::test]
+fn a_full_house_shows_the_notice(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    for _ in 0..8 {
+        cx.update(|cx| ShellApp::open_fresh(&app, k1, cx))
+            .expect("an index is free");
+    }
+    assert_eq!(app.read_with(&vcx1, |a, _| a.windows().len()), 9, "sanity");
+
+    for id in ["window::tear_out", "window::open"] {
+        dispatch_and_draw(&s1, &mut vcx1, id);
+        vcx1.run_until_parked();
+        assert_eq!(
+            s1.read_with(&vcx1, |s, _| s.notice.clone()).as_deref(),
+            Some("all nine workspaces are on screen"),
+            "{id}"
+        );
+        assert_eq!(app.read_with(&vcx1, |a, _| a.windows().len()), 9, "{id}");
+        assert_eq!(shown(&app, &vcx1, k1), Some(1), "{id}");
+    }
+}
+
+/// The window's title follows the registry: `Geode` alone, `Geode · N`
+/// once a second window opens (in both windows), the new index after a
+/// switch, and `Geode` again when the count falls back to one. Read
+/// through the view's last-set title, which the event and dispatch paths
+/// set and render never touches.
+#[gpui::test]
+fn the_title_follows_the_window_count(cx: &mut gpui::TestAppContext) {
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    let title = |s: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        s.read_with(cx, |s, _| s.last_title().map(str::to_owned))
+    };
+    assert_eq!(title(&s1, &vcx1).as_deref(), Some("Geode"));
+
+    let k2 = vcx1
+        .update(|_, cx| ShellApp::open_fresh(&app, k1, cx))
+        .expect("a free index");
+    vcx1.run_until_parked();
+    assert_eq!(title(&s1, &vcx1).as_deref(), Some("Geode · 1"));
+    let (s2, vcx2) = context_for(cx, &app, k2);
+    assert_eq!(title(&s2, &vcx2).as_deref(), Some("Geode · 2"));
+
+    // A switch in the first window renames it after the index it shows.
+    dispatch_and_draw(&s1, &mut vcx1, "workspace::switch_3");
+    assert_eq!(title(&s1, &vcx1).as_deref(), Some("Geode · 3"));
+
+    app.update(&mut vcx1, |a, cx| a.window_closed(k2, cx));
+    vcx1.run_until_parked();
+    assert_eq!(title(&s1, &vcx1).as_deref(), Some("Geode"));
+}
+
+/// A tear-out switches the dispatching window to the lowest free index
+/// inside the app, so the window must run its own post-switch work on
+/// the verb's path: its flip baseline is re-seeded from the lane it now
+/// shows (workspace 2's pinned lane, whose scope generation differs from
+/// workspace 1's), and its scope field shows that lane's text.
+#[gpui::test]
+fn tear_out_reseeds_the_dispatching_window(cx: &mut gpui::TestAppContext) {
+    use geode_core::scope::Scope;
+    let app = test_app(cx, test_services(), None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    let frame = s1.read_with(&vcx1, |s, _| s.frame().clone());
+    let two = WorkspaceIx::new(2).unwrap();
+    frame.update(&mut vcx1, |f, _| {
+        assert!(f.pin(two));
+        assert!(f.view_mut(two).set_scope(Scope {
+            text: Some("spx".to_string()),
+            ..Scope::default()
+        }));
+    });
+    let (one_v, two_v) = frame.read_with(&vcx1, |f, _| {
+        (
+            f.view(WorkspaceIx::FIRST).versions(),
+            f.view(two).versions(),
+        )
+    });
+    assert!(!one_v.same_flip_identity(two_v), "sanity: the lanes differ");
+    assert!(
+        s1.read_with(&vcx1, |s, _| s.last_flip_versions.same_flip_identity(one_v)),
+        "sanity: the baseline is lane 1's"
+    );
+
+    dispatch_and_draw(&s1, &mut vcx1, "window::tear_out");
+    vcx1.run_until_parked();
+
+    assert_eq!(shown(&app, &vcx1, k1), Some(2), "the window fell back to 2");
+    assert!(
+        s1.read_with(&vcx1, |s, _| s.last_flip_versions.same_flip_identity(two_v)),
+        "the flip baseline was re-seeded from lane 2"
+    );
+    let field = s1.read_with(&vcx1, |s, cx| s.filter_input.read(cx).value().to_string());
+    assert_eq!(field, "spx", "the scope field shows lane 2's text");
+    assert_eq!(app.read_with(&vcx1, |a, _| a.windows().len()), 2);
 }

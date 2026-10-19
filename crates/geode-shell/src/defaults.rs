@@ -312,6 +312,17 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
             "Workspace",
         );
     }
+    // The window verbs: palette-only, no default chord. A tear-out moves
+    // the shown workspace into a new window; open shows the lowest free
+    // index in one. Both are refused under a modal and over a page, as
+    // the other workspace verbs are.
+    action(
+        reg,
+        "window::tear_out",
+        "Tear out into a new window",
+        "Workspace",
+    );
+    action(reg, "window::open", "New window", "Workspace");
     action(reg, "palette::toggle", "Toggle command palette", "Palette");
     // Settings share the Appearance category with themes. A theme name
     // selects its light/dark presentation; there is no separate mode action.

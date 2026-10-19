@@ -641,9 +641,20 @@ impl ShellView {
     pub(super) fn on_app_event(
         &mut self,
         event: &ShellEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A window the close path has deregistered (`ShellApp::window_closed`,
+        // see `render`) hears events until gpui removes it. Only the parks
+        // it owes are still its to act on: a reload's dialog refresh reads
+        // the shown workspace it no longer has (`target_frame`), and a
+        // title or a pull names nothing. `Parked` compares against the
+        // shown index and is inert on its own.
+        if !matches!(event, ShellEvent::Park { .. })
+            && self.workspaces(cx).shown(self.key).is_none()
+        {
+            return;
+        }
         match event {
             ShellEvent::Reloaded {
                 pickable_changed,
@@ -720,8 +731,10 @@ impl ShellView {
                         .update(cx, |app, cx| app.records_parked(workspace, cx));
                 }
             }
-            // Nothing in a window reads the count yet; the title bar will.
-            ShellEvent::WindowsChanged => {}
+            // The count decides whether the title names an index; every
+            // window renames itself here, the one that opened or closed a
+            // window as much as the others.
+            ShellEvent::WindowsChanged => self.sync_title(window, cx),
             // The records for the workspace this window shows are parked:
             // take them, and the next draw rebuilds their occupants.
             ShellEvent::Parked { workspace } => {
