@@ -7128,27 +7128,40 @@ run_mutation "shell: a move parks before it closes" \
 
 # Only a `Moved` outcome emits `Park`. A switch within one window (`Shown`)
 # keeps its occupants where they are; parking them would close and rebuild
-# every tile on every mod+N.
+# every tile on every mod+N. The mutation parks the index the window just
+# left, which it still hosts hidden: a park for the index it now shows
+# would be ignored by the `Park` arm's guard against a rolled-back
+# tear-out and prove nothing.
 run_mutation "shell: a plain switch parks nothing" \
   crates/geode-shell/src/shell/app.rs \
   '        let outcome = self.services.workspaces.switch(key, n);
         if let Switch::Moved { from } = outcome {' \
-  '        let outcome = self.services.workspaces.switch(key, n);
-        let from = match outcome {
-            Switch::Moved { from } => Some(from),
-            Switch::Shown => Some(key),
-            _ => None,
-        };
-        if let Some(from) = from {' \
+  '        let before = self.services.workspaces.shown(key);
+        let outcome = self.services.workspaces.switch(key, n);
+        if let (Switch::Shown, Some(before)) = (outcome, before) {
+            cx.emit(ShellEvent::Park {
+                window: key,
+                workspace: before,
+            });
+        }
+        if let Switch::Moved { from } = outcome {' \
   geode-shell \
   a_plain_switch_parks_nothing
 
-# A `Raise` changed no host: the other window keeps showing the index and
-# must not be told to park it.
+# A `Raise` changes nothing: the other window keeps showing the index and
+# the asking window keeps showing its own. The mutation makes the raise
+# also show the index in the asking window (one workspace on two screens);
+# telling the showing window to park it instead would be ignored by the
+# `Park` arm's guard for the workspace a window shows.
 run_mutation "shell: a raise moves nothing" \
-  crates/geode-shell/src/shell/app.rs \
-  '        if let Switch::Moved { from } = outcome {' \
-  '        if let Switch::Moved { from } | Switch::Raise(from) = outcome {' \
+  crates/geode-shell/src/tiling/workspaces.rs \
+  '        if let Some(v) = self.shower(n) {
+            return Switch::Raise(v);
+        }' \
+  '        if let Some(v) = self.shower(n) {
+            self.shown.insert(key, n);
+            return Switch::Raise(v);
+        }' \
   geode-shell \
   a_switch_to_a_shown_index_moves_nothing_and_asks_to_raise
 
