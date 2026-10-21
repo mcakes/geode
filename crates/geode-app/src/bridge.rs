@@ -1627,6 +1627,7 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
             | ShellEvent::DayChanged
             | ShellEvent::Park { .. }
             | ShellEvent::Parked { .. }
+            | ShellEvent::WindowClosing { .. }
             | ShellEvent::WindowsChanged => {}
         }
     })
@@ -7361,6 +7362,144 @@ grain = "underlying"
         });
         assert_eq!(shown, 4, "the initial index");
         assert_eq!(cx.update(|cx| app.read(cx).windows().len()), 1);
+    }
+
+    /// Startup reserves every record's key before the first window opens
+    /// (`ShellApp::open_windows`), so the first window hosts only the
+    /// indexes no later record claims: each restored tile is built once,
+    /// in the window its record names, on that window's first draw, with
+    /// nothing parked and rebuilt. Opened one at a time, the first window
+    /// would host and build every tile, then park the second record's for
+    /// the second window to rebuild, which paints a placeholder first.
+    #[gpui::test]
+    fn startup_builds_each_tile_once_in_its_own_window(cx: &mut gpui::TestAppContext) {
+        let (mut services, log) = test_shell_services_with_rec_roster();
+        let text = r#"
+config_version = 1
+active = 3
+[workspaces.1]
+focused = 1
+[workspaces.1.node]
+kind = "leaf"
+id = 1
+[workspaces.1.tiles.1]
+module = "rec"
+[workspaces.3]
+focused = 2
+[workspaces.3.node]
+kind = "leaf"
+id = 2
+[workspaces.3.tiles.2]
+module = "rec"
+[windows.1]
+workspace = 3
+display = 1
+[windows.1.bounds]
+x = 100.0
+y = 100.0
+w = 800.0
+h = 600.0
+[windows.2]
+workspace = 1
+display = 1
+[windows.2.bounds]
+x = 200.0
+y = 150.0
+w = 640.0
+h = 480.0
+"#;
+        let table: toml::Table = toml::from_str(text).unwrap();
+        let restored = geode_shell::session::from_toml(&table).unwrap();
+        assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+        assert_eq!(restored.windows.len(), 2, "sanity: two records");
+        services.workspaces = restored.workspaces;
+        services.restored_tiles = restored.tiles;
+        services.restored_windows = restored.windows;
+        cx.update(gpui_component::init);
+        let app = cx.update(|cx| cx.new(|cx| ShellApp::new(services, None, None, cx)));
+        cx.update(|cx| {
+            app.update(cx, |a, _| {
+                a.set_window_opener(window_opener(
+                    app.clone(),
+                    None,
+                    gpui::WindowOptions::default,
+                ))
+            })
+        });
+
+        let opened = cx.update(|cx| crate::startup::open_startup_windows(&app, cx));
+
+        assert_eq!(opened.len(), 2, "one window per record");
+        let created: Vec<TileId> = {
+            let mut created: Vec<TileId> = log
+                .borrow()
+                .iter()
+                .filter_map(|r| match r {
+                    Recorded::Created(t, _) => Some(*t),
+                    _ => None,
+                })
+                .collect();
+            created.sort();
+            created
+        };
+        assert_eq!(
+            created,
+            vec![TileId(1), TileId(2)],
+            "each tile built once: {:?}",
+            log.borrow()
+        );
+        assert!(
+            !log.borrow().iter().any(|r| matches!(r, Recorded::Park(_))),
+            "nothing moved between windows, so nothing was parked: {:?}",
+            log.borrow()
+        );
+        // Each tile's occupant is in the window its record names, from
+        // that window's first draw: no placeholder awaiting a rebuild.
+        let kinds: Vec<Option<&'static str>> = cx.update(|cx| {
+            [(opened[0], TileId(2)), (opened[1], TileId(1))]
+                .into_iter()
+                .map(|(key, tile)| {
+                    let handle = app.read(cx).handle(key).expect("registered");
+                    let root = handle.downcast::<Root>().expect("a Root");
+                    root.read(cx)
+                        .expect("open")
+                        .view()
+                        .clone()
+                        .downcast::<ShellView>()
+                        .expect("the root view is the shell")
+                        .read(cx)
+                        .occupant_kind(tile)
+                })
+                .collect()
+        });
+        assert_eq!(
+            kinds,
+            vec![Some("rec"), Some("rec")],
+            "the first window holds workspace 3's tile, the second workspace 1's"
+        );
+        let frames: Vec<gpui::Bounds<gpui::Pixels>> = cx.update(|cx| {
+            opened
+                .iter()
+                .map(|k| {
+                    let handle = app.read(cx).handle(*k).unwrap();
+                    handle.update(cx, |_, window, _| window.bounds()).unwrap()
+                })
+                .collect()
+        });
+        assert_eq!(
+            frames,
+            vec![
+                gpui::Bounds::new(
+                    gpui::point(gpui::px(100.), gpui::px(100.)),
+                    gpui::size(gpui::px(800.), gpui::px(600.))
+                ),
+                gpui::Bounds::new(
+                    gpui::point(gpui::px(200.), gpui::px(150.)),
+                    gpui::size(gpui::px(640.), gpui::px(480.))
+                ),
+            ],
+            "each window at its recorded frame"
+        );
     }
 
     /// A window opened beside another from app level, with no spawner

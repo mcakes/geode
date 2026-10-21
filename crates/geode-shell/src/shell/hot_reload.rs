@@ -646,16 +646,26 @@ impl ShellView {
     ) {
         // A window the close path has deregistered (`ShellApp::window_closed`,
         // see `render`) hears events until gpui removes it. Only the parks
-        // it owes are still its to act on: a reload's dialog refresh reads
-        // the shown workspace it no longer has (`target_frame`), and a
-        // title or a pull names nothing. `Parked` compares against the
-        // shown index and is inert on its own.
-        if !matches!(event, ShellEvent::Park { .. })
-            && self.workspaces(cx).shown(self.key).is_none()
+        // it owes are still its to act on, its page's (`WindowClosing`)
+        // and its tiles' (`Park`): a reload's dialog refresh reads the
+        // shown workspace it no longer has (`target_frame`), and a title
+        // or a pull names nothing. `Parked` compares against the shown
+        // index and is inert on its own.
+        if !matches!(
+            event,
+            ShellEvent::Park { .. } | ShellEvent::WindowClosing { .. }
+        ) && self.workspaces(cx).shown(self.key).is_none()
         {
             return;
         }
         match event {
+            // This window is closing: its page's record goes to the app
+            // before the parks that follow take its tiles'.
+            ShellEvent::WindowClosing { window } => {
+                if *window == self.key {
+                    self.park_page(cx);
+                }
+            }
             ShellEvent::Reloaded {
                 pickable_changed,
                 palette_snapshot_changed,

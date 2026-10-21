@@ -883,13 +883,28 @@ impl Workspaces {
         self.shown.values().next().copied().unwrap_or(self.initial)
     }
 
-    /// Open window `key` on index `n`. `None` when `n` is outside 1–9 or
-    /// another window shows it: a workspace is on at most one screen.
-    /// Materialises `n`, shows and hosts it in `key`. The first window
-    /// also hosts every index already materialised (a restored session's),
-    /// since no other window can build their occupants. `TakenFrom(v)`
-    /// when `v` hosted `n` hidden; the caller moves what `v` built for it.
+    /// Open window `key` on index `n` ([`Self::open_on`]), and, for the
+    /// first window, host every index already materialised and unhosted
+    /// (a restored session's: [`Self::host_unclaimed`]), since no other
+    /// window can build their occupants. A batch that opens several
+    /// windows at once reserves each with `open_on` first and hosts the
+    /// unclaimed indexes in the oldest afterwards, so the first window
+    /// takes only what no later window of the batch claims.
     pub fn add_window(&mut self, key: WindowKey, n: u8) -> Option<Added> {
+        let first = self.host.is_empty();
+        let added = self.open_on(key, n)?;
+        if first {
+            self.host_unclaimed(key);
+        }
+        Some(added)
+    }
+
+    /// Open window `key` on index `n`, hosting `n` alone. `None` when `n`
+    /// is outside 1–9 or another window shows it: a workspace is on at
+    /// most one screen. Materialises `n`, shows and hosts it in `key`.
+    /// `TakenFrom(v)` when `v` hosted `n` hidden; the caller moves what
+    /// `v` built for it.
+    pub fn open_on(&mut self, key: WindowKey, n: u8) -> Option<Added> {
         if !(1..=9).contains(&n) || self.shower(n).is_some() {
             return None;
         }
@@ -899,19 +914,27 @@ impl Workspaces {
         );
         self.spaces.entry(n).or_default();
         let taken = self.host.get(&n).copied().filter(|v| *v != key);
-        if self.host.is_empty() {
-            for ix in self.spaces.keys() {
-                self.host.insert(*ix, key);
-            }
-        } else {
-            self.host.insert(n, key);
-        }
+        self.host.insert(n, key);
         self.shown.insert(key, n);
         self.epochs.entry(key).or_insert(0);
         Some(match taken {
             Some(v) => Added::TakenFrom(v),
             None => Added::Fresh,
         })
+    }
+
+    /// Every materialised index no window hosts becomes `key`'s, hidden:
+    /// a restored session's workspaces, which exist before any window
+    /// does. `key` must be open here. Nothing is taken from another
+    /// window, so no caller has anything to park.
+    pub fn host_unclaimed(&mut self, key: WindowKey) {
+        debug_assert!(
+            self.shown.contains_key(&key),
+            "window {key:?} hosts unclaimed indexes while not open"
+        );
+        for ix in self.spaces.keys() {
+            self.host.entry(*ix).or_insert(key);
+        }
     }
 
     /// Close window `key`: the indexes it hosted, ascending, now unhosted

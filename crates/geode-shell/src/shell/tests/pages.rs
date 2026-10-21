@@ -741,7 +741,9 @@ fn a_restored_pages_table_reaches_the_factory_create(cx: &mut gpui::TestAppConte
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
     assert_eq!(*restored.borrow(), Some(table));
     // Consumed: the live page's own state is what the next flush writes.
-    shell.read_with(&cx, |s, _| assert!(s.restored_pages.is_empty()));
+    shell.read_with(&cx, |s, cx| {
+        assert!(s.app().read(cx).parked_pages.is_empty())
+    });
 }
 
 #[gpui::test]
@@ -818,9 +820,12 @@ fn a_replaced_page_kind_keeps_its_state_through_the_next_flush(cx: &mut gpui::Te
         *diagnostics_restored.borrow(),
         Some(page_table("which", "diagnostics"))
     );
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert_eq!(s.open_page_kind(), Some("diagnostics"));
-        assert_eq!(s.restored_pages.keys().collect::<Vec<_>>(), vec!["other"]);
+        assert_eq!(
+            s.app().read(cx).parked_pages.keys().collect::<Vec<_>>(),
+            vec!["other"]
+        );
     });
 }
 

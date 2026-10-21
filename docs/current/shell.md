@@ -30,13 +30,18 @@ accessors and never updates the app entity; `app.update` runs only on event,
 dispatch, constructor and deferred paths, because an update of the owner from
 inside a window's draw would be a nested update of an entity that window is
 reading. The restore inputs are consumed once, at construction: `ShellApp::new`
-takes the restored tile records into `parked_tiles`, applies the frame,
-pinned-lane and link-scope records and seeds the palette usage, and
-`ShellView::new` takes the parked records (`take_parked_records`) and the
-restored page records out of the app before it creates its occupants, so no
-restore input is read twice or by a second window. The rosters hand out
-module and page factories as `Arc`s, so a factory's `create` runs with no
-lease on the owner.
+takes the restored tile records into `parked_tiles` and the restored page
+records into `parked_pages`, applies the frame, pinned-lane and link-scope
+records and seeds the palette usage, and `ShellView::new` takes the parked
+tile records it hosts (`take_parked_records`) out of the app before it
+creates its occupants, so no restore input is read twice or by a second
+window. Page records stay the app's until a page of the kind opens, in
+whichever window (`take_parked_page`, on the open's dispatch path): a view
+that took them whole at construction would carry every kind's record away
+with it, so a page opened in a second window would restore nothing and the
+first window's close would drop the tables from every later save. The
+rosters hand out module and page factories as `Arc`s, so a factory's
+`create` runs with no lease on the owner.
 
 `ShellApp` also owns the session: the dirty flag, the baselines the periodic
 writer compares against, the palette's usage history, and the tile records
@@ -72,7 +77,10 @@ the title it last set, so an unchanged title is never re-set; render never
 reads or sets it. Neither `cx.windows()` nor a view entity's liveness decides, since
 a host such as the bridge or the quit hooks holds a view or the app past
 its window. A window leaves the registry through `ShellApp::window_closed`,
-which the close path calls while the window still stands: every index the
+which the close path calls while the window still stands: the view parks
+the page it holds (`WindowClosing`, answered by `ShellView::park_page`,
+which serializes the page into `parked_pages`; a page has no workspace,
+so no `Park` would carry it), then every index the
 window hosted leaves `Workspaces` (`remove_window`) and is parked through
 the ordinary `Park` event, so its tiles' records wait in `parked_tiles`
 for the next window to show the index or for the session file; the key
@@ -82,8 +90,11 @@ view); its render paints nothing then. The writer unions every registered
 view's records (`ShellView::current_tiles`: its non-placeholder occupants,
 then its own unplaced records and the records it has pulled but not yet
 built, which left the parked set when they were taken) with the parked
-ones, earlier sources winning an id; page records are each view's, a later
-view winning a kind. A window marks the session dirty through
+ones, earlier sources winning an id; page records are the parked ones
+(`parked_pages`: kinds never opened, unknown kinds, a kind a window
+replaced, a closed window's) overlaid by each registered view's one
+retained page (`ShellView::current_pages`), so a live page wins a parked
+record of its kind. A window marks the session dirty through
 `ShellView::mark_session_dirty`, which updates the app entity, so it is
 called from event, dispatch and constructor paths only; the one render-time
 case, a divider drag cancelled because an overlay, page, fullscreen or
@@ -196,6 +207,28 @@ a second update: the registry must list the key (the view registered it),
 and `ShellEvent::WindowsChanged` is emitted; otherwise the reservation is
 removed (`Workspaces::remove_window`) and `OpenerFailed` returned. With no
 opener installed, `NoOpener` is refused before anything is reserved.
+
+`open_windows(app, specs, cx)` opens several windows as one batch, one
+answer per spec in order, and is what startup uses: the reserve step runs
+for every spec under one app update before the first opener runs, and
+each window is then opened and confirmed in order, lease-free around the
+opener. `open_window` is `open_windows` of one. The batch exists because
+the first window hosts every restored workspace no other window claims
+(`Workspaces::add_window` is `open_on`, which hosts the shown index alone,
+followed, for the first window, by `host_unclaimed`, which gives it every
+materialised index nobody hosts); opened one record at a time, the first
+window's view would take and build every restored tile, the second
+record's reserve would answer `TakenFrom` and the first window would park
+and drop what it built for that index while the second window painted
+placeholders and rebuilt on `Parked`: two module constructions and two
+query submissions per tile in every window but the first, at every
+launch. With every record's index hosted by its own key before any view
+exists, the first window takes only what it hosts and no park fires; a
+spec refused at the reserve step reserves nothing, and `host_unclaimed`
+goes to the first spec that reserved. If the first window's opener then
+fails, its reservation is rolled back and the unclaimed indexes it hosted
+are unhosted again; their records stay parked and are written by every
+save, as a tile in a workspace no window hosts always is.
 
 `open_fresh(app, beside, cx)` opens on `lowest_free`, beside the asking
 window; nine windows exhaust it. `tear_out(app, from, cx)` moves the
@@ -1592,9 +1625,16 @@ A page persists as `[pages.<kind>]` in the session file, written from
 `serialize()` on the coalesced flush; a page-state change with no shell
 action behind it still flushes, because the flush compares the snapshot.
 Whether a page was open at quit is not saved; Geode starts in the
-workspace. A table for a kind that never opens, or that no factory knows,
-is kept as read and written back unchanged; a `pages` entry that is not a
-table warns and is dropped.
+workspace. The restored tables are the app's (`ShellApp::parked_pages`),
+not any window's: a page opening takes its kind's table from there on its
+dispatch path (`take_parked_page`) and hands it to the factory, so a page
+opened in a second window restores the session's record as the first
+would; a replaced kind's last state goes back there (`park_page`), and a
+closing window serializes the page it holds back there too
+(`ShellView::park_page`, on `ShellEvent::WindowClosing`), so the table
+survives the window. A table for a kind that never opens, or that no
+factory knows, stays parked and is written back unchanged; a `pages`
+entry that is not a table warns and is dropped.
 
 ## Diagnostics state and demand
 
@@ -1925,7 +1965,8 @@ not read as a change and opens no flip.
 Workspace actions mark the app's layout state dirty and return without
 session file I/O. The writer is the app's (`ShellApp::take_dirty_session_write`,
 `ShellApp::save_session`): one loop, one writer, one snapshot over every
-registered window's records and the parked ones, however many windows are
+registered window's records (its tiles and its one retained page) and the
+parked ones (`parked_tiles`, `parked_pages`), however many windows are
 open. The app's reload watcher checks for a session snapshot on its 500 ms
 tick, before any configuration-scan early return, from the app entity's own
 update and never from inside a window's, since the snapshot reads every
@@ -1974,10 +2015,12 @@ installed by the opener as the window opens (`bridge::attach_window`), and
 what a close means depends on whether another window stays open
 (`ShellApp::is_last_window`). A close that leaves another window open
 parks and writes nothing: the hook deregisters the window while it still
-stands (`ShellApp::window_closed`), so its occupants park with a live
+stands (`ShellApp::window_closed`), so its page, if it holds one, is
+serialized into the app's parked pages and its occupants park with a live
 context (`park`, which lets a module queue its unsaved work, then the
 record, then `closed`); their records wait in the app's parked tiles for
-the next window to show the workspace or for the next save, the remaining
+the next window to show the workspace or for the next save, the page's
+for the next open of its kind, the remaining
 windows carry on, and the session file changes only at the next periodic
 snapshot or the last close. The last window's close saves: the session
 first, then unsaved pricer sheets, in the order the quit hooks run them,

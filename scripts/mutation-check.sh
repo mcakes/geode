@@ -7153,7 +7153,7 @@ run_mutation "shell: a plain switch parks nothing" \
 # also show the index in the asking window (one workspace on two screens);
 # telling the showing window to park it instead would be ignored by the
 # `Park` arm's guard for the workspace a window shows.
-run_mutation "shell: a raise moves nothing" \
+run_mutation "workspaces: a raise moves nothing" \
   crates/geode-shell/src/tiling/workspaces.rs \
   '        if let Some(v) = self.shower(n) {
             return Switch::Raise(v);
@@ -7255,6 +7255,23 @@ run_mutation "shell app: window records follow registration order" \
             .filter_map(|(key, handle)| match self.services.workspaces.shown(*key) {' \
   geode-shell \
   window_records_follow_registration_order
+
+# A closing window's page record has no workspace, so no `Park` carries
+# it: the view must serialize the page it holds back into the app's parked
+# pages on `WindowClosing`, or `[pages.<kind>]` vanishes from every save
+# after the window closes while another stays open.
+run_mutation "shell app: a closing window parks its page records" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            ShellEvent::WindowClosing { window } => {
+                if *window == self.key {
+                    self.park_page(cx);
+                }
+            }' \
+  '            ShellEvent::WindowClosing { window } => {
+                let _ = window;
+            }' \
+  geode-shell \
+  a_closing_window_parks_its_page_records
 
 # ---- ShellApp: the window registry and opener
 
@@ -7785,17 +7802,16 @@ run_mutation "shell page: focus_home is the shell root even over a page" \
 
 run_mutation "shell page: a restored table never reaches create" \
   crates/geode-shell/src/shell/page.rs \
-  '            let restored = self.restored_pages.remove(kind);' \
+  '            let restored = self.app.update(cx, |app, _| app.take_parked_page(kind));' \
   '            let restored: Option<toml::Table> = None;' \
   geode-shell \
   a_restored_pages_table_reaches_the_factory_create
 
 run_mutation "shell page: a replaced page loses its state" \
   crates/geode-shell/src/shell/page.rs \
-  '            self.restored_pages.insert(
-                page.occupant.kind.to_string(),
-                page.occupant.content.serialize(cx),
-            );' \
+  '            let old_kind = page.occupant.kind;
+            let state = page.occupant.content.serialize(cx);
+            self.app.update(cx, |app, _| app.park_page(old_kind, state));' \
   '' \
   geode-shell \
   a_replaced_page_kind_keeps_its_state_through_the_next_flush
@@ -9253,8 +9269,10 @@ run_mutation "workspaces: add_window refuses an index another window shows" \
 # would have no window to build them.
 run_mutation "workspaces: the first window hosts every restored index" \
   crates/geode-shell/src/tiling/workspaces.rs \
-  '        if self.host.is_empty() {' \
-  '        if false {' \
+  '        let first = self.host.is_empty();
+        let added = self.open_on(key, n)?;' \
+  '        let first = false;
+        let added = self.open_on(key, n)?;' \
   geode-shell the_first_window_hosts_every_materialised_index
 
 # A switch to an index another window shows raises that window; taking the
@@ -26137,8 +26155,8 @@ run_mutation "placement: a restored maximized window is maximized" \
 # the one window, their placements lost).
 run_mutation "app: startup opens one window per restored record" \
   crates/geode-app/src/startup.rs \
-  '    for record in records {' \
-  '    for record in records.into_iter().take(1) {' \
+  '    let results = ShellApp::open_windows(app, specs, cx);' \
+  '    let results = ShellApp::open_windows(app, specs.into_iter().take(1).collect(), cx);' \
   geode-app startup_reopens_one_window_per_restored_record
 
 # With no usable record there must still be one window: without the
@@ -26148,6 +26166,19 @@ run_mutation "app: startup falls back to one window on the initial index" \
   '    if opened.is_empty() {' \
   '    if false {' \
   geode-app startup_with_no_records_opens_one_window_on_the_initial_index
+
+# Every restored record's index must be reserved before the first window
+# opens; opened one at a time, the first window hosts and builds every
+# restored tile, then parks the later records' for their windows to
+# rebuild behind a placeholder.
+run_mutation "app: startup reserves every record before the first window opens" \
+  crates/geode-app/src/startup.rs \
+  '    let results = ShellApp::open_windows(app, specs, cx);' \
+  '    let results: Vec<_> = specs
+        .into_iter()
+        .map(|spec| ShellApp::open_window(app, spec, cx))
+        .collect();' \
+  geode-app startup_builds_each_tile_once_in_its_own_window
 
 run_mutation "pricer: flush_all flushes no tile" \
   crates/geode-pricer/src/content.rs \

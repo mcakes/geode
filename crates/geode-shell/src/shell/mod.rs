@@ -233,6 +233,12 @@ pub enum ShellEvent {
     /// `Park`, because subscriber order is not a contract: one event could
     /// not order the source's park before the destination's pull.
     Parked { workspace: WorkspaceIx },
+    /// Window `window` is leaving the registry (`ShellApp::window_closed`,
+    /// inside its should-close, while it still stands): its view parks the
+    /// page it holds into `ShellApp::parked_pages` (`ShellView::park_page`),
+    /// as the `Park` events that follow park its tiles. Emitted before
+    /// those parks; a page has no workspace, so no `Park` names it.
+    WindowClosing { window: WindowKey },
     /// A window joined or left the registry (`ShellApp::open_window`
     /// confirmed one, `ShellApp::window_closed` forgot one): every window
     /// re-reads `ShellApp::window_title`, which names the shown index
@@ -659,9 +665,6 @@ pub struct ShellView {
     /// service, so creating an occupant during render reads nothing
     /// through the app entity's writer.
     restored_tiles: crate::session::TileRecords,
-    /// Likewise for `[pages.<kind>]` tables; a replaced page's last state
-    /// goes back in here so the next save still writes it.
-    restored_pages: crate::session::PageRecords,
     /// Restored records whose module factory is unavailable. `current_tiles`
     /// writes them back unchanged, preserving sessions from builds with more
     /// modules. Closing or filling their tile removes them.
@@ -1115,15 +1118,11 @@ impl ShellView {
         // the layout's healing left behind gets no occupant at all.
         // Nothing is notified. A membership moves no lane version and no
         // group's scope generation, so it is not a flip either.
-        // The restore inputs become this view's own (see the fields' docs):
-        // the tile records the app parked for this window, and the page
-        // tables, which the services keep none of after this.
-        let (restored_tiles, restored_pages) = app.update(cx, |app, _| {
-            (
-                app.take_parked_records(key),
-                std::mem::take(&mut app.services.restored_pages),
-            )
-        });
+        // The restore inputs become this view's own (see the field's doc):
+        // the tile records the app parked for this window. Page records
+        // stay the app's (`ShellApp::parked_pages`) until a page of the
+        // kind opens, in this window or another.
+        let restored_tiles = app.update(cx, |app, _| app.take_parked_records(key));
         // Gathered before the frame update: the record checks read the
         // services, which the frame's writer cannot hold beside.
         let restored_memberships: Vec<(u64, geode_core::link::Membership)> = {
@@ -1231,7 +1230,6 @@ impl ShellView {
             diagnostics,
             pending_tiles: BTreeMap::new(),
             restored_tiles,
-            restored_pages,
             unplaced_records: crate::session::TileRecords::new(),
             last_flip_versions,
             last_flip_groups,

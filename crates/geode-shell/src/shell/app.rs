@@ -289,6 +289,17 @@ pub struct ShellApp {
     /// here is written back by every save, after the live records, so a
     /// tile no window hosts keeps its module and state across a restart.
     pub(super) parked_tiles: TileRecords,
+    /// Page records (`[pages.<kind>]`) no window holds a page for: the
+    /// restored session's until a page of the kind opens, the last state
+    /// of a page a window replaced with another kind, and the page a
+    /// closing window held, serialized back here as its tiles are parked.
+    /// A page opening takes its kind's record ([`Self::take_parked_page`])
+    /// on its dispatch path, so a page opened in any window restores from
+    /// the session; whatever remains here is written by every save under
+    /// the live pages, so a kind no window has open keeps its state. The
+    /// home tile records have in `parked_tiles`, for the same reason: a
+    /// record a view took whole would leave with that view.
+    pub(super) parked_pages: PageRecords,
     /// The last run's window records (`[windows.K]`), kept from the
     /// restored session for the startup that opens a window per record
     /// ([`Self::take_restored_windows`]). Empty once taken, and empty for
@@ -499,9 +510,11 @@ impl ShellApp {
         }
 
         // The session's own inputs, taken the same way: the tile records
-        // wait here for the window that hosts each tile, and the palette's
-        // history becomes the live one.
+        // wait here for the window that hosts each tile, the page records
+        // for the window that opens each kind, and the palette's history
+        // becomes the live one.
         let parked_tiles = std::mem::take(&mut services.restored_tiles);
+        let parked_pages = std::mem::take(&mut services.restored_pages);
         let palette_usage = std::mem::take(&mut services.restored_palette_usage);
         let restored_windows = std::mem::take(&mut services.restored_windows);
 
@@ -582,6 +595,7 @@ impl ShellApp {
             pricing_baseline,
             vol_baseline,
             parked_tiles,
+            parked_pages,
             restored_windows,
             palette_usage,
             palette_usage_version: 0,
@@ -623,10 +637,49 @@ impl ShellApp {
             .unwrap_or_else(|| panic!("workspace {n} is shown by another window"))
     }
 
-    /// The one place a key is issued and an index reserved for it: open
-    /// index `n` in `Workspaces` under the next key. `None`, with the key
-    /// counter and the workspaces untouched, when `n` is outside 1–9 or
-    /// shown by another window.
+    /// Reserve one index: [`Self::reserve_all`] of one. `None`, with the
+    /// key counter and the workspaces untouched, when `n` is outside 1–9
+    /// or shown by another window.
+    fn reserve(&mut self, n: u8, cx: &mut Context<Self>) -> Option<WindowKey> {
+        self.reserve_all(&[n], cx)
+            .pop()
+            .expect("one index, one answer")
+            .ok()
+    }
+
+    /// The one place keys are issued and indexes reserved for them: open
+    /// each index in `Workspaces` under the next key, in order
+    /// ([`Self::reserve_on`]), then, when no window was open before, make
+    /// the first reserved window host every materialised index the batch
+    /// left unclaimed (`Workspaces::host_unclaimed`: a restored session's
+    /// hidden workspaces, whose occupants only a window can build). One
+    /// answer per index: `NoFreeWorkspace` for an index outside 1–9 or
+    /// shown by another window, which reserves nothing. Reserving the
+    /// whole batch before the first opener runs is what lets a restored
+    /// session's windows each build their own occupants once: with the
+    /// later indexes already hosted by their own keys, the first window's
+    /// view takes and builds only what it hosts, and no `TakenFrom` park
+    /// fires. For one index this is exactly `Workspaces::add_window`.
+    fn reserve_all(
+        &mut self,
+        indexes: &[u8],
+        cx: &mut Context<Self>,
+    ) -> Vec<Result<WindowKey, OpenRefusal>> {
+        let first = self.services.workspaces.windows().next().is_none();
+        let keys: Vec<Result<WindowKey, OpenRefusal>> = indexes
+            .iter()
+            .map(|n| self.reserve_on(*n, cx).ok_or(OpenRefusal::NoFreeWorkspace))
+            .collect();
+        if first && let Some(oldest) = keys.iter().find_map(|k| k.as_ref().ok()) {
+            self.services.workspaces.host_unclaimed(*oldest);
+        }
+        keys
+    }
+
+    /// Open index `n` in `Workspaces` under the next key, hosting `n`
+    /// alone (`Workspaces::open_on`). `None`, with the key counter and
+    /// the workspaces untouched, when `n` is outside 1–9 or shown by
+    /// another window.
     ///
     /// An index another window hosted hidden (`Added::TakenFrom`) leaves
     /// it through the same park a `Moved` switch uses: that window hears
@@ -634,12 +687,12 @@ impl ShellApp {
     /// the new window pulls the records when `Parked` follows. The event
     /// is delivered when the outermost update's effects flush, after the
     /// new window's view exists to hear the answer.
-    fn reserve(&mut self, n: u8, cx: &mut Context<Self>) -> Option<WindowKey> {
+    fn reserve_on(&mut self, n: u8, cx: &mut Context<Self>) -> Option<WindowKey> {
         let key = WindowKey(self.next_window + 1);
-        let added = self.services.workspaces.add_window(key, n)?;
+        let added = self.services.workspaces.open_on(key, n)?;
         self.next_window = key.0;
         if let Added::TakenFrom(host) = added {
-            let workspace = WorkspaceIx::new(n).expect("add_window accepted the index");
+            let workspace = WorkspaceIx::new(n).expect("open_on accepted the index");
             cx.emit(ShellEvent::Park {
                 window: host,
                 workspace,
@@ -672,21 +725,48 @@ impl ShellApp {
     ///
     /// An associated function rather than a method for the lease reason
     /// above: the caller holds no `&mut ShellApp` while the opener runs.
+    /// [`Self::open_windows`] of one spec.
     pub fn open_window(
         app: &Entity<ShellApp>,
         spec: WindowSpec,
         cx: &mut App,
     ) -> Result<WindowKey, OpenRefusal> {
+        Self::open_windows(app, vec![spec], cx)
+            .pop()
+            .expect("one spec, one answer")
+    }
+
+    /// Open several windows at once, one answer per spec in order: the
+    /// startup's one window per restored record. The three steps of
+    /// [`Self::open_window`], with the reserve step taken for every spec
+    /// under one app update before the first opener runs
+    /// ([`Self::reserve_all`]): every index is hosted by its own key
+    /// before any view exists, so each window's view takes and builds
+    /// only the records it hosts, once, and the first window parks
+    /// nothing for the others. Each window is then opened and confirmed
+    /// (or rolled back) in order, with no lease on the app around the
+    /// opener. A spec refused at the reserve step (`NoFreeWorkspace`)
+    /// reserves nothing and the rest still open; with no opener installed
+    /// every spec is `NoOpener` and nothing is reserved.
+    pub fn open_windows(
+        app: &Entity<ShellApp>,
+        specs: Vec<WindowSpec>,
+        cx: &mut App,
+    ) -> Vec<Result<WindowKey, OpenRefusal>> {
         let Some(opener) = app.read(cx).window_opener.clone() else {
-            return Err(OpenRefusal::NoOpener);
+            return specs.iter().map(|_| Err(OpenRefusal::NoOpener)).collect();
         };
-        let key = app.update(cx, |app, cx| {
-            app.reserve(spec.workspace.get(), cx)
-                .ok_or(OpenRefusal::NoFreeWorkspace)
-        })?;
-        let opened = opener(key, &spec, cx);
-        app.update(cx, |app, cx| app.confirm_open(key, opened.is_some(), cx))?;
-        Ok(key)
+        let indexes: Vec<u8> = specs.iter().map(|spec| spec.workspace.get()).collect();
+        let reserved = app.update(cx, |app, cx| app.reserve_all(&indexes, cx));
+        let mut opened = Vec::with_capacity(specs.len());
+        for (key, spec) in reserved.into_iter().zip(&specs) {
+            opened.push(key.and_then(|key| {
+                let window = opener(key, spec, cx);
+                app.update(cx, |app, cx| app.confirm_open(key, window.is_some(), cx))?;
+                Ok(key)
+            }));
+        }
+        opened
     }
 
     /// Open a new window on the lowest index no window shows, placed
@@ -1100,10 +1180,15 @@ impl ShellApp {
     /// (`remove_window`) and is parked through the ordinary
     /// [`ShellEvent::Park`], so a tile in a workspace the window showed
     /// or hid keeps its record in `parked_tiles` for the next window that
-    /// shows the index, or for the session file. The key then leaves the
-    /// registry and the view list, and `WindowsChanged` tells every
-    /// window the count moved.
+    /// shows the index, or for the session file. Before the parks,
+    /// [`ShellEvent::WindowClosing`] tells the view to park the page it
+    /// holds the same way (`ShellView::park_page`, into `parked_pages`):
+    /// page records have no workspace, so no `Park` would carry them, and
+    /// a view that leaves the registry is read by no later save. The key
+    /// then leaves the registry and the view list, and `WindowsChanged`
+    /// tells every window the count moved.
     pub fn window_closed(&mut self, key: WindowKey, cx: &mut Context<Self>) {
+        cx.emit(ShellEvent::WindowClosing { window: key });
         for workspace in self.services.workspaces.remove_window(key) {
             cx.emit(ShellEvent::Park {
                 window: key,
@@ -1150,6 +1235,23 @@ impl ShellApp {
         taken
     }
 
+    /// Hand a window the parked record for page `kind`, removing it from
+    /// here: the restored session's table, or the last state of a page a
+    /// window replaced or closed with. `None` when no record waits, so
+    /// the page is created fresh. A dispatch-path call (`ShellView::open_page`),
+    /// never from render.
+    pub fn take_parked_page(&mut self, kind: &str) -> Option<toml::Table> {
+        self.parked_pages.remove(kind)
+    }
+
+    /// A window no longer holds a page of `kind`: it was replaced by
+    /// another kind, or its window is closing. Its last state waits here
+    /// for the next open of the kind, in any window, and for every save
+    /// until then.
+    pub fn park_page(&mut self, kind: &str, state: toml::Table) {
+        self.parked_pages.insert(kind.to_string(), state);
+    }
+
     /// A layout change awaits the next periodic snapshot. Called from a
     /// window's event, dispatch and constructor paths, never from its
     /// draw pass (`ShellView::mark_session_dirty`).
@@ -1191,11 +1293,13 @@ impl ShellApp {
         tiles
     }
 
-    /// The page records every save writes: each live window's
-    /// (`ShellView::current_pages`), a later window winning a kind both
-    /// retain.
+    /// The page records every save writes: the records parked here (kinds
+    /// no window has open: never opened, unknown, replaced, or held by a
+    /// window that closed), overlaid by each live window's page
+    /// (`ShellView::current_pages`), so a live page wins a parked record
+    /// of its kind and a later window wins an earlier one.
     pub(super) fn current_pages(&self, cx: &App) -> PageRecords {
-        let mut pages = PageRecords::new();
+        let mut pages = self.parked_pages.clone();
         for view in self.views() {
             pages.extend(view.read(cx).current_pages(cx));
         }

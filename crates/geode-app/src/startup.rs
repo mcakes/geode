@@ -11,30 +11,37 @@ use gpui::{App, Bounds, Entity, Pixels, point, px, size};
 
 /// Open the startup windows through the installed opener and return their
 /// keys in opening order. The restored records are taken from the app
-/// once; the first record's window is the oldest, so it writes `active`
-/// at the next save and hosts the restored indexes no window shows. A
-/// record whose open is refused (its index is shown by an earlier record's
-/// window, which the session reader already prevents; the opener failed)
-/// is skipped with a warning and the rest still open. If none opened, one
-/// window opens on the initial index at the platform's default placement;
-/// a refusal there ends the run, since without a window there is nothing
-/// to run. Lease-free: `open_window` leases the app only around its
-/// reserve and confirm steps, never around the opener.
+/// once and opened as one batch (`ShellApp::open_windows`): every record's
+/// index is reserved for its own key before the first window opens, so
+/// each window's view builds only the tiles it hosts, once, and the first
+/// window parks nothing for the others; the first record's window is the
+/// oldest, so it writes `active` at the next save and hosts the restored
+/// indexes no record names. A record whose open is refused (its index is
+/// shown by an earlier record's window, which the session reader already
+/// prevents; the opener failed) is skipped with a warning and the rest
+/// still open. If none opened, one window opens on the initial index at
+/// the platform's default placement; a refusal there ends the run, since
+/// without a window there is nothing to run. Lease-free: the app is
+/// leased only around the reserve and confirm steps, never around the
+/// opener.
 pub fn open_startup_windows(app: &Entity<ShellApp>, cx: &mut App) -> Vec<WindowKey> {
     let records = app.update(cx, |app, _| app.take_restored_windows());
-    let mut opened = Vec::with_capacity(records.len().max(1));
-    for record in records {
-        let workspace = WorkspaceIx::new(record.workspace)
-            .expect("the session reader keeps only records with an index in 1–9");
-        let spec = WindowSpec {
-            workspace,
+    let specs: Vec<WindowSpec> = records
+        .iter()
+        .map(|record| WindowSpec {
+            workspace: WorkspaceIx::new(record.workspace)
+                .expect("the session reader keeps only records with an index in 1–9"),
             placement: Placement::Restored {
                 display: record.display,
                 bounds: record.bounds.map(bounds_of),
                 maximized: record.maximized,
             },
-        };
-        match ShellApp::open_window(app, spec, cx) {
+        })
+        .collect();
+    let results = ShellApp::open_windows(app, specs, cx);
+    let mut opened = Vec::with_capacity(records.len().max(1));
+    for (record, result) in records.iter().zip(results) {
+        match result {
             Ok(key) => opened.push(key),
             Err(refusal) => tracing::warn!(
                 target: "geode::session",

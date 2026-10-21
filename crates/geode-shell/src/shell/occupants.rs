@@ -187,11 +187,12 @@ impl ShellView {
         cx.notify();
     }
 
-    /// The retained page's state (open or not), plus every table still in
-    /// `restored_pages`: kinds never opened, unknown kinds, and the last
-    /// state of a page another kind replaced. All of them survive a save.
+    /// The retained page's state (open or not), the one page record this
+    /// window holds. Every other kind's record is the app's
+    /// (`ShellApp::parked_pages`: never opened, unknown, replaced, or a
+    /// closed window's), which the writer lays this under.
     pub(super) fn current_pages(&self, cx: &App) -> session::PageRecords {
-        let mut pages: session::PageRecords = self.restored_pages.clone();
+        let mut pages = session::PageRecords::new();
         if let Some(page) = &self.page {
             pages.insert(
                 page.occupant.kind.to_string(),

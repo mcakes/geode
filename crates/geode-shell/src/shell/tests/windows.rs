@@ -807,3 +807,85 @@ fn the_window_verbs_carry_their_windows_frame(cx: &mut gpui::TestAppContext) {
         }
     }
 }
+
+/// One `[pages.<kind>]` table with a single string field.
+fn page_table(key: &str, value: &str) -> toml::Table {
+    let mut t = toml::Table::new();
+    t.insert(key.into(), toml::Value::String(value.into()));
+    t
+}
+
+/// A closing window parks its page record: with another window open, the
+/// deregistering view serializes the page it holds back into the app's
+/// parked pages, so the next save, taken from the remaining window, still
+/// carries `[pages.<kind>]` with the state the page reached. Without the
+/// park-back the table would vanish from every later save, since the
+/// writer reads page records from the live views and the parked set only.
+#[gpui::test]
+fn a_closing_window_parks_its_page_records(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.toml");
+    let factory = crate::module::recording::RecordingPageFactory::new("diagnostics");
+    let serialized = factory.serialized();
+    let mut services = services_with_page(factory);
+    services.session_path = Some(path.clone());
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let k1 = s1.read_with(&vcx1, |s, _| s.key());
+    let (_w2, vcx2) = open_shell_on(cx, app.clone());
+    dispatch_action(&s1, "page::toggle_diagnostics", &mut vcx1);
+    s1.read_with(&vcx1, |s, _| {
+        assert_eq!(s.open_page_kind(), Some("diagnostics"))
+    });
+    // The page's state moves with no shell action behind it.
+    serialized
+        .borrow_mut()
+        .insert("section".into(), toml::Value::String("log".into()));
+
+    // The production close route: deregistered while the window stands
+    // (the should-close hook's `window_closed`), then removed.
+    app.update(&mut vcx1, |a, cx| a.window_closed(k1, cx));
+    vcx1.run_until_parked();
+    vcx1.update(|window, _| window.remove_window());
+    vcx2.run_until_parked();
+    assert_eq!(app.read_with(&vcx2, |a, _| a.windows().len()), 1, "sanity");
+
+    cx.update(|cx| ShellApp::save_session(&app, None, cx));
+    let text = std::fs::read_to_string(&path).expect("the save wrote");
+    assert!(
+        text.contains("[pages.diagnostics]") && text.contains("section = \"log\""),
+        "the closed window's page record, with its last state: {text}"
+    );
+}
+
+/// A page opened in a second window restores the session's record for its
+/// kind: the restored page tables are the app's, parked until a page of
+/// that kind opens, not the first window's to take whole at construction.
+#[gpui::test]
+fn a_page_opened_in_a_second_window_restores_its_record(cx: &mut gpui::TestAppContext) {
+    let factory = crate::module::recording::RecordingPageFactory::new("diagnostics");
+    let restored = factory.restored();
+    let mut services = services_with_page(factory);
+    let table = page_table("section", "log");
+    services
+        .restored_pages
+        .insert("diagnostics".into(), table.clone());
+    let app = test_app(cx, services, None);
+    let (_w1, _vcx1) = open_shell_on(cx, app.clone());
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s2 = shell_of(&w2, &mut vcx2);
+    assert!(restored.borrow().is_none(), "not created yet");
+
+    dispatch_action(&s2, "page::toggle_diagnostics", &mut vcx2);
+
+    assert_eq!(
+        *restored.borrow(),
+        Some(table),
+        "the second window's page was created with the session's record"
+    );
+    assert!(
+        app.read_with(&vcx2, |a, _| a.parked_pages.is_empty()),
+        "consumed: the live page's own state is what the next save writes"
+    );
+}

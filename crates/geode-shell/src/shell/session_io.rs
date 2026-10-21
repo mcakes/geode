@@ -85,8 +85,9 @@ impl ShellApp {
     /// The window records (`window_records`) are read from the live
     /// windows once a write is due, never inside a window's update: the
     /// watcher runs from this entity's, so no window is `current`. A move
-    /// or resize alone marks nothing dirty; the new bounds reach the file
-    /// with the next snapshot written for another reason, or the final save.
+    /// or resize marks the session dirty through the view's bounds
+    /// observer (`observe_window_bounds`), so the new bounds reach the
+    /// file with the next periodic snapshot, or the final save.
     pub(crate) fn take_dirty_session_write(
         &mut self,
         cx: &mut Context<Self>,
