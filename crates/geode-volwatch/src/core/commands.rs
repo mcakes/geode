@@ -116,8 +116,9 @@ pub fn parse(line: &str, columns: &[Column]) -> Result<Command, String> {
 
 /// The candidates for the word at `cursor`, sorted and de-duplicated:
 /// the verbs first, then a column id or order word after `sort`, or one
-/// of `views` after `view`. After `group` they are `dims` (the applicable
-/// dimensions, kept in the chain's order), then `none` and `slot`.
+/// of `views` after `view`. After `group` they are `dims` (the leaf, then
+/// the classifications over it in name order, as the vocabulary lists
+/// them), then `none` and `slot`.
 pub fn completions(
     line: &str,
     cursor: usize,
@@ -155,7 +156,7 @@ pub fn completions(
         ["group", ..] => dims.to_vec(),
         _ => Vec::new(),
     };
-    // The group candidates keep the chain's order; the rest read sorted.
+    // The group candidates keep the vocabulary's order; the rest read sorted.
     if !matches!(done, ["group", ..]) {
         out.sort();
         out.dedup();

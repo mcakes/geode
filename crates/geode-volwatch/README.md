@@ -49,7 +49,8 @@ measured against). Behaviour and limits are in the features guide's
     `classification::labels` order, `—` last, members in list order;
     `GroupInfo`/`GroupCell` carry the label, members, present count and
     each measure's mean level, Δ, z and rank over the members that have
-    one, vega summed; `full_path`, `group_name`).
+    one; the summed vega is the group `Row.vega`; `full_path`,
+    `group_name`).
   - `model.rs`: the prepared model. `rows` (members in list order, the
     board's missing at the foot), `Row.path`/`Row.group` make a row a tree
     node (`GridRow::depth`), `prepare` (each cell's text, chip or tint, id
@@ -71,7 +72,8 @@ measured against). Behaviour and limits are in the features guide's
     default lens.
   - `commands.rs`: the `:sort`, `:view`, `:group <dims> | slot N | none`
     and `:unpin` grammar and their completions (`group` completes the
-    applicable dimensions in the chain's order, then `none` and `slot`);
+    leaf, then the classifications over it in name order, then `none` and
+    `slot`);
     an unsortable column refuses as `s` does; commas alone refuse as a
     bare `group` does; whether a view name, a dimension or a slot exists
     is the tile's to say.

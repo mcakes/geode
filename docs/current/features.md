@@ -3809,10 +3809,11 @@ grouping (`nothing in lhu applies to a vol tile: it groups by
 underlying_ref or a classification over it`); `:group underlying_ref`
 alone pins the flat list; bare `:group` and `:group ,` refuse with `group
 needs dimensions, slot N or none`, and `:group save` points at the
-Grouping dialog. The tree is built in the prepare step, after the board
-lands and whenever the grouping, the classifications (pushed by the app
-at startup and on every dimensions reload) or the lens changes: one group
-row per classification label in the order the classification lists them,
+Grouping dialog. The tree is built when the rows are rebuilt: after a
+board lands and whenever the grouping or the classifications (pushed by
+the app at startup and on every dimensions reload) change; a lens change
+re-prepares the stored means and rebuilds nothing. One group row per
+classification label in the order the classification lists them,
 members under it in list order, a member the classification does not map
 under `—` last. A group row's name cell reads `Banks · 6` behind a
 chevron; its measure cells are the arithmetic mean over the members
@@ -4017,8 +4018,9 @@ Known limitations:
 - A group's vega sums every member's vega including members the surface
   lacks; its means exclude them, so a group's vega and its level may
   count different names (the readout's `(n of m)` names the difference).
-- The fold chevron is the only pointer route to a single fold;
-  expand-all and collapse-all are in the `.` menu.
+- The chevron and the `.` menu's Toggle group row are the pointer routes
+  to a single fold; `z o` and `z c` have none (expand-all and
+  collapse-all are in the menu).
 
 See the [crate guide](../../crates/geode-volwatch/README.md) for the
 module map.
