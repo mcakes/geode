@@ -20,7 +20,7 @@ use geode_widgets::cell::{design, widths};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FontWeight, Hsla, MouseButton,
-    MouseDownEvent, Pixels, Point, SharedString, Stateful, Window, div, px, rems,
+    MouseDownEvent, MouseUpEvent, Pixels, Point, SharedString, Stateful, Window, div, px, rems,
 };
 use gpui_component::table::{
     Column as TableColumn, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableState,
@@ -213,7 +213,8 @@ pub(crate) struct GridDelegate {
     /// bubbles through next does not report it as a row press (which would
     /// move the cursor onto the group). Recorded, not stopped: the shell's
     /// click-to-focus is a bubble-phase listener on the tile, and a stopped
-    /// press would fold a group in a tile that never took focus.
+    /// press would fold a group in a tile that never took focus. The fold
+    /// itself is the click's; the release clears the record.
     chevron_pressed: bool,
     /// (shown row, column) under the cursor.
     pub(crate) cursor: Option<(usize, usize)>,
@@ -715,11 +716,15 @@ impl TableDelegate for GridDelegate {
             // The name cell leads with the tree: the depth's indent, then
             // on a group row a chevron (open `▾`, collapsed `▸`) in its own
             // slot and the label at medium weight, so a member one level
-            // down lines up under its group's label. The chevron's press
-            // folds the group as `space` does and leaves the cursor: the
-            // row declines a press the chevron recorded, and the click is
-            // stopped so the table's own row selection never sees it. A
-            // double-click toggles once, on its first press.
+            // down lines up under its group's label. A click on the
+            // chevron folds the group as `space` does and leaves the
+            // cursor: the press is recorded (not stopped, so the shell's
+            // click-to-focus still sees it) and the row declines the press
+            // the chevron recorded; the click toggles and is stopped so
+            // the table's own row selection never sees it. A release
+            // anywhere clears the record, so a press the row never asked
+            // about cannot survive to a later row press. A double-click
+            // toggles once, on its first click.
             Glyph::None if underlying => {
                 let lead = design(row.depth as f32 * TREE_INDENT_PX);
                 let group = row.group.is_some();
@@ -748,16 +753,28 @@ impl TableDelegate for GridDelegate {
                                 .child(if collapsed { "\u{25b8}" } else { "\u{25be}" })
                                 .on_mouse_down(
                                     MouseButton::Left,
-                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                    cx.listener(|this, _: &MouseDownEvent, _, _| {
                                         this.delegate_mut().chevron_pressed = true;
-                                        if e.click_count > 1 {
-                                            return;
-                                        }
-                                        cx.emit(GridEvent::TogglePressed { row: row_ix });
                                     }),
                                 )
-                                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseUpEvent, _, _| {
+                                        this.delegate_mut().chevron_pressed = false;
+                                    }),
+                                )
+                                .on_mouse_up_out(
+                                    MouseButton::Left,
+                                    cx.listener(|this, _: &MouseUpEvent, _, _| {
+                                        this.delegate_mut().chevron_pressed = false;
+                                    }),
+                                )
+                                .on_click(cx.listener(move |_, e: &ClickEvent, _, cx| {
                                     cx.stop_propagation();
+                                    if e.click_count() > 1 {
+                                        return;
+                                    }
+                                    cx.emit(GridEvent::TogglePressed { row: row_ix });
                                 })),
                         )
                     })

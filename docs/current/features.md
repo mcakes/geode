@@ -3788,8 +3788,10 @@ applicable dimensions, then `none` and `slot`. The cursor row is emitted
 into the link group as its path: the applicable group values in chain
 order, then `underlying_ref` on a member, so a follower narrows to the
 group on a group row and to the member on a leaf; the flat list posts
-`underlying_ref` alone. A path through the `—` group names its dimension
-as NULL and posts nothing (the group keeps its scope, as for the blotter).
+`underlying_ref` alone. A member always posts a scope exact for its row:
+under the `—` group, whose path has no value a scope can say, it posts
+`underlying_ref` alone. The `—` group row itself names its dimension as
+NULL and posts nothing (the group keeps its scope, as for the blotter).
 The tile never follows a group. The header's sort chip names the column
 and the direction (`vol 3M ↑`, `|Δ 3M| ↓`) and follows a relabel.
 
@@ -3829,10 +3831,11 @@ mean 70`, the parenthesis counting the members with a board row. `space`
 (and `z a`) toggles the cursor's group row and folds nothing on a member;
 `z o` and `z c` open and close the cursor's group (a member's being its
 parent; closing puts the cursor on the group); `z shift+r` and `z
-shift+m` open and close every group; a press on the chevron toggles its
-group on mouse-down without moving the cursor (an unfocused tile takes
-focus too, since the shell's click-to-focus sees the same press); the `.`
-menu lists the three fold verbs. The collapsed set is saved by group path
+shift+m` open and close every group; a click on the chevron toggles its
+group without moving the cursor (a mouse-down alone folds nothing, and
+the press is let through, so an unfocused tile takes focus too: the
+shell's click-to-focus sees the same press); the `.` menu lists the three
+fold verbs. The collapsed set is saved by group path
 and survives a rebuild; a regroup drops paths deeper than the new chain
 and keeps the rest, so a label the classifications no longer hold stays
 in the session, harmless, until a flatter chain prunes it (`:group none`
@@ -3867,8 +3870,8 @@ requery. A theme change rebuilds the paints.
 **Band.** `enter` opens the inspection band for the cursor row, docked
 between the grid and the footer; `enter` again or `escape` closes it. It
 paints at the grid's text size (the view strip and footer are chrome, a
-size smaller). It follows the cursor and shows the row's surface at fixed
-deltas (`10p 25p atm 25c 10c` as call deltas `0.90 0.75 0.50 0.25 0.10`,
+size smaller). It follows the cursor (empty on a group row, which has no
+surface of its own) and shows the row's surface at fixed deltas (`10p 25p atm 25c 10c` as call deltas `0.90 0.75 0.50 0.25 0.10`,
 every listed tenor, the 25Δ skew and its Δ, one heat range over the
 table), three sparklines over the window in force (ATFM 3M, 25Δ skew 3M,
 realized 20D) captioned with their rank and range and IV−RV's rank, and

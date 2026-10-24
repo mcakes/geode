@@ -3,6 +3,7 @@
 
 use super::harness::*;
 use crate::core::grouping::Pin;
+use crate::core::model::BandModel;
 use crate::core::session::{self, State};
 use geode_core::link::{CursorScope, path_scope};
 use geode_shell::module::FindEvent;
@@ -319,12 +320,17 @@ fn the_cursor_emits_the_group_path_on_a_group_and_the_member_under_it_on_a_leaf(
     let e = vcx.update(|_, cx| h.content.emission(cx));
     assert_eq!(
         e.cursor,
-        CursorScope::NullIn("region".into()),
-        "a path through the unmapped group"
+        CursorScope::Path(path_scope(&pairs(&[("underlying_ref", "NEW")]))),
+        "a member under the unmapped group posts its own key alone"
     );
     h.press(&mut vcx, "k");
+    assert_eq!(h.cursor(&vcx), Some("group:\u{2014}".into()));
     let e = vcx.update(|_, cx| h.content.emission(cx));
-    assert_eq!(e.cursor, CursorScope::NullIn("region".into()));
+    assert_eq!(
+        e.cursor,
+        CursorScope::NullIn("region".into()),
+        "the unmapped group itself refuses: no scope says NULL"
+    );
     h.command(&mut vcx, "group none").unwrap();
     h.press(&mut vcx, "g g");
     let e = vcx.update(|_, cx| h.content.emission(cx));
@@ -412,7 +418,22 @@ fn a_group_row_paints_a_chevron_the_member_none_and_a_press_on_it_toggles(
         vcx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::none());
         vcx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::none());
     };
-    click(&mut vcx, blank.center());
+    vcx.simulate_mouse_down(
+        blank.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    h.draw(&mut vcx);
+    assert_eq!(
+        shown(&h, &vcx).len(),
+        5,
+        "a mouse-down alone folds nothing: the toggle is the click's"
+    );
+    vcx.simulate_mouse_up(
+        blank.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
     h.draw(&mut vcx);
     assert_eq!(
         shown(&h, &vcx),
@@ -485,4 +506,93 @@ fn the_header_paints_the_grouping_chip_and_the_menu_offers_the_folds(
         "the tile is not grouped"
     );
     h.press(&mut vcx, "escape");
+}
+
+#[gpui::test]
+fn the_band_on_a_group_row_is_empty(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = grouped(cx);
+    h.press(&mut vcx, "j");
+    assert_eq!(h.cursor(&vcx), Some("DAX".into()));
+    h.press(&mut vcx, "enter");
+    assert!(h.band_open(&vcx));
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.band_model.name.to_string()),
+        "DAX"
+    );
+    h.press(&mut vcx, "k");
+    assert_eq!(h.cursor(&vcx), Some("group:Core".into()));
+    assert!(h.band_open(&vcx), "the band stays open across the move");
+    let band = h.tile.read_with(&vcx, |t, _| t.band_model.clone());
+    assert_eq!(
+        band,
+        BandModel::default(),
+        "a group has no surface to inspect: an empty band, never its internal name"
+    );
+    h.press(&mut vcx, "j");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.band_model.name.to_string()),
+        "DAX",
+        "back on the member the band fills again"
+    );
+}
+
+#[gpui::test]
+fn a_two_level_chain_nests_groups_and_the_folds_walk_the_depths(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.set_dims(&mut vcx, europe_dims());
+    h.set_frame_chain(&mut vcx, &["region", "sector"]);
+    assert_eq!(h.grouping_chip(&vcx), "region \u{b7} sector");
+    assert_eq!(
+        shown(&h, &vcx),
+        [
+            "group:Core",
+            "group:Core/Index",
+            "DAX",
+            "SX5E",
+            "group:\u{2014}",
+            "group:\u{2014}/\u{2014}",
+            "NEW"
+        ],
+        "depth-2 leaves under depth-1 groups"
+    );
+    h.press(&mut vcx, "j");
+    h.press(&mut vcx, "j");
+    assert_eq!(h.cursor(&vcx), Some("DAX".into()));
+    let e = vcx.update(|_, cx| h.content.emission(cx));
+    assert_eq!(
+        e.cursor,
+        CursorScope::Path(path_scope(&pairs(&[
+            ("region", "Core"),
+            ("sector", "Index"),
+            ("underlying_ref", "DAX")
+        ])))
+    );
+    h.press(&mut vcx, "z c");
+    assert_eq!(
+        h.cursor(&vcx),
+        Some("group:Core/Index".into()),
+        "z c on a leaf closes and lands on its immediate parent"
+    );
+    assert_eq!(
+        shown(&h, &vcx),
+        [
+            "group:Core",
+            "group:Core/Index",
+            "group:\u{2014}",
+            "group:\u{2014}/\u{2014}",
+            "NEW"
+        ]
+    );
+    h.press(&mut vcx, "z shift-m");
+    assert_eq!(
+        shown(&h, &vcx),
+        ["group:Core", "group:\u{2014}"],
+        "every group closed shows the roots alone"
+    );
+    h.press(&mut vcx, "z shift-r");
+    assert_eq!(
+        shown(&h, &vcx).len(),
+        7,
+        "every fold open restores the tree"
+    );
 }

@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
-use geode_core::link::{CursorScope, Emission, UNDERLYING, path_scope};
+use geode_core::link::{CursorScope, Emission, UNDERLYING, path_scope, underlying_scope};
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
 use geode_core::volboard::{Lookback, Role, VolBoard};
@@ -1355,6 +1355,12 @@ impl VolwatchTile {
                     (None, _) => pairs.push((UNDERLYING.to_string(), row.name.clone())),
                 }
                 match pairs.iter().find(|(_, v)| v == grouping::UNMAPPED) {
+                    // A member's own key is exact for its row whatever
+                    // group it fell under; the `—` group itself has no
+                    // value a scope can say, so it refuses.
+                    Some(_) if row.group.is_none() => {
+                        CursorScope::Path(underlying_scope(&row.name))
+                    }
                     Some((dim, _)) => CursorScope::NullIn(dim.clone()),
                     None => CursorScope::Path(path_scope(&pairs)),
                 }

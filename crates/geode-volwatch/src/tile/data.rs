@@ -246,8 +246,10 @@ impl VolwatchTile {
             .grid
             .cursor()
             .and_then(|at| self.grid.visible().get(at).copied());
+        // A group row has no surface of its own: the band stays docked and
+        // empty rather than read the group's internal name over dashes.
         self.band_model = match row.filter(|_| self.state.band) {
-            Some(i) => {
+            Some(i) if self.grid.row(i).group.is_none() => {
                 let empty = Ask::default();
                 let asked = self.board_ask.as_ref().unwrap_or(&empty);
                 let mut band = prepare_band(
@@ -259,7 +261,7 @@ impl VolwatchTile {
                 band.stale |= self.prepared.rows.get(i).is_some_and(|p| p.stale);
                 band
             }
-            None => BandModel::default(),
+            _ => BandModel::default(),
         };
     }
 

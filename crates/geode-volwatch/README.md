@@ -91,11 +91,13 @@ measured against). Behaviour and limits are in the features guide's
     keys, the chevron and the menu), the group refusals (`enter` and `t`
     on a group row), the strip's hints, `t`'s refusal, yank (a group's
     member names one per line), emission (the group path, then the
-    underlying on a member) and autosize (the shown view's columns only;
+    underlying on a member; a member under `—` posts its underlying alone
+    and the `—` group row refuses) and autosize (the shown view's columns only;
     `reset` clears that view's).
   - `data.rs`: the board's request lifecycle (tags, `deliver_board`,
     `deliver_keys`, the refresh and stale timers, the prepared model, the
-    header's dataset times).
+    band (`rebuild_band`; empty on a group row), the header's dataset
+    times).
   - `chrome.rs`: notices, the empty state, the switcher and the `.` action
     menu (the tabs as rows, the shown one ticked; every lens verb as a
     row, the swap disabled with its reason in a pair view; the three fold
@@ -104,9 +106,10 @@ measured against). Behaviour and limits are in the features guide's
   - `table.rs`: the grid's `TableDelegate` and `Paints` (one per theme);
     it formats nothing. It adds the table's fixed chrome (cell padding and
     the cursor border, `chrome_px`) to a prepared width, paints the tree
-    lead and a group row's chevron (a mouse-down emits
-    `GridEvent::TogglePressed` and stops only the click, so the shell's
-    click-to-focus still sees the press), floors every
+    lead and a group row's chevron (the press is recorded so the row
+    ignores it and the shell's click-to-focus still sees it; the click
+    emits `GridEvent::TogglePressed` and is stopped; a release anywhere
+    clears the record), floors every
     column at its glyph's own width plus that chrome (`min_widths`, so a
     drag or a restored width cannot cut a chip's sign), truncates a cut
     cell or head with a trailing ellipsis, sizes a group head to the
