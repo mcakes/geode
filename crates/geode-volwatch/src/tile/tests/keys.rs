@@ -157,6 +157,26 @@ fn w_cycles_the_window_requeries_and_supersedes_the_board_in_flight(cx: &mut gpu
 }
 
 #[gpui::test]
+fn w_mutes_the_old_windows_companions_until_the_board_lands(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "r");
+    let col = h.column_index(&vcx, "atfm-3M-companion");
+    let muted = |vcx: &gpui::VisualTestContext| {
+        h.tile
+            .read_with(vcx, |t, _| t.prepared.rows[0].cells[col].muted)
+    };
+    assert!(!muted(&vcx), "the 1Y board's rank paints under z · 1Y");
+    h.press(&mut vcx, "w");
+    assert_eq!(h.lens(&vcx).window, Window::Y2);
+    assert!(muted(&vcx), "the 1Y board's rank greys under z · 2Y");
+    let tag = h.tag_of(&vcx);
+    let asked = h.asked_of(&vcx);
+    h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    assert!(!muted(&vcx), "the 2Y board's rank paints");
+}
+
+
+#[gpui::test]
 fn colon_view_switches_by_name_and_refuses_an_unknown_one(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
     assert!(h.command(&mut vcx, "view varswap").is_ok());

@@ -42209,8 +42209,8 @@ run_mutation "volwatch: the percentile chip takes the rank at display precision"
 # A rank over fewer than PCTL_MIN_COUNT observations paints muted.
 run_mutation "volwatch: a short window paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '        Lens::Rich => c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT),' \
-  '        Lens::Rich => c.pctl.is_some_and(|(_, count)| count < 1),' \
+  '                || c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT)' \
+  '                || c.pctl.is_some_and(|(_, count)| count < 1)' \
   geode-volwatch \
   a_short_count_mutes_the_rank_and_blanks_the_z
 
@@ -42757,6 +42757,17 @@ run_mutation "volwatch: the demo ssr table is keyed by tenor" \
   '        "ssr" => Some(&["underlying_ref", "tenor", "delta"]),' \
   geode-compose \
   the_surface_ladders_1w_to_5y_at_seven_deltas_and_ssr_is_a_fourth_table
+
+# After `w` the header chip names the new window while the old board's
+# ranks and z-scores are still up: a companion from another window than
+# the lens's paints muted until the new board lands, else a 1Y rank
+# reads as a 2Y one.
+run_mutation "volwatch: a companion from another window paints muted" \
+  crates/geode-volwatch/src/core/model.rs \
+  '            i.board_window != Some(i.lens.window.duration())' \
+  '            false' \
+  geode-volwatch \
+  a_companion_from_another_window_than_the_one_shown_paints_muted
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

@@ -173,6 +173,10 @@ pub struct Inputs<'a> {
     /// The lookback the board was asked with; a change paints muted when
     /// it differs from the lens's.
     pub board_lookback: Lookback,
+    /// The window the board was asked with (`None` before any, or for an
+    /// ask without a measure column); a rank or z paints muted when it
+    /// differs from the lens's window.
+    pub board_window: Option<Duration>,
     /// The lens in force: which companion stands beside a level, and
     /// which number a single column shows.
     pub lens: LensState,
@@ -479,13 +483,18 @@ fn share_group_labels(columns: &[Column], col_px: &mut [f32], advance_px: f32) {
 }
 
 /// Whether a companion over `c` paints muted: under moves, a change from
-/// another lookback than the lens's; under rich/cheap, a rank or z over
-/// too short a history. A level is never muted by its companion; a
-/// single column's tint is dropped instead.
+/// another lookback than the lens's; under rich/cheap, a rank or z from
+/// another window than the lens's (the header chip names the new window
+/// while the old board's numbers are still up), or over too short a
+/// history. A level is never muted by its companion; a single column's
+/// tint is dropped instead.
 fn companion_muted(i: &Inputs<'_>, c: &Cell) -> bool {
     match i.lens.lens {
         Lens::Moves => i.board_lookback != i.lens.lookback,
-        Lens::Rich => c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT),
+        Lens::Rich => {
+            i.board_window != Some(i.lens.window.duration())
+                || c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT)
+        }
     }
 }
 
@@ -1179,6 +1188,7 @@ mod tests {
             columns: Vec::leak(columns(view, &lens, true)),
             asked: Box::leak(Box::new(ask(view, &lens, &tenors(), false))),
             board_lookback: Lookback::D1,
+            board_window: Some(lens.window.duration()),
             lens,
             cells: view.cells,
             paint: true,
@@ -1673,6 +1683,57 @@ mod tests {
             !p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-level")].muted,
             "a level has no lookback"
         );
+    }
+
+    #[test]
+    fn a_companion_from_another_window_than_the_one_shown_paints_muted() {
+        // The board holds 1Y; the lens shows 2Y until it re-answers. The
+        // pair's rank greys; a single view's level keeps its number and tone
+        // and drops the tint, since a 1Y rank under a 2Y chip misleads.
+        let vol = vol();
+        let rich = LensState {
+            lens: Lens::Rich,
+            metric: Metric::Pctl,
+            ..LensState::default()
+        };
+        let mut i = inputs(rows_with_pctl(0.91, 251), &vol, rich);
+        i.board_window = Some(Window::Y1.duration());
+        assert!(!prepare(&i).rows[0].cells[column_index(&vol, &rich, "atfm-3M-companion")].muted);
+        i.lens.window = Window::Y2; // the board holds 1Y
+        let p = prepare(&i);
+        assert!(p.rows[0].cells[column_index(&vol, &rich, "atfm-3M-companion")].muted);
+        assert!(
+            !p.rows[0].cells[column_index(&vol, &rich, "atfm-3M-level")].muted,
+            "a level has no window"
+        );
+        let surface = builtin().get("surface").unwrap().clone();
+        let asked = ask(&surface, &rich, &tenors(), false);
+        let m3 = Measure::atfm("3M");
+        let rows = vec![Row {
+            name: "SX5E".into(),
+            reference: None,
+            present: true,
+            as_of: Some(now()),
+            board: Some(row_of(&asked, "SX5E", true, &|m| {
+                (*m == m3).then_some((Some(19.6), None, Some((0.91, 251)), None))
+            })),
+            vega: None,
+        }];
+        let mut i = inputs(&rows, &surface, rich);
+        i.board_window = Some(Window::Y1.duration());
+        let single = column_index(&surface, &rich, "atfm-3M-single");
+        assert!(
+            matches!(
+                prepare(&i).rows[0].cells[single].glyph,
+                Glyph::Tint(Some(_))
+            ),
+            "the rank tints the level while the windows agree"
+        );
+        i.lens.window = Window::Y2;
+        let cell = &prepare(&i).rows[0].cells[single];
+        assert_eq!(cell.text.as_ref(), "19.6");
+        assert!(!cell.muted, "the level keeps its tone");
+        assert_eq!(cell.glyph, Glyph::Tint(None));
     }
 
     #[test]

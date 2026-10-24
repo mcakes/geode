@@ -225,6 +225,7 @@ impl VolwatchTile {
             columns: &self.columns,
             asked,
             board_lookback: asked_lookback(self.board_ask.as_ref(), self.state.lens.lookback),
+            board_window: self.board_ask.as_ref().and_then(|a| a.window),
             lens: self.state.lens,
             cells: self.cells,
             paint: self.paint,

@@ -73,6 +73,7 @@ fn bench_prepare(c: &mut Criterion) {
         columns: &cols,
         asked: &asked,
         board_lookback: Lookback::D1,
+        board_window: Some(lens.window.duration()),
         lens,
         cells: vol.cells,
         paint: true,
