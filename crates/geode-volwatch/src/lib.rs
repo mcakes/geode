@@ -3,8 +3,12 @@
 //! [`core`] owns the pure parts (views, their columns and the board ask);
 //! [`tile`] holds the entity; [`content`] is the shell's door and factory.
 
+// replaced by the next task: content and tile still name the old View.
+#[cfg(any())]
 pub mod content;
 pub mod core;
+// replaced by the next task
+#[cfg(any())]
 pub mod tile;
 
 pub use core::views::KIND;

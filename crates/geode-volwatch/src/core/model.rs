@@ -26,8 +26,9 @@ use geode_widgets::cell::zero_bar::{Bar, bar};
 use geode_widgets::cell::{DESIGN_REM, column_scale, widths};
 use gpui::SharedString;
 
+use super::lens::PCTL_MIN_COUNT;
 use super::views::{
-    Ask, Column, ColumnKind, PCTL_MIN_COUNT, REALIZED, SURFACE, TITLE, VARSWAP, WINDOW_1Y, sortable,
+    Ask, Column, ColumnKind, REALIZED, SURFACE, TITLE, VARSWAP, WINDOW_1Y, sortable,
 };
 
 /// Fill alpha of a change chip at the column's largest move: a tint under a
