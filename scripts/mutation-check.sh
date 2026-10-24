@@ -42882,6 +42882,83 @@ run_mutation "volwatch: a member emits its group path before the underlying" \
   geode-volwatch \
   the_cursor_emits_the_group_path_on_a_group_and_the_member_under_it_on_a_leaf
 
+# Shared stats make z affine in level and the two means coincide; a member
+# with its own history tells a z of the mean level from the mean of the z.
+run_mutation "volwatch: the group z is the mean of the members' z, not the z of the mean" \
+  crates/geode-volwatch/src/core/grouping.rs \
+  '            z: mean(present.iter().filter_map(|r| z_score(cell_of(r, pos, m)?))),' \
+  '            z: mean(
+                present
+                    .iter()
+                    .filter_map(|r| cell_of(r, pos, m)?.current)
+                    .filter_map(finite),
+            )
+            .and_then(|level| {
+                present.iter().find_map(|r| {
+                    let s = cell_of(r, pos, m)?.stats.as_ref()?;
+                    Some((level - s.mean) / s.sd)
+                })
+            }),' \
+  geode-volwatch \
+  a_group_averages_level_delta_z_and_rank_separately_and_sums_vega
+
+# The old index would land on whichever row slid up under the fold.
+run_mutation "volwatch: a fold hiding the put cursor rests it on the group" \
+  crates/geode-tile/src/rows.rs \
+  '                let folded = put
+                    .and_then(|s| self.folding(s))
+                    .and_then(|g| self.position(self.rows[g].name()));' \
+  '                let folded: Option<usize> = None;' \
+  geode-tile \
+  a_collapsed_group_hiding_the_put_cursor_rests_it_on_the_group
+
+# A band built for a group row reads its internal name over dashes.
+run_mutation "volwatch: the band on a group row is empty" \
+  crates/geode-volwatch/src/tile/data.rs \
+  '            Some(i) if self.grid.row(i).group.is_none() => {' \
+  '            Some(i) => {' \
+  geode-volwatch \
+  the_band_on_a_group_row_is_empty
+
+# A chevron folding on the press would fold under a pointer that never
+# released on it.
+run_mutation "volwatch: the chevron folds on the click, not the press" \
+  crates/geode-volwatch/src/tile/table.rs \
+  '                                    cx.listener(|this, _: &MouseDownEvent, _, _| {
+                                        this.delegate_mut().chevron_pressed = true;
+                                    }),' \
+  '                                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                        this.delegate_mut().chevron_pressed = true;
+                                        cx.emit(GridEvent::TogglePressed { row: row_ix });
+                                    }),' \
+  geode-volwatch \
+  a_group_row_paints_a_chevron_the_member_none_and_a_press_on_it_toggles
+
+# A member under the unmapped group has an exact key of its own; refusing
+# it leaves a follower on the whole list.
+run_mutation "volwatch: a member under the unmapped group posts its own key" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '                    Some(_) if row.group.is_none() => {' \
+  '                    Some(_) if false => {' \
+  geode-volwatch \
+  the_cursor_emits_the_group_path_on_a_group_and_the_member_under_it_on_a_leaf
+
+# An empty path is a fold of nothing; kept, it would be saved back forever.
+run_mutation "volwatch: an empty collapsed path drops the key" \
+  crates/geode-volwatch/src/core/session.rs \
+  '        .filter(|paths| paths.iter().all(|p| !p.is_empty()))' \
+  '' \
+  geode-volwatch \
+  an_empty_collapsed_path_drops_the_key
+
+# A chain naming a level twice would group by it once and say nothing.
+run_mutation "volwatch: group refuses a dimension named twice" \
+  crates/geode-volwatch/src/core/commands.rs \
+  '                        .find_map(|(i, d)| dims[..i].contains(d).then_some(d))' \
+  '                        .find_map(|(i, d)| dims[..0].contains(d).then_some(d))' \
+  geode-volwatch \
+  colon_group_parses_dimensions_slot_none_and_refuses_the_rest
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
