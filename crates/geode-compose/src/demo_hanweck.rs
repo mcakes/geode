@@ -49,8 +49,9 @@ pub const TENORS: [&str; 10] = ["1W", "1M", "2M", "3M", "6M", "1Y", "18M", "2Y",
 pub const DELTAS: [f64; 7] = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95];
 pub const WINDOWS: [&str; 3] = ["5D", "20D", "60D"];
 
-/// A Monday, and the first day with a close. Far enough back that a
-/// `400d` history window is full from the first run.
+/// A Monday, and the first day with a close. Far enough back that an
+/// `800d` history window (the demo datasets' `history`, covering the vol
+/// watchlist's `2Y` window) is full from the first run.
 const EPOCH: NaiveDate = match NaiveDate::from_ymd_opt(2024, 6, 3) {
     Some(d) => d,
     None => unreachable!(),
@@ -430,7 +431,7 @@ impl HistoryQuery for DemoHistory {
         let Some(last) = observations.iter().map(|o| o.day).max() else {
             return Ok(rows);
         };
-        // One walk per underlying per call: a 400-day prefix ask over the
+        // One walk per underlying per call: an 800-day prefix ask over the
         // surface is 40 tuples sharing it.
         let mut walks: HashMap<&str, Vec<f64>> = HashMap::new();
         for tuple in &wanted {

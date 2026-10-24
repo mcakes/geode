@@ -1095,7 +1095,12 @@ The tile reads three history datasets by fixed name: `vol_surface`,
 open-form column names. A deployment that shows the tile declares the
 three as history datasets of the shapes the board reads; while any one is
 undeclared or misshaped, the data service refuses every board and the tile
-shows `surface: <error>`. There is no setting to rename them.
+shows `surface: <error>`. There is no setting to rename them. A dataset's
+`history` window bounds the lens windows: the surface, realized, varswap
+and any table dataset must declare at least the longest window the tile
+offers (`2Y`), else a `2Y` z or percentile is computed over whatever
+shorter history the dataset holds under the `2Y` label; the demo declares
+`800d`.
 
 - `refresh` is a duration or `"off"`; the default is `"60s"`. Below the 10s
   minimum it is raised to 10s with a warning; a value that is neither a

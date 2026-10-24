@@ -967,7 +967,7 @@ retention = "7d"
 [vol_surface]
 family = "history"
 key = ["underlying_ref", "tenor", "delta"]
-history = "400d"
+history = "800d"
 retention = "7d"
 [vol_surface.columns.underlying_ref]
 type = "utf8"
@@ -990,7 +990,7 @@ role = "value"
 [realized_vol]
 family = "history"
 key = ["underlying_ref", "window"]
-history = "400d"
+history = "800d"
 retention = "7d"
 [realized_vol.columns.underlying_ref]
 type = "utf8"
@@ -1007,7 +1007,7 @@ role = "value"
 [varswap]
 family = "history"
 key = ["underlying_ref", "tenor"]
-history = "400d"
+history = "800d"
 retention = "7d"
 [varswap.columns.underlying_ref]
 type = "utf8"
@@ -1027,7 +1027,7 @@ role = "value"
 [ssr]
 family = "history"
 key = ["underlying_ref", "tenor"]
-history = "400d"
+history = "800d"
 retention = "7d"
 [ssr.columns.underlying_ref]
 type = "utf8"
