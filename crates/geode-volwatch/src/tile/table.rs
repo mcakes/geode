@@ -685,9 +685,8 @@ impl TableDelegate for GridDelegate {
             // text, so a column narrower than its number cuts the trailing
             // side into an ellipsis; a child that kept its own width would
             // be pushed out on the leading side by the right-aligned cell
-            // and show a plausible wrong number. A tint with no chip (no
-            // companion to tint by) paints the same.
-            Glyph::None | Glyph::Tint(None) => div()
+            // and show a plausible wrong number.
+            Glyph::None => div()
                 .w_full()
                 .min_w_0()
                 .text_color(tone)
@@ -700,9 +699,15 @@ impl TableDelegate for GridDelegate {
             // cell takes the sign color at the companion's alpha and the
             // number keeps the foreground tone, so the level reads as a
             // level and the color alone says how far the companion moved.
-            // The text shrinks with the cell as plain text does.
-            Glyph::Tint(Some(chip)) => {
-                let paint = if muted { p.chip_muted } else { p.chip };
+            // The tint is a per-row condition (a missing companion, a stale
+            // lookback leave it `None`), so every tint cell keeps the same
+            // inset box with or without a fill: the numbers of one column
+            // share one right edge. A muted tint is `None` by construction
+            // (`prepare` drops it rather than paint a wrong color), so the
+            // unmuted chip paint is the only one. The text shrinks with
+            // the cell as plain text does.
+            Glyph::Tint(chip) => {
+                let paint = p.chip;
                 let tint_sel = id.clone();
                 div()
                     .w_full()
@@ -710,14 +715,14 @@ impl TableDelegate for GridDelegate {
                     .flex()
                     .justify_end()
                     .rounded(paint.radius)
-                    .when(chip.alpha > 0.0, |d| {
-                        d.bg(paint.text_color(chip.sign).opacity(chip.alpha))
+                    .px(design(widths::CHIP_INSET))
+                    .when_some(chip.filter(|c| c.alpha > 0.0), |d, c| {
+                        d.bg(paint.text_color(c.sign).opacity(c.alpha))
                             .debug_selector(move || format!("{tint_sel}-tint"))
                     })
                     .child(
                         div()
                             .min_w_0()
-                            .px(design(widths::CHIP_INSET))
                             .text_color(tone)
                             .truncate()
                             .debug_selector(move || format!("{id}-text"))

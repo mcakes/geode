@@ -894,3 +894,45 @@ fn a_single_view_paints_the_level_over_a_tint_and_m_swaps_the_number(
     );
     assert!(vcx.debug_bounds(format!("{id}-tint").leak()).is_none());
 }
+
+/// A tint is a per-row condition (a missing companion, a stale lookback),
+/// so a tinted and an untinted level in one column must share the inset:
+/// otherwise row A's number sits a few px left of row B's.
+#[gpui::test]
+fn a_single_column_keeps_one_right_edge_with_and_without_a_tint(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "4");
+    let asked = h.asked_of(&vcx);
+    let tag = h.tag_of(&vcx);
+    let mut b = board_for(&["DAX", "SX5E", "NEW"], &asked);
+    for c in &mut b.rows[0].cells {
+        if c.measure == Measure::atfm("3M") {
+            c.changes = vec![None];
+        }
+    }
+    h.answer_board(&mut vcx, tag, b);
+    h.draw(&mut vcx);
+    let (dax, sx5e) = h.tile.read_with(&vcx, |t, _| {
+        let col = t
+            .columns
+            .iter()
+            .position(|c| c.id == "atfm-3M-single")
+            .expect("the 0.5 point is the ATFM column");
+        (
+            t.prepared.rows[0].cells[col].id.to_string(),
+            t.prepared.rows[1].cells[col].id.to_string(),
+        )
+    });
+    assert!(
+        vcx.debug_bounds(format!("{dax}-tint").leak()).is_none(),
+        "no change, no tint"
+    );
+    assert!(vcx.debug_bounds(format!("{sx5e}-tint").leak()).is_some());
+    let bare = vcx.debug_bounds(format!("{dax}-text").leak()).unwrap();
+    let tinted = vcx.debug_bounds(format!("{sx5e}-text").leak()).unwrap();
+    assert_eq!(
+        bare.bottom_right().x,
+        tinted.bottom_right().x,
+        "one right edge: {bare:?} vs {tinted:?}"
+    );
+}
