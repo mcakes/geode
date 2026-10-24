@@ -1231,12 +1231,16 @@ impl VolwatchTile {
             Command::Sort { column, order } => self.set_sort(Some((column, order)), cx),
             Command::SortClear => self.set_sort(None, cx),
             Command::View(name) => self.set_view_by_name(&name, cx)?,
+            // The pin lands with the grouping wiring; the grammar is ahead of it.
+            Command::Group(_) | Command::GroupSlot(_) | Command::GroupNone | Command::Unpin => {
+                return Err("grouping arrives in the next task".into());
+            }
         }
         Ok(())
     }
 
     pub(crate) fn completions(&self, line: &str, cursor: usize) -> Vec<String> {
-        commands::completions(line, cursor, &self.columns, &self.tabs())
+        commands::completions(line, cursor, &self.columns, &self.tabs(), &[])
     }
 
     /// `/` narrows as the query is typed; committing keeps it, cancelling

@@ -1,13 +1,17 @@
 //! The tile's session table: the watchlist shown, the view by name, the
 //! lens and its lookback, metric, window and shown number, the sort, the
-//! member under the cursor and whether the band is open. Bad input is
+//! member under the cursor, whether the band is open, the grouping pin and
+//! the collapsed group rows. Bad input is
 //! repaired, never refused: a value that cannot be read drops its key with
 //! a notice, so one stale field cannot cost the tile its others.
+
+use std::collections::BTreeSet;
 
 use geode_core::sort::SortOrder;
 use geode_core::volboard::Lookback;
 use toml::{Table, Value};
 
+use super::grouping::Pin;
 use super::lens::{Lens, LensState, Metric, Shown, Window};
 
 // The lens keys are additive: a record written before them still reads,
@@ -25,6 +29,11 @@ pub struct State {
     pub sort: Option<(String, SortOrder)>,
     pub cursor: Option<String>,
     pub band: bool,
+    /// The grouping pin (§7.1); `Pin::None` follows the frame.
+    pub pin: Pin,
+    /// Collapsed group rows by path (one label per level, the group's own
+    /// last), kept across rebuilds and regroups within the chain's depth.
+    pub collapsed: BTreeSet<Vec<String>>,
 }
 
 fn order_word(o: SortOrder) -> &'static str {
@@ -49,7 +58,9 @@ fn parse_order(w: &str) -> Option<SortOrder> {
 
 /// `version`, then each set key; an unset key is absent and restores unset.
 /// The lens keys are always written, as a word each. `sort` is
-/// `[column id, order word]`.
+/// `[column id, order word]`. The pin is `pinned` (a list of dimensions;
+/// empty for the flat pin) or `pinned_slot` (1–9); `collapsed` is a list
+/// of group paths, written only when a row is collapsed.
 pub fn to_table(s: &State) -> Table {
     let mut t = Table::new();
     t.insert("version".into(), Value::Integer(VERSION));
@@ -81,7 +92,59 @@ pub fn to_table(s: &State) -> Table {
         t.insert("cursor".into(), Value::String(cursor.clone()));
     }
     t.insert("band".into(), Value::Boolean(s.band));
+    match &s.pin {
+        Pin::None => {}
+        Pin::Grouping(g) => {
+            t.insert("pinned".into(), strings(g));
+        }
+        Pin::Slot(n) => {
+            t.insert("pinned_slot".into(), Value::Integer(i64::from(*n)));
+        }
+        // The empty list: `:group none`, a flat tile by choice.
+        Pin::Flat => {
+            t.insert("pinned".into(), Value::Array(Vec::new()));
+        }
+    }
+    if !s.collapsed.is_empty() {
+        t.insert(
+            "collapsed".into(),
+            Value::Array(s.collapsed.iter().map(|p| strings(p)).collect()),
+        );
+    }
     t
+}
+
+fn strings(words: &[String]) -> Value {
+    Value::Array(words.iter().map(|w| Value::String(w.clone())).collect())
+}
+
+fn read_strings(v: &Value) -> Option<Vec<String>> {
+    v.as_array()?
+        .iter()
+        .map(|w| w.as_str().map(str::to_string))
+        .collect()
+}
+
+fn read_pinned(v: &Value) -> Result<Pin, String> {
+    match read_strings(v) {
+        Some(g) if g.is_empty() => Ok(Pin::Flat),
+        Some(g) => Ok(Pin::Grouping(g)),
+        None => Err("not a list of dimensions".into()),
+    }
+}
+
+fn read_slot(v: &Value) -> Result<Pin, String> {
+    v.as_integer()
+        .and_then(|n| u8::try_from(n).ok())
+        .filter(|n| (1..=9).contains(n))
+        .map(Pin::Slot)
+        .ok_or_else(|| "not a slot 1\u{2013}9".into())
+}
+
+fn read_collapsed(v: &Value) -> Result<BTreeSet<Vec<String>>, String> {
+    v.as_array()
+        .and_then(|a| a.iter().map(read_strings).collect())
+        .ok_or_else(|| "not a list of group paths".into())
 }
 
 fn read_name(v: &Value) -> Result<String, String> {
@@ -159,6 +222,13 @@ pub fn from_table(t: &Table) -> (State, Vec<String>) {
         })
         .unwrap_or(d.lens.shown),
     };
+    // `pinned_slot` wins over `pinned` when both are present, so a slot
+    // pin written beside a stale list restores as the slot.
+    let slot = read(t, "pinned_slot", &mut notices, read_slot);
+    let pin = match slot {
+        Some(p) => p,
+        None => read(t, "pinned", &mut notices, read_pinned).unwrap_or_default(),
+    };
     let state = State {
         list: read(t, "list", &mut notices, read_name),
         view: read(t, "view", &mut notices, read_name),
@@ -166,6 +236,8 @@ pub fn from_table(t: &Table) -> (State, Vec<String>) {
         sort: read(t, "sort", &mut notices, read_sort),
         cursor: read(t, "cursor", &mut notices, read_name),
         band: read(t, "band", &mut notices, read_band).unwrap_or(d.band),
+        pin,
+        collapsed: read(t, "collapsed", &mut notices, read_collapsed).unwrap_or_default(),
     };
     (state, notices)
 }
@@ -194,6 +266,8 @@ mod tests {
             sort: Some(("atfm-3M-change".into(), SortOrder::AbsDesc)),
             cursor: Some("SX5E".into()),
             band: true,
+            pin: Pin::Slot(4),
+            collapsed: paths(&[&["Core"]]),
         };
         let (back, notices) = from_table(&to_table(&s));
         assert_eq!(back, s);
@@ -344,5 +418,84 @@ mod tests {
                 "session: dropped band: not a bool"
             ]
         );
+    }
+
+    use crate::core::grouping::Pin;
+    use std::collections::BTreeSet;
+
+    fn paths(p: &[&[&str]]) -> BTreeSet<Vec<String>> {
+        p.iter()
+            .map(|path| path.iter().map(|s| s.to_string()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn the_pin_and_the_collapsed_set_round_trip() {
+        for pin in [
+            Pin::None,
+            Pin::Grouping(vec!["region".into(), "sector".into()]),
+            Pin::Slot(3),
+            Pin::Flat,
+        ] {
+            let s = State {
+                pin: pin.clone(),
+                collapsed: paths(&[&["Core"], &["Core", "Index"], &["\u{2014}"]]),
+                ..State::default()
+            };
+            let t = to_table(&s);
+            let (back, notices) = from_table(&t);
+            assert_eq!(back, s, "{pin:?}");
+            assert!(notices.is_empty());
+            match &pin {
+                Pin::None => assert!(!t.contains_key("pinned") && !t.contains_key("pinned_slot")),
+                Pin::Grouping(_) => assert_eq!(t["pinned"].as_array().unwrap().len(), 2),
+                Pin::Slot(n) => assert_eq!(t["pinned_slot"].as_integer(), Some(i64::from(*n))),
+                Pin::Flat => assert_eq!(t["pinned"].as_array().unwrap().len(), 0),
+            }
+        }
+        let t = to_table(&State::default());
+        assert!(!t.contains_key("collapsed"), "an empty set writes no key");
+    }
+
+    #[test]
+    fn a_bad_pin_or_collapsed_entry_drops_its_key_alone() {
+        let mut t = to_table(&State::default());
+        t.insert("pinned_slot".into(), toml::Value::Integer(12));
+        t.insert(
+            "collapsed".into(),
+            toml::Value::Array(vec![toml::Value::String("Core".into())]),
+        );
+        let (back, notices) = from_table(&t);
+        assert_eq!(back.pin, Pin::None);
+        assert!(back.collapsed.is_empty());
+        assert_eq!(
+            notices,
+            [
+                "session: dropped pinned_slot: not a slot 1\u{2013}9",
+                "session: dropped collapsed: not a list of group paths"
+            ]
+        );
+        let mut t = to_table(&State::default());
+        t.insert(
+            "pinned".into(),
+            toml::Value::Array(vec![toml::Value::Integer(1)]),
+        );
+        let (back, notices) = from_table(&t);
+        assert_eq!(back.pin, Pin::None);
+        assert_eq!(
+            notices,
+            ["session: dropped pinned: not a list of dimensions"]
+        );
+    }
+
+    #[test]
+    fn pinned_slot_wins_when_both_pin_keys_are_present() {
+        let mut t = to_table(&State {
+            pin: Pin::Grouping(vec!["region".into()]),
+            ..State::default()
+        });
+        t.insert("pinned_slot".into(), toml::Value::Integer(2));
+        let (back, _) = from_table(&t);
+        assert_eq!(back.pin, Pin::Slot(2));
     }
 }
