@@ -3229,10 +3229,10 @@ impl DataService {
         // A declaration error (undeclared, wrong shape) refuses the board for
         // every role: it names a gap in configuration. A drifted or sourceless
         // dataset is a runtime condition: the surface is the board, so it
-        // refuses; realized or varswap blanks its columns like a failed fetch
-        // and is never asked.
+        // refuses; realized, varswap or a table dataset blanks its columns
+        // like a failed fetch and is never asked.
         let mut dataset_errors: Vec<(String, String)> = Vec::new();
-        for role in Role::ALL {
+        for role in params.roles() {
             let Some(name) = params.dataset(&role) else {
                 continue;
             };
@@ -5686,6 +5686,7 @@ mod tests {
             }
             "realized" => vec![0.15 + 0.001 * o],
             "varswap" => vec![0.22 + 0.001 * o],
+            "ssr" => vec![0.05 + 0.001 * o],
             _ => unreachable!(),
         }
     }
@@ -5762,7 +5763,7 @@ mod tests {
                 })
                 .collect(),
             "realized" => FAKE_WINDOWS.iter().map(|w| vec![w.to_string()]).collect(),
-            "varswap" => FAKE_TENORS.iter().map(|t| vec![t.to_string()]).collect(),
+            "varswap" | "ssr" => FAKE_TENORS.iter().map(|t| vec![t.to_string()]).collect(),
             _ => Vec::new(),
         }
     }
@@ -5869,17 +5870,37 @@ mod tests {
     }
 
     /// The demo's three history declarations, without history windows so
-    /// a fake starting a year ago is never swept.
+    /// a fake starting a year ago is never swept, and `ssr`: a table
+    /// dataset keyed `(underlying_ref, tenor)` with the one value `ssr`.
     fn board_schema() -> SchemaSpec {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../examples/demo-config/datasets.toml"
         ))
         .unwrap();
-        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", &text).unwrap()]);
-        let (schema, _) = SchemaSpec::from_doc(&doc);
+        let ssr = r#"
+[ssr]
+family = "history"
+key = ["underlying_ref", "tenor"]
+[ssr.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[ssr.columns.tenor]
+type = "utf8"
+role = "dimension"
+[ssr.columns.ssr]
+type = "f64"
+role = "value"
+"#;
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", &format!("{text}\n{ssr}")).unwrap()],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
         let mut out = SchemaSpec::default();
-        for name in ["vol_surface", "realized_vol", "varswap"] {
+        for name in ["vol_surface", "realized_vol", "varswap", "ssr"] {
             let mut ds = schema.dataset(name).unwrap().clone();
             ds.series_retention = ds
                 .series_retention
@@ -5931,6 +5952,7 @@ mod tests {
                 source("hanweck_surface", "vol_surface", "surface"),
                 source("hanweck_realized", "realized_vol", "realized"),
                 source("hanweck_varswap", "varswap", "varswap"),
+                source("hanweck_ssr", "ssr", "ssr"),
             ]
             .into_iter()
             .filter(|s| sourced.contains(&s.dataset.as_str()))
@@ -6620,6 +6642,73 @@ mod tests {
             refused(5, &|p| p.window =
                 Some(std::time::Duration::from_secs(300_000 * 365 * 86_400))),
             "daily span: out of range"
+        );
+    }
+
+    /// A table measure reads its dataset by name: the fake's `ssr` table
+    /// answers `ssr 3M` for each member, and a window summarizes the days.
+    /// A table dataset the schema does not declare refuses the board.
+    #[test]
+    fn a_board_reads_a_table_dataset_and_refuses_an_undeclared_one() {
+        let (f, _calls) = fake(300);
+        let start = f.start;
+        let (_dir, service, rx) = board_service_over(
+            tempfile::tempdir().unwrap(),
+            f,
+            &["vol_surface", "realized_vol", "varswap", "ssr"],
+        );
+        let now = Utc::now();
+        let table = |dataset: &str| Measure::Table {
+            dataset: dataset.into(),
+            suffix: vec!["3M".into()],
+        };
+        let mut p = board_ask(
+            1,
+            1,
+            &["SPX", "SX5E"],
+            vec![table("ssr")],
+            vec![Lookback::D1],
+            Some(60),
+        );
+        p.tables = vec!["ssr".into()];
+        service.vol_board(p);
+        let board = board_answer(&rx, 1).result.expect("the board answered");
+        assert!(
+            board.dataset_errors.is_empty(),
+            "{:?}",
+            board.dataset_errors
+        );
+        assert!(board.missing.is_empty(), "{:?}", board.missing);
+        assert_eq!(board.rows.len(), 2);
+        let (_, ordinal) = fake_close_at_or_before(start, now).unwrap();
+        let expected = fake_value("ssr", &["3M".to_string()], ordinal)[0];
+        for row in &board.rows {
+            let cell = &row.cells[0];
+            assert!(
+                (cell.current.unwrap() - expected).abs() < 1e-9,
+                "{:?}",
+                cell.current
+            );
+            assert!(cell.changes[0].is_some(), "{cell:?}");
+            assert!(
+                cell.stats.is_some(),
+                "a window summarizes the days: {cell:?}"
+            );
+        }
+
+        let mut p = board_ask(
+            1,
+            2,
+            &["SPX"],
+            vec![table("nope")],
+            vec![Lookback::D1],
+            None,
+        );
+        p.tables = vec!["nope".into()];
+        service.vol_board(p);
+        assert_eq!(
+            board_answer(&rx, 2).result.unwrap_err(),
+            "'nope' is not a declared history dataset"
         );
     }
 

@@ -16,7 +16,7 @@ use geode_core::query::{QueryKey, normalize_key};
 use geode_core::schema::{ColumnSpec, DatasetSpec, SchemaSpec};
 use geode_core::volboard::plan::{daily_span, day_index};
 use geode_core::volboard::reduce::{Observations, Observed, reduce};
-use geode_core::volboard::{Input, Role, VolBoard, VolBoardParams};
+use geode_core::volboard::{Input, Role, VALUE_ONLY, VolBoard, VolBoardParams};
 
 use crate::store::StoreError;
 use crate::store::history::history_table;
@@ -59,8 +59,8 @@ fn joined(cols: &[&ColumnSpec], f: impl Fn(&ColumnSpec) -> String, sep: &str) ->
     cols.iter().map(|c| f(c)).collect::<Vec<_>>().join(sep)
 }
 
-/// The key arity and value columns a fixed role's dataset must declare;
-/// a table role has no fixed shape (its dataset's own declaration is).
+/// The key arity and value columns a fixed role's dataset must declare; a
+/// table role is checked by `check_dataset` directly.
 fn shape(role: &Role) -> Option<(usize, &'static [&'static str])> {
     match role {
         Role::Surface => Some((3, &["vol", "forward"])),
@@ -71,8 +71,12 @@ fn shape(role: &Role) -> Option<(usize, &'static [&'static str])> {
 }
 
 /// Refuses a dataset the board cannot read: undeclared or not history,
-/// the wrong key arity, or a value column the role needs missing. Shared
-/// with the service's submission check so both name the same gap.
+/// the wrong key arity, or a value column the role needs missing. A table
+/// role's dataset is keyed by `underlying_ref` first (the member is the
+/// first key cell of every asked tuple) and declares exactly one value
+/// column (the one `VALUE_ONLY` resolves to); its key arity is checked
+/// against each input's suffix by `read_role`, which has the inputs.
+/// Shared with the service's submission check so both name the same gap.
 pub fn check_dataset<'a>(
     schema: &'a SchemaSpec,
     name: &str,
@@ -82,21 +86,31 @@ pub fn check_dataset<'a>(
         .dataset(name)
         .filter(|d| d.is_history())
         .ok_or_else(|| format!("'{name}' is not a declared history dataset"))?;
-    // A table role is refused explicitly rather than read by a shape it
-    // does not have: the board does not read table datasets yet.
-    let Some((arity, columns)) = shape(role) else {
-        return Err(format!("'{name}' is a table dataset the board cannot read"));
-    };
-    if ds.key.len() != arity {
-        return Err(format!(
-            "'{name}' has a {}-column key; the board needs {arity}",
-            ds.key.len()
-        ));
-    }
     let values = ds.history_values();
-    for column in columns {
-        if !values.iter().any(|c| c.name == *column) {
-            return Err(format!("'{name}' has no value column '{column}'"));
+    match shape(role) {
+        Some((arity, columns)) => {
+            if ds.key.len() != arity {
+                return Err(format!(
+                    "'{name}' has a {}-column key; the board needs {arity}",
+                    ds.key.len()
+                ));
+            }
+            for column in columns {
+                if !values.iter().any(|c| c.name == *column) {
+                    return Err(format!("'{name}' has no value column '{column}'"));
+                }
+            }
+        }
+        None => {
+            if ds.key.first().map(String::as_str) != Some("underlying_ref") {
+                return Err(format!("'{name}' is not keyed by underlying_ref first"));
+            }
+            if values.len() != 1 {
+                return Err(format!(
+                    "'{name}' has {} value columns; a table measure reads one",
+                    values.len()
+                ));
+            }
         }
     }
     Ok(ds)
@@ -237,6 +251,30 @@ fn read_role(
         .enumerate()
         .map(|(i, c)| (c.name.as_str(), i))
         .collect();
+    // A table input names no column (`VALUE_ONLY`): it reads the one value
+    // column the dataset declares, and nothing when it declares another
+    // number (`check_dataset` refused that before this point).
+    let value_index = |column: &str| -> Option<usize> {
+        if column == VALUE_ONLY {
+            (values.len() == 1).then_some(0)
+        } else {
+            column_index.get(column).copied()
+        }
+    };
+    // An input's suffix fills the key after the underlying exactly. The
+    // fixed roles' measures build their suffixes to the shape `check_dataset`
+    // held the dataset to; a table measure's suffix is the document's, so
+    // a mismatch is refused here rather than asked as a tuple of the wrong
+    // width (which would read nothing and blank the cell without a reason).
+    for input in inputs {
+        if input.suffix.len() + 1 != keys.len() {
+            return Err(StoreError::History(format!(
+                "'{name}' takes {} key values after the underlying, not {}",
+                keys.len() - 1,
+                input.suffix.len()
+            )));
+        }
+    }
     // Canonical member -> the request's spellings of it.
     let mut members: HashMap<String, Vec<&str>> = HashMap::new();
     for m in &plan.params.members {
@@ -250,15 +288,11 @@ fn read_role(
     // Canonical suffix -> the inputs asking for it, in first-seen order.
     let mut by_suffix: Vec<(Vec<String>, Vec<&Input>)> = Vec::new();
     for input in inputs {
-        let canonical: Option<Vec<String>> = (input.suffix.len() + 1 == keys.len())
-            .then(|| {
-                keys[1..]
-                    .iter()
-                    .zip(&input.suffix)
-                    .map(|(c, v)| normalize_key(v, c.ty).ok())
-                    .collect()
-            })
-            .flatten();
+        let canonical: Option<Vec<String>> = keys[1..]
+            .iter()
+            .zip(&input.suffix)
+            .map(|(c, v)| normalize_key(v, c.ty).ok())
+            .collect();
         let Some(canonical) = canonical else { continue };
         match by_suffix.iter_mut().find(|(s, _)| *s == canonical) {
             Some((_, list)) => list.push(input),
@@ -280,7 +314,7 @@ fn read_role(
         for (suffix, asking) in &by_suffix {
             let mut feed = Vec::new();
             for input in asking {
-                let Some(&ci) = column_index.get(input.column) else {
+                let Some(ci) = value_index(input.column) else {
                     continue;
                 };
                 for spelling in &members[*member] {
@@ -731,6 +765,48 @@ mod tests {
         assert_eq!(found.current.map(|(_, v)| v), Some(0.20));
     }
 
+    /// The datasets `text` declares, as the configuration reader builds
+    /// them.
+    fn schema_with(text: &str) -> SchemaSpec {
+        let doc = geode_core::config::merge_docs(
+            "datasets",
+            &[geode_core::config::LayerDoc::builtin("datasets", text).unwrap()],
+        );
+        let (parsed, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        parsed
+    }
+
+    #[test]
+    fn a_table_role_needs_a_history_dataset_keyed_by_underlying_with_one_value() {
+        let schema = schema_with(
+            "[ssr]\nfamily = \"history\"\nkey = [\"underlying_ref\", \"tenor\"]\n\
+             [ssr.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [ssr.columns.tenor]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [ssr.columns.ssr]\ntype = \"f64\"\nrole = \"value\"\n\
+             [two]\nfamily = \"history\"\nkey = [\"underlying_ref\"]\n\
+             [two.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [two.columns.a]\ntype = \"f64\"\nrole = \"value\"\n\
+             [two.columns.b]\ntype = \"f64\"\nrole = \"value\"\n\
+             [nokey]\nfamily = \"history\"\nkey = [\"tenor\"]\n\
+             [nokey.columns.tenor]\ntype = \"utf8\"\nrole = \"dimension\"\n\
+             [nokey.columns.v]\ntype = \"f64\"\nrole = \"value\"\n",
+        );
+        assert!(check_dataset(&schema, "ssr", &Role::Table("ssr".into())).is_ok());
+        assert_eq!(
+            check_dataset(&schema, "two", &Role::Table("two".into())).unwrap_err(),
+            "'two' has 2 value columns; a table measure reads one"
+        );
+        assert_eq!(
+            check_dataset(&schema, "nokey", &Role::Table("nokey".into())).unwrap_err(),
+            "'nokey' is not keyed by underlying_ref first"
+        );
+        assert_eq!(
+            check_dataset(&schema, "missing", &Role::Table("missing".into())).unwrap_err(),
+            "'missing' is not a declared history dataset"
+        );
+    }
+
     /// A realized history dataset beside the seeded surface: key
     /// `(underlying_ref, window)`, value `vol`.
     fn with_realized(store: &Store, schema: &mut SchemaSpec) {
@@ -751,13 +827,7 @@ role = "dimension"
 type = "f64"
 role = "value"
 "#;
-        let doc = geode_core::config::merge_docs(
-            "datasets",
-            &[geode_core::config::LayerDoc::builtin("datasets", text).unwrap()],
-        );
-        let (parsed, diags) = SchemaSpec::from_doc(&doc);
-        assert!(diags.is_empty(), "{diags:?}");
-        let ds = parsed.dataset("realized_vol").unwrap().clone();
+        let ds = schema_with(text).dataset("realized_vol").unwrap().clone();
         store.apply_schema(&ds).unwrap();
         schema.datasets.push(ds);
     }
@@ -812,6 +882,51 @@ role = "value"
             assert!(cell.changes.iter().all(Option::is_none), "{cell:?}");
             assert_eq!(cell.pctl, None, "{cell:?}");
         }
+    }
+
+    /// A table measure reads its dataset's one value column by name, and a
+    /// suffix of the wrong width is the dataset's error, not a tuple asked
+    /// of the store: the realized dataset has a table's shape, so it serves
+    /// as one here.
+    #[test]
+    fn a_table_measure_reads_the_one_value_and_refuses_a_suffix_of_the_wrong_width() {
+        let (_dir, store, mut schema) = seeded();
+        with_realized(&store, &mut schema);
+        store
+            .writer()
+            .execute_batch(&format!(
+                "insert into {table} (underlying_ref, \"window\", ts, received_at, vol) values
+                 ('SPX', '20D', TIMESTAMP '2026-01-10 21:00:00', TIMESTAMP '2026-01-10 21:05:00', 0.15),
+                 ('SPX', '20D', TIMESTAMP '2026-01-09 21:00:00', TIMESTAMP '2026-01-10 21:05:00', 0.14)",
+                table = history_table("realized_vol")
+            ))
+            .unwrap();
+        let table = |suffix: &[&str]| Measure::Table {
+            dataset: "realized_vol".into(),
+            suffix: suffix.iter().map(|s| s.to_string()).collect(),
+        };
+        let mut p = plan(vec![table(&["20D"])], None, None);
+        p.params.tables = vec!["realized_vol".into()];
+        let board = read_board(store.writer(), &schema, &p).unwrap();
+        assert!(
+            board.dataset_errors.is_empty(),
+            "{:?}",
+            board.dataset_errors
+        );
+        let cell = &board.rows[0].cells[0];
+        assert_eq!(cell.current, Some(0.15));
+        assert!((cell.changes[0].as_ref().unwrap().value - 0.01).abs() < 1e-12);
+
+        p.params.measures = vec![table(&["20D", "x"])];
+        let board = read_board(store.writer(), &schema, &p).unwrap();
+        assert_eq!(
+            board.dataset_errors,
+            vec![(
+                "realized_vol".to_string(),
+                "'realized_vol' takes 1 key values after the underlying, not 2".to_string()
+            )]
+        );
+        assert_eq!(board.rows[0].cells[0].current, None);
     }
 
     /// A member the cache holds nothing for has no observation at all, not

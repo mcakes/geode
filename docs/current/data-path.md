@@ -1600,11 +1600,20 @@ watchlist member, a cell per measure, each cell with its current value, a
 change per lookback (`D1`, `W1`, `M1`: one, five and twenty-one business
 days), an optional rank percentile over a window, and optional daily
 sparklines (`sparklines`, each a measure and a span, no measure twice;
-`VolRow::sparks` is parallel to them). The measures and their arithmetic are
+`VolRow::sparks` is parallel to them). With a window, each cell also
+carries `stats`: the population mean and sd and the count of the same
+daily observations the rank counts. The measures and their arithmetic are
 `geode_core::volboard::Measure`: points, forwards and realized and varswap
 levels read one tuple; skew, wing skew, slope, IV−RV and the varswap
 spread are first input minus second (`Skew` is the 25Δ put minus the 25Δ
-call, call deltas 0.75 and 0.25).
+call, call deltas 0.75 and 0.25). A `Table` measure (`<dataset> [k1]
+[k2]`, from `vol_views.toml`) reads one tuple of a declared `history`
+dataset keyed by `underlying_ref` first with exactly one value column; the
+request lists those datasets in `tables`, and each is planned as realized
+and varswap are. A table dataset that is drifted or has no source blanks
+its cells and lands in `dataset_errors`; an undeclared or misshaped one
+refuses (`'x' is not keyed by underlying_ref first`, `'x' has 2 value
+columns; a table measure reads one`).
 
 The service fixes `now` and the lookback instants once at submission, then
 plans these asks per dataset the measures (and the sparklines) touch:
