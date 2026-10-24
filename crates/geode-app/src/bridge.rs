@@ -1053,10 +1053,10 @@ pub fn start(
         setup.colours.clone(),
     ));
     let volslice = Rc::new(geode_volslice::VolsliceFactory::new(handle.clone()));
-    let volwatch = Rc::new(VolwatchFactory::new(
-        handle.clone(),
-        setup.volwatch_settings.clone(),
-    ));
+    let volwatch = Rc::new(
+        VolwatchFactory::new(handle.clone(), setup.volwatch_settings.clone())
+            .with_dims(setup.dimensions.clone()),
+    );
     // Pushed its startup snapshot now, before any tile is restored; every
     // reload pushes the next one.
     let classifications = Rc::new(geode_classifications::ClassificationsFactory::new(
@@ -1794,6 +1794,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
     // leave its views and refresh timers alone.
     {
         let pricer = bridge.pricer.clone();
+        let volwatch = bridge.volwatch.clone();
         let underlyings = bridge.underlyings.clone();
         let schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
@@ -1856,6 +1857,9 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     payout,
                 )
             };
+            // The vol factory groups by the same dimensions doc, which the
+            // key above carries: its tiles regroup here, through cx.
+            volwatch.set_dims(dims.clone(), cx);
             // Before `reload`: its rebuild re-applies every tile's scope
             // against the new dimensions.
             pricer.set_dims(dims);
@@ -3469,6 +3473,10 @@ role = "attribute"
             bridge.pricer.dims().get("region").is_none(),
             "fixture: built with no dimensions"
         );
+        assert!(
+            bridge.volwatch.dims().get("region").is_none(),
+            "the vol factory starts without the region"
+        );
         cx.update(|cx| attach(&bridge, window, cx));
         let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
             root.view().clone().downcast::<ShellView>().unwrap()
@@ -3484,6 +3492,12 @@ role = "attribute"
         let dims = bridge.pricer.dims();
         let region = dims.get("region").expect("the reload's dimensions");
         assert_eq!(region.from, "underlying_ref");
+        let vol_dims = bridge.volwatch.dims();
+        assert_eq!(
+            vol_dims.get("region").map(|d| d.from.as_str()),
+            Some("underlying_ref"),
+            "the reload pushed the dimensions to the vol factory"
+        );
     }
 
     /// Pricer view reloads follow the frame's config revision: the observer

@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use geode_core::context::DimensionContext;
+use geode_core::dimensions::DerivedDimensions;
 use geode_core::volviews::VolViews;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
@@ -99,6 +100,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("volwatch::refresh", "Vol: Refresh now"),
     ("volwatch::switch", "Vol: Switch list"),
     ("volwatch::menu", "Vol: Menu"),
+    ("volwatch::toggle", "Vol: Toggle group"),
+    ("volwatch::expand", "Vol: Expand group"),
+    ("volwatch::collapse", "Vol: Collapse group"),
+    ("volwatch::expand_all", "Vol: Expand all groups"),
+    ("volwatch::collapse_all", "Vol: Collapse all groups"),
     ("volwatch::visual_rows", "Vol: Select rows"),
     ("volwatch::escape", "Vol: Escape"),
     ("volwatch::commit", "Vol: Commit"),
@@ -112,9 +118,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
 
 /// Bindings scoped to the factory's `volwatch` context. The context
 /// publishes no `counts` flag: the digits pick the first nine tabs. `g`
-/// alone is unbound, so `g g` and `g w` stay reachable. While a menu is
-/// up the tile publishes `tilelist`, so the shell's shared `j`/`k` step
-/// its rows.
+/// alone is unbound, so `g g` and `g w` stay reachable. `Space` toggles
+/// the cursor's group row and `z` is the fold chord prefix, as in the
+/// blotter. While a menu is up the tile publishes `tilelist`, so the
+/// shell's shared `j`/`k` step its rows.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "volwatch && mode == normal"
@@ -143,6 +150,12 @@ context = "volwatch && mode == normal"
 "shift+r" = "volwatch::refresh"
 "g w" = "volwatch::switch"
 "." = "volwatch::menu"
+"space" = "volwatch::toggle"
+"z a" = "volwatch::toggle"
+"z o" = "volwatch::expand"
+"z c" = "volwatch::collapse"
+"z shift+r" = "volwatch::expand_all"
+"z shift+m" = "volwatch::collapse_all"
 "v" = "volwatch::visual_rows"
 "shift+v" = "volwatch::visual_rows"
 "j" = "volwatch::down"
@@ -174,10 +187,13 @@ context = "volwatch && mode == menu"
 "." = "volwatch::menu"
 "#;
 
-/// What every tile of the factory shares: the settings last pushed and
-/// the live tiles they are pushed to.
+/// What every tile of the factory shares: the settings and dimensions
+/// last pushed and the live tiles they are pushed to.
 pub(crate) struct Shared {
     pub(crate) settings: RefCell<VolwatchSettings>,
+    /// The derived dimensions the grouping chain is resolved against:
+    /// pushed at startup and on every dimensions reload, as the pricer's.
+    pub(crate) dims: RefCell<DerivedDimensions>,
     tiles: RefCell<Vec<WeakEntity<VolwatchTile>>>,
 }
 
@@ -307,9 +323,35 @@ impl VolwatchFactory {
             data,
             shared: Rc::new(Shared {
                 settings: RefCell::new(settings),
+                dims: RefCell::new(DerivedDimensions::default()),
                 tiles: RefCell::new(Vec::new()),
             }),
         }
+    }
+
+    /// The startup dimensions. Call before the first tile is created.
+    pub fn with_dims(self, dims: DerivedDimensions) -> Self {
+        *self.shared.dims.borrow_mut() = dims;
+        self
+    }
+
+    /// Replace the dimensions and regroup every live tile; a closed tile is
+    /// pruned here. No borrow is held across a tile's update.
+    pub fn set_dims(&self, dims: DerivedDimensions, cx: &mut App) {
+        *self.shared.dims.borrow_mut() = dims;
+        let live: Vec<Entity<VolwatchTile>> = {
+            let mut tiles = self.shared.tiles.borrow_mut();
+            tiles.retain(|t| t.upgrade().is_some());
+            tiles.iter().filter_map(WeakEntity::upgrade).collect()
+        };
+        for tile in live {
+            tile.update(cx, |t, cx| t.dims_changed(cx));
+        }
+    }
+
+    /// The dimensions the tiles group by.
+    pub fn dims(&self) -> DerivedDimensions {
+        self.shared.dims.borrow().clone()
     }
 
     /// Store `settings` and tell every live tile; a closed tile is pruned
@@ -406,7 +448,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 37 + 5 + 3);
+        assert_eq!(count, 43 + 5 + 3);
         let mut registry = ActionRegistry::default();
         geode_shell::defaults::register_builtin_actions(&mut registry);
         let (data, _rx) = DataHandle::for_tests();
@@ -417,6 +459,25 @@ mod tests {
             &registry,
         );
         assert!(diags.is_empty(), "{diags:?}");
+    }
+
+    #[test]
+    fn the_factory_holds_the_dimensions_it_is_given() {
+        use geode_core::config::{LayerDoc, merge_docs};
+        use geode_core::dimensions::DerivedDimensions;
+        let doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin(
+                "dimensions",
+                "[region]\nfrom = \"underlying_ref\"\n[region.values]\nCore = [\"DAX\"]\n",
+            )
+            .unwrap()],
+        );
+        let (dims, _) = DerivedDimensions::from_doc(&doc);
+        let (data, _rx) = DataHandle::for_tests();
+        let f = VolwatchFactory::new(data, VolwatchSettings::default()).with_dims(dims);
+        assert!(f.dims().get("region").is_some());
+        assert_eq!(f.dims().get("region").unwrap().from, "underlying_ref");
     }
 
     #[test]

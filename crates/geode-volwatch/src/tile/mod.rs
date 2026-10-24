@@ -599,6 +599,14 @@ impl VolwatchTile {
         cx.notify();
     }
 
+    /// The factory stored new dimensions: regroup. (Task 7 routes this
+    /// through `regroup`.)
+    pub(crate) fn dims_changed(&mut self, cx: &mut Context<Self>) {
+        self.rebuild_rows(cx);
+        self.rebuild_chrome(cx);
+        cx.notify();
+    }
+
     /// Whether the tile names a list the snapshot holds.
     fn shown_in(&self, snapshot: &WatchlistSnapshot) -> bool {
         self.state
