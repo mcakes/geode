@@ -1,6 +1,7 @@
 //! Deterministic Hanweck/KDB-style history for the demo: constant-maturity
-//! implied-vol surface points (`surface`), realized vol (`realized`) and
-//! variance-swap strikes (`varswap`) for the demo underlyings.
+//! implied-vol surface points (`surface`), realized vol (`realized`),
+//! variance-swap strikes (`varswap`) and the skew-stickiness ratio (`ssr`)
+//! for the demo underlyings.
 //!
 //! Every value is a pure function of `(seed, key, day)`, so overlapping
 //! asks agree and the service's coverage subtraction is sound. Each
@@ -43,9 +44,9 @@ pub use geode_demo_data::UNDERLYINGS;
 
 /// The adapter name the `[hanweck_*]` demo sources select.
 pub const DEMO_HANWECK: &str = "demo_hanweck";
-pub const TENORS: [&str; 8] = ["1M", "2M", "3M", "6M", "1Y", "18M", "2Y", "3Y"];
-/// Call deltas: 0.9 is the low-strike (downside) wing, 0.1 the upside.
-pub const DELTAS: [f64; 5] = [0.10, 0.25, 0.50, 0.75, 0.90];
+pub const TENORS: [&str; 10] = ["1W", "1M", "2M", "3M", "6M", "1Y", "18M", "2Y", "3Y", "5Y"];
+/// Call deltas: 0.95 is the low-strike (downside) wing, 0.05 the upside.
+pub const DELTAS: [f64; 7] = [0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95];
 pub const WINDOWS: [&str; 3] = ["5D", "20D", "60D"];
 
 /// A Monday, and the first day with a close. Far enough back that a
@@ -147,12 +148,13 @@ fn weekday_index(d: NaiveDate) -> Option<usize> {
     (is_weekday(d) && d >= EPOCH).then(|| weekdays_between(EPOCH, d) as usize)
 }
 
-/// The three tables' key columns, in key order.
+/// The four tables' key columns, in key order.
 fn key_columns(table: &str) -> Option<&'static [&'static str]> {
     match table {
         "surface" => Some(&["underlying_ref", "tenor", "delta"]),
         "realized" => Some(&["underlying_ref", "window"]),
         "varswap" => Some(&["underlying_ref", "tenor"]),
+        "ssr" => Some(&["underlying_ref", "tenor"]),
         _ => None,
     }
 }
@@ -254,7 +256,16 @@ fn close(seed: u64, table: &str, tuple: &[String], walk: &[f64], index: usize) -
             let a = atm(x, tenor);
             vec![a + 1.4 * skew(tenor) * a / 10.0]
         }
-        _ => unreachable!("key_columns knows only the three tables"),
+        "ssr" => {
+            // Skew-stickiness ratio: how far the ATM moves per unit of spot
+            // move in skew terms; around 1.5 in calm markets, rising with
+            // the walk's level and flattening with term, clamped to a
+            // plausible band.
+            let tenor = tuple[1].as_str();
+            let a = atm(x, tenor);
+            vec![(1.0 + 0.8 * skew(tenor) + 0.02 * (a - 15.0)).clamp(0.5, 3.0)]
+        }
+        _ => unreachable!("key_columns knows only the four tables"),
     }
 }
 
@@ -494,6 +505,10 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
     fn keys(v: &[&[&str]]) -> Vec<Vec<String>> {
         v.iter()
             .map(|t| t.iter().map(|s| s.to_string()).collect())
@@ -576,6 +591,32 @@ mod tests {
             atm.windows(2).all(|w| w[0] < w[1]),
             "ATM rises along the term: {atm:?}"
         );
+    }
+
+    #[test]
+    fn the_surface_ladders_1w_to_5y_at_seven_deltas_and_ssr_is_a_fourth_table() {
+        assert_eq!(TENORS.first(), Some(&"1W"));
+        assert_eq!(TENORS.last(), Some(&"5Y"));
+        assert_eq!(DELTAS.len(), 7);
+        assert_eq!(DELTAS[0], 0.05);
+        assert_eq!(DELTAS[6], 0.95);
+        let day = day(2026, 1, 13);
+        let wing_lo = point(42, "surface", &["SPX", "3M", "0.95"], day).unwrap()[0];
+        let put = point(42, "surface", &["SPX", "3M", "0.75"], day).unwrap()[0];
+        let atm = point(42, "surface", &["SPX", "3M", "0.5"], day).unwrap()[0];
+        let call = point(42, "surface", &["SPX", "3M", "0.25"], day).unwrap()[0];
+        let wing_hi = point(42, "surface", &["SPX", "3M", "0.05"], day).unwrap()[0];
+        assert!(wing_lo > put && put > atm && atm > call && call > wing_hi);
+        let week = point(42, "surface", &["SPX", "1W", "0.5"], day).unwrap()[0];
+        let five = point(42, "surface", &["SPX", "5Y", "0.5"], day).unwrap()[0];
+        assert!(week < atm && atm < five, "the term rises end to end");
+        let ssr = point(42, "ssr", &["SPX", "3M"], day).unwrap();
+        assert_eq!(ssr.len(), 1);
+        assert!((0.5..=3.0).contains(&ssr[0]), "{ssr:?}");
+        assert!(point(42, "ssr", &["SPX", "3M", "0.5"], day).is_none());
+        let mut h = DemoHanweck::new(42).history().unwrap();
+        assert_eq!(h.keys("ssr", "tenor"), Some(strings(&TENORS)));
+        assert!(h.keys("ssr", "delta").is_none());
     }
 
     #[test]
@@ -825,15 +866,16 @@ mod tests {
         assert_eq!(adapter.name(), DEMO_HANWECK);
         assert!(adapter.subscription().is_none() && adapter.egress().is_none());
         let mut h = adapter.history().unwrap();
-        let strings = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(h.keys("surface", "tenor"), Some(strings(&TENORS)));
         assert_eq!(h.keys("varswap", "tenor"), Some(strings(&TENORS)));
         assert_eq!(
             h.keys("surface", "delta"),
-            Some(strings(&["0.1", "0.25", "0.5", "0.75", "0.9"]))
+            Some(strings(&[
+                "0.05", "0.1", "0.25", "0.5", "0.75", "0.9", "0.95"
+            ]))
         );
         assert_eq!(h.keys("realized", "window"), Some(strings(&WINDOWS)));
-        for table in ["surface", "realized", "varswap"] {
+        for table in ["surface", "realized", "varswap", "ssr"] {
             assert_eq!(h.keys(table, "underlying_ref"), Some(strings(&UNDERLYINGS)));
         }
         assert_eq!(h.keys("surface", "vol"), None);

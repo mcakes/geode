@@ -378,9 +378,10 @@ no `topics`); `datasets.toml` `family = "series"` with `retention`;
 
 ### Vol surface history (Hanweck)
 
-**For:** constant-maturity implied-vol surface points, realized vol and
-variance-swap strikes per underlying, asked per key on demand and cached in
-`history` datasets (`vol_surface`, `realized_vol`, `varswap` in the demo).
+**For:** constant-maturity implied-vol surface points, realized vol,
+variance-swap strikes and the skew-stickiness ratio per underlying, asked
+per key on demand and cached in `history` datasets (`vol_surface`,
+`realized_vol`, `varswap`, `ssr` in the demo).
 The vol board request reads them (see
 [board requests](data-path.md#board-requests)), and the vol watchlist tile
 paints the board (see [Vol watchlist](features.md#vol-watchlist)).
@@ -388,13 +389,15 @@ paints the board (see [Vol watchlist](features.md#vol-watchlist)).
 **Simulator:** `DemoHanweck` in
 [`demo_hanweck.rs`](../../crates/geode-compose/src/demo_hanweck.rs)
 (`demo_hanweck`), behind the demo layer's `hanweck_surface`,
-`hanweck_realized` and `hanweck_varswap` sources. Every value is a pure
-function of seed, key and day: one close per weekday at 21:00 UTC from
-2024-06-03, plus five-minute intraday points from 14:30 UTC up to now on the
-current business day only (answered by `Latest`, `At` and `Between` alike,
-so a cached span answers as the source would), no holidays, and nothing
-after the adapter's clock. Ten underlyings, tenors 1M to 3Y, call deltas 0.1 to 0.9, realized
-windows 5D, 20D and 60D. Enabled by `--demo`.
+`hanweck_realized`, `hanweck_varswap` and `hanweck_ssr` sources. Every value
+is a pure function of seed, key and day: one close per weekday at 21:00 UTC
+from 2024-06-03, plus five-minute intraday points from 14:30 UTC up to now
+on the current business day only (answered by `Latest`, `At` and `Between`
+alike, so a cached span answers as the source would), no holidays, and
+nothing after the adapter's clock. Ten underlyings, tenors 1W to 5Y (`1W 1M
+2M 3M 6M 1Y 18M 2Y 3Y 5Y`), call deltas 0.05 to 0.95, realized windows 5D,
+20D and 60D, and a precomputed skew-stickiness ratio per tenor. Enabled by
+`--demo`.
 
 **Seam:** implement `HistoryQuery` and return it from `Adapter::history()`:
 
@@ -430,16 +433,20 @@ windows, and `order = "tenor"` on a tenor or window key column.
 | `surface` | `vol_surface` | `underlying_ref`, `tenor`, `delta` | `vol`, `forward` |
 | `realized` | `realized_vol` | `underlying_ref`, `window` | `vol` |
 | `varswap` | `varswap` | `underlying_ref`, `tenor` | `strike` |
+| `ssr` | `ssr` | `underlying_ref`, `tenor` | `ssr` |
 
 **Guessed:**
 
 - The KDB table names and their column names.
-- Delta convention: call delta as an f64 (0.9 is the low-strike wing),
+- Delta convention: call delta as an f64 (0.95 is the low-strike wing),
   not put deltas or `25P`/`25C` labels.
 - Tenor labels (`1M`, `18M`, `1Y`) as `<n>D|W|M|Y`; a vendor spelling
   `12M` and `1Y` for the same point would be two keys.
 - That realized vol and varswap strikes are precomputed upstream, not
   derived here from prices.
+- That SSR (and any further desk analytic such as realized spot/vol
+  covariance) arrives precomputed per underlying and tenor; the board never
+  derives it from spot and vol series.
 - One observation per key per timestamp, and that history once answered
   does not change: a covered span is never asked again, so a later vendor
   correction reaches the cache only through an ask the cache cannot answer

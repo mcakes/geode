@@ -1021,6 +1021,26 @@ order = "tenor"
 type = "f64"
 role = "value"
 
+# Precomputed skew-stickiness ratio per underlying and tenor, as the feed
+# would publish it; the vol board reads it by name (`ssr 3M` in
+# vol_views.toml) through the open measure form.
+[ssr]
+family = "history"
+key = ["underlying_ref", "tenor"]
+history = "400d"
+retention = "7d"
+[ssr.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[ssr.columns.tenor]
+type = "utf8"
+role = "dimension"
+order = "tenor"
+[ssr.columns.ssr]
+type = "f64"
+role = "value"
+
 # ---- Underlying reference data. ----
 # One row per underlying: system ticker to vendor tickers and static
 # attributes. `geode_compose::demo_refdb` serves it through the generated

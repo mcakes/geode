@@ -74,15 +74,16 @@ Its `calendar` column is an exchange calendar code; no holiday dates are
 modelled. `fail_next` and the query delay exercise the degraded and slow
 paths in tests.
 
-`demo_hanweck` answers the three history datasets for the ten demo
-underlyings, eight tenors (1M to 3Y), five call deltas (0.1 to 0.9) and three
-realized windows (5D, 20D, 60D). Every value is a pure function of seed, key
-and day, so overlapping asks agree: each underlying's log vol level walks a
-mean-reverting AR(1) from 2024-06-03 with shocks on the 3rd Monday of March
-and the 2nd Monday of October; the term structure rises, the skew is steeper
-on the low-strike side, realized vol for a window `<W>D` tracks the 1M
-implied W weekdays ago, and the varswap strike sits above ATM. There is one
-close per weekday at 21:00 UTC. The current business day (the adapter's clock
+`demo_hanweck` answers the four history datasets for the ten demo
+underlyings, ten tenors (1W to 5Y), seven call deltas (0.05 to 0.95) and
+three realized windows (5D, 20D, 60D). Every value is a pure function of
+seed, key and day, so overlapping asks agree: each underlying's log vol level
+walks a mean-reverting AR(1) from 2024-06-03 with shocks on the 3rd Monday of
+March and the 2nd Monday of October; the term structure rises, the skew is
+steeper on the low-strike side, realized vol for a window `<W>D` tracks the
+1M implied W weekdays ago, the varswap strike sits above ATM, and the
+skew-stickiness ratio (`ssr`) is precomputed per tenor. There is one close
+per weekday at 21:00 UTC. The current business day (the adapter's clock
 on a weekday) also has a point at every five-minute mark from 14:30 up to
 now, before 21:00: that day's close with its vol (not its forward) nudged.
 Past days have their close only. `Latest` and `At` answer the last
