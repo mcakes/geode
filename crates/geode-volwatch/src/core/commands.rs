@@ -95,6 +95,10 @@ pub fn parse(line: &str, columns: &[Column]) -> Result<Command, String> {
                         .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .collect();
+                    // Commas alone name nothing: a bare `group` by a side door.
+                    if dims.is_empty() {
+                        return Err(GROUP_USAGE.into());
+                    }
                     // `none` is the flat pin, never a dimension.
                     if dims.iter().any(|d| d == "none") {
                         return Err("none stands alone: `group none`".into());
@@ -319,6 +323,9 @@ mod tests {
         assert_eq!(parse("group none", &cols).unwrap(), Command::GroupNone);
         assert_eq!(parse("unpin", &cols).unwrap(), Command::Unpin);
         assert_eq!(parse("group", &cols).unwrap_err(), GROUP_USAGE);
+        for empty in ["group ,", "group ,,", "group , ,"] {
+            assert_eq!(parse(empty, &cols).unwrap_err(), GROUP_USAGE, "{empty}");
+        }
         assert_eq!(parse("group save", &cols).unwrap_err(), REFUSED_GROUP_SAVE);
         assert_eq!(
             parse("group slot", &cols).unwrap_err(),
