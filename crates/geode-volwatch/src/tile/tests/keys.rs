@@ -45,6 +45,12 @@ fn every_key_reaches_its_action(cx: &mut gpui::TestAppContext) {
         ("escape", "volwatch::escape"),
         ("g w", "volwatch::switch"),
         ("escape", "volwatch::escape"),
+        ("space", "volwatch::toggle"),
+        ("z o", "volwatch::expand"),
+        ("z c", "volwatch::collapse"),
+        ("z a", "volwatch::toggle"),
+        ("z shift-r", "volwatch::expand_all"),
+        ("z shift-m", "volwatch::collapse_all"),
     ] {
         h.press(&mut vcx, keys);
         assert_eq!(
@@ -512,6 +518,9 @@ fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpu
             "Swap level / companion",
             "Paint",
             "Sort by column",
+            "Toggle group",
+            "Expand all groups",
+            "Collapse all groups",
             "Inspect row",
             "Open timeseries",
             "Yank cell",

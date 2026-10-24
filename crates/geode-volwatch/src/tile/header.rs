@@ -1,6 +1,7 @@
 //! The tile's chrome, top to bottom: the shared header strip (the mark,
 //! the `Vol · <list> ▾` switch control with the switcher hung beneath it,
-//! the member count, the lens chips (the lookbacks under moves, the
+//! the member count, the grouping chip (muted while nothing groups), the
+//! lens chips (the lookbacks under moves, the
 //! windows under rich/cheap) with the one in force lit, the sort chip, the
 //! members not in the surface in the warning tone, one chip per failed
 //! dataset in the danger tone; in the cluster the mode, the in-flight `…`,
@@ -342,6 +343,19 @@ fn render_header(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTi
                 .text_color(muted)
                 .debug_selector(move || format!("volwatch-count-{id}"))
                 .child(h.count_text.clone()),
+        )
+        // The grouping chip: the chain in force, muted while nothing
+        // groups.
+        .child(
+            div()
+                .flex_none()
+                .text_color(if h.grouping_muted {
+                    muted
+                } else {
+                    theme.foreground
+                })
+                .debug_selector(move || format!("volwatch-grouping-{id}"))
+                .child(h.grouping.clone()),
         )
         .child(lens_chips(tile, theme, cx))
         .when_some(h.sort.clone(), |el, sort| {

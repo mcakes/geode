@@ -59,6 +59,9 @@ struct ShellStandIn {
     /// Every action id the keymap matched, in order, whether or not the
     /// tile carried it out.
     dispatched: Rc<RefCell<Vec<String>>>,
+    /// Left presses that bubbled up to the stand-in, as the shell's
+    /// click-to-focus listener on a tile would see them.
+    presses: Rc<std::cell::Cell<u32>>,
 }
 
 impl gpui::Render for ShellStandIn {
@@ -70,6 +73,10 @@ impl gpui::Render for ShellStandIn {
             // from gpui-component's Root focus cycling.
             .key_context("GeodeShell")
             .track_focus(&self.focus)
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let presses = self.presses.clone();
+                move |_, _, _| presses.set(presses.get() + 1)
+            })
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let context = this.content.key_context(cx);
                 let Some(keystroke) = geode_shell::shell::keys::convert_keystroke(&event.keystroke)
@@ -124,6 +131,7 @@ pub(super) struct Harness {
     pub frame: Entity<Frame>,
     pub diagnostics: Entity<Diagnostics>,
     dispatched: Rc<RefCell<Vec<String>>>,
+    presses: Rc<std::cell::Cell<u32>>,
 }
 
 struct Built {
@@ -159,11 +167,13 @@ pub(super) fn open_with(
     });
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let dispatched: Rc<RefCell<Vec<String>>> = Rc::default();
+    let presses: Rc<std::cell::Cell<u32>> = Rc::default();
     let window = cx
         .update(|cx| {
             let slot = slot.clone();
             let factory = factory.clone();
             let dispatched = dispatched.clone();
+            let presses = presses.clone();
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let frame =
                     cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
@@ -189,6 +199,7 @@ pub(super) fn open_with(
                     keymap: keymap.clone(),
                     matcher: Matcher::default(),
                     dispatched,
+                    presses,
                 });
                 *slot.borrow_mut() = Some(Built {
                     content,
@@ -218,6 +229,7 @@ pub(super) fn open_with(
             frame: built.frame,
             diagnostics: built.diagnostics,
             dispatched,
+            presses,
         },
         vcx,
     )
@@ -465,6 +477,11 @@ impl Harness {
     /// Every action id the keymap matched so far, in order.
     pub(super) fn dispatched(&self, _vcx: &gpui::VisualTestContext) -> Vec<String> {
         self.dispatched.borrow().clone()
+    }
+
+    /// How many left presses have bubbled up to the shell stand-in.
+    pub(super) fn presses(&self) -> u32 {
+        self.presses.get()
     }
 
     /// Paint a frame, so debug bounds follow the state.

@@ -12,9 +12,10 @@ use gpui::{App, Context, SharedString, Window};
 
 use super::table::sortable;
 use super::{
-    INSPECT_ACTION, LENS_ACTION, LOOKBACK_ACTION, METRIC_ACTION, PAINT_ACTION, REFRESH_ACTION,
-    SHOWN_ACTION, SORT_ACTION, SWITCH_ACTION, TIMESERIES_ACTION, VIEW_ACTIONS, VolwatchTile,
-    WINDOW_ACTION, YANK_ACTION, snapshot,
+    COLLAPSE_ALL_ACTION, EXPAND_ALL_ACTION, INSPECT_ACTION, LENS_ACTION, LOOKBACK_ACTION,
+    METRIC_ACTION, PAINT_ACTION, REFRESH_ACTION, SHOWN_ACTION, SORT_ACTION, SWITCH_ACTION,
+    TIMESERIES_ACTION, TOGGLE_ACTION, VIEW_ACTIONS, VolwatchTile, WINDOW_ACTION, YANK_ACTION,
+    snapshot,
 };
 use crate::core::grouping;
 use crate::core::model::header;
@@ -242,7 +243,8 @@ impl VolwatchTile {
 
     /// The verbs for the current state: the active view and paint are
     /// ticked; a verb its key would refuse, or whose effect the view
-    /// cannot show, is disabled with the reason.
+    /// cannot show, is disabled with the reason. The fold verbs need a
+    /// grouped tile, and the toggle a group row under the cursor.
     pub(super) fn actions_rows(&self) -> Vec<MenuRow<Pick>> {
         // `m` swaps the number a single cell shows; a pair view shows both.
         let swap = if self.cells == Cells::Single {
@@ -258,11 +260,24 @@ impl VolwatchTile {
         };
         let inspect = match self.cursor_row() {
             None => Err(SharedString::new_static("no row")),
+            Some(r) if r.group.is_some() => {
+                Err(SharedString::new_static("inspect needs an underlying"))
+            }
             Some(r) if self.board.is_some() && !r.present => Err(SharedString::from(format!(
                 "{} is not in the surface",
                 r.name
             ))),
             Some(_) => Ok(()),
+        };
+        let grouped = if self.grouping.kept.is_empty() {
+            Err(SharedString::new_static("the tile is not grouped"))
+        } else {
+            Ok(())
+        };
+        let on_group = if self.cursor_row().is_some_and(|r| r.group.is_some()) {
+            Ok(())
+        } else {
+            Err(SharedString::new_static("the cursor is not on a group"))
         };
         let mut rows = vec![
             MenuRow::Action(self.verb(SWITCH_ACTION, "Switch list\u{2026}")),
@@ -288,6 +303,15 @@ impl VolwatchTile {
             ),
             MenuRow::Action(self.verb(PAINT_ACTION, "Paint").checked(self.paint)),
             MenuRow::Action(self.verb(SORT_ACTION, "Sort by column").enabled(sort)),
+            MenuRow::Action(self.verb(TOGGLE_ACTION, "Toggle group").enabled(on_group)),
+            MenuRow::Action(
+                self.verb(EXPAND_ALL_ACTION, "Expand all groups")
+                    .enabled(grouped.clone()),
+            ),
+            MenuRow::Action(
+                self.verb(COLLAPSE_ALL_ACTION, "Collapse all groups")
+                    .enabled(grouped),
+            ),
             MenuRow::Separator,
             MenuRow::Action(self.verb(INSPECT_ACTION, "Inspect row").enabled(inspect)),
             MenuRow::Action(self.verb(TIMESERIES_ACTION, "Open timeseries")),

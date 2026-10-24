@@ -12,22 +12,24 @@ use geode_shell::colfit::{
     CURSOR_BORDER_PX, FitMetrics, FittedWidths, TABLE_TEXT_REM, widths_from_record,
 };
 use geode_shell::fonts;
+use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
 use geode_widgets::cell::heat::HeatPaint;
 use geode_widgets::cell::{design, widths};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, Pixels,
-    Point, SharedString, Stateful, Window, div, px, rems,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FontWeight, Hsla, MouseButton,
+    MouseDownEvent, Pixels, Point, SharedString, Stateful, Window, div, px, rems,
 };
 use gpui_component::table::{
     Column as TableColumn, ColumnGroup, ColumnSort, DataTable, TableDelegate, TableState,
 };
-use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme};
+use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex};
 
 use crate::core::model::{
-    Glyph, Prepared, PreparedCell, PreparedRow, SORT_MARK_DESIGN_PX, glyph_width,
+    CHEVRON_PX, Glyph, Prepared, PreparedCell, PreparedRow, SORT_MARK_DESIGN_PX, TREE_INDENT_PX,
+    glyph_width,
 };
 use crate::core::views::{Column, ColumnKind};
 
@@ -61,6 +63,9 @@ pub(crate) struct Paints {
     pub(crate) stripe_ring: Hsla,
     pub(crate) plain_ring: Hsla,
     pub(crate) selection_ring: Hsla,
+    /// A group row's chevron: a bare glyph on the table's ground, so its
+    /// hover and press read as a control's.
+    pub(crate) chevron: control::ControlPaint,
 }
 
 /// A selected row's tint, under the table's own cursor-row highlight.
@@ -116,6 +121,7 @@ impl Paints {
             stripe_ring: ground.blend(t.table_even),
             plain_ring: ground,
             selection_ring: ground.blend(selection_tint(t)),
+            chevron: control::paint(t, control::Rest::Bare, ground, muted),
         }
     }
 }
@@ -129,6 +135,9 @@ pub(crate) enum GridEvent {
     RowContext { row: usize, position: Point<Pixels> },
     /// A press on a sortable column's head or its sort control.
     HeadPressed(usize),
+    /// A press on shown group row `row`'s chevron: a fold, never a cursor
+    /// move.
+    TogglePressed { row: usize },
 }
 
 impl gpui::EventEmitter<GridEvent> for TableState<GridDelegate> {}
@@ -197,6 +206,15 @@ pub(crate) struct GridDelegate {
     view: String,
     /// Shown rows in painted order, as indices into `prepared.rows`.
     pub(crate) visible: Vec<usize>,
+    /// Parallel to `visible`: whether the shown row is a collapsed group,
+    /// for its chevron.
+    collapsed: Vec<bool>,
+    /// A left press a chevron owns, recorded on the way up so the row it
+    /// bubbles through next does not report it as a row press (which would
+    /// move the cursor onto the group). Recorded, not stopped: the shell's
+    /// click-to-focus is a bubble-phase listener on the tile, and a stopped
+    /// press would fold a group in a tile that never took focus.
+    chevron_pressed: bool,
     /// (shown row, column) under the cursor.
     pub(crate) cursor: Option<(usize, usize)>,
     pub(crate) selection: Option<Range<usize>>,
@@ -230,6 +248,8 @@ impl GridDelegate {
             columns: Rc::default(),
             view: String::new(),
             visible: Vec::new(),
+            collapsed: Vec::new(),
+            chevron_pressed: false,
             cursor: None,
             selection: None,
             sorted: None,
@@ -289,8 +309,10 @@ impl GridDelegate {
         cursor: Option<(usize, usize)>,
         selection: Option<Range<usize>>,
         empty: SharedString,
+        collapsed: Vec<bool>,
     ) {
         self.visible = visible;
+        self.collapsed = collapsed;
         self.cursor = cursor;
         self.selection = selection;
         self.empty = empty;
@@ -298,6 +320,12 @@ impl GridDelegate {
 
     pub(crate) fn set_paints(&mut self, paints: Paints) {
         self.paints = paints;
+    }
+
+    /// Whether the press now bubbling through a row began on its chevron;
+    /// cleared by the asking.
+    fn take_chevron_press(&mut self) -> bool {
+        std::mem::take(&mut self.chevron_pressed)
     }
 
     /// `true` when the rem changed: the widths follow it.
@@ -628,7 +656,10 @@ impl TableDelegate for GridDelegate {
             .when(in_selection, |el| el.bg(tint))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |_, e: &MouseDownEvent, _, cx| {
+                cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                    if this.delegate_mut().take_chevron_press() {
+                        return;
+                    }
                     let m = e.modifiers;
                     if m.platform || m.control || m.alt {
                         return;
@@ -681,6 +712,66 @@ impl TableDelegate for GridDelegate {
         let cell_id = cell.id.clone();
         let underlying = column.kind == ColumnKind::Underlying;
         let content: AnyElement = match &cell.glyph {
+            // The name cell leads with the tree: the depth's indent, then
+            // on a group row a chevron (open `▾`, collapsed `▸`) in its own
+            // slot and the label at medium weight, so a member one level
+            // down lines up under its group's label. The chevron's press
+            // folds the group as `space` does and leaves the cursor: the
+            // row declines a press the chevron recorded, and the click is
+            // stopped so the table's own row selection never sees it. A
+            // double-click toggles once, on its first press.
+            Glyph::None if underlying => {
+                let lead = design(row.depth as f32 * TREE_INDENT_PX);
+                let group = row.group.is_some();
+                let collapsed = self.collapsed.get(row_ix).copied().unwrap_or(false);
+                let fold_name: SharedString = format!("volwatch-fold-{}", row.name).into();
+                let fold_sel = fold_name.clone();
+                let chevron = p.chevron;
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .pl(lead)
+                    .when(group, |el| {
+                        el.child(
+                            div()
+                                .id(ElementId::Name(fold_name.clone()))
+                                .flex_none()
+                                .w(design(CHEVRON_PX))
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(theme.radius_tokens().sm)
+                                .text_color(theme.muted_foreground)
+                                .pointer_states(chevron)
+                                .debug_selector(move || fold_sel.to_string())
+                                .child(if collapsed { "\u{25b8}" } else { "\u{25be}" })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, e: &MouseDownEvent, _, cx| {
+                                        this.delegate_mut().chevron_pressed = true;
+                                        if e.click_count > 1 {
+                                            return;
+                                        }
+                                        cx.emit(GridEvent::TogglePressed { row: row_ix });
+                                    }),
+                                )
+                                .on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                })),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_color(tone)
+                            .when(group, |el| el.font_weight(FontWeight::MEDIUM))
+                            .truncate()
+                            .debug_selector(move || format!("{id}-text"))
+                            .child(text),
+                    )
+                    .into_any_element()
+            }
             // Plain text fills the cell, shrinks with it and aligns as
             // text, so a column narrower than its number cuts the trailing
             // side into an ellipsis; a child that kept its own width would
@@ -690,7 +781,7 @@ impl TableDelegate for GridDelegate {
                 .w_full()
                 .min_w_0()
                 .text_color(tone)
-                .when(!underlying, |el| el.text_right())
+                .text_right()
                 .truncate()
                 .debug_selector(move || format!("{id}-text"))
                 .child(text)

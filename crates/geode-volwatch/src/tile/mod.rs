@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use geode_core::clock::Clock;
-use geode_core::link::{CursorScope, Emission, underlying_scope};
+use geode_core::link::{CursorScope, Emission, UNDERLYING, path_scope};
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
 use geode_core::volboard::{Lookback, Role, VolBoard};
@@ -101,6 +101,21 @@ const VISUAL_ACTION: &str = "volwatch::visual_rows";
 const INSPECT_ACTION: &str = "volwatch::inspect";
 const TIMESERIES_ACTION: &str = "volwatch::timeseries";
 pub(super) const MENU_ACTION: &str = "volwatch::menu";
+pub(super) const TOGGLE_ACTION: &str = "volwatch::toggle";
+const EXPAND_ACTION: &str = "volwatch::expand";
+const COLLAPSE_ACTION: &str = "volwatch::collapse";
+pub(super) const EXPAND_ALL_ACTION: &str = "volwatch::expand_all";
+pub(super) const COLLAPSE_ALL_ACTION: &str = "volwatch::collapse_all";
+
+/// The fold verbs, the blotter's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fold {
+    Toggle,
+    Open,
+    Close,
+    OpenAll,
+    CloseAll,
+}
 
 /// The tile's motion actions and the shared grid motions they name.
 const MOTIONS: [(&str, &str); 6] = [
@@ -510,7 +525,7 @@ impl VolwatchTile {
     }
 
     /// The row under the cursor.
-    fn cursor_row(&self) -> Option<&Row> {
+    pub(super) fn cursor_row(&self) -> Option<&Row> {
         self.grid
             .cursor()
             .and_then(|at| self.grid.visible().get(at))
@@ -825,6 +840,7 @@ impl VolwatchTile {
         let visible = self.grid.visible().to_vec();
         let cursor = self.grid.cursor().map(|r| (r, self.cursor_col));
         let selection = self.grid.selected();
+        let collapsed: Vec<bool> = visible.iter().map(|&i| self.grid.is_collapsed(i)).collect();
         let empty = SharedString::new_static(if self.grid.query().is_empty() {
             NO_MEMBERS
         } else {
@@ -834,7 +850,7 @@ impl VolwatchTile {
         self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
             let relayout = d.set_model(prepared, columns, sorted, &view);
-            d.set_view(visible, cursor, selection, empty);
+            d.set_view(visible, cursor, selection, empty, collapsed);
             if relayout {
                 t.refresh(cx);
             }
@@ -848,14 +864,25 @@ impl VolwatchTile {
     }
 
     /// A press in the grid: a row takes the cursor (shift extends the
-    /// selection); a sortable head walks its click cycle. The right press
-    /// opens the actions menu at the pointer.
+    /// selection); a group row's chevron folds it as `space` would, the
+    /// cursor staying put; a sortable head walks its click cycle. The
+    /// right press opens the actions menu at the pointer.
     fn grid_event(&mut self, e: GridEvent, cx: &mut Context<Self>) {
         match e {
             GridEvent::RowPressed { row, shift } => {
                 self.grid.click(row, shift);
                 self.sync_table(cx);
                 cx.notify();
+            }
+            GridEvent::TogglePressed { row } => {
+                self.user_acted(cx);
+                let Some(&i) = self.grid.visible().get(row) else {
+                    return;
+                };
+                if self.grid.is_group(i) {
+                    let folded = !self.grid.is_collapsed(i);
+                    self.set_folded(i, folded, cx);
+                }
             }
             GridEvent::RowContext { row, position } => {
                 self.user_acted(cx);
@@ -1072,9 +1099,88 @@ impl VolwatchTile {
             }
             SORT_ACTION => self.sort_cursor_column(cx),
             YANK_ACTION => self.yank(cx),
+            TOGGLE_ACTION => self.fold(Fold::Toggle, cx),
+            EXPAND_ACTION => self.fold(Fold::Open, cx),
+            COLLAPSE_ACTION => self.fold(Fold::Close, cx),
+            EXPAND_ALL_ACTION => self.fold(Fold::OpenAll, cx),
+            COLLAPSE_ALL_ACTION => self.fold(Fold::CloseAll, cx),
             _ => return false,
         }
         true
+    }
+
+    /// `Space`/`z a` toggle the cursor's group row (a member folds
+    /// nothing); `z o`/`z c` open and close the cursor's group, a member's
+    /// being its parent, and closing puts the cursor on the group so it
+    /// never rests on a hidden row; `z shift+r`/`z shift+m` open and close
+    /// every group. The set is saved by path.
+    fn fold(&mut self, verb: Fold, cx: &mut Context<Self>) {
+        match verb {
+            Fold::OpenAll => {
+                self.state.collapsed.clear();
+                self.apply_folds(cx);
+                return;
+            }
+            Fold::CloseAll => {
+                self.state.collapsed = self
+                    .grid
+                    .group_rows()
+                    .into_iter()
+                    .map(|g| grouping::full_path(self.grid.row(g)))
+                    .collect();
+                self.apply_folds(cx);
+                return;
+            }
+            Fold::Toggle | Fold::Open | Fold::Close => {}
+        }
+        let Some(at) = self.grid.cursor() else {
+            return;
+        };
+        let i = self.grid.visible()[at];
+        let target = if self.grid.is_group(i) {
+            Some(i)
+        } else if verb == Fold::Toggle {
+            None
+        } else {
+            self.grid.parent(i)
+        };
+        let Some(t) = target else {
+            return;
+        };
+        let folded = match verb {
+            Fold::Toggle => !self.grid.is_collapsed(t),
+            Fold::Open => false,
+            Fold::Close | Fold::OpenAll | Fold::CloseAll => true,
+        };
+        if folded
+            && t != i
+            && let Some(pos) = self.grid.visible().iter().position(|&v| v == t)
+        {
+            self.grid.click(pos, false);
+        }
+        self.set_folded(t, folded, cx);
+    }
+
+    /// Fold or open group row `row` (an index into the grid's rows): the
+    /// saved set is written by path, then applied, so the next rebuild
+    /// keeps the fold.
+    fn set_folded(&mut self, row: usize, folded: bool, cx: &mut Context<Self>) {
+        let path = grouping::full_path(self.grid.row(row));
+        if folded {
+            self.state.collapsed.insert(path);
+        } else {
+            self.state.collapsed.remove(&path);
+        }
+        self.apply_folds(cx);
+    }
+
+    /// Hand the grid the collapsed set and repaint; the aggregates are
+    /// unchanged, so nothing is re-prepared.
+    fn apply_folds(&mut self, cx: &mut Context<Self>) {
+        self.grid
+            .set_collapsed(self.state.collapsed.iter().map(|p| group_name(p)));
+        self.sync_table(cx);
+        cx.notify();
     }
 
     /// `enter`: open the band on the cursor row, or close it. Opening
@@ -1090,6 +1196,7 @@ impl VolwatchTile {
         };
         let refused = match self.cursor_row() {
             None => return,
+            Some(row) if row.group.is_some() => Some("inspect needs an underlying".to_string()),
             Some(row) => (self.board.is_some() && !row.present)
                 .then(|| format!("{} is not in the surface", row.name)),
         };
@@ -1149,6 +1256,12 @@ impl VolwatchTile {
     /// dataset, the key tuple (member, then the measure's first input's
     /// suffix) and the value column. A column with no series says so.
     fn timeseries(&mut self, cx: &mut Context<Self>) {
+        if self.cursor_row().is_some_and(|r| r.group.is_some()) {
+            self.notices.refused = Some("timeseries needs an underlying".into());
+            self.rebuild_chrome(cx);
+            cx.notify();
+            return;
+        }
         let Some(c) = self.columns.get(self.cursor_col) else {
             return;
         };
@@ -1188,8 +1301,16 @@ impl VolwatchTile {
     }
 
     /// `y`: the cursor cell's text, or the cursor column's text of every
-    /// selected row, one per line; a selection ends.
+    /// selected row, one per line; a selection ends. On a group row with
+    /// no selection, its members' names one per line.
     fn yank(&mut self, cx: &mut Context<Self>) {
+        if self.grid.selected().is_none()
+            && let Some(g) = self.cursor_row().and_then(|r| r.group.as_ref())
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(g.members.join("\n")));
+            cx.notify();
+            return;
+        }
         let col = self.cursor_col;
         let text_at = |at: usize| {
             self.grid
@@ -1212,15 +1333,35 @@ impl VolwatchTile {
         cx.notify();
     }
 
-    /// The cursor row's member as a one-value `underlying_ref` path;
+    /// The cursor row's path: the applicable group values in chain order,
+    /// then `underlying_ref` on a member, so a follower narrows to the
+    /// group on a group row and to the member on a leaf. A path through
+    /// the unmapped group names its dimension as NULL and posts nothing.
     /// `Nothing` while no row is under the cursor.
     pub(crate) fn emission(&self) -> Emission {
-        let name = self.cursor_row().map(|r| r.name.as_str());
+        let cursor = match self.cursor_row() {
+            None => CursorScope::Nothing,
+            Some(row) => {
+                let mut pairs: Vec<(String, String)> = self
+                    .grouping
+                    .kept
+                    .iter()
+                    .cloned()
+                    .zip(row.path.iter().cloned())
+                    .collect();
+                match (&row.group, self.grouping.kept.get(row.path.len())) {
+                    (Some(g), Some(dim)) => pairs.push((dim.clone(), g.label.clone())),
+                    (Some(_), None) => {}
+                    (None, _) => pairs.push((UNDERLYING.to_string(), row.name.clone())),
+                }
+                match pairs.iter().find(|(_, v)| v == grouping::UNMAPPED) {
+                    Some((dim, _)) => CursorScope::NullIn(dim.clone()),
+                    None => CursorScope::Path(path_scope(&pairs)),
+                }
+            }
+        };
         Emission {
-            cursor: match name {
-                Some(name) => CursorScope::Path(underlying_scope(name)),
-                None => CursorScope::Nothing,
-            },
+            cursor,
             ..Emission::default()
         }
     }
