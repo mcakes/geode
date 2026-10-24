@@ -478,10 +478,10 @@ fn share_group_labels(columns: &[Column], col_px: &mut [f32], advance_px: f32) {
     }
 }
 
-/// Whether a companion shown in a cell over `c` paints muted: under
-/// moves, a change from another lookback than the lens's; under
-/// rich/cheap, a rank or z over too short a history. A level is never
-/// muted by its companion.
+/// Whether a companion over `c` paints muted: under moves, a change from
+/// another lookback than the lens's; under rich/cheap, a rank or z over
+/// too short a history. A level is never muted by its companion; a
+/// single column's tint is dropped instead.
 fn companion_muted(i: &Inputs<'_>, c: &Cell) -> bool {
     match i.lens.lens {
         Lens::Moves => i.board_lookback != i.lens.lookback,
@@ -545,8 +545,12 @@ fn prepare_cell(
             &i.lens,
         ))
     } else if matches!(column.kind, ColumnKind::Single { .. }) {
+        // A tint the pair would paint muted (a stale lookback, a short
+        // history) is a wrong color under a right number: it goes
+        // entirely, and the level keeps its text and tone.
         Glyph::Tint(
             board_cell
+                .filter(|c| !companion_muted(i, c))
                 .and_then(|c| companion(c, &i.lens))
                 .and_then(|cv| {
                     let f = companion_text(cv, &i.lens);
@@ -1480,6 +1484,83 @@ mod tests {
         let cell = &p.rows[0].cells[column_index(&surface, &lens, "atfm-3M-single")];
         assert_eq!(cell.text.as_ref(), "19.6");
         assert_eq!(cell.glyph, Glyph::Tint(None));
+    }
+
+    #[test]
+    fn a_tint_from_another_lookback_goes_while_the_level_stays() {
+        // The board holds W1; the lens shows D1 until it re-answers. The
+        // pair's companion greys; the single's level keeps its number and
+        // tone but takes no tint from the wrong lookback.
+        let surface = builtin().get("surface").unwrap().clone();
+        let vol = vol();
+        let lens = LensState::default();
+        let m3 = Measure::atfm("3M");
+        let set =
+            |m: &Measure| (*m == m3).then_some((Some(19.6), Some(change(-0.9, 20.5)), None, None));
+        let single = vec![Row {
+            name: "SX5E".into(),
+            reference: None,
+            present: true,
+            as_of: Some(now()),
+            board: Some(row_of(
+                &ask(&surface, &lens, &tenors(), false),
+                "SX5E",
+                true,
+                &set,
+            )),
+            vega: None,
+        }];
+        let mut i = inputs(&single, &surface, lens);
+        i.board_lookback = Lookback::W1;
+        let p = prepare(&i);
+        let cell = &p.rows[0].cells[column_index(&surface, &lens, "atfm-3M-single")];
+        assert_eq!(cell.text.as_ref(), "19.6");
+        assert!(!cell.muted, "the level keeps its tone");
+        assert_eq!(cell.glyph, Glyph::Tint(None));
+        let pair = vec![Row {
+            board: Some(row_of(
+                &ask(&vol, &lens, &tenors(), false),
+                "SX5E",
+                true,
+                &set,
+            )),
+            ..single[0].clone()
+        }];
+        let mut i = inputs(&pair, &vol, lens);
+        i.board_lookback = Lookback::W1;
+        let p = prepare(&i);
+        assert!(p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-companion")].muted);
+    }
+
+    #[test]
+    fn a_tint_over_a_short_history_goes_while_the_level_stays() {
+        let surface = builtin().get("surface").unwrap().clone();
+        let pctl = LensState {
+            lens: Lens::Rich,
+            metric: Metric::Pctl,
+            ..LensState::default()
+        };
+        let asked = ask(&surface, &pctl, &tenors(), false);
+        let m3 = Measure::atfm("3M");
+        let rows = vec![Row {
+            name: "SX5E".into(),
+            reference: None,
+            present: true,
+            as_of: Some(now()),
+            board: Some(row_of(&asked, "SX5E", true, &|m| {
+                (*m == m3).then_some((Some(19.6), None, Some((0.9, 12)), None))
+            })),
+            vega: None,
+        }];
+        let p = prepare(&inputs(&rows, &surface, pctl));
+        let cell = &p.rows[0].cells[column_index(&surface, &pctl, "atfm-3M-single")];
+        assert_eq!(cell.text.as_ref(), "19.6");
+        assert!(!cell.muted);
+        assert_eq!(
+            cell.glyph,
+            Glyph::Tint(None),
+            "no tint under 60 observations"
+        );
     }
 
     #[test]
