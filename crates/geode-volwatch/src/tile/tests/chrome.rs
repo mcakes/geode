@@ -218,6 +218,57 @@ fn a_reload_that_drops_the_shown_view_opens_the_default_with_a_notice(
 }
 
 #[gpui::test]
+fn a_reload_that_relabels_a_column_reaches_the_grid_without_a_board(cx: &mut gpui::TestAppContext) {
+    use geode_core::volboard::Measure;
+    use geode_core::volviews::VolColumn;
+    let (h, mut vcx) = landed(cx);
+    let mut settings = VolwatchSettings::default();
+    let vol = settings
+        .views
+        .views
+        .iter_mut()
+        .find(|v| v.name == "vol")
+        .unwrap();
+    for c in &mut vol.columns {
+        if let VolColumn::Measure { measure, label, .. } = c
+            && *measure == Measure::atfm("3M")
+        {
+            *label = Some("3m vol".into());
+        }
+    }
+    vcx.update(|_, cx| h.factory.set_settings(settings, cx));
+    assert!(
+        Harness::boards(&h.requests()).is_empty(),
+        "a label asks nothing of the board"
+    );
+    h.tile.read_with(&vcx, |t, cx| {
+        let d = t.table.read(cx).delegate();
+        let head = d
+            .columns
+            .iter()
+            .find(|c| c.id == "atfm-3M-level")
+            .map(|c| c.head.clone());
+        assert_eq!(
+            head.as_deref(),
+            Some("3m vol"),
+            "the grid holds the new head"
+        );
+        assert!(
+            std::rc::Rc::ptr_eq(&d.prepared, &t.prepared),
+            "the grid holds the re-prepared model"
+        );
+        assert_eq!(t.prepared.rows.len(), 3);
+        assert!(
+            t.prepared
+                .rows
+                .iter()
+                .all(|r| r.cells.len() == t.columns.len()),
+            "every row is prepared over the new columns"
+        );
+    });
+}
+
+#[gpui::test]
 fn a_reload_that_keeps_the_shown_view_keeps_it_and_requeries_only_for_new_measures(
     cx: &mut gpui::TestAppContext,
 ) {

@@ -484,13 +484,6 @@ impl VolwatchTile {
         self.cursor_col = self.cursor_col.clamp(1, self.columns.len().max(2) - 1);
     }
 
-    /// A standing warning (a view that went away) until the trader picks
-    /// a view.
-    fn post_warning(&mut self, text: String, cx: &mut Context<Self>) {
-        self.notices.warning = Some(text);
-        self.rebuild_chrome(cx);
-    }
-
     /// The factory stored new settings: the refresh interval and the stale
     /// threshold apply at once; changed views rebuild the tabs, falling
     /// back to the default (with a notice) when the shown one went, and
@@ -502,16 +495,21 @@ impl VolwatchTile {
         };
         if views_changed {
             self.applied_views = self.shared.settings.borrow().views.clone();
+            // A shown view that went: the default shows, and the standing
+            // warning says which name went until the trader picks a view.
             if let Some(name) = self
                 .state
                 .view
                 .take_if(|n| self.applied_views.get(n).is_none())
             {
-                self.post_warning(format!("view {name} is gone"), cx);
+                self.notices.warning = Some(format!("view {name} is gone"));
             }
             self.rebuild_columns();
-            self.sync_sort();
             self.resubmit(false, cx);
+            // The new columns reach the grid even when the ask is inside the
+            // last one and nothing is asked; the chrome follows the columns.
+            self.rebuild_rows(cx);
+            self.rebuild_chrome(cx);
         }
         let vega = self.shared.settings.borrow().vega.clone();
         if vega != self.vega.setting {
