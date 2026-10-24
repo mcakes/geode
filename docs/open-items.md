@@ -932,6 +932,24 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   "0d"` and `columns = "x"` messages mislabel the fault; `slope 1Y-1M-2M`
   parses; unknown column keys are silently ignored; the app closure's
   `underlying_ref`-first check is untested through the app reader.
+- Grouping code placement: `requested_chain`, `regroup`, `dims_changed`
+  and the fold family (`fold`, `set_folded`, `apply_folds`) sit in
+  `tile/mod.rs` and belong in a `tile/grouping.rs`; the emission's
+  pair-building belongs in a pure `core::grouping::cursor_scope(kept,
+  row)` with a unit test.
+- A `:group slot N` pin whose slot is later emptied becomes `pinned
+  ungrouped` silently; a notice would tell the trader why the groups
+  vanished.
+- Grouping test gaps: depth-2 `leaves_under`/`parent` and a fold inside
+  a fold in `rows.rs`; `chip_text` over an empty chain and a
+  classification over a classification; `["Index", "—"]` and all-unmapped
+  trees; the group name-cell width assertion is vacuous; a chevron
+  double-click toggling once; `y` on a nested group; a `Slot` pin emptied
+  via `replace_slots`; completions after `group slot N` (the blotter
+  shares the gap); a malformed `pinned` beside a valid `pinned_slot` is
+  silent; `group , slot 3` parses as dimensions; the group-means mutation
+  entry scales `level` only; a third private `finite` helper; the prune
+  in `new` depends on the frame being restored before the occupants.
 
 ### Display checks
 
