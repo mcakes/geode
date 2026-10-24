@@ -777,6 +777,7 @@ mod tests {
                 surface: "vol_surface".into(),
                 realized: None,
                 varswap: None,
+                tables: Vec::new(),
                 members: vec!["SPX".into()],
                 measures: vec![geode_core::volboard::Measure::atfm("3M")],
                 lookbacks: vec![],

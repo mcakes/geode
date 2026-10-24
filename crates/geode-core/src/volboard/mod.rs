@@ -9,7 +9,7 @@ pub mod measure;
 pub mod plan;
 pub mod reduce;
 
-pub use measure::{Input, Measure, Role, delta_text};
+pub use measure::{Input, Measure, Role, VALUE_ONLY, delta_text};
 
 use crate::query::QueryKey;
 use chrono::{DateTime, Utc};
@@ -65,6 +65,10 @@ pub struct VolBoardParams {
     pub surface: String,
     pub realized: Option<String>,
     pub varswap: Option<String>,
+    /// The table datasets the measures read by name (`Measure::Table`),
+    /// distinct, in first-seen order; a table measure whose dataset is
+    /// not listed is refused by `validate`.
+    pub tables: Vec<String>,
     pub members: Vec<String>,
     pub measures: Vec<Measure>,
     pub lookbacks: Vec<Lookback>,
@@ -75,9 +79,10 @@ pub struct VolBoardParams {
 const DAY: u64 = 86_400;
 
 impl VolBoardParams {
-    /// Members trimmed with repeats removed in order, lookbacks with
-    /// repeats removed in order: a repeated member would be two rows for
-    /// one name and a repeated lookback two identical columns.
+    /// Members trimmed with repeats removed in order, lookbacks and tables
+    /// with repeats removed in order: a repeated member would be two rows
+    /// for one name, a repeated lookback two identical columns, and a
+    /// repeated table two reads of one dataset.
     pub fn normalized(mut self) -> Self {
         let mut members: Vec<String> = Vec::with_capacity(self.members.len());
         for m in &self.members {
@@ -94,6 +99,13 @@ impl VolBoardParams {
             }
         }
         self.lookbacks = lookbacks;
+        let mut tables = Vec::with_capacity(self.tables.len());
+        for t in &self.tables {
+            if !tables.contains(t) {
+                tables.push(t.clone());
+            }
+        }
+        self.tables = tables;
         self
     }
 
@@ -115,7 +127,7 @@ impl VolBoardParams {
             .chain(self.sparklines.iter().map(|(m, _)| m));
         for measure in asked {
             for role in measure.roles() {
-                if self.dataset(role).is_none() {
+                if self.dataset(&role).is_none() {
                     return Err(format!(
                         "{} needs a {} dataset",
                         measure.name(),
@@ -152,12 +164,23 @@ impl VolBoardParams {
         Ok(())
     }
 
-    pub fn dataset(&self, role: Role) -> Option<&str> {
+    pub fn dataset(&self, role: &Role) -> Option<&str> {
         match role {
             Role::Surface => Some(self.surface.as_str()),
             Role::Realized => self.realized.as_deref(),
             Role::Varswap => self.varswap.as_deref(),
+            Role::Table(d) => self.tables.iter().find(|t| *t == d).map(String::as_str),
         }
+    }
+
+    /// Every role this request may read: the three fixed ones, then one
+    /// `Table` per listed dataset.
+    pub fn roles(&self) -> Vec<Role> {
+        Role::ALL
+            .iter()
+            .cloned()
+            .chain(self.tables.iter().cloned().map(Role::Table))
+            .collect()
     }
 }
 
@@ -168,6 +191,15 @@ pub struct Change {
     pub value: f64,
     pub from: f64,
     pub at: DateTime<Utc>,
+}
+
+/// The window's daily observations summarized: population mean and sd
+/// over `count` values, the same series a rank counts.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Stats {
+    pub mean: f64,
+    pub sd: f64,
+    pub count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -183,6 +215,9 @@ pub struct Cell {
     /// Rank in `[0, 1]` (the share of the window's daily observations
     /// strictly below the current) and the observation count.
     pub pctl: Option<(f64, usize)>,
+    /// Mean and sd of the same window; `None` with no window or no
+    /// observation.
+    pub stats: Option<Stats>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -231,6 +266,7 @@ mod tests {
             surface: "vol_surface".into(),
             realized: Some("realized_vol".into()),
             varswap: Some("varswap".into()),
+            tables: Vec::new(),
             members: vec!["SPX".into(), "SX5E".into()],
             measures: vec![Measure::atfm("3M"), Measure::Skew { tenor: "3M".into() }],
             lookbacks: vec![Lookback::D1, Lookback::M1],
@@ -253,9 +289,11 @@ mod tests {
         let mut p = params();
         p.members = vec![" SX5E".into(), "SPX".into(), "SX5E ".into()];
         p.lookbacks = vec![Lookback::M1, Lookback::D1, Lookback::M1];
+        p.tables = vec!["ssr".into(), "ssr".into()];
         let p = p.normalized();
         assert_eq!(p.members, vec!["SX5E", "SPX"]);
         assert_eq!(p.lookbacks, vec![Lookback::M1, Lookback::D1]);
+        assert_eq!(p.tables, vec!["ssr"]);
     }
 
     /// A refusal case: its name, the edit that breaks a good request, and
@@ -370,12 +408,35 @@ mod tests {
     }
 
     #[test]
+    fn a_table_measure_needs_its_dataset_listed_and_roles_walk_the_tables() {
+        let mut p = params();
+        p.measures = vec![Measure::Table {
+            dataset: "ssr".into(),
+            suffix: vec!["3M".into()],
+        }];
+        assert_eq!(p.validate().unwrap_err(), "ssr 3M needs a ssr dataset");
+        p.tables = vec!["ssr".into()];
+        assert!(p.validate().is_ok());
+        assert_eq!(p.dataset(&Role::Table("ssr".into())), Some("ssr"));
+        assert_eq!(p.dataset(&Role::Table("other".into())), None);
+        assert_eq!(
+            p.roles(),
+            vec![
+                Role::Surface,
+                Role::Realized,
+                Role::Varswap,
+                Role::Table("ssr".into())
+            ]
+        );
+    }
+
+    #[test]
     fn dataset_by_role() {
         let p = params();
-        assert_eq!(p.dataset(Role::Surface), Some("vol_surface"));
-        assert_eq!(p.dataset(Role::Realized), Some("realized_vol"));
+        assert_eq!(p.dataset(&Role::Surface), Some("vol_surface"));
+        assert_eq!(p.dataset(&Role::Realized), Some("realized_vol"));
         let mut p = p;
         p.varswap = None;
-        assert_eq!(p.dataset(Role::Varswap), None);
+        assert_eq!(p.dataset(&Role::Varswap), None);
     }
 }

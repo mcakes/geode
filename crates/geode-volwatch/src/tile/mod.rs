@@ -922,10 +922,11 @@ impl VolwatchTile {
             .map(|&i| self.grid.row(i).name.clone());
         let text = match (measure.and_then(|m| m.inputs().into_iter().next()), name) {
             (Some(input), Some(member)) => {
-                let dataset = match input.role {
+                let dataset = match &input.role {
                     Role::Surface => SURFACE,
                     Role::Realized => REALIZED,
                     Role::Varswap => VARSWAP,
+                    Role::Table(dataset) => dataset.as_str(),
                 };
                 let key = std::iter::once(member)
                     .chain(input.suffix)

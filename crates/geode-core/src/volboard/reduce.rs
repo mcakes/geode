@@ -6,7 +6,7 @@
 //! derived measure is combined pointwise over the days all its inputs
 //! hold.
 
-use super::{Cell, Change, Input, Role, VolBoardParams, VolRow};
+use super::{Cell, Change, Input, Role, Stats, VolBoardParams, VolRow};
 use crate::clock::Clock;
 use chrono::{DateTime, Utc};
 use std::collections::{BTreeMap, HashMap};
@@ -66,6 +66,22 @@ pub fn rank(values: impl Iterator<Item = f64>, current: f64) -> (f64, usize) {
     }
 }
 
+/// Population mean and standard deviation of `values`; `None` for none.
+pub fn stats(values: impl Iterator<Item = f64>) -> Option<Stats> {
+    let values: Vec<f64> = values.collect();
+    if values.is_empty() {
+        return None;
+    }
+    let n = values.len() as f64;
+    let mean = values.iter().sum::<f64>() / n;
+    let var = values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    Some(Stats {
+        mean,
+        sd: var.sqrt(),
+        count: values.len(),
+    })
+}
+
 /// The inputs' observations for one member, in `inputs()` order; `None`
 /// when any input is absent from the cache.
 fn gather<'a>(obs: &'a Observations, member: &str, inputs: &[Input]) -> Option<Vec<&'a Observed>> {
@@ -106,6 +122,7 @@ fn cell(
         current_at: None,
         changes: vec![None; params.lookbacks.len()],
         pctl: None,
+        stats: None,
     };
     let Some(found) = gather(obs, member, &inputs) else {
         return blank;
@@ -137,16 +154,21 @@ fn cell(
             })
         })
         .collect();
-    let pctl = match (current, obs.window_from_day) {
+    // Rank and stats summarize one series: the window's days every input
+    // holds, so a cell never ranks against days its mean omits.
+    let (pctl, stats) = match (current, obs.window_from_day) {
         (Some(current), Some(from_day)) => {
             let series = daily(measure, &found, from_day);
             if series.is_empty() {
-                None
+                (None, None)
             } else {
-                Some(rank(series.into_iter(), current))
+                (
+                    Some(rank(series.iter().copied(), current)),
+                    stats(series.into_iter()),
+                )
             }
         }
-        _ => None,
+        _ => (None, None),
     };
     Cell {
         measure: measure.clone(),
@@ -154,6 +176,7 @@ fn cell(
         current_at,
         changes,
         pctl,
+        stats,
     }
 }
 
@@ -223,7 +246,7 @@ pub fn reduce(params: &VolBoardParams, obs: &Observations, clock: &Clock) -> Red
     let mut starts: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
     let mut failed_at: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
     for ((_, input), o) in &obs.by_input {
-        let Some(dataset) = params.dataset(input.role) else {
+        let Some(dataset) = params.dataset(&input.role) else {
             continue;
         };
         for (i, at) in o.at.iter().enumerate() {
@@ -280,6 +303,7 @@ mod tests {
             surface: "vol_surface".into(),
             realized: Some("realized_vol".into()),
             varswap: None,
+            tables: Vec::new(),
             members: vec!["SPX".into(), "ZZZ".into()],
             measures,
             lookbacks: vec![Lookback::D1, Lookback::M1],
@@ -405,9 +429,9 @@ mod tests {
         assert_eq!(long[0], 0.40942, "the skew line, not the ATFM one");
     }
 
-    #[test]
-    fn a_derived_cell_combines_inputs_pointwise_and_ranks_over_the_days_both_hold() {
-        // IV−RV 3M/20D: realized starts a day later than the surface.
+    /// IV−RV 3M/20D over a window: realized starts a day later than the
+    /// surface, so days 9 and 10 alone hold both inputs (0.03 and 0.05).
+    fn reduce_iv_rv_with_window() -> Reduced {
         let p = params(vec![Measure::IvRv {
             tenor: "3M".into(),
             window: "20D".into(),
@@ -434,7 +458,18 @@ mod tests {
                 first: Some(ts("2026-01-09T20:00:00Z")),
             },
         );
-        let r = reduce(&p, &obs, &Clock::utc());
+        reduce(&p, &obs, &Clock::utc())
+    }
+
+    /// The ranked IV−RV cell and the daily series its rank counted.
+    fn ranked_cell_fixture() -> (Cell, Vec<f64>) {
+        let r = reduce_iv_rv_with_window();
+        (r.rows[0].cells[0].clone(), vec![0.19 - 0.16, 0.20 - 0.15])
+    }
+
+    #[test]
+    fn a_derived_cell_combines_inputs_pointwise_and_ranks_over_the_days_both_hold() {
+        let r = reduce_iv_rv_with_window();
         let cell = &r.rows[0].cells[0];
         assert!((cell.current.unwrap() - 0.05).abs() < 1e-12);
         let d1 = cell.changes[0].as_ref().unwrap();
@@ -461,8 +496,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_missing_input_blanks_the_cell_but_not_the_row() {
+    /// ATFM and skew without a window; the 0.75 point (the 25Δ put leg)
+    /// is absent, so the skew cell cannot be formed.
+    fn reduce_without_window() -> Reduced {
         let p = params(vec![
             Measure::atfm("3M"),
             Measure::Skew { tenor: "3M".into() },
@@ -477,8 +513,34 @@ mod tests {
             .insert(("SPX".into(), point("3M", "0.5", "vol")), observed_atfm());
         obs.by_input
             .insert(("SPX".into(), point("3M", "0.25", "vol")), observed_atfm());
-        // No 0.75 point (the 25Δ put leg): skew cannot be formed.
-        let r = reduce(&p, &obs, &Clock::utc());
+        reduce(&p, &obs, &Clock::utc())
+    }
+
+    #[test]
+    fn stats_are_the_population_mean_and_sd_of_the_window() {
+        let s = stats([2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0].into_iter()).unwrap();
+        assert!((s.mean - 5.0).abs() < 1e-12);
+        assert!((s.sd - 2.0).abs() < 1e-12);
+        assert_eq!(s.count, 8);
+        assert_eq!(stats(std::iter::empty()), None);
+        let one = stats([3.0].into_iter()).unwrap();
+        assert_eq!((one.mean, one.sd, one.count), (3.0, 0.0, 1));
+    }
+
+    #[test]
+    fn a_cell_carries_the_window_s_stats_beside_its_rank() {
+        let (cell, series) = ranked_cell_fixture();
+        let s = cell.stats.expect("stats with a window");
+        assert_eq!(s.count, series.len());
+        let mean = series.iter().sum::<f64>() / series.len() as f64;
+        assert!((s.mean - mean).abs() < 1e-12);
+        let r = reduce_without_window();
+        assert_eq!(r.rows[0].cells[1].stats, None, "no window asked");
+    }
+
+    #[test]
+    fn a_missing_input_blanks_the_cell_but_not_the_row() {
+        let r = reduce_without_window();
         assert_eq!(r.rows[0].cells[0].current, Some(0.20));
         assert_eq!(r.rows[0].cells[1].current, None);
         assert_eq!(r.rows[0].cells[1].changes, vec![None, None]);

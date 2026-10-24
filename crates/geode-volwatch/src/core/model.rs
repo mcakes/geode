@@ -584,6 +584,7 @@ fn measure_label(m: &Measure) -> String {
         Measure::IvRv { tenor, window } => format!("IV {tenor} \u{2212} RV {window}"),
         Measure::Varswap { tenor } => format!("vs {tenor}"),
         Measure::VsSpread { tenor } => format!("vs spread {tenor}"),
+        Measure::Table { .. } => m.name(),
     }
 }
 
@@ -594,11 +595,12 @@ pub fn sort_value(row: &Row, column: &Column, asked: &Ask) -> Option<f64> {
 
 /// The dataset a measure's change is read from: its first input's role,
 /// under the dataset names the tile asks with.
-fn measure_dataset(m: &Measure) -> &'static str {
-    match m.inputs().first().map(|i| i.role) {
-        Some(Role::Realized) => REALIZED,
-        Some(Role::Varswap) => VARSWAP,
-        Some(Role::Surface) | None => SURFACE,
+fn measure_dataset(m: &Measure) -> String {
+    match m.inputs().first().map(|i| i.role.clone()) {
+        Some(Role::Realized) => REALIZED.into(),
+        Some(Role::Varswap) => VARSWAP.into(),
+        Some(Role::Table(dataset)) => dataset,
+        Some(Role::Surface) | None => SURFACE.into(),
     }
 }
 
@@ -641,7 +643,7 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock:
                     asked.lookback.label(),
                     widths::DASH
                 ));
-                if let Some(note) = note_for(notes, measure_dataset(m)) {
+                if let Some(note) = note_for(notes, &measure_dataset(m)) {
                     parts.push(note.to_string());
                 }
             }
@@ -737,20 +739,20 @@ fn caption(parts: impl IntoIterator<Item = Option<String>>) -> SharedString {
 /// then the oldest `current_at` among its cells reading each other
 /// dataset; a dataset with no time reads `—`.
 fn source_line(row: &Row, clock: &Clock) -> String {
-    let at = |role: Role| -> Option<DateTime<Utc>> {
-        if role == Role::Surface {
+    let at = |role: &Role| -> Option<DateTime<Utc>> {
+        if *role == Role::Surface {
             return row.as_of;
         }
         row.board
             .as_ref()?
             .cells
             .iter()
-            .filter(|c| c.measure.roles().contains(&role))
+            .filter(|c| c.measure.roles().contains(role))
             .filter_map(|c| c.current_at)
             .min()
     };
     [Role::Surface, Role::Realized, Role::Varswap]
-        .into_iter()
+        .iter()
         .map(|role| match at(role) {
             Some(t) => format!("{} {}", role.name(), clock.hm(t)),
             None => format!("{} {}", role.name(), widths::DASH),
@@ -1124,6 +1126,7 @@ mod tests {
                         current_at: current.map(|_| now() - chrono::Duration::hours(1)),
                         changes: vec![change],
                         pctl,
+                        stats: None,
                     }
                 })
                 .collect(),

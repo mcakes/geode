@@ -87,6 +87,7 @@ impl VolwatchTile {
             surface: SURFACE.into(),
             realized: Some(REALIZED.into()),
             varswap: Some(VARSWAP.into()),
+            tables: Vec::new(),
             members: self.members.clone(),
             measures: next.measures.clone(),
             lookbacks: vec![next.lookback],

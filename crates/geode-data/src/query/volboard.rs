@@ -59,12 +59,14 @@ fn joined(cols: &[&ColumnSpec], f: impl Fn(&ColumnSpec) -> String, sep: &str) ->
     cols.iter().map(|c| f(c)).collect::<Vec<_>>().join(sep)
 }
 
-/// The key arity and value columns a role's dataset must declare.
-fn shape(role: Role) -> (usize, &'static [&'static str]) {
+/// The key arity and value columns a fixed role's dataset must declare;
+/// a table role has no fixed shape (its dataset's own declaration is).
+fn shape(role: &Role) -> Option<(usize, &'static [&'static str])> {
     match role {
-        Role::Surface => (3, &["vol", "forward"]),
-        Role::Realized => (2, &["vol"]),
-        Role::Varswap => (2, &["strike"]),
+        Role::Surface => Some((3, &["vol", "forward"])),
+        Role::Realized => Some((2, &["vol"])),
+        Role::Varswap => Some((2, &["strike"])),
+        Role::Table(_) => None,
     }
 }
 
@@ -74,13 +76,17 @@ fn shape(role: Role) -> (usize, &'static [&'static str]) {
 pub fn check_dataset<'a>(
     schema: &'a SchemaSpec,
     name: &str,
-    role: Role,
+    role: &Role,
 ) -> Result<&'a DatasetSpec, String> {
     let ds = schema
         .dataset(name)
         .filter(|d| d.is_history())
         .ok_or_else(|| format!("'{name}' is not a declared history dataset"))?;
-    let (arity, columns) = shape(role);
+    // A table role is refused explicitly rather than read by a shape it
+    // does not have: the board does not read table datasets yet.
+    let Some((arity, columns)) = shape(role) else {
+        return Err(format!("'{name}' is a table dataset the board cannot read"));
+    };
     if ds.key.len() != arity {
         return Err(format!(
             "'{name}' has a {}-column key; the board needs {arity}",
@@ -215,7 +221,7 @@ fn read_role(
     conn: &Connection,
     schema: &SchemaSpec,
     plan: &BoardPlan,
-    role: Role,
+    role: &Role,
     inputs: &[Input],
     obs: &mut Observations,
 ) -> Result<(), StoreError> {
@@ -404,16 +410,16 @@ pub fn read_board(
     };
     let mut by_role: BTreeMap<Role, Vec<Input>> = BTreeMap::new();
     for input in geode_core::volboard::plan::inputs(params) {
-        by_role.entry(input.role).or_default().push(input);
+        by_role.entry(input.role.clone()).or_default().push(input);
     }
     for (role, inputs) in by_role {
-        let Some(name) = params.dataset(role) else {
+        let Some(name) = params.dataset(&role) else {
             continue;
         };
         if board.dataset_errors.iter().any(|(d, _)| d == name) {
             continue;
         }
-        match read_role(conn, schema, plan, role, &inputs, &mut obs) {
+        match read_role(conn, schema, plan, &role, &inputs, &mut obs) {
             Ok(()) => {}
             Err(e) if role == Role::Surface => return Err(e),
             // `StoreError::History` displays as `history: <message>`; the
@@ -575,6 +581,7 @@ mod tests {
                 surface: "vol_surface".into(),
                 realized: None,
                 varswap: None,
+                tables: Vec::new(),
                 members: vec!["SPX".into(), "NDX".into()],
                 measures,
                 lookbacks: vec![Lookback::D1, Lookback::M1],
@@ -715,7 +722,7 @@ mod tests {
             store.writer(),
             &schema,
             &p,
-            Role::Surface,
+            &Role::Surface,
             std::slice::from_ref(&input),
             &mut obs,
         )

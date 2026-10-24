@@ -286,6 +286,7 @@ pub(super) fn board_for(members: &[&str], asked: &Ask) -> VolBoard {
                     at,
                 })],
                 pctl: (present && asked.window.is_some()).then_some((0.91, 251)),
+                stats: None,
             })
             .collect();
         let sparks = asked
@@ -330,6 +331,7 @@ pub(super) fn blank_role(board: &mut VolBoard, role: Role) {
                 c.current_at = None;
                 c.changes.iter_mut().for_each(|ch| *ch = None);
                 c.pctl = None;
+                c.stats = None;
             }
         }
     }

@@ -47,7 +47,7 @@ pub fn inputs(params: &VolBoardParams) -> Vec<Input> {
 pub fn suffixes(params: &VolBoardParams) -> BTreeMap<Role, Vec<Vec<String>>> {
     let mut out: BTreeMap<Role, Vec<Vec<String>>> = BTreeMap::new();
     for input in inputs(params) {
-        let tuples = out.entry(input.role).or_default();
+        let tuples = out.entry(input.role.clone()).or_default();
         if !tuples.contains(&input.suffix) {
             tuples.push(input.suffix);
         }
@@ -142,6 +142,7 @@ mod tests {
             surface: "vol_surface".into(),
             realized: Some("realized_vol".into()),
             varswap: Some("varswap".into()),
+            tables: Vec::new(),
             members: vec!["SPX".into()],
             measures: vec![
                 Measure::atfm("3M"),

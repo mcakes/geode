@@ -3,21 +3,30 @@
 //! named inputs, so the data layer's SQL projection and the reduction
 //! agree on the formula by construction.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Role {
     Surface,
     Realized,
     Varswap,
+    /// A declared history dataset read by name through the open measure
+    /// form; its one value column is [`VALUE_ONLY`].
+    Table(String),
 }
 
+/// The `Input::column` of a table measure: whichever single value column
+/// the dataset declares. Resolved by the reader against the schema.
+pub const VALUE_ONLY: &str = "*";
+
 impl Role {
+    /// The fixed roles; table roles come from `VolBoardParams::tables`.
     pub const ALL: [Role; 3] = [Role::Surface, Role::Realized, Role::Varswap];
 
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> String {
         match self {
-            Role::Surface => "surface",
-            Role::Realized => "realized",
-            Role::Varswap => "varswap",
+            Role::Surface => "surface".into(),
+            Role::Realized => "realized".into(),
+            Role::Varswap => "varswap".into(),
+            Role::Table(d) => d.clone(),
         }
     }
 }
@@ -79,6 +88,12 @@ pub enum Measure {
     VsSpread {
         tenor: String,
     },
+    /// One tuple of a declared history dataset, named in `vol_views.toml`
+    /// as `<dataset> [k1] [k2]`; `suffix` is the key after the underlying.
+    Table {
+        dataset: String,
+        suffix: Vec<String>,
+    },
 }
 
 fn surface(tenor: &str, delta: f64, column: &'static str) -> Input {
@@ -137,6 +152,11 @@ impl Measure {
                 },
                 surface(tenor, 0.5, "vol"),
             ],
+            Measure::Table { dataset, suffix } => vec![Input {
+                role: Role::Table(dataset.clone()),
+                suffix: suffix.clone(),
+                column: VALUE_ONLY,
+            }],
         }
     }
 
@@ -156,7 +176,7 @@ impl Measure {
         let mut out = Vec::new();
         for input in self.inputs() {
             if !out.contains(&input.role) {
-                out.push(input.role);
+                out.push(input.role.clone());
             }
         }
         out
@@ -174,6 +194,10 @@ impl Measure {
             Measure::IvRv { tenor, window } => format!("iv-rv {tenor}/{window}"),
             Measure::Varswap { tenor } => format!("varswap {tenor}"),
             Measure::VsSpread { tenor } => format!("vs spread {tenor}"),
+            Measure::Table { dataset, suffix } => std::iter::once(dataset.as_str())
+                .chain(suffix.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" "),
         }
     }
 }
@@ -316,6 +340,27 @@ mod tests {
     #[should_panic(expected = "2 inputs")]
     fn combine_refuses_the_wrong_number_of_values() {
         Measure::Skew { tenor: "3M".into() }.combine(&[0.1]);
+    }
+
+    #[test]
+    fn a_table_measure_reads_one_tuple_of_its_dataset_s_only_value_column() {
+        let m = Measure::Table {
+            dataset: "ssr".into(),
+            suffix: vec!["3M".into()],
+        };
+        assert_eq!(
+            m.inputs(),
+            vec![Input {
+                role: Role::Table("ssr".into()),
+                suffix: vec!["3M".into()],
+                column: VALUE_ONLY,
+            }]
+        );
+        assert_eq!(m.name(), "ssr 3M");
+        assert_eq!(m.combine(&[1.7]), 1.7);
+        assert_eq!(m.roles(), vec![Role::Table("ssr".into())]);
+        assert_eq!(Role::Table("ssr".into()).name(), "ssr");
+        assert_eq!(Role::Surface.name(), "surface");
     }
 
     #[test]

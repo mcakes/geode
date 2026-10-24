@@ -3233,10 +3233,10 @@ impl DataService {
         // and is never asked.
         let mut dataset_errors: Vec<(String, String)> = Vec::new();
         for role in Role::ALL {
-            let Some(name) = params.dataset(role) else {
+            let Some(name) = params.dataset(&role) else {
                 continue;
             };
-            let ds = match crate::query::volboard::check_dataset(&self.config.schema, name, role) {
+            let ds = match crate::query::volboard::check_dataset(&self.config.schema, name, &role) {
                 Ok(ds) => ds,
                 Err(e) => return refuse(&params, e),
             };
@@ -5979,6 +5979,7 @@ mod tests {
             surface: "vol_surface".into(),
             realized: Some("realized_vol".into()),
             varswap: Some("varswap".into()),
+            tables: Vec::new(),
             members: members.iter().map(|m| m.to_string()).collect(),
             measures,
             lookbacks,
@@ -6040,10 +6041,11 @@ mod tests {
             .inputs()
             .iter()
             .map(|i| {
-                let table = match i.role {
+                let table = match &i.role {
                     Role::Surface => "surface",
                     Role::Realized => "realized",
                     Role::Varswap => "varswap",
+                    Role::Table(d) => panic!("the fake has no table dataset {d}"),
                 };
                 let v = fake_value(table, &i.suffix, o);
                 match i.column {

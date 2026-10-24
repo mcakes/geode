@@ -419,6 +419,7 @@ fn params(
         surface: "vol_surface".into(),
         realized: Some("realized_vol".into()),
         varswap: Some("varswap".into()),
+        tables: Vec::new(),
         members: members(),
         measures,
         lookbacks,

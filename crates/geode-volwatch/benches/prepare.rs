@@ -44,6 +44,7 @@ fn bench_prepare(c: &mut Criterion) {
                                 at: now - chrono::Duration::days(1),
                             })],
                             pctl: Some(((r * 13 % 100) as f64 / 100.0, 251)),
+                            stats: None,
                         }
                     })
                     .collect(),
