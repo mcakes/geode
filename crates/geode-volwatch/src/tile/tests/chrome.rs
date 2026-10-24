@@ -21,6 +21,7 @@ fn the_header_names_the_list_count_lookback_sort_and_the_missing(cx: &mut gpui::
             "▤",
             "Vol · europe_risk ▾",
             "3",
+            "ungrouped",
             "Δ 1d",
             "1w",
             "1m",
@@ -445,7 +446,7 @@ fn the_header_chips_follow_the_lens_and_a_press_sets_the_lookback_or_the_window(
     assert_eq!(h.lens(&vcx).window, Window::Y2);
     assert_eq!(Harness::boards(&h.requests()).len(), 1);
     assert_eq!(
-        chip_texts(&h, &vcx)[3..6],
+        chip_texts(&h, &vcx)[4..7],
         ["6M".to_string(), "1Y".into(), "z \u{b7} 2Y".into()]
     );
 }

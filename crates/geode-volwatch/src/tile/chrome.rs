@@ -335,6 +335,10 @@ impl VolwatchTile {
             &self.state.lens,
             sort.as_deref(),
             self.board.as_deref(),
+            // The grouping chip's text and mute; the applicable chain
+            // replaces these placeholders once the tile holds one.
+            "ungrouped",
+            true,
         );
     }
 

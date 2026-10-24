@@ -305,40 +305,10 @@ fn group_row(label: &str, path: &[String], leaves: &[&Row], asked: &Ask) -> Row 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::volboard::Stats;
+    use geode_tile::rows::GridRow;
 
-    fn dims(toml: &str) -> DerivedDimensions {
-        let doc = merge_docs(
-            "dimensions",
-            &[LayerDoc::builtin("dimensions", toml).unwrap()],
-        );
-        let (dims, diags) = DerivedDimensions::from_doc(&doc);
-        assert!(diags.is_empty(), "{diags:?}");
-        dims
-    }
-
-    /// `region` and `sector` over the underlying; `desk` over `book`.
-    pub(super) fn europe() -> DerivedDimensions {
-        dims(
-            r#"
-[region]
-from = "underlying_ref"
-[region.values]
-Core = ["DAX", "SX5E"]
-Isles = ["UKX"]
-
-[sector]
-from = "underlying_ref"
-[sector.values]
-Index = ["DAX", "SX5E", "UKX"]
-
-[desk]
-from = "book"
-[desk.values]
-Flow = ["b1"]
-"#,
-        )
-    }
+    use super::fixtures::*;
 
     fn chain(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
@@ -421,61 +391,6 @@ Flow = ["b1"]
         assert_eq!(group_name(&chain(&["Core"])), "group:Core");
         assert_eq!(group_name(&chain(&["Core", "Index"])), "group:Core/Index");
         assert_eq!(group_name(&chain(&[UNMAPPED])), "group:\u{2014}");
-    }
-
-    use crate::core::model::Row;
-    use crate::core::views::Ask;
-    use chrono::Utc;
-    use geode_core::volboard::{Cell, Change, Measure, Stats, VolRow};
-    use geode_tile::rows::GridRow;
-
-    fn asked() -> Ask {
-        Ask {
-            measures: vec![Measure::atfm("1M"), Measure::atfm("3M")],
-            window: Some(std::time::Duration::from_secs(365 * 86_400)),
-            ..Ask::default()
-        }
-    }
-
-    /// A leaf whose two cells read `level`, a change of `delta`, a rank
-    /// of `rank` over 251 observations with mean 14.5 and sd 2.0 (so z =
-    /// (level − 14.5) / 2). `None` level: the member is not in the surface.
-    fn leaf(name: &str, level: Option<f64>, delta: f64, rank: f64, vega: Option<f64>) -> Row {
-        let cells = asked()
-            .measures
-            .iter()
-            .map(|m| Cell {
-                measure: m.clone(),
-                current: level,
-                current_at: level.map(|_| Utc::now()),
-                changes: vec![level.map(|_| Change {
-                    value: delta,
-                    from: 0.0,
-                    at: Utc::now(),
-                })],
-                pctl: level.map(|_| (rank, 251)),
-                stats: level.map(|_| Stats {
-                    mean: 14.5,
-                    sd: 2.0,
-                    count: 251,
-                }),
-            })
-            .collect();
-        Row {
-            name: name.to_string(),
-            reference: None,
-            present: level.is_some(),
-            as_of: level.map(|_| Utc::now()),
-            board: Some(VolRow {
-                underlying: name.to_string(),
-                as_of: level.map(|_| Utc::now()),
-                cells,
-                sparks: Vec::new(),
-            }),
-            vega,
-            path: Vec::new(),
-            group: None,
-        }
     }
 
     fn names(rows: &[Row]) -> Vec<String> {
@@ -634,5 +549,103 @@ Flow = ["b1"]
     fn mean_is_blank_over_nothing() {
         assert_eq!(mean(std::iter::empty()), None);
         assert_eq!(mean([1.0, 2.0].into_iter()), Some(1.5));
+    }
+}
+
+/// Fixtures the grouping and model tests share.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use chrono::Utc;
+    use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::volboard::{Change, Stats, VolRow};
+
+    use super::*;
+
+    pub(crate) fn dims(toml: &str) -> DerivedDimensions {
+        let doc = merge_docs(
+            "dimensions",
+            &[LayerDoc::builtin("dimensions", toml).unwrap()],
+        );
+        let (dims, diags) = DerivedDimensions::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        dims
+    }
+
+    /// `region` and `sector` over the underlying; `desk` over `book`.
+    pub(crate) fn europe() -> DerivedDimensions {
+        dims(
+            r#"
+[region]
+from = "underlying_ref"
+[region.values]
+Core = ["DAX", "SX5E"]
+Isles = ["UKX"]
+
+[sector]
+from = "underlying_ref"
+[sector.values]
+Index = ["DAX", "SX5E", "UKX"]
+
+[desk]
+from = "book"
+[desk.values]
+Flow = ["b1"]
+"#,
+        )
+    }
+
+    pub(crate) fn asked() -> Ask {
+        Ask {
+            measures: vec![Measure::atfm("1M"), Measure::atfm("3M")],
+            window: Some(std::time::Duration::from_secs(365 * 86_400)),
+            ..Ask::default()
+        }
+    }
+
+    /// A leaf whose two cells read `level`, a change of `delta`, a rank
+    /// of `rank` over 251 observations with mean 14.5 and sd 2.0 (so z =
+    /// (level − 14.5) / 2). `None` level: the member is not in the surface.
+    pub(crate) fn leaf(
+        name: &str,
+        level: Option<f64>,
+        delta: f64,
+        rank: f64,
+        vega: Option<f64>,
+    ) -> Row {
+        let cells = asked()
+            .measures
+            .iter()
+            .map(|m| Cell {
+                measure: m.clone(),
+                current: level,
+                current_at: level.map(|_| Utc::now()),
+                changes: vec![level.map(|_| Change {
+                    value: delta,
+                    from: 0.0,
+                    at: Utc::now(),
+                })],
+                pctl: level.map(|_| (rank, 251)),
+                stats: level.map(|_| Stats {
+                    mean: 14.5,
+                    sd: 2.0,
+                    count: 251,
+                }),
+            })
+            .collect();
+        Row {
+            name: name.to_string(),
+            reference: None,
+            present: level.is_some(),
+            as_of: level.map(|_| Utc::now()),
+            board: Some(VolRow {
+                underlying: name.to_string(),
+                as_of: level.map(|_| Utc::now()),
+                cells,
+                sparks: Vec::new(),
+            }),
+            vega,
+            path: Vec::new(),
+            group: None,
+        }
     }
 }

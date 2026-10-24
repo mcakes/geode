@@ -25,7 +25,7 @@ use geode_widgets::cell::heat::{heat, range};
 use geode_widgets::cell::{DESIGN_REM, column_scale, widths};
 use gpui::SharedString;
 
-use super::grouping::GroupInfo;
+use super::grouping::{GroupCell, GroupInfo};
 use super::lens::{
     Lens, LensState, Metric, PCTL_MIN_COUNT, Shown, Window, Z_CEILING, companion, pctl_side,
     z_score,
@@ -45,6 +45,19 @@ pub const BAND_HEAT_CEILING: f32 = 0.40;
 /// sort mark: an `Icon::size_3` (0.75 rem) in `p(px(2.))`, right of the
 /// head. A head that forgot it loses its leading letters under the mark.
 pub const SORT_MARK_DESIGN_PX: f32 = 0.75 * DESIGN_REM + 4.0;
+/// Design px a row steps right per tree depth: the pricer's tree indent,
+/// so a grouped vol tile and a grouped sheet read alike.
+pub const TREE_INDENT_PX: f32 = 14.0;
+/// Design px a group row's chevron takes ahead of its label: one mono
+/// advance and its gap, so a member one level down lines up under its
+/// group's label rather than under the chevron.
+pub const CHEVRON_PX: f32 = TREE_INDENT_PX;
+
+/// What the name cell paints ahead of its text: the depth's indent, plus
+/// the chevron slot on a group row.
+pub fn tree_lead(row: &Row) -> f32 {
+    row.depth() as f32 * TREE_INDENT_PX + if row.group.is_some() { CHEVRON_PX } else { 0.0 }
+}
 
 /// Levels, changes and z: one decimal.
 pub const ONE_DP: ColumnFormat = ColumnFormat {
@@ -173,6 +186,10 @@ pub struct PreparedRow {
     pub name: SharedString,
     pub present: bool,
     pub stale: bool,
+    /// Tree depth (0 flat); the table indents by it.
+    pub depth: usize,
+    /// `Some(member count)` for a group row.
+    pub group: Option<usize>,
     pub cells: Vec<PreparedCell>,
 }
 
@@ -259,6 +276,30 @@ fn column_cell<'r>(row: &'r Row, kind: &ColumnKind, asked: &Ask) -> Option<&'r C
     }
 }
 
+/// A group row's aggregate for a measure column, by the measure's position
+/// in the ask, as a member's cell is found.
+fn group_cell<'g>(g: &'g GroupInfo, kind: &ColumnKind, asked: &Ask) -> Option<&'g GroupCell> {
+    let measure = match kind {
+        ColumnKind::Level { measure }
+        | ColumnKind::Companion { measure }
+        | ColumnKind::Single { measure } => measure,
+        ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Vega => return None,
+    };
+    let pos = asked.measures.iter().position(|m| m == measure)?;
+    g.cells.get(pos).filter(|c| c.measure == *measure)
+}
+
+/// The companion a group row shows under `lens`: the members' mean Δ, z
+/// or rank, as [`companion`] picks one member's.
+pub fn group_companion(c: &GroupCell, lens: &LensState) -> Option<f64> {
+    match (lens.lens, lens.metric) {
+        (Lens::Moves, _) => c.delta,
+        (Lens::Rich, Metric::Z) => c.z,
+        (Lens::Rich, Metric::Pctl) => c.pctl,
+    }
+    .and_then(finite)
+}
+
 /// Whether `kind` shows a companion number under `lens` (the pair's
 /// companion column, or a single column after `m`).
 fn shows_companion(kind: &ColumnKind, lens: &LensState) -> bool {
@@ -267,8 +308,23 @@ fn shows_companion(kind: &ColumnKind, lens: &LensState) -> bool {
 }
 
 /// The number a cell shows, before formatting; `None` for a blank and for
-/// any row the surface lacks.
+/// any row the surface lacks. A group row reads its stored means, so a
+/// lens flip picks another companion without rebuilding the tree.
 fn value(row: &Row, kind: &ColumnKind, asked: &Ask, lens: &LensState) -> Option<f64> {
+    if let Some(g) = &row.group {
+        return match kind {
+            ColumnKind::Vega => row.vega.and_then(finite),
+            ColumnKind::Underlying | ColumnKind::Spark { .. } => None,
+            ColumnKind::Level { .. } | ColumnKind::Companion { .. } | ColumnKind::Single { .. } => {
+                let c = group_cell(g, kind, asked)?;
+                if shows_companion(kind, lens) {
+                    group_companion(c, lens)
+                } else {
+                    c.level.and_then(finite)
+                }
+            }
+        };
+    }
     if !row.present {
         return None;
     }
@@ -449,10 +505,16 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
                     let v = value(row, &column.kind, i.asked, &i.lens);
                     let mut cell = prepare_cell(i, row, column, v, scales[ci]);
                     if column.kind == ColumnKind::Underlying {
-                        cell.text = SharedString::from(row.name.clone());
+                        cell.text = match &row.group {
+                            Some(g) => format!("{} \u{b7} {}", g.label, g.members.len()).into(),
+                            None => SharedString::from(row.name.clone()),
+                        };
                         cell.muted = !row.present;
                     }
-                    let px = cell.text.chars().count() as f32 * i.mono_advance_px;
+                    let mut px = cell.text.chars().count() as f32 * i.mono_advance_px;
+                    if column.kind == ColumnKind::Underlying {
+                        px += tree_lead(row);
+                    }
                     col_px[ci] = col_px[ci].max(glyph_width(&column.kind, px));
                     cell.id = format!("{}-{}-{}", i.tile, row.name, column.id).into();
                     cell
@@ -462,6 +524,8 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
                 name: row.name.clone().into(),
                 present: row.present,
                 stale,
+                depth: row.depth(),
+                group: row.group.as_ref().map(|g| g.members.len()),
                 cells,
             }
         })
@@ -503,20 +567,24 @@ fn share_group_labels(columns: &[Column], col_px: &mut [f32], advance_px: f32) {
     }
 }
 
-/// Whether a companion over `c` paints muted: under moves, a change from
-/// another lookback than the lens's; under rich/cheap, a rank or z from
-/// another window than the lens's (the header chip names the new window
-/// while the old board's numbers are still up), or over too short a
-/// history. A level is never muted by its companion; a single column's
-/// tint is dropped instead.
-fn companion_muted(i: &Inputs<'_>, c: &Cell) -> bool {
+/// Whether the lens asks for a lookback or window other than the board's:
+/// after `d` or `w`, until the new board lands (the header chip names the
+/// new one while the old board's numbers are still up).
+fn lens_mismatch(i: &Inputs<'_>) -> bool {
     match i.lens.lens {
         Lens::Moves => i.board_lookback != i.lens.lookback,
-        Lens::Rich => {
-            i.board_window != Some(i.lens.window.duration())
-                || c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT)
-        }
+        Lens::Rich => i.board_window != Some(i.lens.window.duration()),
     }
+}
+
+/// Whether a companion over `c` paints muted: the lens mismatch, or under
+/// rich/cheap a rank or z over too short a history. A level is never
+/// muted by its companion; a single column's tint is dropped instead. A
+/// group row's companion mutes on the mismatch alone: its members' short
+/// histories already blank the z they would contribute.
+fn companion_muted(i: &Inputs<'_>, c: &Cell) -> bool {
+    lens_mismatch(i)
+        || (i.lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT))
 }
 
 /// One cell's text, sign, glyph and muted flag; the id and the
@@ -578,19 +646,27 @@ fn prepare_cell(
         // A tint the pair would paint muted (a stale lookback, a short
         // history) is a wrong color under a right number: it goes
         // entirely, and the level keeps its text and tone.
-        Glyph::Tint(
-            board_cell
+        let cv = match &row.group {
+            Some(g) => (!lens_mismatch(i))
+                .then(|| group_cell(g, &column.kind, i.asked))
+                .flatten()
+                .and_then(|c| group_companion(c, &i.lens)),
+            None => board_cell
                 .filter(|c| !companion_muted(i, c))
-                .and_then(|c| companion(c, &i.lens))
-                .and_then(|cv| {
-                    let f = companion_text(cv, &i.lens);
-                    companion_chip(displayed_companion(cv, &i.lens), f.sign, scale, &i.lens)
-                }),
-        )
+                .and_then(|c| companion(c, &i.lens)),
+        };
+        Glyph::Tint(cv.and_then(|cv| {
+            let f = companion_text(cv, &i.lens);
+            companion_chip(displayed_companion(cv, &i.lens), f.sign, scale, &i.lens)
+        }))
     } else {
         Glyph::None
     };
-    let muted = shows_companion && board_cell.is_some_and(|c| companion_muted(i, c));
+    let muted = shows_companion
+        && match &row.group {
+            Some(_) => lens_mismatch(i),
+            None => board_cell.is_some_and(|c| companion_muted(i, c)),
+        };
     PreparedCell {
         text: t.into(),
         value: Some(v),
@@ -655,7 +731,9 @@ fn window_word(asked: &Ask) -> &'static str {
 /// carries them, and a z blank for a short history says so: `z 1Y — (12
 /// of 60)`. A cell with a level but no change says why when the board
 /// knows: `SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01` (the
-/// board note for the measure's dataset).
+/// board note for the measure's dataset). A group row reads its means:
+/// `Core · 2 members · ATFM 1M mean 15.5 (2 of 2) · Δ1d mean +0.8 · z 1Y
+/// mean +0.5 · pctl 1Y mean 70`.
 pub fn readout(
     row: &Row,
     column: &Column,
@@ -664,6 +742,52 @@ pub fn readout(
     clock: &Clock,
     _lens: &LensState,
 ) -> String {
+    if let Some(g) = &row.group {
+        let dash = || widths::DASH.to_string();
+        let mut parts = vec![format!("{} \u{b7} {} members", g.label, g.members.len())];
+        match column_measure(column) {
+            Some(m) => {
+                let c = asked
+                    .measures
+                    .iter()
+                    .position(|x| x == m)
+                    .and_then(|pos| g.cells.get(pos));
+                let num = |v: Option<f64>| v.map_or_else(dash, |v| format_number(v, &ONE_DP).text);
+                let sgn = |v: Option<f64>| v.map_or_else(dash, |v| signed(v, &ONE_DP).text);
+                parts.push(format!(
+                    "{} mean {} ({} of {})",
+                    family_label(m),
+                    num(c.and_then(|c| c.level)),
+                    g.present,
+                    g.members.len()
+                ));
+                parts.push(format!(
+                    "\u{394}{} mean {}",
+                    asked.lookback.label(),
+                    sgn(c.and_then(|c| c.delta))
+                ));
+                if asked.window.is_some() {
+                    let w = window_word(asked);
+                    parts.push(format!("z {w} mean {}", sgn(c.and_then(|c| c.z))));
+                    parts.push(format!(
+                        "pctl {w} mean {}",
+                        c.and_then(|c| c.pctl)
+                            .map_or_else(dash, |p| format!("{:.0}", rank_percent(p)))
+                    ));
+                }
+            }
+            None => {
+                if column.kind == ColumnKind::Vega {
+                    parts.push(format!(
+                        "{} {}",
+                        column.head,
+                        row.vega.map_or_else(dash, |v| format_number(v, &VEGA).text)
+                    ));
+                }
+            }
+        }
+        return parts.join(" \u{b7} ");
+    }
     if !row.present {
         return format!("{} \u{b7} not in surface", row.name);
     }
@@ -1055,6 +1179,10 @@ pub struct HeaderModel {
     pub title: SharedString,
     pub count: usize,
     pub count_text: SharedString,
+    /// The grouping chip (`region`, `region · lhu skipped`, `ungrouped`,
+    /// `pinned region`); muted while nothing groups.
+    pub grouping: SharedString,
+    pub grouping_muted: bool,
     /// The three lens chips in paint order, the one in force true: the
     /// lookbacks under moves, the windows under rich/cheap. The lit chip
     /// alone carries its head (`Δ`, or the metric word).
@@ -1076,11 +1204,13 @@ pub const CHEVRON: &str = "\u{25be}";
 
 impl HeaderModel {
     /// The chips' texts in paint order: the mark, the switch control, the
-    /// count, the lens chips, the sort, the missing, the failed.
+    /// count, the grouping, the lens chips, the sort, the missing, the
+    /// failed.
     #[cfg(test)]
     pub fn chip_texts(&self) -> Vec<String> {
         let mut out = vec![MARK.to_string(), format!("{} {CHEVRON}", self.title)];
         out.push(self.count_text.to_string());
+        out.push(self.grouping.to_string());
         out.extend(self.chips.iter().map(|(t, _)| t.clone()));
         out.extend(self.sort.iter().map(ToString::to_string));
         out.extend(self.missing_text.iter().map(ToString::to_string));
@@ -1091,17 +1221,29 @@ impl HeaderModel {
 
 impl Default for HeaderModel {
     fn default() -> Self {
-        header(None, 0, &LensState::default(), None, None)
+        header(
+            None,
+            0,
+            &LensState::default(),
+            None,
+            None,
+            "ungrouped",
+            true,
+        )
     }
 }
 
 /// The header's text and counts. With no list the title reads `Vol · New…`.
+/// `grouping` is the grouping chip's prepared text, muted while nothing
+/// groups.
 pub fn header(
     list: Option<&str>,
     count: usize,
     lens: &LensState,
     sort: Option<&str>,
     board: Option<&VolBoard>,
+    grouping: &str,
+    grouping_muted: bool,
 ) -> HeaderModel {
     let (chips, chip_kind) = match lens.lens {
         Lens::Moves => (
@@ -1134,6 +1276,8 @@ pub fn header(
         title: format!("{TITLE} \u{b7} {}", list.unwrap_or("New\u{2026}")).into(),
         count,
         count_text: count.to_string().into(),
+        grouping: grouping.to_string().into(),
+        grouping_muted,
         chips,
         chip_kind,
         sort: sort.map(|s| s.to_string().into()),
@@ -2184,7 +2328,15 @@ mod tests {
 
     #[test]
     fn the_header_chips_are_the_lookbacks_under_moves_and_the_windows_under_rich() {
-        let moves = header(Some("europe_risk"), 3, &LensState::default(), None, None);
+        let moves = header(
+            Some("europe_risk"),
+            3,
+            &LensState::default(),
+            None,
+            None,
+            "ungrouped",
+            true,
+        );
         assert_eq!(moves.chip_kind, ChipKind::Lookback);
         assert_eq!(
             moves.chips,
@@ -2204,6 +2356,8 @@ mod tests {
             },
             None,
             None,
+            "ungrouped",
+            true,
         );
         assert_eq!(rich.chip_kind, ChipKind::Window);
         assert_eq!(
@@ -2426,19 +2580,241 @@ mod tests {
             lookback: Lookback::W1,
             ..LensState::default()
         };
-        let h = header(Some("europe_risk"), 2, &w1, Some("|Δ 3M|"), Some(&b));
+        let h = header(
+            Some("europe_risk"),
+            2,
+            &w1,
+            Some("|Δ 3M|"),
+            Some(&b),
+            "ungrouped",
+            true,
+        );
         assert_eq!(h.title, "Vol · europe_risk");
         assert_eq!(h.not_in_surface, 1);
         assert_eq!(h.failed, ["realized_vol"]);
         assert_eq!(h.chips[1], ("\u{394} 1w".to_string(), true));
         assert_eq!(h.sort.as_deref(), Some("|Δ 3M|"));
         assert_eq!(
-            header(None, 0, &LensState::default(), None, None).title,
+            header(
+                None,
+                0,
+                &LensState::default(),
+                None,
+                None,
+                "ungrouped",
+                true
+            )
+            .title,
             "Vol · New…"
         );
         assert_eq!(
-            h.chip_texts()[3..6],
+            h.chip_texts()[4..7],
             ["1d".to_string(), "\u{394} 1w".into(), "1m".into()]
         );
+    }
+
+    mod grouped {
+        use super::*;
+        use crate::core::grouping::fixtures::{asked, europe, leaf};
+        use crate::core::grouping::group_rows;
+        use crate::core::lens::{Lens, Metric, Window};
+        use crate::core::views::{builtin, columns};
+        use std::time::Duration;
+
+        fn grouped_rows() -> Vec<Row> {
+            group_rows(
+                vec![
+                    leaf("SX5E", Some(16.5), 1.0, 0.9, Some(2.0)),
+                    leaf("DAX", Some(14.5), 0.6, 0.5, Some(3.0)),
+                    leaf("NEW", None, 0.0, 0.0, None),
+                ],
+                &["region".into()],
+                &europe(),
+                &asked(),
+            )
+        }
+
+        fn vol_columns(lens: &LensState) -> Vec<Column> {
+            let view = builtin().get("vol").unwrap().clone();
+            columns(&view, lens, true)
+        }
+
+        fn inputs<'a>(
+            rows: &'a [Row],
+            columns: &'a [Column],
+            asked: &'a Ask,
+            lens: LensState,
+            board_window: Option<Duration>,
+        ) -> Inputs<'a> {
+            Inputs {
+                tile: 1,
+                rows,
+                columns,
+                asked,
+                board_lookback: lens.lookback,
+                board_window,
+                lens,
+                cells: Cells::Pair,
+                paint: true,
+                stale_after: Duration::from_secs(86_400),
+                now: Utc::now(),
+                mono_advance_px: 7.0,
+            }
+        }
+
+        fn col(columns: &[Column], id: &str) -> usize {
+            columns
+                .iter()
+                .position(|c| c.id == id)
+                .unwrap_or_else(|| panic!("{id}"))
+        }
+
+        #[test]
+        fn a_group_cell_follows_the_lens_and_mutes_on_a_window_mismatch() {
+            let rows = grouped_rows();
+            let asked = asked();
+            let moves = LensState::default();
+            let cols = vol_columns(&moves);
+            let p = prepare(&inputs(&rows, &cols, &asked, moves, asked.window));
+            let core = &p.rows[0];
+            assert_eq!(core.depth, 0);
+            assert_eq!(
+                core.group,
+                Some(2),
+                "Core holds SX5E and DAX; NEW is unmapped"
+            );
+            let level = &core.cells[col(&cols, "atfm-1M-level")];
+            assert_eq!(level.text, "15.5");
+            let companion = &core.cells[col(&cols, "atfm-1M-companion")];
+            assert_eq!(companion.text, "+0.8", "the mean of the members' Δ");
+            assert!(!companion.muted);
+
+            let z = LensState {
+                lens: Lens::Rich,
+                metric: Metric::Z,
+                window: Window::Y1,
+                ..LensState::default()
+            };
+            let cols = vol_columns(&z);
+            let p = prepare(&inputs(&rows, &cols, &asked, z, asked.window));
+            assert_eq!(
+                p.rows[0].cells[col(&cols, "atfm-1M-companion")].text,
+                "+0.5",
+                "the mean of the members' z, not the z of the mean"
+            );
+
+            let pctl = LensState {
+                metric: Metric::Pctl,
+                ..z
+            };
+            let cols = vol_columns(&pctl);
+            let p = prepare(&inputs(&rows, &cols, &asked, pctl, asked.window));
+            assert_eq!(p.rows[0].cells[col(&cols, "atfm-1M-companion")].text, "70");
+
+            // The board was asked under 6M while the lens says 1Y: muted,
+            // as a member's companion is.
+            let p = prepare(&inputs(
+                &rows,
+                &cols,
+                &asked,
+                pctl,
+                Some(Window::M6.duration()),
+            ));
+            assert!(p.rows[0].cells[col(&cols, "atfm-1M-companion")].muted);
+            assert!(p.rows[1].cells[col(&cols, "atfm-1M-companion")].muted);
+        }
+
+        #[test]
+        fn a_group_rows_name_cell_carries_its_label_and_count_and_a_spark_is_blank() {
+            let rows = grouped_rows();
+            let asked = asked();
+            let lens = LensState::default();
+            let cols = vol_columns(&lens);
+            let p = prepare(&inputs(&rows, &cols, &asked, lens, asked.window));
+            let core = &p.rows[0];
+            assert_eq!(core.cells[0].text, "Core \u{b7} 2");
+            assert!(!core.cells[0].muted);
+            let spark = cols
+                .iter()
+                .position(|c| matches!(c.kind, ColumnKind::Spark { .. }))
+                .unwrap();
+            assert_eq!(core.cells[spark].glyph, Glyph::None);
+            assert_eq!(core.cells[spark].text, widths::DASH);
+            let vega = col(&cols, "vega");
+            assert_eq!(
+                core.cells[vega].text, "0",
+                "5.0 vega in thousands rounds to 0"
+            );
+            assert_eq!(p.rows[1].depth, 1, "a member under its group");
+            assert_eq!(p.rows[1].group, None);
+            // The unmapped group: label `—`, one member, no value.
+            let unmapped = &p.rows[3];
+            assert_eq!(unmapped.cells[0].text, "\u{2014} \u{b7} 1");
+            assert_eq!(
+                unmapped.cells[col(&cols, "atfm-1M-level")].text,
+                widths::DASH
+            );
+            // The name column is wide enough for the deepest indented label.
+            let lead = tree_lead(&rows[1]);
+            assert!(p.widths[0] >= "SX5E".len() as f32 * 7.0 + lead);
+        }
+
+        #[test]
+        fn the_readout_on_a_group_row_names_the_means_and_the_count() {
+            let rows = grouped_rows();
+            let asked = asked();
+            let lens = LensState::default();
+            let cols = vol_columns(&lens);
+            let text = readout(
+                &rows[0],
+                &cols[col(&cols, "atfm-1M-level")],
+                &asked,
+                &[],
+                &Clock::utc(),
+                &lens,
+            );
+            assert_eq!(
+                text,
+                "Core \u{b7} 2 members \u{b7} ATFM 1M mean 15.5 (2 of 2) \u{b7} \u{394}1d mean +0.8 \u{b7} z 1Y mean +0.5 \u{b7} pctl 1Y mean 70"
+            );
+            let unmapped = readout(
+                &rows[3],
+                &cols[col(&cols, "atfm-1M-level")],
+                &asked,
+                &[],
+                &Clock::utc(),
+                &lens,
+            );
+            assert!(
+                unmapped
+                    .starts_with("\u{2014} \u{b7} 1 members \u{b7} ATFM 1M mean \u{2014} (0 of 1)"),
+                "{unmapped}"
+            );
+            let name = readout(&rows[0], &cols[0], &asked, &[], &Clock::utc(), &lens);
+            assert_eq!(name, "Core \u{b7} 2 members");
+        }
+
+        #[test]
+        fn the_header_carries_the_grouping_chip() {
+            let h = header(
+                Some("europe_risk"),
+                4,
+                &LensState::default(),
+                None,
+                None,
+                "region",
+                false,
+            );
+            assert_eq!(h.grouping, "region");
+            assert!(!h.grouping_muted);
+            assert_eq!(
+                h.chip_texts()[3],
+                "region",
+                "after the mark, the switch control and the count"
+            );
+            let d = HeaderModel::default();
+            assert_eq!(d.grouping, "ungrouped");
+            assert!(d.grouping_muted);
+        }
     }
 }
