@@ -1,50 +1,51 @@
 //! The prepared model: a landed [`VolBoard`] turned into everything render
 //! reads — each cell's text, glyph core, id and muted flag, the column
 //! widths, the cursor readout and the header model — built once per board,
-//! view or paint change, never per frame.
+//! view, lens or paint change, never per frame.
 //!
-//! The only arithmetic here is display: a forward change as a percent of
-//! its `from`, a rank times a hundred, and the scales and ranges glyphs are
-//! measured against. Every number comes from a board cell.
+//! The only arithmetic here is display: a rank times a hundred, a number
+//! rounded to what the cell shows, and the scales glyphs are measured
+//! against. The companion numbers themselves (a change, a z, a rank) come
+//! from the lens over a board cell.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use geode_chart::core::spark::shared_range;
 use geode_chart::spark::sizes;
 use geode_core::clock::Clock;
 use geode_core::format::{Formatted, Sign, format_number};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 use geode_core::volboard::{Cell, Change, Lookback, Measure, Role, VolBoard, VolRow};
+use geode_core::volviews::Cells;
 use geode_tile::rows::GridRow;
 use geode_widgets::cell::delta_chip::{Chip, chip};
 use geode_widgets::cell::heat::{heat, range};
-use geode_widgets::cell::percent_slider::{Slider, slider};
-use geode_widgets::cell::zero_bar::{Bar, bar};
 use geode_widgets::cell::{DESIGN_REM, column_scale, widths};
 use gpui::SharedString;
 
-use super::lens::PCTL_MIN_COUNT;
+use super::lens::{
+    Lens, LensState, Metric, PCTL_MIN_COUNT, Shown, Window, Z_CEILING, companion, pctl_side,
+    z_score,
+};
 use super::views::{
-    Ask, Column, ColumnKind, REALIZED, SURFACE, TITLE, VARSWAP, WINDOW_1Y, sortable,
+    Ask, Column, ColumnKind, REALIZED, SURFACE, TITLE, VARSWAP, family_label, sortable,
 };
 
-/// Fill alpha of a change chip at the column's largest move: a tint under a
-/// colored number; at 0.55 the chips read as filled pills and hid the grid's
-/// rhythm.
+/// Fill alpha of a chip at its scale's top (the column's largest move, a z
+/// of `Z_CEILING`, a rank at either end): a tint under a colored number;
+/// at 0.55 the chips read as filled pills and hid the grid's rhythm.
 pub const CHIP_CEILING: f32 = 0.25;
-/// Heat tint alpha at the top of the grid's range.
-pub const HEAT_CEILING: f32 = 0.40;
-/// Zero bar fill alpha over its sign color.
-pub const BAR_ALPHA: f32 = 0.75;
+/// Heat tint alpha at the top of the band's surface range. The band's
+/// own: the grid paints no heat.
+pub const BAND_HEAT_CEILING: f32 = 0.40;
 /// Design px a sortable head keeps clear beside its text for the table's
 /// sort mark: an `Icon::size_3` (0.75 rem) in `p(px(2.))`, right of the
 /// head. A head that forgot it loses its leading letters under the mark.
 pub const SORT_MARK_DESIGN_PX: f32 = 0.75 * DESIGN_REM + 4.0;
 
-/// Levels, changes and bars: one decimal.
+/// Levels, changes and z: one decimal.
 pub const ONE_DP: ColumnFormat = ColumnFormat {
     precision: 1,
     thousands: false,
@@ -121,10 +122,12 @@ pub fn rows(
 #[derive(Debug, Clone, PartialEq)]
 pub enum Glyph {
     None,
+    /// A companion number in its chip: the pair's companion column, or a
+    /// single column after `m`.
     Chip(Option<Chip>),
-    Slider(Option<Slider>),
-    Bar(Option<Bar>),
-    Heat(Option<f32>),
+    /// A level over its companion's sign tint: a single column showing
+    /// the level. `None` when the cell has no companion.
+    Tint(Option<Chip>),
     Spark {
         values: Arc<[f64]>,
         range: Option<(f64, f64)>,
@@ -167,9 +170,14 @@ pub struct Inputs<'a> {
     /// sparklines are found by their position in it, so reading a board
     /// through any other ask misplaces every cell.
     pub asked: &'a Ask,
-    /// the lookback the board was asked with; cells paint muted when it differs from `shown`
+    /// The lookback the board was asked with; a change paints muted when
+    /// it differs from the lens's.
     pub board_lookback: Lookback,
-    pub shown: Lookback,
+    /// The lens in force: which companion stands beside a level, and
+    /// which number a single column shows.
+    pub lens: LensState,
+    /// The view's cell shape, carried beside its columns.
+    pub cells: Cells,
     pub paint: bool,
     pub stale_after: Duration,
     pub now: DateTime<Utc>,
@@ -213,26 +221,41 @@ fn finite(v: f64) -> Option<f64> {
     v.is_finite().then_some(v)
 }
 
-/// The number a cell shows, before formatting; `None` for a blank and for
-/// any row the surface lacks.
-fn value(row: &Row, kind: &ColumnKind, asked: &Ask) -> Option<f64> {
+/// The board cell a column of `kind` reads, for a row the surface holds.
+fn column_cell<'r>(row: &'r Row, kind: &ColumnKind, asked: &Ask) -> Option<&'r Cell> {
     if !row.present {
         return None;
     }
     match kind {
-        ColumnKind::Level { measure, .. } | ColumnKind::Bar { measure } => {
-            cell(row, measure, asked)?.current.and_then(finite)
-        }
-        ColumnKind::Change { measure } => finite(change_of(row, measure, asked)?.value),
-        ColumnKind::ForwardChange { measure } => {
-            let c = change_of(row, measure, asked)?;
-            finite(c.value / c.from * 100.0)
-        }
-        ColumnKind::Pctl { measure } => {
-            cell(row, measure, asked)?.pctl.and_then(|(r, _)| finite(r))
+        ColumnKind::Level { measure }
+        | ColumnKind::Companion { measure }
+        | ColumnKind::Single { measure } => cell(row, measure, asked),
+        ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Vega => None,
+    }
+}
+
+/// Whether `kind` shows a companion number under `lens` (the pair's
+/// companion column, or a single column after `m`).
+fn shows_companion(kind: &ColumnKind, lens: &LensState) -> bool {
+    matches!(kind, ColumnKind::Companion { .. })
+        || (matches!(kind, ColumnKind::Single { .. }) && lens.shown == Shown::Companion)
+}
+
+/// The number a cell shows, before formatting; `None` for a blank and for
+/// any row the surface lacks.
+fn value(row: &Row, kind: &ColumnKind, asked: &Ask, lens: &LensState) -> Option<f64> {
+    if !row.present {
+        return None;
+    }
+    if shows_companion(kind, lens) {
+        return companion(column_cell(row, kind, asked)?, lens);
+    }
+    match kind {
+        ColumnKind::Level { .. } | ColumnKind::Single { .. } => {
+            column_cell(row, kind, asked)?.current.and_then(finite)
         }
         ColumnKind::Vega => row.vega.and_then(finite),
-        ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Term => None,
+        ColumnKind::Underlying | ColumnKind::Companion { .. } | ColumnKind::Spark { .. } => None,
     }
 }
 
@@ -250,22 +273,64 @@ fn rank_percent(rank: f64) -> f64 {
     (rank * 100.0).round()
 }
 
-/// The displayed text of a value in a column of `kind`.
-fn text(kind: &ColumnKind, v: f64) -> Formatted {
-    match kind {
-        ColumnKind::Level { .. } => format_number(v, &ONE_DP),
-        ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } | ColumnKind::Bar { .. } => {
-            signed(v, &ONE_DP)
-        }
-        ColumnKind::Pctl { .. } => Formatted {
+/// A companion as the cell shows it: a change or a z with its sign at
+/// one decimal, a rank as a whole percent with no sign.
+fn companion_text(v: f64, lens: &LensState) -> Formatted {
+    match (lens.lens, lens.metric) {
+        (Lens::Rich, Metric::Pctl) => Formatted {
             text: format!("{:.0}", rank_percent(v)),
             sign: Sign::Zero,
         },
+        _ => signed(v, &ONE_DP),
+    }
+}
+
+/// The displayed text of a value in a column of `kind`.
+fn text(kind: &ColumnKind, v: f64, lens: &LensState) -> Formatted {
+    if shows_companion(kind, lens) {
+        return companion_text(v, lens);
+    }
+    match kind {
+        ColumnKind::Level { .. } | ColumnKind::Single { .. } => format_number(v, &ONE_DP),
         ColumnKind::Vega => format_number(v, &VEGA),
-        ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Term => Formatted {
-            text: String::new(),
-            sign: Sign::Zero,
-        },
+        ColumnKind::Underlying | ColumnKind::Companion { .. } | ColumnKind::Spark { .. } => {
+            Formatted {
+                text: String::new(),
+                sign: Sign::Zero,
+            }
+        }
+    }
+}
+
+/// A companion at the magnitude its text shows: a change or a z rounded
+/// to one decimal, a rank to its whole percent. The chip tints what the
+/// eye reads, so a z displayed `1.4` tints as 1.4 and a move displayed
+/// `0.0` tints as nothing.
+fn displayed_companion(v: f64, lens: &LensState) -> f64 {
+    match (lens.lens, lens.metric) {
+        (Lens::Rich, Metric::Pctl) => rank_percent(v) / 100.0,
+        _ => (v * 10.0).round() / 10.0,
+    }
+}
+
+/// The companion's chip: a Δ against the column's scale, a z against
+/// `Z_CEILING`, a rank by its side of the median. `v` is the displayed
+/// companion and `sign` its text's sign.
+fn companion_chip(v: f64, sign: Sign, scale: f64, lens: &LensState) -> Option<Chip> {
+    match (lens.lens, lens.metric) {
+        (Lens::Moves, _) => chip(v, sign, scale, CHIP_CEILING),
+        (Lens::Rich, Metric::Z) => chip(v, sign, Z_CEILING, CHIP_CEILING),
+        (Lens::Rich, Metric::Pctl) => {
+            let side = pctl_side(v);
+            let sign = if side > 0.0 {
+                Sign::Positive
+            } else if side < 0.0 {
+                Sign::Negative
+            } else {
+                Sign::Zero
+            };
+            chip(side, sign, 1.0, CHIP_CEILING)
+        }
     }
 }
 
@@ -274,9 +339,9 @@ fn text(kind: &ColumnKind, v: f64) -> Formatted {
 ///
 /// The cut is by proportion and assumes the values fill `board_span` (one
 /// a day across it). A member whose history is shorter than the span is
-/// cut too hard: under the band's 1Y ask, ~40 days of history leave ~4 in
-/// a 30d column until the next ask narrows the span. A known limit,
-/// listed in `docs/open-items.md`; the spark shape stays as it is.
+/// cut too hard: under the band's window-long ask, ~40 days of history
+/// leave ~4 in a 30d column until the next ask narrows the span. A known
+/// limit, listed in `docs/open-items.md`; the spark shape stays as it is.
 fn spark_tail(values: &[f64], board_span: Duration, wanted: Duration) -> &[f64] {
     let (have, want) = (board_span.as_secs(), wanted.as_secs());
     if have <= want || have == 0 {
@@ -287,37 +352,6 @@ fn spark_tail(values: &[f64], board_span: Duration, wanted: Duration) -> &[f64] 
     &values[n - keep.min(n)..]
 }
 
-/// The ATFM measures a Term glyph draws, in column order (the view lists
-/// a level per tenor).
-fn term_measures(columns: &[Column]) -> Vec<&Measure> {
-    columns
-        .iter()
-        .filter_map(|c| match &c.kind {
-            ColumnKind::Level {
-                measure: m @ Measure::Point { delta, .. },
-                ..
-            } if *delta == 0.5 => Some(m),
-            _ => None,
-        })
-        .collect()
-}
-
-fn term_values(row: &Row, measures: &[&Measure], asked: &Ask) -> Option<Vec<f64>> {
-    if !row.present {
-        return None;
-    }
-    let values: Vec<f64> = measures
-        .iter()
-        .map(|m| {
-            cell(row, m, asked)
-                .and_then(|c| c.current)
-                .filter(|v| v.is_finite())
-                .unwrap_or(f64::NAN)
-        })
-        .collect();
-    values.iter().any(|v| v.is_finite()).then_some(values)
-}
-
 fn is_stale(row: &Row, now: DateTime<Utc>, stale_after: Duration) -> bool {
     row.present
         && row
@@ -325,62 +359,44 @@ fn is_stale(row: &Row, now: DateTime<Utc>, stale_after: Duration) -> bool {
             .is_some_and(|t| (now - t).to_std().is_ok_and(|age| age > stale_after))
 }
 
-/// Text px → the narrowest cell a column of `kind` paints it in.
+/// Text px → the narrowest cell a column of `kind` paints it in. A
+/// single column keeps the chip's room under either shown number, so `m`
+/// never resizes the grid.
 pub(crate) fn glyph_width(kind: &ColumnKind, text_px: f32) -> f32 {
     match kind {
-        ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } => widths::chip(text_px),
-        ColumnKind::Pctl { .. } => widths::slider(text_px),
-        ColumnKind::Bar { .. } => widths::bar(text_px),
-        ColumnKind::Level { heat: true, .. } => widths::heat(text_px),
+        ColumnKind::Companion { .. } | ColumnKind::Single { .. } => widths::chip(text_px),
         ColumnKind::Spark { .. } => text_px.max(sizes::WIDTH_30D),
-        ColumnKind::Term => text_px.max(sizes::WIDTH_TERM),
-        ColumnKind::Level { heat: false, .. } | ColumnKind::Underlying | ColumnKind::Vega => {
-            text_px
-        }
+        ColumnKind::Level { .. } | ColumnKind::Underlying | ColumnKind::Vega => text_px,
     }
+}
+
+/// The scale a column's chips tint against: under moves, the largest
+/// displayed companion among the rows (so the column's largest move takes
+/// the ceiling itself); under rich/cheap the chip has its own ceiling and
+/// the column none.
+fn companion_scale(i: &Inputs<'_>, kind: &ColumnKind) -> f64 {
+    let (ColumnKind::Companion { .. } | ColumnKind::Single { .. }) = kind else {
+        return 0.0;
+    };
+    if i.lens.lens != Lens::Moves {
+        return 0.0;
+    }
+    column_scale(
+        i.rows
+            .iter()
+            .filter_map(|r| column_cell(r, kind, i.asked))
+            .filter_map(|c| companion(c, &i.lens))
+            .map(|v| displayed_companion(v, &i.lens)),
+    )
 }
 
 /// Every row's cells, prepared once.
 pub fn prepare(i: &Inputs<'_>) -> Prepared {
-    // One pass for the numbers, so scales and ranges read them once.
-    let values: Vec<Vec<Option<f64>>> = i
-        .rows
+    let scales: Vec<f64> = i
+        .columns
         .iter()
-        .map(|r| {
-            i.columns
-                .iter()
-                .map(|c| value(r, &c.kind, i.asked))
-                .collect()
-        })
+        .map(|c| companion_scale(i, &c.kind))
         .collect();
-    let scales: Vec<f64> = (0..i.columns.len())
-        .map(|ci| column_scale(values.iter().filter_map(|row| row[ci])))
-        .collect();
-    let heat_range = range(i.columns.iter().enumerate().flat_map(|(ci, c)| {
-        let tinted = matches!(c.kind, ColumnKind::Level { heat: true, .. });
-        values
-            .iter()
-            .filter_map(move |row| if tinted { row[ci] } else { None })
-    }));
-    let has_term = i.columns.iter().any(|c| c.kind == ColumnKind::Term);
-    let tenors = if has_term {
-        term_measures(i.columns)
-    } else {
-        Vec::new()
-    };
-    let terms: Vec<Option<Arc<[f64]>>> = i
-        .rows
-        .iter()
-        .map(|r| {
-            if has_term {
-                term_values(r, &tenors, i.asked).map(Arc::from)
-            } else {
-                None
-            }
-        })
-        .collect();
-    let term_range = shared_range(terms.iter().flatten().map(|v| &v[..]));
-    let term_mark = tenors.iter().position(|m| **m == Measure::atfm("3M"));
 
     let mut col_px: Vec<f32> = i
         .columns
@@ -398,34 +414,18 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
     let rows = i
         .rows
         .iter()
-        .enumerate()
-        .map(|(ri, row)| {
+        .map(|row| {
             let stale = is_stale(row, i.now, i.stale_after);
             let cells = i
                 .columns
                 .iter()
                 .enumerate()
                 .map(|(ci, column)| {
-                    let v = values[ri][ci];
-                    let mut cell = prepare_cell(i, row, column, v, scales[ci], heat_range);
-                    match &column.kind {
-                        ColumnKind::Underlying => {
-                            cell.text = SharedString::from(row.name.clone());
-                            cell.muted = !row.present;
-                        }
-                        ColumnKind::Term => {
-                            if let Some(values) = &terms[ri] {
-                                cell.text = SharedString::default();
-                                cell.glyph = Glyph::Spark {
-                                    values: Arc::clone(values),
-                                    range: term_range,
-                                    mark: term_mark,
-                                    end_dot: false,
-                                };
-                                cell.muted = !row.present;
-                            }
-                        }
-                        _ => {}
+                    let v = value(row, &column.kind, i.asked, &i.lens);
+                    let mut cell = prepare_cell(i, row, column, v, scales[ci]);
+                    if column.kind == ColumnKind::Underlying {
+                        cell.text = SharedString::from(row.name.clone());
+                        cell.muted = !row.present;
                     }
                     let px = cell.text.chars().count() as f32 * i.mono_advance_px;
                     col_px[ci] = col_px[ci].max(glyph_width(&column.kind, px));
@@ -478,15 +478,25 @@ fn share_group_labels(columns: &[Column], col_px: &mut [f32], advance_px: f32) {
     }
 }
 
-/// One cell's text, sign, glyph and muted flag; the id, the Underlying
-/// name and the Term glyph are the caller's.
+/// Whether a companion shown in a cell over `c` paints muted: under
+/// moves, a change from another lookback than the lens's; under
+/// rich/cheap, a rank or z over too short a history. A level is never
+/// muted by its companion.
+fn companion_muted(i: &Inputs<'_>, c: &Cell) -> bool {
+    match i.lens.lens {
+        Lens::Moves => i.board_lookback != i.lens.lookback,
+        Lens::Rich => c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT),
+    }
+}
+
+/// One cell's text, sign, glyph and muted flag; the id and the
+/// Underlying name are the caller's.
 fn prepare_cell(
     i: &Inputs<'_>,
     row: &Row,
     column: &Column,
     v: Option<f64>,
     scale: f64,
-    heat_range: Option<(f64, f64)>,
 ) -> PreparedCell {
     let blank = PreparedCell {
         id: SharedString::default(),
@@ -522,29 +532,31 @@ fn prepare_cell(
     let Some(v) = v else {
         return blank;
     };
-    let Formatted { text: t, sign } = text(&column.kind, v);
+    let Formatted { text: t, sign } = text(&column.kind, v, &i.lens);
+    let board_cell = column_cell(row, &column.kind, i.asked);
+    let shows_companion = shows_companion(&column.kind, &i.lens);
     let glyph = if !i.paint {
         Glyph::None
+    } else if shows_companion {
+        Glyph::Chip(companion_chip(
+            displayed_companion(v, &i.lens),
+            sign,
+            scale,
+            &i.lens,
+        ))
+    } else if matches!(column.kind, ColumnKind::Single { .. }) {
+        Glyph::Tint(
+            board_cell
+                .and_then(|c| companion(c, &i.lens))
+                .and_then(|cv| {
+                    let f = companion_text(cv, &i.lens);
+                    companion_chip(displayed_companion(cv, &i.lens), f.sign, scale, &i.lens)
+                }),
+        )
     } else {
-        match &column.kind {
-            ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } => {
-                Glyph::Chip(chip(v, sign, scale, CHIP_CEILING))
-            }
-            ColumnKind::Bar { .. } => Glyph::Bar(bar(v, sign, scale)),
-            ColumnKind::Pctl { .. } => Glyph::Slider(slider(rank_percent(v) / 100.0)),
-            ColumnKind::Level { heat: true, .. } => {
-                Glyph::Heat(heat_range.and_then(|(lo, hi)| heat(v, lo, hi, HEAT_CEILING)))
-            }
-            _ => Glyph::None,
-        }
+        Glyph::None
     };
-    let muted = match &column.kind {
-        ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } => i.board_lookback != i.shown,
-        ColumnKind::Pctl { measure } => cell(row, measure, i.asked)
-            .and_then(|c| c.pctl)
-            .is_some_and(|(_, count)| count < PCTL_MIN_COUNT),
-        _ => false,
-    };
+    let muted = shows_companion && board_cell.is_some_and(|c| companion_muted(i, c));
     PreparedCell {
         text: t.into(),
         value: Some(v),
@@ -559,39 +571,18 @@ fn prepare_cell(
 /// its sparkline's measure.
 fn column_measure(column: &Column) -> Option<&Measure> {
     match &column.kind {
-        ColumnKind::Level { measure, .. }
-        | ColumnKind::Change { measure }
-        | ColumnKind::ForwardChange { measure }
-        | ColumnKind::Pctl { measure }
-        | ColumnKind::Bar { measure } => Some(measure),
-        ColumnKind::Spark { measure, .. } => Some(measure),
-        ColumnKind::Underlying | ColumnKind::Term | ColumnKind::Vega => None,
+        ColumnKind::Level { measure }
+        | ColumnKind::Companion { measure }
+        | ColumnKind::Single { measure }
+        | ColumnKind::Spark { measure, .. } => Some(measure),
+        ColumnKind::Underlying | ColumnKind::Vega => None,
     }
 }
 
-/// A measure as the desk names it in the readout.
-fn measure_label(m: &Measure) -> String {
-    match m {
-        Measure::Point { tenor, delta } if *delta == 0.5 => format!("ATFM {tenor}"),
-        Measure::Point { tenor, delta } => format!(
-            "{tenor} {}\u{394}",
-            geode_core::volboard::delta_text(*delta)
-        ),
-        Measure::Forward { tenor } => format!("fwd {tenor}"),
-        Measure::Skew { tenor } => format!("25\u{394} skew {tenor}"),
-        Measure::WingSkew { tenor } => format!("10\u{394} skew {tenor}"),
-        Measure::Slope { long, short } => format!("{long}\u{2212}{short}"),
-        Measure::Realized { window } => format!("rlz {window}"),
-        Measure::IvRv { tenor, window } => format!("IV {tenor} \u{2212} RV {window}"),
-        Measure::Varswap { tenor } => format!("vs {tenor}"),
-        Measure::VsSpread { tenor } => format!("vs spread {tenor}"),
-        Measure::Table { .. } => m.name(),
-    }
-}
-
-/// The cell's value for sorting: the number the column shows (rank as 0..1 for Pctl); None sorts last.
-pub fn sort_value(row: &Row, column: &Column, asked: &Ask) -> Option<f64> {
-    value(row, &column.kind, asked)
+/// The cell's value for sorting: the number the column shows under
+/// `lens` (a rank as 0..1); `None` sorts last.
+pub fn sort_value(row: &Row, column: &Column, asked: &Ask, lens: &LensState) -> Option<f64> {
+    value(row, &column.kind, asked, lens)
 }
 
 /// The dataset a measure's change is read from: its first input's role,
@@ -613,11 +604,32 @@ fn note_for<'n>(notes: &'n [String], dataset: &str) -> Option<&'n str> {
         .find_map(|n| n.strip_prefix(dataset)?.strip_prefix(": "))
 }
 
-/// `SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · 1Y pctl 91 of 251`, or `SX5E · not in surface`.
-/// A cell with a level but no change says why when the board knows:
-/// `SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01` (the board
-/// note for the measure's dataset).
-pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock: &Clock) -> String {
+/// The window word of the ask the board answered: `1Y`, or `window` for
+/// a span that is none of the three.
+fn window_word(asked: &Ask) -> &'static str {
+    asked
+        .window
+        .and_then(Window::from_duration)
+        .map_or("window", Window::label)
+}
+
+/// `SX5E · ATFM 3M 19.6 · Δ1d +0.8 from 18.8 on 2026-10-22 · z 1Y +1.4 ·
+/// pctl 1Y 91 of 251 · mean 16.9 · sd 1.9`, or `SX5E · not in surface`.
+/// Every part reads the ask the board answered, whatever the lens shows,
+/// so the readout never names a lookback or window the numbers were not
+/// computed over; the z, the rank and the stats appear only when the cell
+/// carries them, and a z blank for a short history says so: `z 1Y — (12
+/// of 60)`. A cell with a level but no change says why when the board
+/// knows: `SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01` (the
+/// board note for the measure's dataset).
+pub fn readout(
+    row: &Row,
+    column: &Column,
+    asked: &Ask,
+    notes: &[String],
+    clock: &Clock,
+    _lens: &LensState,
+) -> String {
     if !row.present {
         return format!("{} \u{b7} not in surface", row.name);
     }
@@ -629,7 +641,7 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock:
                 || widths::DASH.to_string(),
                 |v| format_number(v, &ONE_DP).text,
             );
-            parts.push(format!("{} {current}", measure_label(m)));
+            parts.push(format!("{} {current}", family_label(m)));
             if let Some(ch) = change_of(row, m, asked) {
                 parts.push(format!(
                     "\u{394}{} {} from {} on {}",
@@ -648,8 +660,29 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock:
                     parts.push(note.to_string());
                 }
             }
-            if let Some((rank, count)) = c.and_then(|c| c.pctl) {
-                parts.push(format!("1Y pctl {:.0} of {count}", rank_percent(rank)));
+            if let Some(c) = c {
+                let window = window_word(asked);
+                if let Some(stats) = c.stats {
+                    match z_score(c) {
+                        Some(z) => parts.push(format!("z {window} {}", signed(z, &ONE_DP).text)),
+                        None if stats.count < PCTL_MIN_COUNT => parts.push(format!(
+                            "z {window} {} ({} of {PCTL_MIN_COUNT})",
+                            widths::DASH,
+                            stats.count
+                        )),
+                        None => {}
+                    }
+                }
+                if let Some(text) = pctl_text(&format!("pctl {window}"), Some(c)) {
+                    parts.push(text);
+                }
+                if let Some(stats) = c.stats {
+                    parts.push(format!(
+                        "mean {} \u{b7} sd {}",
+                        format_number(stats.mean, &ONE_DP).text,
+                        format_number(stats.sd, &ONE_DP).text
+                    ));
+                }
             }
         }
         None => match &column.kind {
@@ -673,7 +706,7 @@ pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock:
 pub const BAND_DELTAS: [f64; 5] = [0.90, 0.75, 0.50, 0.25, 0.10];
 /// The band surface's column ids, parallel to its cells.
 const BAND_IDS: [&str; 7] = ["10p", "25p", "atm", "25c", "10c", "skew", "delta"];
-/// The band's three one-year sparklines: ATFM 3M, 25Δ skew 3M, realized 20D.
+/// The band's three window-long sparklines: ATFM 3M, 25Δ skew 3M, realized 20D.
 fn band_sparks() -> [Measure; 3] {
     [
         Measure::atfm("3M"),
@@ -682,6 +715,17 @@ fn band_sparks() -> [Measure; 3] {
             window: "20D".into(),
         },
     ]
+}
+
+/// One band surface cell: a prepared cell and, for the five vol points,
+/// its heat tint over the band's one range. The heat is the band's own
+/// glyph: the grid tints by sign, the band by level.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BandCell {
+    pub cell: PreparedCell,
+    /// Alpha in `0..=BAND_HEAT_CEILING`; `None` for a blank, the skew and
+    /// its Δ.
+    pub heat: Option<f32>,
 }
 
 /// The inspection band for the cursor row: built when the row, the board
@@ -693,12 +737,13 @@ pub struct BandModel {
     pub name: SharedString,
     /// Rows = tenors, columns = DELTAS (10p 25p atm 25c 10c as call deltas
     /// 0.90 0.75 0.50 0.25 0.10), then 25Δ skew and its Δ.
-    pub surface: Vec<(SharedString, Vec<PreparedCell>)>,
+    pub surface: Vec<(SharedString, Vec<BandCell>)>,
     /// The Δ column's head over the lookback shown: `Δ1d`.
     pub delta_head: SharedString,
-    /// ATFM 3M · 1Y, 25Δ skew 3M · 1Y, RV 20d · 1Y (spark glyphs with an end dot).
+    /// ATFM 3M, 25Δ skew 3M, RV 20d over the window the board answered
+    /// (spark glyphs with an end dot).
     pub sparks: [Option<PreparedCell>; 3],
-    /// `1Y pctl 91 of 251 · range 11.2 – 24.6`, `1Y pctl 64 of 251 · range
+    /// `pctl 1Y 91 of 251 · range 11.2 – 24.6`, `pctl 1Y 64 of 251 · range
     /// 4.9 – 7.1`, `IV−RV +3.4 · pctl 77 of 251`.
     pub captions: [SharedString; 3],
     /// `(Varswap 3M, 18.1)`, `(vs ATM, +2.2)`, `(Book vega, -312k)`,
@@ -764,10 +809,10 @@ fn source_line(row: &Row, clock: &Clock) -> String {
 
 /// The cursor row's band: the fixed-delta surface over `tenors` (a tenor
 /// the surface lacks shows dashes), heat-tinted over one range for the
-/// whole table; the three one-year sparks and their captions; the context
-/// pairs. A row the surface lacks is all dashes. A stale row's band keeps
-/// its tone and colors like its grid row; its name (`stale`) and the
-/// header's surface run carry the staleness.
+/// whole table; the three window-long sparks and their captions; the
+/// context pairs. A row the surface lacks is all dashes. A stale row's
+/// band keeps its tone and colors like its grid row; its name (`stale`)
+/// and the header's surface run carry the staleness.
 pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock) -> BandModel {
     let read = |m: &Measure| -> Option<&Cell> {
         if row.present {
@@ -778,13 +823,16 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
     };
     let current = |m: &Measure| read(m).and_then(|c| c.current).and_then(finite);
     let skew = |t: &str| Measure::Skew { tenor: t.into() };
-    let blank = |id: SharedString| PreparedCell {
-        id,
-        text: SharedString::new_static(widths::DASH),
-        value: None,
-        sign: Sign::Zero,
-        glyph: Glyph::None,
-        muted: true,
+    let blank = |id: SharedString| BandCell {
+        cell: PreparedCell {
+            id,
+            text: SharedString::new_static(widths::DASH),
+            value: None,
+            sign: Sign::Zero,
+            glyph: Glyph::None,
+            muted: true,
+        },
+        heat: None,
     };
     let vols: Vec<[Option<f64>; 5]> = tenors
         .iter()
@@ -815,25 +863,26 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
         .zip(&vols)
         .zip(&deltas)
         .map(|((t, vols), delta)| {
-            let mut cells: Vec<PreparedCell> = vols
+            let mut cells: Vec<BandCell> = vols
                 .iter()
                 .zip(BAND_IDS)
                 .map(|(v, col)| match v {
                     Some(v) => {
                         let f = format_number(*v, &ONE_DP);
-                        PreparedCell {
-                            id: id(t, col),
-                            text: f.text.into(),
-                            value: Some(*v),
-                            sign: f.sign,
-                            glyph: if i.paint {
-                                Glyph::Heat(
-                                    heat_range.and_then(|(lo, hi)| heat(*v, lo, hi, HEAT_CEILING)),
-                                )
-                            } else {
-                                Glyph::None
+                        BandCell {
+                            cell: PreparedCell {
+                                id: id(t, col),
+                                text: f.text.into(),
+                                value: Some(*v),
+                                sign: f.sign,
+                                glyph: Glyph::None,
+                                muted: false,
                             },
-                            muted: false,
+                            heat: if i.paint {
+                                heat_range.and_then(|(lo, hi)| heat(*v, lo, hi, BAND_HEAT_CEILING))
+                            } else {
+                                None
+                            },
                         }
                     }
                     None => blank(id(t, col)),
@@ -842,13 +891,16 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
             cells.push(match current(&skew(t)) {
                 Some(v) => {
                     let f = format_number(v, &ONE_DP);
-                    PreparedCell {
-                        id: id(t, BAND_IDS[5]),
-                        text: f.text.into(),
-                        value: Some(v),
-                        sign: f.sign,
-                        glyph: Glyph::None,
-                        muted: false,
+                    BandCell {
+                        cell: PreparedCell {
+                            id: id(t, BAND_IDS[5]),
+                            text: f.text.into(),
+                            value: Some(v),
+                            sign: f.sign,
+                            glyph: Glyph::None,
+                            muted: false,
+                        },
+                        heat: None,
                     }
                 }
                 None => blank(id(t, BAND_IDS[5])),
@@ -856,17 +908,20 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
             cells.push(match delta {
                 Some(v) => {
                     let f = signed(*v, &ONE_DP);
-                    PreparedCell {
-                        id: id(t, BAND_IDS[6]),
-                        text: f.text.into(),
-                        value: Some(*v),
-                        sign: f.sign,
-                        glyph: if i.paint {
-                            Glyph::Chip(chip(*v, f.sign, delta_scale, CHIP_CEILING))
-                        } else {
-                            Glyph::None
+                    BandCell {
+                        cell: PreparedCell {
+                            id: id(t, BAND_IDS[6]),
+                            text: f.text.into(),
+                            value: Some(*v),
+                            sign: f.sign,
+                            glyph: if i.paint {
+                                Glyph::Chip(chip(*v, f.sign, delta_scale, CHIP_CEILING))
+                            } else {
+                                Glyph::None
+                            },
+                            muted: i.board_lookback != i.lens.lookback,
                         },
-                        muted: i.board_lookback != i.shown,
+                        heat: None,
                     }
                 }
                 None => blank(id(t, BAND_IDS[6])),
@@ -875,11 +930,13 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
         })
         .collect();
 
+    // The band asks its sparks at the window in force, so the board's
+    // span is the span shown: no tail to cut.
     let spark_values: [Option<Arc<[f64]>>; 3] = band_sparks().map(|m| {
-        let (Some(series), span) = spark(row, &m, i.asked)? else {
+        let (Some(series), _) = spark(row, &m, i.asked)? else {
             return None;
         };
-        (!series.is_empty()).then(|| Arc::from(spark_tail(series, span, WINDOW_1Y)))
+        (!series.is_empty()).then(|| Arc::from(series.as_slice()))
     });
     let sparks = [0, 1, 2].map(|k| {
         spark_values[k].as_ref().map(|values| PreparedCell {
@@ -902,9 +959,10 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
         window: "20D".into(),
     };
     let spark_range = |k: usize| spark_values[k].as_deref().and_then(range_text);
+    let pctl_label = format!("pctl {}", window_word(i.asked));
     let captions = [
-        caption([pctl_text("1Y pctl", read(&atfm)), spark_range(0)]),
-        caption([pctl_text("1Y pctl", read(&skew3m)), spark_range(1)]),
+        caption([pctl_text(&pctl_label, read(&atfm)), spark_range(0)]),
+        caption([pctl_text(&pctl_label, read(&skew3m)), spark_range(1)]),
         caption([
             current(&ivrv).map(|v| format!("IV\u{2212}RV {}", signed(v, &ONE_DP).text)),
             pctl_text("pctl", read(&ivrv)),
@@ -937,7 +995,7 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
     BandModel {
         name: row.name.clone().into(),
         surface,
-        delta_head: format!("\u{394}{}", i.shown.label()).into(),
+        delta_head: format!("\u{394}{}", i.lens.lookback.label()).into(),
         sparks,
         captions,
         context,
@@ -945,19 +1003,29 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
     }
 }
 
+/// What the header's three lens chips are: the lookbacks under moves,
+/// the windows under rich/cheap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipKind {
+    Lookback,
+    Window,
+}
+
 /// The header's left side, every string formatted when its inputs change
 /// so paint only clones: the switch control's title, the member count,
-/// the lookback chips (`Δ 1d` lit, `1w`, `1m`), the sort chip, the
-/// missing members (`1 not in surface`) and the failed datasets.
+/// the lens chips (`Δ 1d` lit, `1w`, `1m`; or `6M`, `z · 1Y` lit, `2Y`),
+/// the sort chip, the missing members (`1 not in surface`) and the failed
+/// datasets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeaderModel {
     pub title: SharedString,
     pub count: usize,
     pub count_text: SharedString,
-    /// `Lookback::ALL` in order, the one in force true.
-    pub lookbacks: [(Lookback, bool); 3],
-    /// Parallel to `lookbacks`: the lit one carries the `Δ ` prefix.
-    pub lookback_texts: [SharedString; 3],
+    /// The three lens chips in paint order, the one in force true: the
+    /// lookbacks under moves, the windows under rich/cheap. The lit chip
+    /// alone carries its head (`Δ`, or the metric word).
+    pub chips: [(String, bool); 3],
+    pub chip_kind: ChipKind,
     pub sort: Option<SharedString>,
     pub not_in_surface: usize,
     /// `<n> not in surface`; `None` while every member is in it.
@@ -974,12 +1042,12 @@ pub const CHEVRON: &str = "\u{25be}";
 
 impl HeaderModel {
     /// The chips' texts in paint order: the mark, the switch control, the
-    /// count, the lookbacks, the sort, the missing, the failed.
+    /// count, the lens chips, the sort, the missing, the failed.
     #[cfg(test)]
     pub fn chip_texts(&self) -> Vec<String> {
         let mut out = vec![MARK.to_string(), format!("{} {CHEVRON}", self.title)];
         out.push(self.count_text.to_string());
-        out.extend(self.lookback_texts.iter().map(ToString::to_string));
+        out.extend(self.chips.iter().map(|(t, _)| t.clone()));
         out.extend(self.sort.iter().map(ToString::to_string));
         out.extend(self.missing_text.iter().map(ToString::to_string));
         out.extend(self.failed.iter().map(ToString::to_string));
@@ -989,7 +1057,7 @@ impl HeaderModel {
 
 impl Default for HeaderModel {
     fn default() -> Self {
-        header(None, 0, Lookback::D1, None, None)
+        header(None, 0, &LensState::default(), None, None)
     }
 }
 
@@ -997,24 +1065,43 @@ impl Default for HeaderModel {
 pub fn header(
     list: Option<&str>,
     count: usize,
-    shown: Lookback,
+    lens: &LensState,
     sort: Option<&str>,
     board: Option<&VolBoard>,
 ) -> HeaderModel {
-    let lookbacks = Lookback::ALL.map(|l| (l, l == shown));
+    let (chips, chip_kind) = match lens.lens {
+        Lens::Moves => (
+            Lookback::ALL.map(|l| {
+                let lit = l == lens.lookback;
+                let text = if lit {
+                    format!("\u{394} {}", l.label())
+                } else {
+                    l.label().to_string()
+                };
+                (text, lit)
+            }),
+            ChipKind::Lookback,
+        ),
+        Lens::Rich => (
+            Window::ALL.map(|w| {
+                let lit = w == lens.window;
+                let text = if lit {
+                    format!("{} \u{b7} {}", lens.metric.label(), w.label())
+                } else {
+                    w.label().to_string()
+                };
+                (text, lit)
+            }),
+            ChipKind::Window,
+        ),
+    };
     let not_in_surface = board.map_or(0, |b| b.missing.len());
     HeaderModel {
         title: format!("{TITLE} \u{b7} {}", list.unwrap_or("New\u{2026}")).into(),
         count,
         count_text: count.to_string().into(),
-        lookbacks,
-        lookback_texts: lookbacks.map(|(l, lit)| {
-            if lit {
-                format!("\u{394} {}", l.label()).into()
-            } else {
-                SharedString::new_static(l.label())
-            }
-        }),
+        chips,
+        chip_kind,
         sort: sort.map(|s| s.to_string().into()),
         not_in_surface,
         missing_text: (not_in_surface > 0)
@@ -1031,19 +1118,13 @@ pub fn header(
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell as StdCell;
-
     use chrono::TimeZone as _;
-    use geode_core::volboard::{Cell, Change};
+    use geode_core::volboard::{Cell, Change, Stats};
+    use geode_core::volviews::VolView;
 
     use super::*;
-    use crate::core::views::{ALL_TENORS, View, WINDOW_1Y, ask, columns, order_tenors};
-
-    thread_local! {
-        /// The view the last `inputs` call laid out, so `column_index`
-        /// reads that view's columns.
-        static VIEW: StdCell<View> = const { StdCell::new(View::Changes) };
-    }
+    use crate::core::lens::{Lens, Metric, Shown, Window, Z_CEILING};
+    use crate::core::views::{ALL_TENORS, ask, builtin, columns, order_tenors};
 
     fn now() -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 10, 12, 16, 0, 0).unwrap()
@@ -1053,8 +1134,8 @@ mod tests {
         order_tenors(None)
     }
 
-    fn ask_of(view: View) -> Ask {
-        ask(view, &tenors(), Lookback::D1, false)
+    fn vol() -> VolView {
+        builtin().get("vol").unwrap().clone()
     }
 
     fn members<const N: usize>(names: [&str; N]) -> Vec<String> {
@@ -1069,32 +1150,33 @@ mod tests {
         Clock::utc()
     }
 
-    /// The first column with `id` across the views, in `ALL` order.
+    /// The first column with `id` across the builtin views under the
+    /// default lens.
     fn col(id: &str) -> Column {
-        View::ALL
+        builtin()
+            .views
             .iter()
-            .flat_map(|v| columns(*v, &tenors()))
+            .flat_map(|v| columns(v, &LensState::default(), true))
             .find(|c| c.id == id)
             .expect("a column with that id")
     }
 
-    fn column_index(id: &str) -> usize {
-        let view = VIEW.with(StdCell::get);
-        columns(view, &tenors())
+    fn column_index(view: &VolView, lens: &LensState, id: &str) -> usize {
+        columns(view, lens, true)
             .iter()
             .position(|c| c.id == id)
             .expect("the column in the view inputs laid out")
     }
 
-    fn inputs(rows: &[Row], view: View) -> Inputs<'_> {
-        VIEW.with(|v| v.set(view));
+    fn inputs<'r>(rows: &'r [Row], view: &VolView, lens: LensState) -> Inputs<'r> {
         Inputs {
             tile: 7,
             rows,
-            columns: Vec::leak(columns(view, &tenors())),
-            asked: Box::leak(Box::new(ask_of(view))),
+            columns: Vec::leak(columns(view, &lens, true)),
+            asked: Box::leak(Box::new(ask(view, &lens, &tenors(), false))),
             board_lookback: Lookback::D1,
-            shown: Lookback::D1,
+            lens,
+            cells: view.cells,
             paint: true,
             stale_after: Duration::from_secs(3 * 86_400),
             now: now(),
@@ -1102,8 +1184,13 @@ mod tests {
         }
     }
 
-    /// What a fixture puts in one cell: current, change, pctl.
-    type CellData = (Option<f64>, Option<Change>, Option<(f64, usize)>);
+    /// What a fixture puts in one cell: current, change, pctl, stats.
+    type CellData = (
+        Option<f64>,
+        Option<Change>,
+        Option<(f64, usize)>,
+        Option<Stats>,
+    );
 
     /// A board row parallel to `asked`, cells from `set` (blank where it
     /// gives `None`), sparks of 30 points where `spark`.
@@ -1120,14 +1207,14 @@ mod tests {
                 .measures
                 .iter()
                 .map(|m| {
-                    let (current, change, pctl) = set(m).unwrap_or((None, None, None));
+                    let (current, change, pctl, stats) = set(m).unwrap_or((None, None, None, None));
                     Cell {
                         measure: m.clone(),
                         current,
                         current_at: current.map(|_| now() - chrono::Duration::hours(1)),
                         changes: vec![change],
                         pctl,
-                        stats: None,
+                        stats,
                     }
                 })
                 .collect(),
@@ -1148,14 +1235,15 @@ mod tests {
     }
 
     /// SX5E present with ATFM 3M at 15.9, Δ1d +1.1 from 14.8, rank 0.91 of
-    /// 251; NEW missing. Answered for the Changes ask.
+    /// 251; NEW missing. Answered for the vol tab's ask.
     fn board_two() -> VolBoard {
-        let asked = ask_of(View::Changes);
+        let asked = ask(&vol(), &LensState::default(), &tenors(), false);
         let atfm3m = Measure::atfm("3M");
         VolBoard {
             rows: vec![
                 row_of(&asked, "SX5E", true, &|m| {
-                    (*m == atfm3m).then(|| (Some(15.9), Some(change(1.1, 14.8)), Some((0.91, 251))))
+                    (*m == atfm3m)
+                        .then(|| (Some(15.9), Some(change(1.1, 14.8)), Some((0.91, 251)), None))
                 }),
                 row_of(&asked, "NEW", false, &|_| None),
             ],
@@ -1170,9 +1258,9 @@ mod tests {
         Vec::leak(rows(&names, Some(&board), &no_reference, None))
     }
 
-    /// One member per change, ATFM 3M moved by it (Changes ask).
+    /// One member per change, ATFM 3M moved by it (the vol tab's ask).
     fn rows_with_changes(changes: &[f64]) -> &'static [Row] {
-        let asked = ask_of(View::Changes);
+        let asked = ask(&vol(), &LensState::default(), &tenors(), false);
         let atfm3m = Measure::atfm("3M");
         rows_from(VolBoard {
             rows: changes
@@ -1180,7 +1268,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, v)| {
                     row_of(&asked, &format!("U{i}"), true, &|m| {
-                        (*m == atfm3m).then(|| (Some(15.0), Some(change(*v, 15.0 - v)), None))
+                        (*m == atfm3m).then(|| (Some(15.0), Some(change(*v, 15.0 - v)), None, None))
                     })
                 })
                 .collect(),
@@ -1188,38 +1276,14 @@ mod tests {
         })
     }
 
-    /// One member whose ATFM 3M ranks `rank` of `count` (Rich/cheap ask).
+    /// One member whose ATFM 3M ranks `rank` of `count` (the vol tab's ask).
     fn rows_with_pctl(rank: f64, count: usize) -> &'static [Row] {
-        let asked = ask_of(View::RichCheap);
+        let asked = ask(&vol(), &LensState::default(), &tenors(), false);
         let atfm3m = Measure::atfm("3M");
         rows_from(VolBoard {
             rows: vec![row_of(&asked, "SX5E", true, &|m| {
-                (*m == atfm3m).then_some((Some(15.0), None, Some((rank, count))))
+                (*m == atfm3m).then_some((Some(15.0), None, Some((rank, count)), None))
             })],
-            ..VolBoard::default()
-        })
-    }
-
-    /// One member per pair: ATFM 1M and 3M levels (Term ask).
-    fn rows_with_levels(levels: &[[f64; 2]]) -> &'static [Row] {
-        let asked = ask_of(View::Term);
-        let (m1, m3) = (Measure::atfm("1M"), Measure::atfm("3M"));
-        rows_from(VolBoard {
-            rows: levels
-                .iter()
-                .enumerate()
-                .map(|(i, [a, b])| {
-                    row_of(&asked, &format!("U{i}"), true, &|m| {
-                        if *m == m1 {
-                            Some((Some(*a), None, None))
-                        } else if *m == m3 {
-                            Some((Some(*b), None, None))
-                        } else {
-                            None
-                        }
-                    })
-                })
-                .collect(),
             ..VolBoard::default()
         })
     }
@@ -1237,7 +1301,7 @@ mod tests {
             ["SX5E", "NEW"]
         );
         assert!(!rows[1].present);
-        let p = prepare(&inputs(&rows, View::Changes));
+        let p = prepare(&inputs(&rows, &vol(), LensState::default()));
         assert!(
             p.rows[1]
                 .cells
@@ -1251,8 +1315,10 @@ mod tests {
     fn the_chip_takes_the_displayed_sign_and_the_columns_scale() {
         // 0.04 displays as 0.0 → Sign::Zero and a chip with no fill; -2.0 is
         // the column max → alpha = ceiling.
-        let p = prepare(&inputs(rows_with_changes(&[0.04, -2.0]), View::Changes));
-        let col = column_index("atfm-3M-change");
+        let vol = vol();
+        let lens = LensState::default();
+        let p = prepare(&inputs(rows_with_changes(&[0.04, -2.0]), &vol, lens));
+        let col = column_index(&vol, &lens, "atfm-3M-companion");
         let (a, b) = (&p.rows[0].cells[col], &p.rows[1].cells[col]);
         assert_eq!(a.sign, Sign::Zero);
         assert_eq!(a.text.as_ref(), "0.0");
@@ -1268,8 +1334,10 @@ mod tests {
     #[test]
     fn the_chip_ceiling_is_a_tint_not_a_fill() {
         // The column's largest move takes the ceiling itself.
-        let p = prepare(&inputs(rows_with_changes(&[-2.0, 0.5]), View::Changes));
-        let col = column_index("atfm-3M-change");
+        let vol = vol();
+        let lens = LensState::default();
+        let p = prepare(&inputs(rows_with_changes(&[-2.0, 0.5]), &vol, lens));
+        let col = column_index(&vol, &lens, "atfm-3M-companion");
         let Glyph::Chip(Some(Chip { alpha, .. })) = p.rows[0].cells[col].glyph else {
             panic!("the largest move has a chip");
         };
@@ -1281,9 +1349,11 @@ mod tests {
 
     #[test]
     fn a_positive_change_carries_an_explicit_plus() {
-        let p = prepare(&inputs(rows_with_changes(&[1.1]), View::Changes));
+        let vol = vol();
+        let lens = LensState::default();
+        let p = prepare(&inputs(rows_with_changes(&[1.1]), &vol, lens));
         assert_eq!(
-            p.rows[0].cells[column_index("atfm-3M-change")]
+            p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-companion")]
                 .text
                 .as_ref(),
             "+1.1"
@@ -1291,50 +1361,221 @@ mod tests {
     }
 
     #[test]
-    fn the_slider_gets_the_rank_at_display_precision() {
-        // rank 0.8951 displays as 90 and must warn.
-        let p = prepare(&inputs(rows_with_pctl(0.8951, 251), View::RichCheap));
-        let c = &p.rows[0].cells[column_index("atfm-3M-pctl")];
-        assert_eq!(c.text.as_ref(), "90");
-        assert!(matches!(
-            c.glyph,
-            Glyph::Slider(Some(Slider { warn: true, .. }))
-        ));
+    fn a_pair_cell_is_a_level_and_a_companion_that_follows_the_lens() {
+        let vol = builtin().get("vol").unwrap().clone();
+        let lens = LensState::default();
+        let asked = ask(&vol, &lens, &tenors(), false);
+        let rows = vec![Row {
+            name: "SX5E".into(),
+            reference: None,
+            present: true,
+            as_of: Some(now()),
+            board: Some(row_of(&asked, "SX5E", true, &|m| {
+                (*m == Measure::atfm("3M")).then_some((
+                    Some(19.6),
+                    Some(Change {
+                        value: 0.8,
+                        from: 18.8,
+                        at: now(),
+                    }),
+                    Some((0.91, 251)),
+                    Some(Stats {
+                        mean: 16.9,
+                        sd: 1.9,
+                        count: 251,
+                    }),
+                ))
+            })),
+            vega: None,
+        }];
+        let p = prepare(&inputs(&rows, &vol, lens));
+        let level = &p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-level")];
+        let comp = &p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-companion")];
+        assert_eq!(level.text.as_ref(), "19.6");
+        assert_eq!(level.glyph, Glyph::None);
+        assert_eq!(comp.text.as_ref(), "+0.8");
+        assert!(matches!(comp.glyph, Glyph::Chip(Some(_))));
+        let rich = LensState {
+            lens: Lens::Rich,
+            ..lens
+        };
+        let p = prepare(&inputs(&rows, &vol, rich));
+        let comp = &p.rows[0].cells[column_index(&vol, &rich, "atfm-3M-companion")];
+        assert_eq!(comp.text.as_ref(), "+1.4");
+        let Glyph::Chip(Some(chip)) = comp.glyph else {
+            panic!("{:?}", comp.glyph)
+        };
+        assert!(
+            (chip.alpha - (1.4_f64 / Z_CEILING) as f32 * CHIP_CEILING).abs() < 1e-3,
+            "z scales against Z_CEILING, not the column"
+        );
+        let pctl = LensState {
+            lens: Lens::Rich,
+            metric: Metric::Pctl,
+            ..lens
+        };
+        let p = prepare(&inputs(&rows, &vol, pctl));
+        let comp = &p.rows[0].cells[column_index(&vol, &pctl, "atfm-3M-companion")];
+        assert_eq!(comp.text.as_ref(), "91", "a rank has no sign");
+        let Glyph::Chip(Some(chip)) = comp.glyph else {
+            panic!()
+        };
+        assert_eq!(chip.sign, Sign::Positive, "above the median");
+        assert!((chip.alpha - 0.82 * CHIP_CEILING).abs() < 1e-3);
     }
 
     #[test]
-    fn a_short_window_paints_muted_with_its_count_in_the_readout() {
+    fn a_single_cell_shows_the_level_over_the_tint_and_m_swaps_in_the_companion() {
+        let surface = builtin().get("surface").unwrap().clone();
+        let lens = LensState::default();
+        let asked = ask(&surface, &lens, &tenors(), false);
+        let m3 = Measure::atfm("3M");
+        let rows = vec![Row {
+            name: "SX5E".into(),
+            reference: None,
+            present: true,
+            as_of: Some(now()),
+            board: Some(row_of(&asked, "SX5E", true, &|m| {
+                (*m == m3).then_some((
+                    Some(19.6),
+                    Some(Change {
+                        value: -0.9,
+                        from: 20.5,
+                        at: now(),
+                    }),
+                    None,
+                    None,
+                ))
+            })),
+            vega: None,
+        }];
+        let p = prepare(&inputs(&rows, &surface, lens));
+        let cell = &p.rows[0].cells[column_index(&surface, &lens, "atfm-3M-single")];
+        assert_eq!(cell.text.as_ref(), "19.6");
+        let Glyph::Tint(Some(chip)) = cell.glyph else {
+            panic!("{:?}", cell.glyph)
+        };
+        assert_eq!(chip.sign, Sign::Negative);
+        assert_eq!(
+            cell.sign,
+            Sign::Positive,
+            "the text's own sign is the level's"
+        );
+        let swapped = LensState {
+            shown: Shown::Companion,
+            ..lens
+        };
+        let p = prepare(&inputs(&rows, &surface, swapped));
+        let cell = &p.rows[0].cells[column_index(&surface, &swapped, "atfm-3M-single")];
+        assert_eq!(cell.text.as_ref(), "\u{2212}0.9".replace('\u{2212}', "-"));
+        assert!(matches!(cell.glyph, Glyph::Chip(Some(_))));
+        // A level with no companion keeps its number and takes no tint.
+        let bare = vec![Row {
+            board: Some(row_of(&asked, "SX5E", true, &|m| {
+                (*m == m3).then_some((Some(19.6), None, None, None))
+            })),
+            ..rows[0].clone()
+        }];
+        let p = prepare(&inputs(&bare, &surface, lens));
+        let cell = &p.rows[0].cells[column_index(&surface, &lens, "atfm-3M-single")];
+        assert_eq!(cell.text.as_ref(), "19.6");
+        assert_eq!(cell.glyph, Glyph::Tint(None));
+    }
+
+    #[test]
+    fn a_short_count_mutes_the_rank_and_blanks_the_z() {
+        let vol = builtin().get("vol").unwrap().clone();
+        let rich = LensState {
+            lens: Lens::Rich,
+            ..LensState::default()
+        };
+        let asked = ask(&vol, &rich, &tenors(), false);
+        let rows = vec![Row {
+            name: "SX5E".into(),
+            reference: None,
+            present: true,
+            as_of: Some(now()),
+            board: Some(row_of(&asked, "SX5E", true, &|m| {
+                (*m == Measure::atfm("3M")).then_some((
+                    Some(19.6),
+                    None,
+                    Some((0.9, 12)),
+                    Some(Stats {
+                        mean: 16.9,
+                        sd: 1.9,
+                        count: 12,
+                    }),
+                ))
+            })),
+            vega: None,
+        }];
+        let p = prepare(&inputs(&rows, &vol, rich));
+        let comp = &p.rows[0].cells[column_index(&vol, &rich, "atfm-3M-companion")];
+        assert_eq!(
+            comp.text.as_ref(),
+            widths::DASH,
+            "no z under 60 observations"
+        );
+        let pctl = LensState {
+            metric: Metric::Pctl,
+            ..rich
+        };
+        let p = prepare(&inputs(&rows, &vol, pctl));
+        let comp = &p.rows[0].cells[column_index(&vol, &pctl, "atfm-3M-companion")];
+        assert_eq!(comp.text.as_ref(), "90");
+        assert!(comp.muted);
+    }
+
+    #[test]
+    fn a_short_count_names_itself_in_the_readout() {
+        let vol = vol();
         let rows = rows_with_pctl(0.5, 12);
-        let p = prepare(&inputs(rows, View::RichCheap));
-        assert!(p.rows[0].cells[column_index("atfm-3M-pctl")].muted);
-        assert!(
+        let asked = ask(&vol, &LensState::default(), &tenors(), false);
+        let mut rows = rows.to_vec();
+        let board = rows[0].board.as_mut().unwrap();
+        let pos = asked
+            .measures
+            .iter()
+            .position(|m| *m == Measure::atfm("3M"))
+            .unwrap();
+        board.cells[pos].stats = Some(Stats {
+            mean: 16.9,
+            sd: 1.9,
+            count: 12,
+        });
+        assert_eq!(
             readout(
                 &rows[0],
-                &col("atfm-3M-pctl"),
-                &ask_of(View::RichCheap),
+                &col("atfm-3M-companion"),
+                &asked,
                 &[],
-                &clock_utc()
-            )
-            .ends_with("1Y pctl 50 of 12")
+                &clock_utc(),
+                &LensState::default()
+            ),
+            "SX5E · ATFM 3M 15.0 · Δ1d — · z 1Y — (12 of 60) · pctl 1Y 50 of 12 · mean 16.9 · sd 1.9"
         );
     }
 
     #[test]
     fn a_change_from_another_lookback_than_the_one_shown_paints_muted() {
-        let mut i = inputs(rows_with_changes(&[1.0]), View::Changes);
-        assert!(!prepare(&i).rows[0].cells[column_index("atfm-3M-change")].muted);
-        i.shown = Lookback::W1; // the board holds D1
+        let vol = vol();
+        let lens = LensState::default();
+        let mut i = inputs(rows_with_changes(&[1.0]), &vol, lens);
+        assert!(!prepare(&i).rows[0].cells[column_index(&vol, &lens, "atfm-3M-companion")].muted);
+        i.lens.lookback = Lookback::W1; // the board holds D1
         let p = prepare(&i);
-        assert!(p.rows[0].cells[column_index("atfm-3M-change")].muted);
+        assert!(p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-companion")].muted);
         assert!(
-            !p.rows[0].cells[column_index("atfm-3M-level")].muted,
+            !p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-level")].muted,
             "a level has no lookback"
         );
     }
 
     #[test]
     fn a_stale_row_keeps_its_cells_tone_and_mutes_only_its_flag() {
-        let mut i = inputs(rows_with_changes(&[1.0]), View::Changes);
+        let vol = vol();
+        let lens = LensState::default();
+        let mut i = inputs(rows_with_changes(&[1.0]), &vol, lens);
         i.stale_after = Duration::from_secs(60);
         let p = prepare(&i);
         assert!(p.rows[0].stale);
@@ -1348,8 +1589,8 @@ mod tests {
                 .all(|c| !c.muted),
             "stale does not mute the cells"
         );
-        assert!(!p.rows[0].cells[column_index("atfm-3M-level")].muted);
-        assert!(!p.rows[0].cells[column_index("atfm-3M-change")].muted);
+        assert!(!p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-level")].muted);
+        assert!(!p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-companion")].muted);
         assert!(!p.rows[0].cells[0].muted, "the model leaves the name too");
     }
 
@@ -1357,15 +1598,12 @@ mod tests {
     /// afternoon, and only a row a day old is stale.
     #[test]
     fn the_default_stale_threshold_is_a_day() {
-        assert_eq!(
-            crate::content::DEFAULT_STALE_AFTER,
-            Duration::from_secs(24 * 60 * 60)
-        );
+        let day = Duration::from_secs(24 * 60 * 60);
         let aged = |hours: i64| -> &'static [Row] {
-            let asked = ask_of(View::Changes);
+            let asked = ask(&vol(), &LensState::default(), &tenors(), false);
             let atfm3m = Measure::atfm("3M");
             let mut row = row_of(&asked, "U0", true, &|m| {
-                (*m == atfm3m).then(|| (Some(15.0), Some(change(1.0, 14.0)), None))
+                (*m == atfm3m).then(|| (Some(15.0), Some(change(1.0, 14.0)), None, None))
             });
             row.as_of = Some(now() - chrono::Duration::hours(hours));
             rows_from(VolBoard {
@@ -1373,14 +1611,14 @@ mod tests {
                 ..VolBoard::default()
             })
         };
-        let mut i = inputs(aged(16), View::Changes);
-        i.stale_after = crate::content::DEFAULT_STALE_AFTER;
+        let mut i = inputs(aged(16), &vol(), LensState::default());
+        i.stale_after = day;
         assert!(
             !prepare(&i).rows[0].stale,
             "yesterday's 17:00 publish is fresh at 09:00"
         );
-        let mut i = inputs(aged(25), View::Changes);
-        i.stale_after = crate::content::DEFAULT_STALE_AFTER;
+        let mut i = inputs(aged(25), &vol(), LensState::default());
+        i.stale_after = day;
         assert!(
             prepare(&i).rows[0].stale,
             "a day without a publish is stale"
@@ -1388,8 +1626,14 @@ mod tests {
     }
 
     #[test]
-    fn paint_off_keeps_the_numbers_and_drops_tints_sliders_and_bars() {
-        let mut i = inputs(rows_with_pctl(0.9, 251), View::RichCheap);
+    fn paint_off_keeps_the_numbers_and_drops_the_chips_and_tints() {
+        let vol = vol();
+        let pctl = LensState {
+            lens: Lens::Rich,
+            metric: Metric::Pctl,
+            ..LensState::default()
+        };
+        let mut i = inputs(rows_with_pctl(0.9, 251), &vol, pctl);
         i.paint = false;
         let p = prepare(&i);
         assert!(
@@ -1399,46 +1643,49 @@ mod tests {
                 .all(|c| matches!(c.glyph, Glyph::None | Glyph::Spark { .. }))
         );
         assert_eq!(
-            p.rows[0].cells[column_index("atfm-3M-pctl")].text.as_ref(),
+            p.rows[0].cells[column_index(&vol, &pctl, "atfm-3M-companion")]
+                .text
+                .as_ref(),
             "90"
         );
-    }
-
-    #[test]
-    fn heat_shares_one_range_across_the_grid_and_term_one_y_range_across_the_list() {
-        let p = prepare(&inputs(
-            rows_with_levels(&[[10.0, 20.0], [30.0, 40.0]]),
-            View::Term,
-        ));
-        // levels 10 and 40 are the range's ends: alpha 0 and the ceiling
-        let lo = &p.rows[0].cells[column_index("atfm-1M-level")];
-        let hi = &p.rows[1].cells[column_index("atfm-3M-level")];
-        assert!(matches!(lo.glyph, Glyph::Heat(Some(a)) if a == 0.0));
-        assert!(matches!(hi.glyph, Glyph::Heat(Some(a)) if (a - HEAT_CEILING).abs() < 1e-6));
-        let t0 = &p.rows[0].cells[column_index("term")];
-        let t1 = &p.rows[1].cells[column_index("term")];
-        assert!(
-            matches!((&t0.glyph, &t1.glyph), (Glyph::Spark { range: Some(r0), .. }, Glyph::Spark { range: Some(r1), .. }) if r0 == r1)
-        );
-        // the term glyph marks 3M among the listed tenors
-        let mark = ALL_TENORS.iter().position(|t| *t == "3M");
-        assert!(matches!(&t0.glyph, Glyph::Spark { mark: m, .. } if *m == mark));
+        // A single view's tint goes the same way.
+        let surface = builtin().get("surface").unwrap().clone();
+        let lens = LensState::default();
+        let asked = ask(&surface, &lens, &tenors(), false);
+        let m3 = Measure::atfm("3M");
+        let rows = vec![Row {
+            name: "SX5E".into(),
+            reference: None,
+            present: true,
+            as_of: Some(now()),
+            board: Some(row_of(&asked, "SX5E", true, &|m| {
+                (*m == m3).then_some((Some(19.6), Some(change(-0.9, 20.5)), None, None))
+            })),
+            vega: None,
+        }];
+        let mut i = inputs(&rows, &surface, lens);
+        i.paint = false;
+        let p = prepare(&i);
+        let cell = &p.rows[0].cells[column_index(&surface, &lens, "atfm-3M-single")];
+        assert_eq!(cell.text.as_ref(), "19.6");
+        assert_eq!(cell.glyph, Glyph::None);
     }
 
     #[test]
     fn widths_come_from_the_glyph_minimums_and_the_widest_text() {
-        let p = prepare(&inputs(rows_with_pctl(0.9, 251), View::RichCheap));
-        let pctl = column_index("atfm-3M-pctl");
+        let vol = vol();
+        let lens = LensState::default();
+        let p = prepare(&inputs(rows_with_changes(&[1.0]), &vol, lens));
+        let comp = column_index(&vol, &lens, "atfm-3M-companion");
         assert!(
-            p.widths[pctl] >= widths::slider(2.0 * 7.0),
-            "track + gap + a two-char label at 7 px advance"
+            p.widths[comp] >= widths::chip(4.0 * 7.0),
+            "`+1.0` at 7 px advance inside the chip's insets, or the chip's minimum"
         );
-        let p = prepare(&inputs(rows_with_changes(&[1.0]), View::Changes));
-        assert!(p.widths[column_index("spark-0")] >= sizes::WIDTH_30D);
-        // A level column without a tint is as wide as its widest text or
-        // its head with the sort mark, whichever is wider.
+        assert!(p.widths[column_index(&vol, &lens, "spark-atfm-3M")] >= sizes::WIDTH_30D);
+        // A level column is as wide as its widest text or its head with
+        // the sort mark, whichever is wider.
         assert_eq!(
-            p.widths[column_index("atfm-3M-level")],
+            p.widths[column_index(&vol, &lens, "atfm-3M-level")],
             (3.0 * 7.0 + SORT_MARK_DESIGN_PX).max(4.0 * 7.0),
             "`vol` plus the sort mark, wider than `15.0`"
         );
@@ -1446,12 +1693,14 @@ mod tests {
 
     #[test]
     fn a_sortable_head_reserves_the_sort_mark() {
-        let p = prepare(&inputs(rows_with_changes(&[1.0]), View::Changes));
-        let vol = column_index("atfm-1M-level");
+        let vol = vol();
+        let lens = LensState::default();
+        let p = prepare(&inputs(rows_with_changes(&[1.0]), &vol, lens));
+        let level = column_index(&vol, &lens, "atfm-1M-level");
         let head_px = "vol".chars().count() as f32 * 7.0;
-        assert!(p.widths[vol] >= head_px + SORT_MARK_DESIGN_PX);
+        assert!(p.widths[level] >= head_px + SORT_MARK_DESIGN_PX);
         // A spark column is not sortable: as wide as its label, no mark.
-        let spark = column_index("spark-0");
+        let spark = column_index(&vol, &lens, "spark-atfm-3M");
         let label_px = "ATFM 3M \u{b7} 30d".chars().count() as f32 * 7.0;
         assert!(p.widths[spark] >= label_px);
         assert!(p.widths[spark] < label_px + SORT_MARK_DESIGN_PX);
@@ -1459,11 +1708,22 @@ mod tests {
 
     #[test]
     fn a_group_label_wider_than_its_columns_is_shared_across_them() {
-        // Changes: "25Δ skew 3M" over `pts` and `Δ`, both blank in this board.
-        let p = prepare(&inputs(rows_with_changes(&[1.0]), View::Changes));
+        // Skew: "25Δ skew 3M" over `pts` and `Δ`, both blank in this board.
+        let skew = builtin().get("skew").unwrap().clone();
+        let lens = LensState::default();
+        let rows = rows_from(VolBoard {
+            rows: vec![row_of(
+                &ask(&skew, &lens, &tenors(), false),
+                "SX5E",
+                true,
+                &|_| None,
+            )],
+            ..VolBoard::default()
+        });
+        let p = prepare(&inputs(rows, &skew, lens));
         let (a, b) = (
-            column_index("skew-3M-level"),
-            column_index("skew-3M-change"),
+            column_index(&skew, &lens, "skew-3M-level"),
+            column_index(&skew, &lens, "skew-3M-companion"),
         );
         let label_px = "25\u{394} skew 3M".chars().count() as f32 * 7.0;
         assert!(p.widths[a] + p.widths[b] >= label_px);
@@ -1471,15 +1731,19 @@ mod tests {
 
     #[test]
     fn a_long_board_sparkline_is_cut_to_the_columns_span() {
-        let mut asked = ask_of(View::Changes);
-        asked.sparklines = vec![(Measure::atfm("3M"), WINDOW_1Y)];
+        let vol = vol();
+        let lens = LensState::default();
+        let mut asked = ask(&vol, &lens, &tenors(), false);
+        asked.sparklines = vec![(Measure::atfm("3M"), Window::Y1.duration())];
         let mut board = board_two();
         board.rows[0].sparks = vec![Some((0..365).map(f64::from).collect())];
         let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, None);
-        let mut i = inputs(&rows, View::Changes);
+        let mut i = inputs(&rows, &vol, lens);
         i.asked = &asked;
         let p = prepare(&i);
-        let Glyph::Spark { values, .. } = &p.rows[0].cells[column_index("spark-0")].glyph else {
+        let Glyph::Spark { values, .. } =
+            &p.rows[0].cells[column_index(&vol, &lens, "spark-atfm-3M")].glyph
+        else {
             panic!("a spark");
         };
         assert_eq!(values.len(), 30);
@@ -1489,20 +1753,27 @@ mod tests {
 
     #[test]
     fn a_spark_column_reads_its_measures_series_wherever_the_ask_lists_it() {
-        // A band-open ask lists skew 3M first: the Changes spark still shows ATFM 3M.
+        // A band-open ask lists skew 3M first: the vol tab's spark still shows ATFM 3M.
+        let vol = vol();
+        let lens = LensState::default();
         let skew = Measure::Skew { tenor: "3M".into() };
-        let mut asked = ask_of(View::Changes);
-        asked.sparklines = vec![(skew, WINDOW_1Y), (Measure::atfm("3M"), WINDOW_1Y)];
+        let mut asked = ask(&vol, &lens, &tenors(), false);
+        asked.sparklines = vec![
+            (skew, Window::Y1.duration()),
+            (Measure::atfm("3M"), Window::Y1.duration()),
+        ];
         let mut board = board_two();
         board.rows[0].sparks = vec![
             Some((0..365).map(|v| -f64::from(v)).collect()),
             Some((0..365).map(f64::from).collect()),
         ];
         let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, None);
-        let mut i = inputs(&rows, View::Changes);
+        let mut i = inputs(&rows, &vol, lens);
         i.asked = &asked;
         let p = prepare(&i);
-        let Glyph::Spark { values, .. } = &p.rows[0].cells[column_index("spark-0")].glyph else {
+        let Glyph::Spark { values, .. } =
+            &p.rows[0].cells[column_index(&vol, &lens, "spark-atfm-3M")].glyph
+        else {
             panic!("a spark");
         };
         assert_eq!(values.len(), 30);
@@ -1510,76 +1781,60 @@ mod tests {
     }
 
     #[test]
-    fn a_non_finite_level_leaves_the_term_range_finite() {
-        let p = prepare(&inputs(
-            rows_with_levels(&[[10.0, f64::INFINITY], [30.0, 40.0]]),
-            View::Term,
-        ));
-        let t = &p.rows[1].cells[column_index("term")];
-        assert!(
-            matches!(&t.glyph, Glyph::Spark { range: Some((lo, hi)), .. } if *lo == 10.0 && *hi == 40.0)
-        );
-        let t = &p.rows[0].cells[column_index("term")];
-        assert!(
-            matches!(&t.glyph, Glyph::Spark { values, .. } if values.iter().all(|v| !v.is_infinite())),
-            "the infinite 3M is a gap"
-        );
-    }
-
-    #[test]
     fn a_measure_the_board_was_not_asked_for_is_blank() {
-        // A Levels column read against the Changes board: realized was not asked.
+        // A skew column read against the vol tab's board: skew was not asked.
+        let skew = builtin().get("skew").unwrap().clone();
+        let vol = vol();
+        let lens = LensState::default();
         let rows = rows(&members(["SX5E"]), Some(&board_two()), &no_reference, None);
-        let mut i = inputs(&rows, View::Levels);
-        let changes = ask_of(View::Changes);
-        i.asked = &changes;
+        let mut i = inputs(&rows, &skew, lens);
+        let asked = ask(&vol, &lens, &tenors(), false);
+        i.asked = &asked;
         let p = prepare(&i);
-        let c = &p.rows[0].cells[column_index("rlz-5D-level")];
+        let c = &p.rows[0].cells[column_index(&skew, &lens, "skew-3M-level")];
         assert_eq!(c.text.as_ref(), widths::DASH);
         assert!(c.muted);
+        let p = prepare(&inputs(&rows, &vol, lens));
         assert_eq!(
-            p.rows[0].cells[column_index("atfm-3M-level")].text.as_ref(),
+            p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-level")]
+                .text
+                .as_ref(),
             "15.9"
         );
     }
 
     #[test]
-    fn forward_change_is_a_percent_of_from_and_vega_is_in_thousands() {
-        let fwd = Measure::Forward { tenor: "1M".into() };
-        let asked = ask_of(View::Changes);
-        let board = VolBoard {
-            rows: vec![row_of(&asked, "SX5E", true, &|m| {
-                (*m == fwd).then(|| (Some(4100.0), Some(change(41.0, 4059.0)), None))
-            })],
-            ..VolBoard::default()
-        };
+    fn vega_is_in_thousands() {
+        let vol = vol();
+        let lens = LensState::default();
         let vega = HashMap::from([("SX5E".to_string(), -312_400.0)]);
-        let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, Some(&vega));
-        let p = prepare(&inputs(&rows, View::Changes));
-        assert_eq!(
-            p.rows[0].cells[column_index("fwd-1M-change")].text.as_ref(),
-            "+1.0"
+        let rows = rows(
+            &members(["SX5E"]),
+            Some(&board_two()),
+            &no_reference,
+            Some(&vega),
         );
-        assert_eq!(p.rows[0].cells[column_index("vega")].text.as_ref(), "-312");
+        let p = prepare(&inputs(&rows, &vol, lens));
+        let vega = column_index(&vol, &lens, "vega");
+        assert_eq!(p.rows[0].cells[vega].text.as_ref(), "-312");
         assert_eq!(col("vega").head, "vega k");
         assert_eq!(
             readout(
                 &rows[0],
                 &col("vega"),
-                &ask_of(View::Changes),
+                &ask(&vol, &lens, &tenors(), false),
                 &[],
-                &clock_utc()
+                &clock_utc(),
+                &lens
             ),
             "SX5E · vega k -312"
         );
-        assert_eq!(
-            p.rows[0].cells[column_index("vega")].id.as_ref(),
-            "7-SX5E-vega"
-        );
+        assert_eq!(p.rows[0].cells[vega].id.as_ref(), "7-SX5E-vega");
     }
 
     #[test]
     fn the_readout_names_the_cell_its_change_and_its_rank() {
+        let asked = ask(&vol(), &LensState::default(), &tenors(), false);
         let rows = rows(
             &members(["SX5E", "NEW"]),
             Some(&board_two()),
@@ -1589,31 +1844,74 @@ mod tests {
         let text = readout(
             &rows[0],
             &col("atfm-3M-level"),
-            &ask_of(View::Changes),
+            &asked,
             &[],
             &clock_utc(),
+            &LensState::default(),
         );
         assert_eq!(
-            text,
-            "SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · 1Y pctl 91 of 251"
+            text, "SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · pctl 1Y 91 of 251",
+            "no stats, no z and no mean"
         );
         let text = readout(
             &rows[1],
             &col("atfm-3M-level"),
-            &ask_of(View::Changes),
+            &asked,
             &[],
             &clock_utc(),
+            &LensState::default(),
         );
         assert_eq!(text, "NEW · not in surface");
     }
 
     #[test]
+    fn the_readout_carries_the_change_the_z_the_rank_and_the_stats() {
+        let vol = builtin().get("vol").unwrap().clone();
+        let lens = LensState::default();
+        let asked = ask(&vol, &lens, &tenors(), false);
+        let at = chrono::Utc
+            .with_ymd_and_hms(2026, 10, 22, 21, 0, 0)
+            .unwrap();
+        let row = Row {
+            name: "SX5E".into(),
+            reference: None,
+            present: true,
+            as_of: Some(now()),
+            board: Some(row_of(&asked, "SX5E", true, &|m| {
+                (*m == Measure::atfm("3M")).then_some((
+                    Some(19.6),
+                    Some(Change {
+                        value: 0.8,
+                        from: 18.8,
+                        at,
+                    }),
+                    Some((0.91, 251)),
+                    Some(Stats {
+                        mean: 16.9,
+                        sd: 1.9,
+                        count: 251,
+                    }),
+                ))
+            })),
+            vega: None,
+        };
+        let col = columns(&vol, &lens, true)
+            .into_iter()
+            .find(|c| c.id == "atfm-3M-companion")
+            .unwrap();
+        assert_eq!(
+            readout(&row, &col, &asked, &[], &clock_utc(), &lens),
+            "SX5E \u{b7} ATFM 3M 19.6 \u{b7} \u{394}1d +0.8 from 18.8 on 2026-10-22 \u{b7} z 1Y +1.4 \u{b7} pctl 1Y 91 of 251 \u{b7} mean 16.9 \u{b7} sd 1.9"
+        );
+    }
+
+    #[test]
     fn a_cell_without_a_change_names_where_its_history_starts() {
-        let asked = ask_of(View::Changes);
+        let asked = ask(&vol(), &LensState::default(), &tenors(), false);
         let atfm3m = Measure::atfm("3M");
         let board = VolBoard {
             rows: vec![row_of(&asked, "SX5E", true, &|m| {
-                (*m == atfm3m).then_some((Some(15.9), None, None))
+                (*m == atfm3m).then_some((Some(15.9), None, None, None))
             })],
             notes: vec![
                 "realized_vol: history starts 2026-08-01".into(),
@@ -1622,46 +1920,108 @@ mod tests {
             ..VolBoard::default()
         };
         let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, None);
-        for id in ["atfm-3M-level", "atfm-3M-change"] {
+        let lens = LensState::default();
+        for id in ["atfm-3M-level", "atfm-3M-companion"] {
             assert_eq!(
-                readout(&rows[0], &col(id), &asked, &board.notes, &clock_utc()),
+                readout(
+                    &rows[0],
+                    &col(id),
+                    &asked,
+                    &board.notes,
+                    &clock_utc(),
+                    &lens
+                ),
                 "SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01",
                 "{id}"
             );
         }
         assert_eq!(
-            readout(&rows[0], &col("atfm-3M-change"), &asked, &[], &clock_utc()),
+            readout(
+                &rows[0],
+                &col("atfm-3M-companion"),
+                &asked,
+                &[],
+                &clock_utc(),
+                &lens
+            ),
             "SX5E · ATFM 3M 15.9 · Δ1d —",
             "no note, no reason"
         );
     }
 
     #[test]
-    fn sort_values_put_blanks_last_and_rank_pctl_by_rank() {
+    fn sort_values_put_blanks_last_and_follow_the_lens() {
+        let asked = ask(&vol(), &LensState::default(), &tenors(), false);
         let rows = rows(
             &members(["NEW", "SX5E"]),
             Some(&board_two()),
             &no_reference,
             None,
         );
+        let lens = LensState::default();
         assert_eq!(
-            sort_value(&rows[1], &col("atfm-3M-level"), &ask_of(View::Changes)),
+            sort_value(&rows[1], &col("atfm-3M-level"), &asked, &lens),
             None
         );
         assert_eq!(
-            sort_value(&rows[0], &col("atfm-3M-pctl"), &ask_of(View::Changes)),
-            Some(0.91)
+            sort_value(&rows[0], &col("atfm-3M-companion"), &asked, &lens),
+            Some(1.1),
+            "the move under moves"
+        );
+        let pctl = LensState {
+            lens: Lens::Rich,
+            metric: Metric::Pctl,
+            ..lens
+        };
+        assert_eq!(
+            sort_value(&rows[0], &col("atfm-3M-companion"), &asked, &pctl),
+            Some(0.91),
+            "the rank under rich/cheap · pctl"
         );
     }
 
-    /// SX5E answered for the Changes ask over `listed` tenors, band open
+    #[test]
+    fn the_header_chips_are_the_lookbacks_under_moves_and_the_windows_under_rich() {
+        let moves = header(Some("europe_risk"), 3, &LensState::default(), None, None);
+        assert_eq!(moves.chip_kind, ChipKind::Lookback);
+        assert_eq!(
+            moves.chips,
+            [
+                ("\u{394} 1d".to_string(), true),
+                ("1w".into(), false),
+                ("1m".into(), false)
+            ]
+        );
+        let rich = header(
+            Some("europe_risk"),
+            3,
+            &LensState {
+                lens: Lens::Rich,
+                window: Window::Y2,
+                ..LensState::default()
+            },
+            None,
+            None,
+        );
+        assert_eq!(rich.chip_kind, ChipKind::Window);
+        assert_eq!(
+            rich.chips,
+            [
+                ("6M".to_string(), false),
+                ("1Y".into(), false),
+                ("z \u{b7} 2Y".into(), true)
+            ]
+        );
+    }
+
+    /// SX5E answered for the vol tab's ask over `listed` tenors, band open
     /// or not (the board omits 2Y either way):
     /// every vol point at 10 + its tenor index + 10 × its delta (ATFM 3M
     /// at 16.0), skew 3M 5.5 moved +0.4,
     /// ATFM 3M ranked 0.91 of 251, IV−RV 3.4 ranked 0.77, varswap 18.1,
     /// vs spread 2.2; sparks rise from 15.0 to 17.9.
     fn band_row(listed: &[String], band: bool) -> (Ask, Vec<Row>) {
-        let mut asked = ask(View::Changes, listed, Lookback::D1, band);
+        let mut asked = ask(&vol(), &LensState::default(), listed, band);
         asked
             .measures
             .retain(|m| !matches!(m, Measure::Point { tenor, .. } if tenor == "2Y"));
@@ -1672,18 +2032,18 @@ mod tests {
         let board = VolBoard {
             rows: vec![row_of(&asked, "SX5E", true, &|m| match m {
                 Measure::Point { tenor, delta } if *delta == 0.5 && tenor == "3M" => {
-                    Some((Some(16.0), None, Some((0.91, 251))))
+                    Some((Some(16.0), None, Some((0.91, 251)), None))
                 }
                 Measure::Point { tenor, delta } => {
                     let at = listed.iter().position(|t| t == tenor).unwrap();
-                    Some((Some(10.0 + at as f64 + 10.0 * delta), None, None))
+                    Some((Some(10.0 + at as f64 + 10.0 * delta), None, None, None))
                 }
                 Measure::Skew { tenor } if tenor == "3M" => {
-                    Some((Some(5.5), Some(change(0.4, 5.1)), Some((0.64, 251))))
+                    Some((Some(5.5), Some(change(0.4, 5.1)), Some((0.64, 251)), None))
                 }
-                m if *m == ivrv => Some((Some(3.4), None, Some((0.77, 251)))),
-                Measure::Varswap { .. } => Some((Some(18.1), None, None)),
-                Measure::VsSpread { .. } => Some((Some(2.2), None, None)),
+                m if *m == ivrv => Some((Some(3.4), None, Some((0.77, 251)), None)),
+                Measure::Varswap { .. } => Some((Some(18.1), None, None, None)),
+                Measure::VsSpread { .. } => Some((Some(2.2), None, None, None)),
                 _ => None,
             })],
             ..VolBoard::default()
@@ -1696,7 +2056,7 @@ mod tests {
     fn the_band_reads_the_surface_by_tenor_and_delta_and_captions_its_sparks() {
         let listed = tenors();
         let (asked, rows) = band_row(&listed, true);
-        let mut i = inputs(&rows, View::Changes);
+        let mut i = inputs(&rows, &vol(), LensState::default());
         i.asked = &asked;
         let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
         assert_eq!(b.name.as_ref(), "SX5E");
@@ -1707,34 +2067,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             ALL_TENORS
         );
-        let three_m = &b.surface[2].1;
-        assert_eq!(three_m[2].text.as_ref(), "16.0", "atm is ATFM");
-        // 3M is tenor 2: each column reads its own call delta's point.
-        assert_eq!(three_m[0].text.as_ref(), "21.0", "10p reads 0.90");
-        assert_eq!(three_m[1].text.as_ref(), "19.5", "25p reads 0.75");
-        assert_eq!(three_m[3].text.as_ref(), "14.5", "25c reads 0.25");
-        assert_eq!(three_m[4].text.as_ref(), "13.0", "10c reads 0.10");
-        assert_eq!(three_m[5].text.as_ref(), "5.5", "25Δ skew");
-        assert_eq!(three_m[6].text.as_ref(), "+0.4", "its Δ over the lookback");
-        assert_eq!(three_m[6].id.as_ref(), "7-band-3M-delta");
+        let three_m = &b.surface[3].1;
+        assert_eq!(three_m[2].cell.text.as_ref(), "16.0", "atm is ATFM");
+        // 3M is tenor 3: each column reads its own call delta's point.
+        assert_eq!(three_m[0].cell.text.as_ref(), "22.0", "10p reads 0.90");
+        assert_eq!(three_m[1].cell.text.as_ref(), "20.5", "25p reads 0.75");
+        assert_eq!(three_m[3].cell.text.as_ref(), "15.5", "25c reads 0.25");
+        assert_eq!(three_m[4].cell.text.as_ref(), "14.0", "10c reads 0.10");
+        assert_eq!(three_m[5].cell.text.as_ref(), "5.5", "25Δ skew");
+        assert_eq!(
+            three_m[6].cell.text.as_ref(),
+            "+0.4",
+            "its Δ over the lookback"
+        );
+        assert_eq!(three_m[6].cell.id.as_ref(), "7-band-3M-delta");
         assert_eq!(b.delta_head.as_ref(), "Δ1d");
-        let two_y = &b.surface[6].1;
+        let two_y = &b.surface[7].1;
         assert!(
             two_y
                 .iter()
-                .all(|c| c.text.as_ref() == widths::DASH && c.muted),
+                .all(|c| c.cell.text.as_ref() == widths::DASH && c.cell.muted),
             "a tenor the board lacks is dashes"
         );
-        // One heat range over the whole table: 1M 10c's 11.0 is its floor.
-        assert!(matches!(b.surface[0].1[4].glyph, Glyph::Heat(Some(a)) if a == 0.0));
+        // One heat range over the whole table: 1W 10c's 11.0 is its floor
+        // and 5Y 10p's 28.0 its ceiling; the skew and its Δ take none.
+        assert_eq!(b.surface[0].1[4].heat, Some(0.0));
+        assert!(matches!(b.surface[9].1[0].heat, Some(a) if (a - BAND_HEAT_CEILING).abs() < 1e-6));
+        assert_eq!(three_m[5].heat, None);
+        assert_eq!(three_m[6].heat, None);
+        assert!(matches!(three_m[6].cell.glyph, Glyph::Chip(Some(_))));
         assert!(b.sparks.iter().all(Option::is_some));
         assert_eq!(
             b.captions[0].as_ref(),
-            "1Y pctl 91 of 251 · range 15.0 – 17.9"
+            "pctl 1Y 91 of 251 · range 15.0 – 17.9"
         );
         assert_eq!(
             b.captions[1].as_ref(),
-            "1Y pctl 64 of 251 · range 15.0 – 17.9"
+            "pctl 1Y 64 of 251 · range 15.0 – 17.9"
         );
         assert_eq!(b.captions[2].as_ref(), "IV−RV +3.4 · pctl 77 of 251");
         let ctx: Vec<(&str, &str)> = b
@@ -1756,6 +2125,28 @@ mod tests {
         assert_eq!(b.context[2].1.as_ref(), "-312k");
     }
 
+    #[test]
+    fn the_band_names_the_window_the_board_answered() {
+        let listed = tenors();
+        let lens = LensState {
+            window: Window::Y2,
+            ..LensState::default()
+        };
+        let mut asked = ask(&vol(), &lens, &listed, true);
+        let (_, rows) = band_row(&listed, true);
+        asked
+            .measures
+            .retain(|m| !matches!(m, Measure::Point { tenor, .. } if tenor == "2Y"));
+        let mut i = inputs(&rows, &vol(), lens);
+        i.asked = &asked;
+        let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
+        assert!(
+            b.captions[0].starts_with("pctl 2Y 91 of 251"),
+            "{}",
+            b.captions[0]
+        );
+    }
+
     /// The band follows the grid: a stale row's surface, skew, delta chip
     /// and sparks keep their tone and its name carries the staleness; only
     /// a lookback mismatch mutes the chip.
@@ -1763,17 +2154,17 @@ mod tests {
     fn a_stale_rows_band_keeps_its_cells_tone() {
         let listed = tenors();
         let (asked, rows) = band_row(&listed, true);
-        let mut i = inputs(&rows, View::Changes);
+        let mut i = inputs(&rows, &vol(), LensState::default());
         i.asked = &asked;
         i.stale_after = Duration::from_secs(60);
         assert!(prepare(&i).rows[0].stale, "the fixture row is an hour old");
         let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
-        let three_m = &b.surface[2].1;
-        assert!(matches!(three_m[2].glyph, Glyph::Heat(Some(_))));
-        assert!(!three_m[2].muted, "a heat tint keeps its tone");
-        assert!(!three_m[5].muted, "the skew keeps its tone");
-        assert!(matches!(three_m[6].glyph, Glyph::Chip(_)));
-        assert!(!three_m[6].muted, "the delta chip keeps its color");
+        let three_m = &b.surface[3].1;
+        assert!(three_m[2].heat.is_some());
+        assert!(!three_m[2].cell.muted, "a heat tint keeps its tone");
+        assert!(!three_m[5].cell.muted, "the skew keeps its tone");
+        assert!(matches!(three_m[6].cell.glyph, Glyph::Chip(_)));
+        assert!(!three_m[6].cell.muted, "the delta chip keeps its color");
         let spark = b.sparks[0].as_ref().expect("the ATFM spark");
         assert!(!spark.muted, "a spark keeps its tone");
         assert!(
@@ -1786,31 +2177,42 @@ mod tests {
             "fresh under a wider threshold"
         );
         i.stale_after = Duration::from_secs(60);
-        i.shown = Lookback::W1;
+        i.lens.lookback = Lookback::W1;
         let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
         assert!(
-            b.surface[2].1[6].muted,
+            b.surface[3].1[6].cell.muted,
             "a chip from another lookback still paints muted"
         );
-        assert!(!b.surface[2].1[2].muted);
+        assert_eq!(
+            b.delta_head.as_ref(),
+            "Δ1w",
+            "the head names the lookback shown"
+        );
+        assert!(!b.surface[3].1[2].cell.muted);
     }
 
     #[test]
     fn the_band_of_a_board_asked_without_it_is_dashes() {
         let listed = tenors();
-        // The board answered the closed ask: no point but ATFM, no 1Y spark.
+        // The board answered the closed ask: no point but ATFM, no skew, no
+        // window-long spark.
         let (asked, rows) = band_row(&listed, false);
-        let mut i = inputs(&rows, View::Changes);
+        let mut i = inputs(&rows, &vol(), LensState::default());
         i.asked = &asked;
         let b = prepare_band(&i, &rows[0], &listed, &clock_utc());
-        assert_eq!(b.surface[0].1[0].text.as_ref(), widths::DASH, "10p 1M");
-        assert_eq!(b.surface[0].1[5].text.as_ref(), widths::DASH, "skew 1M");
+        assert_eq!(b.surface[0].1[0].cell.text.as_ref(), widths::DASH, "10p 1M");
+        assert_eq!(
+            b.surface[0].1[5].cell.text.as_ref(),
+            widths::DASH,
+            "skew 1M"
+        );
         assert!(b.sparks[1].is_none() && b.sparks[2].is_none());
         assert_eq!(
-            b.captions[1].as_ref(),
-            "1Y pctl 64 of 251",
-            "no spark, no range"
+            b.captions[0].as_ref(),
+            "pctl 1Y 91 of 251 · range 15.0 – 17.9",
+            "the tab's own 30d ATFM spark serves the band"
         );
+        assert_eq!(b.captions[1].as_ref(), widths::DASH, "skew was not asked");
     }
 
     #[test]
@@ -1818,21 +2220,23 @@ mod tests {
         let mut b = board_two();
         b.dataset_errors
             .push(("realized_vol".into(), "drifted".into()));
-        let h = header(
-            Some("europe_risk"),
-            2,
-            Lookback::W1,
-            Some("|Δ 3M|"),
-            Some(&b),
-        );
+        let w1 = LensState {
+            lookback: Lookback::W1,
+            ..LensState::default()
+        };
+        let h = header(Some("europe_risk"), 2, &w1, Some("|Δ 3M|"), Some(&b));
         assert_eq!(h.title, "Vol · europe_risk");
         assert_eq!(h.not_in_surface, 1);
         assert_eq!(h.failed, ["realized_vol"]);
-        assert_eq!(h.lookbacks[1], (Lookback::W1, true));
+        assert_eq!(h.chips[1], ("\u{394} 1w".to_string(), true));
         assert_eq!(h.sort.as_deref(), Some("|Δ 3M|"));
         assert_eq!(
-            header(None, 0, Lookback::D1, None, None).title,
+            header(None, 0, &LensState::default(), None, None).title,
             "Vol · New…"
+        );
+        assert_eq!(
+            h.chip_texts()[3..6],
+            ["1d".to_string(), "\u{394} 1w".into(), "1m".into()]
         );
     }
 }

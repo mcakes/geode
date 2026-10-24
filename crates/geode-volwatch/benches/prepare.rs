@@ -1,7 +1,7 @@
-//! The prepared model over a synthetic 25-member Changes board: every
-//! cell's text, glyph core, id and width, as the tile rebuilds it when a
-//! board lands or the view, lookback or paint changes. Runs on the UI
-//! thread; painting is excluded. Reference measurements are in
+//! The prepared model over a synthetic 25-member board under the builtin
+//! vol tab: every cell's text, glyph core, id and width, as the tile
+//! rebuilds it when a board lands or the view, lens or paint changes. Runs
+//! on the UI thread; painting is excluded. Reference measurements are in
 //! `docs/current/performance.md`.
 
 use std::collections::HashMap;
@@ -11,13 +11,17 @@ use std::time::Duration;
 use chrono::{TimeZone as _, Utc};
 use criterion::{Criterion, criterion_group, criterion_main};
 use geode_core::volboard::{Cell, Change, Lookback, VolBoard, VolRow};
+use geode_volwatch::core::lens::LensState;
 use geode_volwatch::core::model::{Inputs, prepare, rows};
-use geode_volwatch::core::views::{View, ask, columns, order_tenors};
+use geode_volwatch::core::views::{ask, builtin, columns, order_tenors};
 
 fn bench_prepare(c: &mut Criterion) {
     let tenors = order_tenors(None);
-    let asked = ask(View::Changes, &tenors, Lookback::D1, false);
-    let cols = columns(View::Changes, &tenors);
+    let views = builtin();
+    let vol = views.get("vol").unwrap();
+    let lens = LensState::default();
+    let asked = ask(vol, &lens, &tenors, false);
+    let cols = columns(vol, &lens, true);
     let now = Utc.with_ymd_and_hms(2026, 10, 12, 16, 0, 0).unwrap();
     let members: Vec<String> = (0..25).map(|i| format!("IDX{i:02}")).collect();
     let board = VolBoard {
@@ -69,12 +73,15 @@ fn bench_prepare(c: &mut Criterion) {
         columns: &cols,
         asked: &asked,
         board_lookback: Lookback::D1,
-        shown: Lookback::D1,
+        lens,
+        cells: vol.cells,
         paint: true,
         stale_after: Duration::from_secs(3 * 86_400),
         now,
         mono_advance_px: 7.0,
     };
+    // The name predates the configured tabs; the vol tab lays out 19
+    // columns (Underlying, eight level-and-companion pairs, a spark, vega).
     c.bench_function("prepare_25x24", |b| b.iter(|| prepare(black_box(&inputs))));
 }
 
