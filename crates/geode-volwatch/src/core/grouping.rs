@@ -534,19 +534,28 @@ Flow = ["b1"]
 
     #[test]
     fn a_group_averages_level_delta_z_and_rank_separately_and_sums_vega() {
-        let leaves = vec![
-            leaf("SX5E", Some(16.5), 1.0, 0.9, Some(2.0)),
-            leaf("DAX", Some(14.5), 0.5, 0.5, Some(3.0)),
-        ];
+        // DAX gets its own history (mean 12.5, sd 8.0) so the mean of the
+        // members' z differs from the z of the mean level under any stats:
+        // shared stats would make z affine in level and the two coincide.
+        let mut dax = leaf("DAX", Some(14.5), 0.5, 0.5, Some(3.0));
+        for cell in &mut dax.board.as_mut().unwrap().cells {
+            cell.stats = Some(Stats {
+                mean: 12.5,
+                sd: 8.0,
+                count: 251,
+            });
+        }
+        let leaves = vec![leaf("SX5E", Some(16.5), 1.0, 0.9, Some(2.0)), dax];
         let rows = group_rows(leaves, &["region".into()], &europe(), &asked());
         let core = group(&rows, "group:Core");
         let c = &core.cells[0];
         assert_eq!(c.measure, Measure::atfm("1M"));
         assert_eq!(c.level, Some(15.5));
         assert_eq!(c.delta, Some(0.75));
-        // z: (16.5 − 14.5)/2 = 1.0 and (14.5 − 14.5)/2 = 0.0 → 0.5; NOT the
-        // z of the mean level over the mean stats.
-        assert_eq!(c.z, Some(0.5));
+        // z: SX5E (16.5 − 14.5)/2 = 1.0, DAX (14.5 − 12.5)/8 = 0.25 → 0.625.
+        // The z of the mean level 15.5 would be 0.5 over SX5E's stats,
+        // 0.375 over DAX's and 0.4 over their average: none is 0.625.
+        assert_eq!(c.z, Some(0.625));
         assert_eq!(c.pctl, Some(0.7));
         assert_eq!(rows[0].vega, Some(5.0));
         assert_eq!(core.cells.len(), 2, "one per asked measure");
