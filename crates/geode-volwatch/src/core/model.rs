@@ -25,6 +25,7 @@ use geode_widgets::cell::heat::{heat, range};
 use geode_widgets::cell::{DESIGN_REM, column_scale, widths};
 use gpui::SharedString;
 
+use super::grouping::GroupInfo;
 use super::lens::{
     Lens, LensState, Metric, PCTL_MIN_COUNT, Shown, Window, Z_CEILING, companion, pctl_side,
     z_score,
@@ -63,16 +64,25 @@ const VEGA: ColumnFormat = ColumnFormat {
     scale: Scale::Thousands,
 };
 
-/// One member's row as the board answered it, joined with the list and reference.
+/// One member's row as the board answered it, joined with the list and
+/// reference; or a group row over such members (`group` is `Some`), whose
+/// cells are the members' means.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     pub name: String,
     pub reference: Option<String>,
-    /// In the board and not among its `missing`.
+    /// In the board and not among its `missing`. A group row is present.
     pub present: bool,
     pub as_of: Option<DateTime<Utc>>,
     pub board: Option<VolRow>,
+    /// Book vega; a group's is its members' sum.
     pub vega: Option<f64>,
+    /// The enclosing group path: one label per grouping level above this
+    /// row. Empty for a flat list's member and for a root group.
+    pub path: Vec<String>,
+    /// `Some` for a group row: its label, its members and its averaged
+    /// cells.
+    pub group: Option<GroupInfo>,
 }
 
 impl GridRow for Row {
@@ -80,8 +90,17 @@ impl GridRow for Row {
         &self.name
     }
 
+    /// `/` searches members; a group row stays while a member under it
+    /// matches, and its own label never matches.
     fn narrow_fields(&self) -> Vec<&str> {
+        if self.group.is_some() {
+            return Vec::new();
+        }
         vec![&self.name, self.reference.as_deref().unwrap_or("")]
+    }
+
+    fn depth(&self) -> usize {
+        self.path.len()
     }
 }
 
@@ -101,6 +120,8 @@ pub fn rows(
         as_of: board_row.and_then(|r| r.as_of),
         board: board_row.cloned(),
         vega: vega.and_then(|v| v.get(name)).copied(),
+        path: Vec::new(),
+        group: None,
     };
     let missing = |name: &str| board.is_some_and(|b| b.missing.iter().any(|m| m == name));
     let mut out: Vec<Row> = board
@@ -1424,6 +1445,8 @@ mod tests {
                 ))
             })),
             vega: None,
+            path: Vec::new(),
+            group: None,
         }];
         let p = prepare(&inputs(&rows, &vol, lens));
         let level = &p.rows[0].cells[column_index(&vol, &lens, "atfm-3M-level")];
@@ -1485,6 +1508,8 @@ mod tests {
                 ))
             })),
             vega: None,
+            path: Vec::new(),
+            group: None,
         }];
         let p = prepare(&inputs(&rows, &surface, lens));
         let cell = &p.rows[0].cells[column_index(&surface, &lens, "atfm-3M-single")];
@@ -1542,6 +1567,8 @@ mod tests {
                 &set,
             )),
             vega: None,
+            path: Vec::new(),
+            group: None,
         }];
         let mut i = inputs(&single, &surface, lens);
         i.board_lookback = Lookback::W1;
@@ -1584,6 +1611,8 @@ mod tests {
                 (*m == m3).then_some((Some(19.6), None, Some((0.9, 12)), None))
             })),
             vega: None,
+            path: Vec::new(),
+            group: None,
         }];
         let p = prepare(&inputs(&rows, &surface, pctl));
         let cell = &p.rows[0].cells[column_index(&surface, &pctl, "atfm-3M-single")];
@@ -1622,6 +1651,8 @@ mod tests {
                 ))
             })),
             vega: None,
+            path: Vec::new(),
+            group: None,
         }];
         let p = prepare(&inputs(&rows, &vol, rich));
         let comp = &p.rows[0].cells[column_index(&vol, &rich, "atfm-3M-companion")];
@@ -1718,6 +1749,8 @@ mod tests {
                 (*m == m3).then_some((Some(19.6), None, Some((0.91, 251)), None))
             })),
             vega: None,
+            path: Vec::new(),
+            group: None,
         }];
         let mut i = inputs(&rows, &surface, rich);
         i.board_window = Some(Window::Y1.duration());
@@ -1827,6 +1860,8 @@ mod tests {
                 (*m == m3).then_some((Some(19.6), Some(change(-0.9, 20.5)), None, None))
             })),
             vega: None,
+            path: Vec::new(),
+            group: None,
         }];
         let mut i = inputs(&rows, &surface, lens);
         i.paint = false;
@@ -2059,6 +2094,8 @@ mod tests {
                 ))
             })),
             vega: None,
+            path: Vec::new(),
+            group: None,
         };
         let col = columns(&vol, &lens, true)
             .into_iter()
