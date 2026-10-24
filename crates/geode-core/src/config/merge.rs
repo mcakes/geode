@@ -27,7 +27,8 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         | "egress"
         | "dimensions"
         | "expressions"
-        | "watchlists" => Some(1),
+        | "watchlists"
+        | "vol_views" => Some(1),
         // One complete definition per color name.
         "colors" => Some(1),
         // A dimension's values merge per value; one value's entry (a color

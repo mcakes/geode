@@ -42,4 +42,5 @@ pub mod tree;
 pub mod view;
 pub mod vol;
 pub mod volboard;
+pub mod volviews;
 pub mod watchlist;

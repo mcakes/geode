@@ -33,6 +33,10 @@ pub const DIMENSIONS_DOC: &str = "dimensions";
 /// list of underlyings (manual names, exclusions and rules over datasets).
 pub const WATCHLISTS_DOC: &str = "watchlists";
 
+/// The vol views document, `vol_views.toml`: one whole object per named
+/// tab of the vol watchlist (a column list over the board measures).
+pub const VOL_VIEWS_DOC: &str = "vol_views";
+
 /// Documents whose file was renamed: `(old stem, current doc name)`. A layer
 /// directory still holding only the old file loads it under the current name
 /// with a warning; when a layer holds both, the current file wins and the old
