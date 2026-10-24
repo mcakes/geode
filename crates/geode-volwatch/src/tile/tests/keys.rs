@@ -175,7 +175,6 @@ fn w_mutes_the_old_windows_companions_until_the_board_lands(cx: &mut gpui::TestA
     assert!(!muted(&vcx), "the 2Y board's rank paints");
 }
 
-
 #[gpui::test]
 fn colon_view_switches_by_name_and_refuses_an_unknown_one(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
@@ -495,6 +494,7 @@ fn the_cursor_waits_for_its_restored_row(cx: &mut gpui::TestAppContext) {
 
 #[gpui::test]
 fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpui::TestAppContext) {
+    use geode_tile::menu::Trailing;
     let (h, mut vcx) = landed(cx);
     h.press(&mut vcx, ".");
     assert_eq!(
@@ -505,7 +505,11 @@ fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpu
             "skew view",
             "varswap view",
             "surface view",
+            "Toggle moves / rich-cheap",
             "Cycle lookback",
+            "Toggle z-score / percentile",
+            "Cycle window",
+            "Swap level / companion",
             "Paint",
             "Sort by column",
             "Inspect row",
@@ -514,6 +518,49 @@ fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpu
             "Refresh now",
         ]
     );
+    let lens_verbs = [
+        "Toggle moves / rich-cheap",
+        "Toggle z-score / percentile",
+        "Cycle window",
+    ];
+    let row = |vcx: &gpui::VisualTestContext, title: &str| {
+        h.tile.read_with(vcx, |t, _| {
+            t.menu
+                .as_ref()
+                .unwrap()
+                .menu
+                .rows()
+                .iter()
+                .filter_map(geode_tile::menu::Row::action)
+                .find(|a| a.title().as_ref() == title)
+                .unwrap_or_else(|| panic!("no row {title}"))
+                .clone()
+        })
+    };
+    for title in lens_verbs {
+        assert!(
+            matches!(row(&vcx, title).trailing(), Trailing::Keys(_)),
+            "{title} shows its chord"
+        );
+    }
+    // The vol tab pairs a level with its companion, so there is nothing to
+    // swap: the row says so in place of its chord.
+    let swap = row(&vcx, "Swap level / companion");
+    assert!(!swap.is_enabled());
+    assert_eq!(swap.reason().unwrap().as_ref(), "a pair view shows both");
+    assert!(matches!(swap.trailing(), Trailing::Text(_)));
+    let titles = h.menu_titles(&vcx);
+    let at = titles
+        .iter()
+        .position(|t| t == "Toggle moves / rich-cheap")
+        .unwrap();
+    for _ in 0..at {
+        h.press(&mut vcx, "j");
+    }
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.lens(&vcx).lens, Lens::Rich, "the pick flips the lens");
+    assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_none()));
+    h.press(&mut vcx, ".");
     let titles = h.menu_titles(&vcx);
     let at = titles.iter().position(|t| t == "surface view").unwrap();
     for _ in 0..at {
@@ -522,6 +569,12 @@ fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpu
     h.press(&mut vcx, "enter");
     assert_eq!(h.view(&vcx), "surface");
     assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_none()));
+    // A single view swaps, and the row shows its chord.
+    h.press(&mut vcx, ".");
+    let swap = row(&vcx, "Swap level / companion");
+    assert!(swap.is_enabled());
+    assert!(matches!(swap.trailing(), Trailing::Keys(_)));
+    h.press(&mut vcx, "escape");
 }
 
 #[gpui::test]

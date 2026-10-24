@@ -835,8 +835,6 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - A blank single cell's dash paints flush at the cell's right while the
   numbers carry the chip inset; paint-off shifts a single column by the
   inset, column-wide.
-- The lens, metric and swap keys (`r`, `q`, `m`) have no pointer route:
-  the `.` menu lists the lookback verb and not them.
 - The band's Δ chip tints by the raw change where the grid tints by the
   displayed one.
 - The inspection band is a region docked under the grid, not a taller row

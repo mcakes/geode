@@ -42769,6 +42769,16 @@ run_mutation "volwatch: a companion from another window paints muted" \
   geode-volwatch \
   a_companion_from_another_window_than_the_one_shown_paints_muted
 
+# The `.` menu is the pointer's route to the lens keys: with the lens row
+# gone, `r` has no pointer route. The constant stays read so a
+# `-D warnings` test profile cannot turn this into a BUILD verdict.
+run_mutation "volwatch: the menu offers the lens verbs" \
+  crates/geode-volwatch/src/tile/chrome.rs \
+  $'            MenuRow::Action(self.verb(LENS_ACTION, "Toggle moves / rich-cheap")),\n            MenuRow::Action(self.verb(LOOKBACK_ACTION, "Cycle lookback")),' \
+  $'            {\n                let _ = LENS_ACTION;\n                MenuRow::Action(self.verb(LOOKBACK_ACTION, "Cycle lookback"))\n            },' \
+  geode-volwatch \
+  the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

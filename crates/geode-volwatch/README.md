@@ -68,7 +68,8 @@ measured against). Behaviour and limits are in the features guide's
     `deliver_keys`, the refresh and stale timers, the prepared model, the
     header's dataset times).
   - `chrome.rs`: notices, the empty state, the switcher and the `.` action
-    menu (the tabs as rows, the shown one ticked).
+    menu (the tabs as rows, the shown one ticked; every lens verb as a
+    row, the swap disabled with its reason in a pair view).
   - `table.rs`: the grid's `TableDelegate` and `Paints` (one per theme);
     it formats nothing. It adds the table's fixed chrome (cell padding and
     the cursor border, `chrome_px`) to a prepared width, floors every

@@ -1,6 +1,7 @@
 //! The tile's chrome: the header model, the notices and their
 //! dismissal, the empty state, and the watchlist switcher's menu.
 
+use geode_core::volviews::Cells;
 use geode_core::watchlist::state::{Status, WatchlistSnapshot};
 use geode_shell::actions::ActionId;
 use geode_shell::keymap::Keystroke;
@@ -11,8 +12,9 @@ use gpui::{App, Context, SharedString, Window};
 
 use super::table::sortable;
 use super::{
-    INSPECT_ACTION, LOOKBACK_ACTION, PAINT_ACTION, REFRESH_ACTION, SORT_ACTION, SWITCH_ACTION,
-    TIMESERIES_ACTION, VIEW_ACTIONS, VolwatchTile, YANK_ACTION, snapshot,
+    INSPECT_ACTION, LENS_ACTION, LOOKBACK_ACTION, METRIC_ACTION, PAINT_ACTION, REFRESH_ACTION,
+    SHOWN_ACTION, SORT_ACTION, SWITCH_ACTION, TIMESERIES_ACTION, VIEW_ACTIONS, VolwatchTile,
+    WINDOW_ACTION, YANK_ACTION, snapshot,
 };
 use crate::core::model::header;
 
@@ -238,8 +240,15 @@ impl VolwatchTile {
     }
 
     /// The verbs for the current state: the active view and paint are
-    /// ticked; a verb its key would refuse is disabled with the reason.
+    /// ticked; a verb its key would refuse, or whose effect the view
+    /// cannot show, is disabled with the reason.
     pub(super) fn actions_rows(&self) -> Vec<MenuRow<Pick>> {
+        // `m` swaps the number a single cell shows; a pair view shows both.
+        let swap = if self.cells == Cells::Single {
+            Ok(())
+        } else {
+            Err(SharedString::new_static("a pair view shows both"))
+        };
         let column = self.columns.get(self.cursor_col);
         let sort = match column {
             Some(c) if sortable(&c.kind) => Ok(()),
@@ -273,7 +282,14 @@ impl VolwatchTile {
         }));
         rows.extend([
             MenuRow::Separator,
+            MenuRow::Action(self.verb(LENS_ACTION, "Toggle moves / rich-cheap")),
             MenuRow::Action(self.verb(LOOKBACK_ACTION, "Cycle lookback")),
+            MenuRow::Action(self.verb(METRIC_ACTION, "Toggle z-score / percentile")),
+            MenuRow::Action(self.verb(WINDOW_ACTION, "Cycle window")),
+            MenuRow::Action(
+                self.verb(SHOWN_ACTION, "Swap level / companion")
+                    .enabled(swap),
+            ),
             MenuRow::Action(self.verb(PAINT_ACTION, "Paint").checked(self.paint)),
             MenuRow::Action(self.verb(SORT_ACTION, "Sort by column").enabled(sort)),
             MenuRow::Separator,

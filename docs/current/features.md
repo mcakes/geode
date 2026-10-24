@@ -3842,9 +3842,12 @@ sort, `enter` the band, `t` the timeseries refusal (below), `y` yank,
 row moves the cursor there (unless inside a selection) and opens the
 action menu at the pointer; `⋯` opens it under the header. The menu lists
 the switcher, every tab with its digit and the shown one ticked, then the
-lookback, paint, sort, inspect, timeseries, yank and refresh verbs with
-their chords, the paint tick, and a disabled row's reason. `escape` peels one layer at a time: the menu, the band, a selection, a `/`
-narrowing, then the notices.
+lens, lookback, metric, window and swap verbs (the pointer's route to
+`r`, `d`, `q`, `w` and `m`; the swap is disabled in a pair view with the
+reason `a pair view shows both`), then paint, sort, inspect, timeseries,
+yank and refresh, each with its chord, the paint tick, and a disabled
+row's reason in place of its chord. `escape` peels one layer at a time:
+the menu, the band, a selection, a `/` narrowing, then the notices.
 
 **Header and footer.** The header carries the switch control
 (`Vol · <list> ▾`), the member count, the lens chips (the lookbacks under
@@ -3919,9 +3922,6 @@ Known limitations:
   the builtin ships five; a user view may name more.
 - The header's dataset times and health chips cover the three fixed
   datasets; a table dataset shows a danger chip on failure but no time.
-- The lens, metric and swap keys (`r`, `q`, `m`) have no pointer route:
-  the `.` menu lists the lookback verb and not them; the header chips give
-  the pointer the lookback and the window only.
 - The band is a region docked under the grid, not a taller row in place:
   gpui-component's `DataTable` lays rows out at one row height.
 - The band's book vega is the column's; a vega bucket (by expiry) needs a
