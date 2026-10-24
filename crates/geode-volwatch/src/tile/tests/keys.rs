@@ -12,7 +12,7 @@ use gpui_component::table::TableEvent;
 
 use super::harness::*;
 use crate::content::VolwatchSettings;
-use crate::core::views::View;
+use crate::core::lens::{Lens, Metric, Shown, Window};
 use crate::tile::table::sized_key;
 
 #[gpui::test]
@@ -24,8 +24,13 @@ fn every_key_reaches_its_action(cx: &mut gpui::TestAppContext) {
         ("l", "volwatch::right"),
         ("h", "volwatch::left"),
         ("2", "volwatch::view_2"),
+        ("4", "volwatch::view_4"),
         ("tab", "volwatch::view_next"),
         ("shift-tab", "volwatch::view_prev"),
+        ("r", "volwatch::lens"),
+        ("q", "volwatch::metric"),
+        ("w", "volwatch::window"),
+        ("m", "volwatch::shown"),
         ("d", "volwatch::lookback"),
         ("p", "volwatch::paint"),
         ("s", "volwatch::sort"),
@@ -71,28 +76,128 @@ fn j_k_and_g_move_the_cursor_and_h_l_the_column(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn digits_switch_views_and_requery_only_when_the_ask_grows(cx: &mut gpui::TestAppContext) {
+fn digits_and_tab_walk_the_configured_tabs_and_requery_only_when_the_ask_grows(
+    cx: &mut gpui::TestAppContext,
+) {
     let (h, mut vcx) = landed(cx);
-    h.press(&mut vcx, "2"); // Levels reads realized + varswap: new measures
-    assert_eq!(h.view(&vcx), View::Levels);
+    assert_eq!(h.view(&vcx), "vol");
+    h.press(&mut vcx, "2"); // skew reads other measures
+    assert_eq!(h.view(&vcx), "skew");
     assert_eq!(Harness::boards(&h.requests()).len(), 1);
     let asked = h.asked_of(&vcx);
     let tag = h.tag_of(&vcx);
     h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
-    h.press(&mut vcx, "1"); // the 30d sparkline is not in Levels' ask → requery
+    h.press(&mut vcx, "1"); // the vol spark and vega are not in skew's ask → requery
     assert_eq!(Harness::boards(&h.requests()).len(), 1);
+    h.press(&mut vcx, "shift-tab");
+    assert_eq!(h.view(&vcx), "surface", "wraps backwards");
     h.press(&mut vcx, "tab");
-    assert_eq!(h.view(&vcx), View::Levels);
+    assert_eq!(h.view(&vcx), "vol");
+    h.press(&mut vcx, "9");
+    assert_eq!(
+        h.view(&vcx),
+        "vol",
+        "a digit past the last tab does nothing"
+    );
+    assert!(h.notices(&vcx).is_empty());
 }
 
 #[gpui::test]
-fn shift_tab_steps_views_backwards_and_wraps(cx: &mut gpui::TestAppContext) {
+fn r_q_and_m_change_the_lens_without_a_requery_and_w_and_d_requery(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
-    assert_eq!(h.view(&vcx), View::Changes);
-    h.press(&mut vcx, "shift-tab");
-    assert_eq!(h.view(&vcx), View::Skew);
-    h.press(&mut vcx, "tab");
-    assert_eq!(h.view(&vcx), View::Changes);
+    h.press(&mut vcx, "r");
+    assert_eq!(h.lens(&vcx).lens, Lens::Rich);
+    h.press(&mut vcx, "q");
+    assert_eq!(h.lens(&vcx).metric, Metric::Pctl);
+    h.press(&mut vcx, "m");
+    assert_eq!(h.lens(&vcx).shown, Shown::Companion);
+    assert!(
+        Harness::boards(&h.requests()).is_empty(),
+        "no requery for a lens, metric or shown change"
+    );
+    let col = h.column_index(&vcx, "atfm-3M-companion");
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.prepared.rows[0].cells[col].text.to_string()),
+        "91",
+        "the rank paints from the board already held"
+    );
+    h.press(&mut vcx, "w");
+    assert_eq!(h.lens(&vcx).window, Window::Y2);
+    let reqs = h.requests();
+    let boards = Harness::boards(&reqs);
+    assert_eq!(boards.len(), 1);
+    assert_eq!(boards[0].window, Some(Window::Y2.duration()));
+    h.press(&mut vcx, "d");
+    assert_eq!(h.lens(&vcx).lookback, Lookback::W1);
+    assert_eq!(Harness::boards(&h.requests()).len(), 1);
+}
+
+#[gpui::test]
+fn w_cycles_the_window_requeries_and_supersedes_the_board_in_flight(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "w");
+    let first = h.tag_of(&vcx);
+    h.press(&mut vcx, "w");
+    let second = h.tag_of(&vcx);
+    assert!(second > first);
+    let asked = h.asked_of(&vcx);
+    h.answer_board(&mut vcx, first, board_for(&["DAX"], &asked));
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.in_flight),
+        "the superseded board is dropped"
+    );
+    h.answer_board(&mut vcx, second, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    assert!(h.tile.read_with(&vcx, |t, _| !t.in_flight));
+    assert_eq!(
+        h.tile
+            .read_with(&vcx, |t, _| t.board_ask.clone().unwrap().window),
+        Some(Window::M6.duration())
+    );
+}
+
+#[gpui::test]
+fn colon_view_switches_by_name_and_refuses_an_unknown_one(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    assert!(h.command(&mut vcx, "view varswap").is_ok());
+    assert_eq!(h.view(&vcx), "varswap");
+    assert_eq!(
+        h.command(&mut vcx, "view nope").unwrap_err(),
+        "no view 'nope'"
+    );
+    assert_eq!(
+        h.completions(&vcx, "view ", 5),
+        ["skew", "surface", "varswap", "vol"]
+    );
+}
+
+#[gpui::test]
+fn the_session_restores_the_view_name_and_the_lens(cx: &mut gpui::TestAppContext) {
+    let mut record = restored(LIST);
+    record.insert("view".into(), toml::Value::String("skew".into()));
+    record.insert("lens".into(), toml::Value::String("rich".into()));
+    record.insert("window".into(), toml::Value::String("6M".into()));
+    let (h, mut vcx) = open_with(cx, one_list(), Some(record), VolwatchSettings::default());
+    assert_eq!(h.view(&vcx), "skew");
+    assert_eq!(h.lens(&vcx).lens, Lens::Rich);
+    assert_eq!(h.lens(&vcx).window, Window::M6);
+    let reqs = h.requests();
+    let boards = Harness::boards(&reqs);
+    assert_eq!(
+        boards[0].window,
+        Some(Window::M6.duration()),
+        "the first ask carries the restored window"
+    );
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    assert_eq!(saved.get("view").and_then(|v| v.as_str()), Some("skew"));
+    assert_eq!(saved.get("lens").and_then(|v| v.as_str()), Some("rich"));
+}
+
+#[gpui::test]
+fn an_old_view_name_opens_the_default_with_a_notice(cx: &mut gpui::TestAppContext) {
+    let (h, vcx) = open_on(cx, "richcheap");
+    assert_eq!(h.view(&vcx), "vol");
+    assert_eq!(h.notices(&vcx), ["view richcheap is gone"]);
 }
 
 #[gpui::test]
@@ -101,21 +206,21 @@ fn d_cycles_the_lookback_requeries_and_mutes_the_old_changes_until_the_board_lan
 ) {
     let (h, mut vcx) = landed(cx);
     h.press(&mut vcx, "d");
-    assert_eq!(h.lookback(&vcx), Lookback::W1);
+    assert_eq!(h.lens(&vcx).lookback, Lookback::W1);
     assert_eq!(Harness::boards(&h.requests())[0].lookbacks, [Lookback::W1]);
-    let col = h.column_index(&vcx, "atfm-3M-change");
+    let col = h.column_index(&vcx, "atfm-3M-companion");
     assert!(
         h.tile
             .read_with(&vcx, |t, _| t.prepared.rows[0].cells[col].muted)
     );
     h.press(&mut vcx, "d d");
-    assert_eq!(h.lookback(&vcx), Lookback::D1, "wraps");
+    assert_eq!(h.lens(&vcx).lookback, Lookback::D1, "wraps");
 }
 
 #[gpui::test]
 fn p_toggles_the_glyphs_without_asking(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
-    let col = h.column_index(&vcx, "atfm-3M-change");
+    let col = h.column_index(&vcx, "atfm-3M-companion");
     let glyph = |vcx: &gpui::VisualTestContext| {
         h.tile
             .read_with(vcx, |t, _| t.prepared.rows[0].cells[col].glyph.clone())
@@ -172,7 +277,7 @@ fn s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last(cx: &mut gpui::Te
     h.press(&mut vcx, "s");
     assert_eq!(h.shown(&vcx), ["DAX", "SX5E", "NEW"], "off: member order");
     assert!(h.tile.read_with(&vcx, |t, _| t.state.sort.is_none()));
-    h.command(&mut vcx, "sort atfm-3M-change abs").unwrap();
+    h.command(&mut vcx, "sort atfm-3M-companion abs").unwrap();
     assert!(
         h.tile
             .read_with(&vcx, |t, _| t.header.sort.as_deref() == Some("|Δ 3M| ↓"))
@@ -184,7 +289,7 @@ fn s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last(cx: &mut gpui::Te
 #[gpui::test]
 fn a_spark_column_refuses_to_sort_with_a_notice(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
-    h.move_to_column(&mut vcx, "spark-0");
+    h.move_to_column(&mut vcx, "spark-atfm-3M");
     h.press(&mut vcx, "s");
     assert_eq!(h.notices(&vcx), ["ATFM 3M · 30d is not sortable"]);
     assert!(h.tile.read_with(&vcx, |t, _| t.state.sort.is_none()));
@@ -202,7 +307,7 @@ fn a_column_narrower_than_its_number_keeps_its_text_inside_the_cell(cx: &mut gpu
     h.tile.update(&mut vcx, |t, cx| {
         t.table.update(cx, |tb, cx| {
             let mut sized = tb.delegate().fitted.clone();
-            sized.insert(sized_key(View::Changes, "atfm-1M-level"), 20.0);
+            sized.insert(sized_key("vol", "atfm-1M-level"), 20.0);
             tb.delegate_mut().set_fitted(sized);
             tb.refresh(cx);
         });
@@ -283,24 +388,24 @@ fn escape_ends_a_selection_then_a_narrowing_then_answers_false(cx: &mut gpui::Te
 #[gpui::test]
 fn y_yanks_the_cursor_cells_text(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
-    // The cursor starts on fwd Δ%: 1.1 from 14.8 is +7.4%.
+    // The cursor starts on the first level.
     h.press(&mut vcx, "y");
     assert_eq!(
         vcx.read_from_clipboard().and_then(|c| c.text()),
-        Some("+7.4".into())
+        Some("15.9".into())
     );
     h.press(&mut vcx, "l");
     h.press(&mut vcx, "y");
     assert_eq!(
         vcx.read_from_clipboard().and_then(|c| c.text()),
-        Some("15.9".into())
+        Some("+1.1".into()),
+        "its companion"
     );
 }
 
 #[gpui::test]
 fn y_over_a_selection_yanks_the_column_one_row_per_line_and_ends_it(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
-    h.press(&mut vcx, "l");
     h.press(&mut vcx, "v j j y");
     assert_eq!(
         vcx.read_from_clipboard().and_then(|c| c.text()),
@@ -376,11 +481,10 @@ fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpu
         h.menu_titles(&vcx),
         [
             "Switch list\u{2026}",
-            "Changes view",
-            "Levels view",
-            "Rich / cheap view",
-            "Term view",
-            "Skew view",
+            "vol view",
+            "skew view",
+            "varswap view",
+            "surface view",
             "Cycle lookback",
             "Paint",
             "Sort by column",
@@ -391,12 +495,12 @@ fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpu
         ]
     );
     let titles = h.menu_titles(&vcx);
-    let at = titles.iter().position(|t| t == "Term view").unwrap();
+    let at = titles.iter().position(|t| t == "surface view").unwrap();
     for _ in 0..at {
         h.press(&mut vcx, "j");
     }
     h.press(&mut vcx, "enter");
-    assert_eq!(h.view(&vcx), View::Term);
+    assert_eq!(h.view(&vcx), "surface");
     assert!(h.tile.read_with(&vcx, |t, _| t.menu.is_none()));
 }
 
@@ -417,8 +521,8 @@ fn the_menu_rows_carry_their_chords_ticks_and_reasons(cx: &mut gpui::TestAppCont
                 .unwrap_or_else(|| panic!("no row {title}"))
                 .clone()
         };
-        assert_eq!(row("Changes view").tick(), Some(true));
-        assert_eq!(row("Term view").tick(), Some(false));
+        assert_eq!(row("vol view").tick(), Some(true));
+        assert_eq!(row("surface view").tick(), Some(false));
         assert_eq!(row("Paint").tick(), Some(t.paint));
         assert!(row("Sort by column").is_enabled(), "a numeric column sorts");
         assert!(matches!(row("Yank cell").trailing(), Trailing::Keys(_)));
@@ -427,10 +531,9 @@ fn the_menu_rows_carry_their_chords_ticks_and_reasons(cx: &mut gpui::TestAppCont
             Trailing::Keys(_)
         ));
     });
-    // Back on Underlying, the sort row says why it is off.
+    // On the sparkline, the sort row says why it is off.
     h.press(&mut vcx, "escape");
-    h.press(&mut vcx, "4");
-    h.move_to_column(&mut vcx, "term");
+    h.move_to_column(&mut vcx, "spark-atfm-3M");
     h.press(&mut vcx, ".");
     h.tile.read_with(&vcx, |t, _| {
         let sort = t
@@ -553,9 +656,8 @@ fn t_is_refused_with_a_notice_naming_the_gap(cx: &mut gpui::TestAppContext) {
         h.notices(&vcx),
         ["timeseries cannot open a history series yet: vol_surface [SX5E, 3M, 0.5] vol"]
     );
-    // A column with no measure says so.
-    h.press(&mut vcx, "4");
-    h.move_to_column(&mut vcx, "term");
+    // A column with no series says so.
+    h.move_to_column(&mut vcx, "spark-atfm-3M");
     h.press(&mut vcx, "t");
     let n = h.notices(&vcx);
     assert_eq!(n.len(), 1, "{n:?}");
@@ -612,7 +714,7 @@ fn a_verbs_notice_lasts_until_the_next_verb(cx: &mut gpui::TestAppContext) {
 #[gpui::test]
 fn autosize_refuses_before_a_board_lands(cx: &mut gpui::TestAppContext) {
     use geode_shell::colfit::NOTHING_TO_FIT;
-    let (h, mut vcx) = open_on(cx, View::Changes);
+    let (h, mut vcx) = open_on(cx, "vol");
     let tile = h.content.clone();
     assert_eq!(
         vcx.update(|window, cx| tile.autosize_columns(false, window, cx)),
@@ -663,10 +765,7 @@ fn fitted_widths_restore_from_the_session_record(cx: &mut gpui::TestAppContext) 
     use geode_shell::colfit::SESSION_KEY;
     let mut record = restored(LIST);
     let mut widths = toml::Table::new();
-    widths.insert(
-        sized_key(View::Changes, "atfm-3M-level"),
-        toml::Value::Float(123.0),
-    );
+    widths.insert(sized_key("vol", "atfm-3M-level"), toml::Value::Float(123.0));
     record.insert(SESSION_KEY.into(), toml::Value::Table(widths));
     let (h, vcx) = open_with(cx, one_list(), Some(record), VolwatchSettings::default());
     let got = h.tile.read_with(&vcx, |t, cx| {
@@ -674,7 +773,7 @@ fn fitted_widths_restore_from_the_session_record(cx: &mut gpui::TestAppContext) 
             .read(cx)
             .delegate()
             .fitted
-            .get(&sized_key(View::Changes, "atfm-3M-level"))
+            .get(&sized_key("vol", "atfm-3M-level"))
             .copied()
     });
     assert_eq!(got, Some(123.0));
@@ -689,15 +788,15 @@ fn autosize_sizes_only_the_current_view_and_a_view_switch_keeps_it(cx: &mut gpui
         Ok(())
     );
     let sized = widths(&h, &vcx);
-    assert!(sized.keys().all(|k| k.starts_with("changes:")), "{sized:?}");
-    let w = sized[&sized_key(View::Changes, "atfm-1M-level")];
+    assert!(sized.keys().all(|k| k.starts_with("vol:")), "{sized:?}");
+    let w = sized[&sized_key("vol", "underlying")];
     h.press(&mut vcx, "2");
-    assert_eq!(h.view(&vcx), View::Levels);
-    // Levels' atfm-1M-level is unfitted: the prepared width, not Changes'.
-    assert_ne!(h.column_width(&vcx, "atfm-1M-level"), w);
+    assert_eq!(h.view(&vcx), "skew");
+    // skew's underlying is unfitted: the prepared width, not vol's.
+    assert_ne!(h.column_width(&vcx, "underlying"), w);
     h.press(&mut vcx, "1");
     assert_eq!(
-        h.column_width(&vcx, "atfm-1M-level"),
+        h.column_width(&vcx, "underlying"),
         w,
         "the fit survives a round trip"
     );
@@ -707,11 +806,12 @@ fn autosize_sizes_only_the_current_view_and_a_view_switch_keeps_it(cx: &mut gpui
         vcx.update(|window, cx| tile.autosize_columns(false, window, cx)),
         Ok(())
     );
+    assert!(widths(&h, &vcx).keys().any(|k| k.starts_with("skew:")));
     assert_eq!(
         vcx.update(|window, cx| tile.autosize_columns(true, window, cx)),
         Ok(())
     );
-    assert!(widths(&h, &vcx).keys().all(|k| k.starts_with("changes:")));
+    assert!(widths(&h, &vcx).keys().all(|k| k.starts_with("vol:")));
 }
 
 #[gpui::test]
@@ -735,10 +835,7 @@ fn a_header_drag_records_the_width_for_this_view_and_persists(cx: &mut gpui::Tes
     assert_eq!(h.column_width(&vcx, "atfm-1M-level"), 97.0);
     let saved = vcx.update(|_, cx| h.content.serialize(cx));
     let t = saved[SESSION_KEY].as_table().unwrap();
-    assert_eq!(
-        t[&sized_key(View::Changes, "atfm-1M-level")].as_float(),
-        Some(97.0)
-    );
+    assert_eq!(t[&sized_key("vol", "atfm-1M-level")].as_float(), Some(97.0));
     assert_eq!(t.len(), 1, "an undragged column is not recorded");
 }
 

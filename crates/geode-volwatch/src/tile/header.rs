@@ -4,9 +4,10 @@
 //! sort chip, the members not in the surface in the warning tone, one chip
 //! per failed dataset in the danger tone; in the cluster the mode, the
 //! in-flight `…`, the per-dataset source times, link chips, health, `⋯`
-//! and ×), the view strip (`1`–`5`, the active view lit, the step keys at
-//! the right), the grid or the empty state, and the footer (the first
-//! reported notice on the left, the cursor readout on the right).
+//! and ×), the view strip (the tabs with their digits, the active one
+//! lit, the step keys at the right), the grid or the empty state, and the
+//! footer (the first reported notice on the left, the cursor readout on
+//! the right).
 //!
 //! Every string is prepared outside render (`HeaderModel`, `times`,
 //! `readout`, `strip_keys`); paint clones them. A press takes the same
@@ -15,6 +16,7 @@
 
 use std::rc::Rc;
 
+use geode_core::volboard::Lookback;
 use geode_shell::actions::ActionId;
 use geode_shell::fonts;
 use geode_shell::shell::chip::{Tone as ChipTone, chip_paint};
@@ -31,9 +33,9 @@ use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use super::chrome::MenuKind;
 use super::table::table_el;
-use super::{LOOKBACK_ACTION, SWITCH_ACTION, VIEW_ACTIONS, VolwatchTile};
-use crate::core::model::{CHEVRON, MARK};
-use crate::core::views::View;
+use super::{LOOKBACK_ACTION, SWITCH_ACTION, VIEW_ACTIONS, VolwatchTile, WINDOW_ACTION};
+use crate::core::lens::Window as LensWindow;
+use crate::core::model::{CHEVRON, ChipKind, MARK};
 
 /// The view strip's and the footer's heights in design pixels, the
 /// blotter's footer.
@@ -47,17 +49,8 @@ const LOOKBACK_IDS: [&str; 3] = [
     "volwatch-lookback-1m",
 ];
 
-/// The view strip's element names, parallel to `View::ALL`.
-const VIEW_IDS: [&str; 5] = [
-    "volwatch-view-changes",
-    "volwatch-view-levels",
-    "volwatch-view-richcheap",
-    "volwatch-view-term",
-    "volwatch-view-skew",
-];
-
-/// The view digits as static text, parallel to `View::ALL`.
-const DIGITS: [&str; 5] = ["1", "2", "3", "4", "5"];
+/// The view digits as static text, parallel to `VIEW_ACTIONS`.
+const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
 use super::MENU_ACTION;
 
@@ -243,58 +236,76 @@ fn switch_control(
         .into_any_element()
 }
 
-/// The three lookback chips: the one in force lit in the neutral chip
-/// tone; a press on another sets it, asking again as `d` does.
+/// The three lens chips (the lookbacks under moves, the windows under
+/// rich/cheap): the one in force lit in the neutral chip tone; a press on
+/// another sets it, asking again as `d` or `w` does.
 fn lookback_chips(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTile>) -> Div {
     let id = tile.tile.0;
     let h = &tile.header;
+    let kind = h.chip_kind;
     let lit_paint = chip_paint(theme, ChipTone::Neutral);
-    h_flex().flex_none().gap_0p5().children(
-        h.lookbacks
-            .iter()
-            .zip(&h.lookback_texts)
-            .zip(LOOKBACK_IDS)
-            .map(|(((lookback, lit), text), name)| {
-                let lookback = *lookback;
-                let entity = cx.entity();
-                let (pointer, text_color) = if *lit {
-                    (
-                        control::for_chip(theme, &lit_paint, theme.background),
-                        lit_paint.text,
-                    )
-                } else {
-                    let muted = theme.muted_foreground;
-                    (
-                        control::paint(theme, control::Rest::Bare, theme.background, muted),
-                        muted,
-                    )
-                };
-                div()
-                    .id(ElementId::NamedInteger(SharedString::new_static(name), id))
-                    .flex_none()
-                    .px_1()
-                    .rounded(theme.radius_tokens().sm)
-                    .text_color(text_color)
-                    .when_some(lit_paint.fill.filter(|_| *lit), |el, fill| el.bg(fill))
-                    .debug_selector(move || name.to_string())
-                    .pointer_states(pointer)
-                    .capture_any_mouse_down(move |event, _, cx| {
-                        if event.button == MouseButton::Left {
-                            entity.update(cx, |t, cx| {
-                                t.user_acted(cx);
-                                t.set_lookback(lookback, cx);
-                            });
-                        }
-                    })
-                    .tooltip(tips::tip_with(
-                        SharedString::new_static("tip-volwatch-lookback"),
-                        SharedString::new_static("Change lookback"),
-                        Some(LOOKBACK_ACTION),
-                        None,
-                    ))
-                    .child(text.clone())
-            }),
-    )
+    h_flex()
+        .flex_none()
+        .gap_0p5()
+        .children(
+            h.chips
+                .iter()
+                .zip(LOOKBACK_IDS)
+                .enumerate()
+                .map(|(i, ((text, lit), name))| {
+                    let text = SharedString::from(text.clone());
+                    let entity = cx.entity();
+                    let (pointer, text_color) = if *lit {
+                        (
+                            control::for_chip(theme, &lit_paint, theme.background),
+                            lit_paint.text,
+                        )
+                    } else {
+                        let muted = theme.muted_foreground;
+                        (
+                            control::paint(theme, control::Rest::Bare, theme.background, muted),
+                            muted,
+                        )
+                    };
+                    div()
+                        .id(ElementId::NamedInteger(SharedString::new_static(name), id))
+                        .flex_none()
+                        .px_1()
+                        .rounded(theme.radius_tokens().sm)
+                        .text_color(text_color)
+                        .when_some(lit_paint.fill.filter(|_| *lit), |el, fill| el.bg(fill))
+                        .debug_selector(move || name.to_string())
+                        .pointer_states(pointer)
+                        .capture_any_mouse_down(move |event, _, cx| {
+                            if event.button == MouseButton::Left {
+                                entity.update(cx, |t, cx| {
+                                    t.user_acted(cx);
+                                    match kind {
+                                        ChipKind::Lookback => {
+                                            t.set_lens(|l| l.lookback = Lookback::ALL[i], true, cx)
+                                        }
+                                        ChipKind::Window => {
+                                            t.set_lens(|l| l.window = LensWindow::ALL[i], true, cx)
+                                        }
+                                    }
+                                });
+                            }
+                        })
+                        .tooltip(tips::tip_with(
+                            SharedString::new_static("tip-volwatch-lookback"),
+                            SharedString::new_static(match kind {
+                                ChipKind::Lookback => "Change lookback",
+                                ChipKind::Window => "Change window",
+                            }),
+                            Some(match kind {
+                                ChipKind::Lookback => LOOKBACK_ACTION,
+                                ChipKind::Window => WINDOW_ACTION,
+                            }),
+                            None,
+                        ))
+                        .child(text)
+                }),
+        )
 }
 
 /// The left side, then the shared cluster.
@@ -375,58 +386,58 @@ fn render_header(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTi
     .debug_selector(move || format!("volwatch-header-{id}"))
 }
 
-/// `1`–`5` with each view's label, the active one lit in the neutral chip
-/// tone; a press dispatches that view's digit action. The step key sits
+/// The tabs with their digits, the active one lit in the neutral chip
+/// tone; a press dispatches that tab's digit action. The step key sits
 /// at the right.
 fn render_strip(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTile>) -> Div {
     let id = tile.tile.0;
     let lit = chip_paint(theme, ChipTone::Neutral);
     let muted = theme.muted_foreground;
-    let views = View::ALL
-        .iter()
-        .zip(VIEW_ACTIONS)
-        .zip(VIEW_IDS)
-        .zip(DIGITS)
-        .map(|(((view, action), name), digit)| {
-            let active = *view == tile.state.view;
-            let entity = cx.entity();
-            let key = view.key();
-            let (pointer, text) = if active {
-                (control::for_chip(theme, &lit, theme.background), lit.text)
-            } else {
-                (
-                    control::paint(theme, control::Rest::Bare, theme.background, muted),
-                    muted,
-                )
-            };
-            h_flex()
-                .id(ElementId::NamedInteger(SharedString::new_static(name), id))
-                .flex_none()
-                .gap_1()
-                .px_1()
-                .rounded(theme.radius_tokens().sm)
-                .text_color(text)
-                .when_some(lit.fill.filter(|_| active), |el, fill| el.bg(fill))
-                .debug_selector(move || name.to_string())
-                .pointer_states(pointer)
-                .capture_any_mouse_down(move |event, window, cx| {
-                    if event.button == MouseButton::Left {
-                        entity.update(cx, |t, cx| dispatch(t, action, window, cx));
-                    }
-                })
-                .child(
-                    div()
-                        .font_family(fonts::MONO)
-                        .child(SharedString::new_static(digit)),
-                )
-                .child(
-                    div()
-                        .when(active, |el| {
-                            el.debug_selector(move || format!("volwatch-view-lit-{key}"))
-                        })
-                        .child(view.label()),
-                )
-        });
+    let shown = tile.shown_view().map(|v| v.name);
+    let views =
+        tile.tabs()
+            .into_iter()
+            .zip(VIEW_ACTIONS)
+            .zip(DIGITS)
+            .map(|((name, action), digit)| {
+                let active = shown.as_deref() == Some(name.as_str());
+                let entity = cx.entity();
+                let selector = SharedString::from(format!("volwatch-view-{name}-{id}"));
+                let lit_selector = format!("volwatch-view-lit-{name}");
+                let (pointer, text) = if active {
+                    (control::for_chip(theme, &lit, theme.background), lit.text)
+                } else {
+                    (
+                        control::paint(theme, control::Rest::Bare, theme.background, muted),
+                        muted,
+                    )
+                };
+                h_flex()
+                    .id(ElementId::Name(selector.clone()))
+                    .flex_none()
+                    .gap_1()
+                    .px_1()
+                    .rounded(theme.radius_tokens().sm)
+                    .text_color(text)
+                    .when_some(lit.fill.filter(|_| active), |el, fill| el.bg(fill))
+                    .debug_selector(move || selector.to_string())
+                    .pointer_states(pointer)
+                    .capture_any_mouse_down(move |event, window, cx| {
+                        if event.button == MouseButton::Left {
+                            entity.update(cx, |t, cx| dispatch(t, action, window, cx));
+                        }
+                    })
+                    .child(
+                        div()
+                            .font_family(fonts::MONO)
+                            .child(SharedString::new_static(digit)),
+                    )
+                    .child(
+                        div()
+                            .when(active, |el| el.debug_selector(move || lit_selector.clone()))
+                            .child(SharedString::from(name)),
+                    )
+            });
     h_flex()
         .w_full()
         .h(scale::design(STRIP_HEIGHT))

@@ -17,7 +17,7 @@ use gpui_component::theme::Theme;
 use gpui_component::{h_flex, v_flex};
 
 use super::table::Paints;
-use crate::core::model::{BandModel, Glyph, PreparedCell};
+use crate::core::model::{BandCell, BandModel, Glyph};
 
 /// The surface table's tenor column, in design px: a four-character
 /// tenor label beside the `T \ Δ` corner.
@@ -69,21 +69,23 @@ fn section_title(text: &'static str, theme: &Theme) -> Div {
         .child(SharedString::new_static(text))
 }
 
-/// One prepared surface cell: its tint or chip, or plain text.
-fn cell_el(cell: &PreparedCell, paints: &Paints, theme: &Theme) -> AnyElement {
+/// One band surface cell: its heat tint (a vol point over the band's
+/// range), else its chip (the Δ), else plain text.
+fn cell_el(band_cell: &BandCell, paints: &Paints, theme: &Theme) -> AnyElement {
+    let cell = &band_cell.cell;
     let text = cell.text.clone();
     let id = cell.id.clone();
+    if let Some(alpha) = band_cell.heat {
+        let paint = if cell.muted {
+            paints.heat_muted
+        } else {
+            paints.heat
+        };
+        return heat::paint(text, Some(alpha), paint, id)
+            .w_full()
+            .into_any_element();
+    }
     match &cell.glyph {
-        Glyph::Heat(alpha) => {
-            let paint = if cell.muted {
-                paints.heat_muted
-            } else {
-                paints.heat
-            };
-            heat::paint(text, *alpha, paint, id)
-                .w_full()
-                .into_any_element()
-        }
         Glyph::Chip(chip) => {
             let paint = if cell.muted {
                 paints.chip_muted

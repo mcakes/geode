@@ -1679,7 +1679,7 @@ mod tests {
     /// afternoon, and only a row a day old is stale.
     #[test]
     fn the_default_stale_threshold_is_a_day() {
-        let day = Duration::from_secs(24 * 60 * 60);
+        let day = crate::content::DEFAULT_STALE_AFTER;
         let aged = |hours: i64| -> &'static [Row] {
             let asked = ask(&vol(), &LensState::default(), &tenors(), false);
             let atfm3m = Measure::atfm("3M");

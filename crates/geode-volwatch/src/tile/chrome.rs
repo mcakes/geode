@@ -16,7 +16,6 @@ use super::{
     snapshot,
 };
 use crate::core::model::header;
-use crate::core::views::View;
 
 /// Which menu is up. Menu mode, its keys and its pick door are shared by
 /// every kind.
@@ -66,6 +65,9 @@ pub(crate) struct Notices {
     /// A key's refusal (a sort on an unsortable column); cleared by the
     /// trader's next action in the tile.
     pub(crate) refused: Option<String>,
+    /// The shown view went away (from the session or a reload); stands
+    /// until the trader picks a view.
+    pub(crate) warning: Option<String>,
 }
 
 /// A chord in the keymap's own spelling (`g w`, `shift+r`).
@@ -254,10 +256,11 @@ impl VolwatchTile {
             MenuRow::Action(self.verb(SWITCH_ACTION, "Switch list\u{2026}")),
             MenuRow::Separator,
         ];
-        rows.extend(View::ALL.iter().zip(VIEW_ACTIONS).map(|(v, id)| {
+        let shown = self.shown_view().map(|v| v.name);
+        rows.extend(self.tabs().iter().zip(VIEW_ACTIONS).map(|(name, id)| {
             MenuRow::Action(
-                self.verb(id, format!("{} view", v.label()))
-                    .checked(self.state.view == *v),
+                self.verb(id, format!("{name} view"))
+                    .checked(shown.as_deref() == Some(name.as_str())),
             )
         }));
         rows.extend([
@@ -297,15 +300,15 @@ impl VolwatchTile {
             .collect()
     }
 
-    /// The header's title, count, lookback chips and board counts, from
-    /// the shown list's name: rebuilt with the chrome, so a list switch or
-    /// a restore whose snapshot has not arrived names its list at once.
+    /// The header's title, count, lens chips and board counts, from the
+    /// shown list's name: rebuilt with the chrome, so a list switch or a
+    /// restore whose snapshot has not arrived names its list at once.
     pub(crate) fn rebuild_header(&mut self) {
         let sort = self.sort_label();
         self.header = header(
             self.state.list.as_deref(),
             self.members.len(),
-            self.state.lookback,
+            &self.state.lens,
             sort.as_deref(),
             self.board.as_deref(),
         );
@@ -346,6 +349,7 @@ impl VolwatchTile {
             .iter()
             .chain(n.failure.iter())
             .chain(n.refused.iter())
+            .chain(n.warning.iter())
             .cloned()
             .map(Notice::warning)
             .chain(
@@ -376,6 +380,9 @@ impl VolwatchTile {
             true
         } else if self.notices.refused.as_deref() == Some(text) {
             self.notices.refused = None;
+            true
+        } else if self.notices.warning.as_deref() == Some(text) {
+            self.notices.warning = None;
             true
         } else if self.notices.nothing_to_switch && text == NOTHING_TO_SWITCH {
             self.notices.nothing_to_switch = false;

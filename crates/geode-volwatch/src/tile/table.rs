@@ -15,9 +15,7 @@ use geode_shell::fonts;
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
 use geode_widgets::cell::design;
-use geode_widgets::cell::heat::{self, HeatPaint};
-use geode_widgets::cell::percent_slider::{self, SliderPaint};
-use geode_widgets::cell::zero_bar::{self, BarPaint};
+use geode_widgets::cell::heat::HeatPaint;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, Pixels,
@@ -29,9 +27,9 @@ use gpui_component::table::{
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme};
 
 use crate::core::model::{
-    BAR_ALPHA, Glyph, Prepared, PreparedCell, PreparedRow, SORT_MARK_DESIGN_PX, glyph_width,
+    Glyph, Prepared, PreparedCell, PreparedRow, SORT_MARK_DESIGN_PX, glyph_width,
 };
-use crate::core::views::{Column, ColumnKind, View};
+use crate::core::views::{Column, ColumnKind};
 
 /// Whether a cell paints in the muted tone: its own flag (a lookback
 /// mismatch, a short rank), an absent row, or, in the Underlying column
@@ -52,13 +50,10 @@ const STRIPE: bool = false;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Paints {
     pub(crate) chip: ChipPaint,
-    /// A change painted from a board asked over another lookback.
+    /// A companion painted from a board asked over another lookback, or
+    /// a rank over too short a history.
     pub(crate) chip_muted: ChipPaint,
-    pub(crate) slider: SliderPaint,
-    /// A rank over too short a history.
-    pub(crate) slider_muted: SliderPaint,
-    pub(crate) bar: BarPaint,
-    pub(crate) bar_muted: BarPaint,
+    /// The band's surface tint; the grid paints no heat.
     pub(crate) heat: HeatPaint,
     pub(crate) heat_muted: HeatPaint,
     pub(crate) spark: SparkPaint,
@@ -86,24 +81,6 @@ impl Paints {
             text: t.foreground,
             radius,
         };
-        let slider = SliderPaint {
-            track: t.muted,
-            fill: t.primary.opacity(0.6),
-            tick: t.background,
-            marker: t.foreground,
-            warning: t.warning,
-            text: muted,
-            radius,
-        };
-        let bar = BarPaint {
-            positive: t.chart_bullish,
-            negative: t.chart_bearish,
-            zero: muted,
-            axis: t.border,
-            text: t.foreground,
-            fill_alpha: BAR_ALPHA,
-            radius,
-        };
         let heat = HeatPaint {
             hue: t.primary,
             text: t.foreground,
@@ -123,19 +100,6 @@ impl Paints {
                 negative: muted,
                 text: muted,
                 ..chip
-            },
-            slider,
-            slider_muted: SliderPaint {
-                marker: muted,
-                fill: t.muted_foreground.opacity(0.4),
-                ..slider
-            },
-            bar,
-            bar_muted: BarPaint {
-                positive: muted,
-                negative: muted,
-                text: muted,
-                ..bar
             },
             heat,
             heat_muted: HeatPaint {
@@ -205,34 +169,32 @@ fn sort_mark_px(m: &FitMetrics) -> f32 {
     scale::design_px(SORT_MARK_DESIGN_PX, px(m.rem_px))
 }
 
-/// A width belongs to a column in a view: the same measure paints as a
-/// chip in Changes and a heat tint in Term, and its head differs, so a
-/// width fitted in one view is wrong in another. The session key is
-/// `<view>:<column id>`.
-pub(crate) fn sized_key(view: View, id: &str) -> String {
-    format!("{}:{}", view.key(), id)
+/// A width belongs to a column in a view: the same measure paints under
+/// another head or group in another view, so a width fitted in one view
+/// is wrong in another. The session key is `<view name>:<column id>`.
+pub(crate) fn sized_key(view: &str, id: &str) -> String {
+    format!("{view}:{id}")
 }
 
-/// The sized widths a restored record holds, keyed by view. A record
+/// The sized widths a restored record holds, keyed by view name. A record
 /// written before widths were keyed by view holds bare column ids: an
-/// autosize in Skew once wrote `skew-3M-level = 30`, which Levels then
-/// applied to a column whose head needs 60 px. An entry without a known
-/// view prefix is dropped silently: it is an old record, not a malformed
-/// value, so it earns no notice.
+/// autosize in one view once wrote a width another view then applied to
+/// a column whose head needs twice it. An entry without a view prefix is
+/// dropped silently: it is an old record, not a malformed value, so it
+/// earns no notice. A name the document no longer has keeps its entry:
+/// the view may come back.
 pub(crate) fn restored_widths(record: Option<&toml::Table>) -> FittedWidths {
     let mut fitted = widths_from_record(record);
-    fitted.retain(|k, _| {
-        k.split_once(':')
-            .is_some_and(|(v, _)| View::ALL.iter().any(|view| view.key() == v))
-    });
+    fitted.retain(|k, _| k.split_once(':').is_some_and(|(v, _)| !v.is_empty()));
     fitted
 }
 
 pub(crate) struct GridDelegate {
     pub(crate) prepared: Rc<Prepared>,
     pub(crate) columns: Rc<Vec<Column>>,
-    /// The view the columns belong to: the key space of `fitted`.
-    view: View,
+    /// The name of the view the columns belong to: the key space of
+    /// `fitted`.
+    view: String,
     /// Shown rows in painted order, as indices into `prepared.rows`.
     pub(crate) visible: Vec<usize>,
     /// (shown row, column) under the cursor.
@@ -266,7 +228,7 @@ impl GridDelegate {
         GridDelegate {
             prepared: Rc::default(),
             columns: Rc::default(),
-            view: View::Changes,
+            view: String::new(),
             visible: Vec::new(),
             cursor: None,
             selection: None,
@@ -292,7 +254,7 @@ impl GridDelegate {
         prepared: Rc<Prepared>,
         columns: Rc<Vec<Column>>,
         sorted: Option<(usize, bool)>,
-        view: View,
+        view: &str,
     ) -> bool {
         let relayout = !Rc::ptr_eq(&self.columns, &columns)
             || self.prepared.widths != prepared.widths
@@ -300,7 +262,9 @@ impl GridDelegate {
             || self.view != view;
         self.prepared = prepared;
         self.sorted = sorted;
-        self.view = view;
+        if self.view != view {
+            self.view = view.to_string();
+        }
         if !Rc::ptr_eq(&self.columns, &columns) {
             self.groups = groups(&columns);
             self.heads = columns
@@ -374,7 +338,7 @@ impl GridDelegate {
                 let width = match self
                     .ids
                     .get(ix)
-                    .and_then(|id| self.fitted.get(&sized_key(self.view, id)))
+                    .and_then(|id| self.fitted.get(&sized_key(&self.view, id)))
                 {
                     Some(sized) => *sized,
                     None => scale::design_px(*w, rem) + chrome,
@@ -392,7 +356,7 @@ impl GridDelegate {
         for (ix, w) in widths.iter().enumerate().take(self.ids.len()) {
             if *w != self.width(ix) {
                 self.fitted
-                    .insert(sized_key(self.view, &self.ids[ix]), f32::from(*w));
+                    .insert(sized_key(&self.view, &self.ids[ix]), f32::from(*w));
             }
         }
         self.relayout();
@@ -436,7 +400,7 @@ impl GridDelegate {
                         m.text_px(&c.head)
                     };
                     let width = m.fit(std::iter::once(head).chain(cells));
-                    (sized_key(self.view, &c.id), width)
+                    (sized_key(&self.view, &c.id), width)
                 })
                 .collect(),
         )
@@ -721,8 +685,9 @@ impl TableDelegate for GridDelegate {
             // text, so a column narrower than its number cuts the trailing
             // side into an ellipsis; a child that kept its own width would
             // be pushed out on the leading side by the right-aligned cell
-            // and show a plausible wrong number.
-            Glyph::None => div()
+            // and show a plausible wrong number. A single column's tint
+            // paints as plain text until the tint cell exists.
+            Glyph::None | Glyph::Tint(_) => div()
                 .w_full()
                 .min_w_0()
                 .text_color(tone)
@@ -735,35 +700,13 @@ impl TableDelegate for GridDelegate {
                 let paint = if muted { p.chip_muted } else { p.chip };
                 delta_chip::paint(text, *chip, paint, id).into_any_element()
             }
-            Glyph::Slider(slider) => {
-                let paint = if muted { p.slider_muted } else { p.slider };
-                percent_slider::paint(text, *slider, paint, id)
-                    .w_full()
-                    .into_any_element()
-            }
-            Glyph::Bar(bar) => {
-                let paint = if muted { p.bar_muted } else { p.bar };
-                zero_bar::paint(text, *bar, paint, id)
-                    .w_full()
-                    .into_any_element()
-            }
-            Glyph::Heat(alpha) => {
-                let paint = if muted { p.heat_muted } else { p.heat };
-                heat::paint(text, *alpha, paint, id)
-                    .w_full()
-                    .into_any_element()
-            }
             Glyph::Spark {
                 values,
                 range,
                 mark,
                 end_dot,
             } => {
-                let width = if column.kind == ColumnKind::Term {
-                    sizes::WIDTH_TERM
-                } else {
-                    sizes::WIDTH_30D
-                };
+                let width = sizes::WIDTH_30D;
                 let paint = SparkPaint {
                     ring: self.ring(row_ix),
                     ..p.spark
@@ -801,27 +744,39 @@ impl TableDelegate for GridDelegate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::views::{columns, order_tenors};
+    use crate::core::lens::LensState;
+    use crate::core::views::{builtin, columns};
+    use geode_core::volviews::VolView;
+
+    fn view(name: &str) -> VolView {
+        builtin().get(name).unwrap().clone()
+    }
 
     #[test]
     fn groups_are_runs_of_equal_column_groups() {
-        let cols = columns(View::Changes, &order_tenors(None));
+        let cols = columns(&view("vol"), &LensState::default(), false);
         let g = groups(&cols);
         assert_eq!(g.iter().map(|g| g.span).sum::<usize>(), cols.len());
         assert_eq!(g[0].label.as_ref(), "", "Underlying is ungrouped");
         assert_eq!((g[2].label.as_ref(), g[2].span), ("ATFM 1M", 2));
-        assert!(groups(&columns(View::Levels, &order_tenors(None))).is_empty());
+        assert_eq!(
+            g.last().map(|g| g.label.as_ref()),
+            Some(""),
+            "the sparkline is ungrouped"
+        );
+        let ungrouped: Vec<Column> = cols.iter().filter(|c| c.group.is_none()).cloned().collect();
+        assert!(groups(&ungrouped).is_empty());
     }
 
     #[test]
     fn relayout_adds_the_tables_fixed_chrome_to_every_width() {
         let mut d = GridDelegate::new(Paints::from_theme(&Theme::default()));
-        let cols = Rc::new(columns(View::Levels, &order_tenors(None)));
+        let cols = Rc::new(columns(&view("skew"), &LensState::default(), false));
         let prepared = Rc::new(Prepared {
             rows: Vec::new(),
             widths: vec![30.0; cols.len()],
         });
-        d.set_model(prepared, cols, None, View::Levels);
+        d.set_model(prepared, cols, None, "skew");
         d.set_rem(12.0);
         // The chrome as the registry states it, not as `chrome_px` says.
         let pad = Size::XSmall.table_cell_padding();
@@ -830,7 +785,7 @@ mod tests {
         assert_eq!(f32::from(d.width(0)), 30.0 + chrome);
         // A fitted width already holds the chrome: it is taken as is.
         d.set_fitted(FittedWidths::from([(
-            sized_key(View::Levels, "underlying"),
+            sized_key("skew", "underlying"),
             50.0,
         )]));
         assert_eq!(f32::from(d.width(0)), 50.0);
@@ -846,11 +801,11 @@ mod tests {
         cx: &mut gpui::TestAppContext,
     ) {
         let mut d = GridDelegate::new(Paints::from_theme(&Theme::default()));
-        let cols = Rc::new(columns(View::Changes, &order_tenors(None)));
+        let cols = Rc::new(columns(&view("vol"), &LensState::default(), false));
         let chip = cols
             .iter()
-            .position(|c| matches!(c.kind, ColumnKind::Change { .. }))
-            .expect("Changes has a chip column");
+            .position(|c| matches!(c.kind, ColumnKind::Companion { .. }))
+            .expect("vol has a companion column");
         let text = cols
             .iter()
             .position(|c| c.kind == ColumnKind::Underlying)
@@ -860,7 +815,7 @@ mod tests {
             rows: Vec::new(),
             widths: vec![60.0; cols.len()],
         });
-        d.set_model(prepared, cols, None, View::Changes);
+        d.set_model(prepared, cols, None, "vol");
         d.set_rem(12.0);
         let chrome = chrome_px();
         let floor = TableColumn::default().min_width;
@@ -876,10 +831,7 @@ mod tests {
             "a text column keeps the registry's floor"
         );
         // A restored (or dragged) width below the minimum lays out at it.
-        d.set_fitted(FittedWidths::from([(
-            sized_key(View::Changes, &chip_id),
-            20.0,
-        )]));
+        d.set_fitted(FittedWidths::from([(sized_key("vol", &chip_id), 20.0)]));
         assert_eq!(
             d.width(chip),
             px(chip_min),

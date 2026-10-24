@@ -9,7 +9,6 @@ use geode_widgets::cell::widths;
 
 use super::harness::*;
 use crate::content::VolwatchSettings;
-use crate::core::views::View;
 use crate::tile::table::td_muted;
 
 #[gpui::test]
@@ -29,20 +28,19 @@ fn the_header_names_the_list_count_lookback_sort_and_the_missing(cx: &mut gpui::
     );
     h.press(&mut vcx, "d");
     assert!(chip_texts(&h, &vcx).contains(&"Δ 1w".into()));
-    assert!(h.tile.read_with(&vcx, |t, _| t.header.lookbacks[1].1));
+    assert!(h.tile.read_with(&vcx, |t, _| t.header.chips[1].1));
 }
 
 #[gpui::test]
 fn a_failed_dataset_is_a_danger_chip_and_blanks_its_columns(cx: &mut gpui::TestAppContext) {
-    let (h, mut vcx) = open_on(cx, View::Levels);
+    let (h, mut vcx) = open_on(cx, "varswap");
     let mut b = board_for(&["DAX", "SX5E", "NEW"], &asked_of(&h, &vcx));
-    b.dataset_errors
-        .push(("realized_vol".into(), "drifted".into()));
-    blank_role(&mut b, Role::Realized);
+    b.dataset_errors.push(("varswap".into(), "drifted".into()));
+    blank_role(&mut b, Role::Varswap);
     let tag = tag_of(&h, &vcx);
     h.answer_board(&mut vcx, tag, b);
-    assert!(chip_texts(&h, &vcx).contains(&"realized_vol".into()));
-    let col = column_index(&h, &vcx, "rlz-5D-level");
+    assert!(chip_texts(&h, &vcx).contains(&"varswap".into()));
+    let col = column_index(&h, &vcx, "varswap-3M-level");
     assert_eq!(
         h.tile
             .read_with(&vcx, |t, _| t.prepared.rows[0].cells[col].text.to_string()),
@@ -57,7 +55,7 @@ fn the_readout_follows_the_cursor_cell(cx: &mut gpui::TestAppContext) {
     h.move_to_column(&mut vcx, "atfm-3M-level");
     assert_eq!(
         h.tile.read_with(&vcx, |t, _| t.readout.to_string()),
-        "SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09"
+        "SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · z 1Y +1.2 · pctl 1Y 91 of 251 · mean 14.5 · sd 1.2"
     );
     h.press(&mut vcx, "j");
     assert_eq!(
@@ -185,16 +183,60 @@ fn the_strip_names_each_bound_step_key_on_its_own(cx: &mut gpui::TestAppContext)
 #[gpui::test]
 fn the_view_strip_lights_the_active_view_and_a_press_switches(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
-    assert!(vcx.debug_bounds("volwatch-view-lit-changes").is_some());
-    assert!(vcx.debug_bounds("volwatch-view-lit-term").is_none());
+    assert!(vcx.debug_bounds("volwatch-view-lit-vol").is_some());
+    assert!(vcx.debug_bounds("volwatch-view-lit-surface").is_none());
     let bounds = vcx
-        .debug_bounds("volwatch-view-term")
-        .expect("the strip paints every view");
+        .debug_bounds("volwatch-view-surface-7")
+        .expect("the strip paints every tab");
     vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
     vcx.run_until_parked();
-    assert_eq!(h.view(&vcx), View::Term);
-    assert!(vcx.debug_bounds("volwatch-view-lit-term").is_some());
-    assert!(vcx.debug_bounds("volwatch-view-lit-changes").is_none());
+    assert_eq!(h.view(&vcx), "surface");
+    assert!(vcx.debug_bounds("volwatch-view-lit-surface").is_some());
+    assert!(vcx.debug_bounds("volwatch-view-lit-vol").is_none());
+}
+
+#[gpui::test]
+fn a_reload_that_drops_the_shown_view_opens_the_default_with_a_notice(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "3");
+    assert_eq!(h.view(&vcx), "varswap");
+    h.press(&mut vcx, "enter");
+    assert!(h.band_open(&vcx));
+    let mut settings = VolwatchSettings::default();
+    settings.views.views.retain(|v| v.name != "varswap");
+    vcx.update(|_, cx| h.factory.set_settings(settings, cx));
+    assert_eq!(h.view(&vcx), "vol");
+    assert_eq!(h.notices(&vcx), ["view varswap is gone"]);
+    assert!(h.band_open(&vcx), "the band stays on the cursor row");
+    assert_eq!(h.cursor(&vcx), Some("DAX".into()));
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.tabs()),
+        ["vol", "skew", "surface"]
+    );
+}
+
+#[gpui::test]
+fn a_reload_that_keeps_the_shown_view_keeps_it_and_requeries_only_for_new_measures(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = landed(cx);
+    let mut settings = VolwatchSettings::default();
+    // Reorder: vol stays, now second.
+    let vol = settings.views.views.remove(0);
+    settings.views.views.push(vol);
+    settings.views.default = 0;
+    vcx.update(|_, cx| h.factory.set_settings(settings, cx));
+    assert_eq!(h.view(&vcx), "vol");
+    assert!(
+        Harness::boards(&h.requests()).is_empty(),
+        "the same columns ask nothing"
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.tabs()),
+        ["skew", "varswap", "surface", "vol"]
+    );
 }
 
 #[gpui::test]
@@ -205,7 +247,7 @@ fn a_lookback_chip_press_sets_that_lookback(cx: &mut gpui::TestAppContext) {
         .expect("the header paints every lookback");
     vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
     vcx.run_until_parked();
-    assert_eq!(h.lookback(&vcx), geode_core::volboard::Lookback::M1);
+    assert_eq!(h.lens(&vcx).lookback, geode_core::volboard::Lookback::M1);
     assert_eq!(
         Harness::boards(&h.requests())[0].lookbacks,
         [geode_core::volboard::Lookback::M1],

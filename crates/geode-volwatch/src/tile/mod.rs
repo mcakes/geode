@@ -6,7 +6,7 @@
 //! state and the switcher menu; `table` the grid's delegate and paints.
 //!
 //! What paint reads (`prepared`, `header`, the notices and the empty
-//! state) is rebuilt when the snapshot, the board, the view, the lookback
+//! state) is rebuilt when the snapshot, the board, the view, the lens
 //! or the reference tables change, never in render.
 
 mod band;
@@ -32,6 +32,7 @@ use geode_core::link::{CursorScope, Emission, underlying_scope};
 use geode_core::reference::ReferenceData;
 use geode_core::sort::SortOrder;
 use geode_core::volboard::{Lookback, Role, VolBoard};
+use geode_core::volviews::{Cells, VolView, VolViews};
 use geode_core::watchlist::state::{Status, WatchlistSnapshot};
 use geode_data::DataHandle;
 use geode_shell::actions::ActionId;
@@ -59,22 +60,32 @@ use table::{GridDelegate, GridEvent, Paints, restored_widths, sized_key, sortabl
 
 use crate::content::Shared;
 use crate::core::commands::{self, Command};
+use crate::core::lens::LensState;
 use crate::core::model::{BandModel, HeaderModel, Prepared, Row, sort_value};
 use crate::core::session::{self, State};
 use crate::core::views::{
-    Ask, Column, ColumnKind, KIND, REALIZED, SURFACE, VARSWAP, View, columns, order_tenors,
+    Ask, Column, ColumnKind, KIND, REALIZED, SURFACE, VARSWAP, columns, order_tenors,
 };
 
-const VIEW_ACTIONS: [&str; 5] = [
+/// The digit actions, parallel to the first nine tabs.
+const VIEW_ACTIONS: [&str; 9] = [
     "volwatch::view_1",
     "volwatch::view_2",
     "volwatch::view_3",
     "volwatch::view_4",
     "volwatch::view_5",
+    "volwatch::view_6",
+    "volwatch::view_7",
+    "volwatch::view_8",
+    "volwatch::view_9",
 ];
 const VIEW_NEXT_ACTION: &str = "volwatch::view_next";
 const VIEW_PREV_ACTION: &str = "volwatch::view_prev";
 const LOOKBACK_ACTION: &str = "volwatch::lookback";
+const LENS_ACTION: &str = "volwatch::lens";
+const METRIC_ACTION: &str = "volwatch::metric";
+pub(super) const WINDOW_ACTION: &str = "volwatch::window";
+const SHOWN_ACTION: &str = "volwatch::shown";
 const REFRESH_ACTION: &str = "volwatch::refresh";
 pub(super) const SWITCH_ACTION: &str = "volwatch::switch";
 const ESCAPE_ACTION: &str = "volwatch::escape";
@@ -139,18 +150,24 @@ fn reference(cx: &App) -> Arc<ReferenceData> {
 }
 
 /// The grid order for `(column id, order)` over `columns`, reading values
-/// through the ask the board answered; blanks sort last either way. `None`
-/// when the column is not in the view.
-fn order_for(sort: &(String, SortOrder), columns: &[Column], asked: &Ask) -> Option<Order<Row>> {
+/// through the ask the board answered under `lens`; blanks sort last
+/// either way. `None` when the column is not in the view. The lens is in
+/// the key: a companion column orders by whichever number it shows.
+fn order_for(
+    sort: &(String, SortOrder),
+    columns: &[Column],
+    asked: &Ask,
+    lens: LensState,
+) -> Option<Order<Row>> {
     let (id, order) = sort;
     let column = columns.iter().find(|c| c.id == *id)?.clone();
     let asked = asked.clone();
     let order = *order;
     let value = move |r: &Row| {
-        sort_value(r, &column, &asked).map(|v| if order.absolute() { v.abs() } else { v })
+        sort_value(r, &column, &asked, &lens).map(|v| if order.absolute() { v.abs() } else { v })
     };
     Some(Order {
-        key: format!("{id} {order:?}"),
+        key: format!("{id} {order:?} {lens:?}"),
         cmp: Rc::new(move |a, b| match (value(a), value(b)) {
             (Some(x), Some(y)) if order.descending() => y.total_cmp(&x),
             (Some(x), Some(y)) => x.total_cmp(&y),
@@ -188,6 +205,11 @@ pub struct VolwatchTile {
     sorted_with: Option<Ask>,
     pub(crate) prepared: Rc<Prepared>,
     pub(crate) columns: Rc<Vec<Column>>,
+    /// The shown view's cell shape, carried beside its columns.
+    pub(crate) cells: Cells,
+    /// The views the columns were last built from: a settings push that
+    /// changes them rebuilds the tabs, one that does not asks nothing.
+    applied_views: VolViews,
     /// The grid's table, created once; the prepared model and the cursor
     /// are handed to its delegate whenever they change.
     pub(crate) table: Entity<TableState<GridDelegate>>,
@@ -253,7 +275,14 @@ impl VolwatchTile {
         cx: &mut Context<Self>,
     ) -> Self {
         let vega_setting = shared.settings.borrow().vega.clone();
-        let (state, restore) = restored.map(session::from_table).unwrap_or_default();
+        let applied_views = shared.settings.borrow().views.clone();
+        let (mut state, restore) = restored.map(session::from_table).unwrap_or_default();
+        // A restored view the document no longer has: the default shows,
+        // and the notice says which name went.
+        let warning = state
+            .view
+            .take_if(|n| applied_views.get(n).is_none())
+            .map(|name| format!("view {name} is gone"));
         let mut grid = RowModel::new();
         if let Some(name) = &state.cursor {
             grid.seed_cursor(name.clone());
@@ -366,6 +395,8 @@ impl VolwatchTile {
             sorted_with: None,
             prepared: Rc::default(),
             columns: Rc::default(),
+            cells: Cells::Pair,
+            applied_views,
             table,
             last_rem: scale::DESIGN_REM,
             cursor_col: 1,
@@ -387,6 +418,7 @@ impl VolwatchTile {
             },
             notices: Notices {
                 restore,
+                warning,
                 ..Notices::default()
             },
             reported: Vec::new(),
@@ -412,19 +444,75 @@ impl VolwatchTile {
         order_tenors(self.tenors.as_deref())
     }
 
+    /// The tab names in order.
+    pub(crate) fn tabs(&self) -> Vec<String> {
+        self.shared
+            .settings
+            .borrow()
+            .views
+            .views
+            .iter()
+            .map(|v| v.name.clone())
+            .collect()
+    }
+
+    /// The view shown: the state's name when the document has it, else
+    /// the default; `None` with no views at all.
+    pub(crate) fn shown_view(&self) -> Option<VolView> {
+        let settings = self.shared.settings.borrow();
+        self.state
+            .view
+            .as_deref()
+            .and_then(|n| settings.views.get(n))
+            .or_else(|| settings.views.default_view())
+            .cloned()
+    }
+
+    /// The shown view's columns under the lens; none with no views. A
+    /// vega column only when the setting names a view and the query was
+    /// not refused.
     fn rebuild_columns(&mut self) {
-        let mut columns = columns(self.state.view, &self.ordered_tenors());
-        // No setting, or a refused view: no vega column.
-        if !self.vega_offered() {
-            columns.retain(|c| c.kind != ColumnKind::Vega);
-        }
+        let vega = self.vega_offered();
+        let columns = match self.shown_view() {
+            Some(view) => {
+                self.cells = view.cells;
+                columns(&view, &self.state.lens, vega)
+            }
+            None => Vec::new(),
+        };
         self.columns = Rc::new(columns);
         self.cursor_col = self.cursor_col.clamp(1, self.columns.len().max(2) - 1);
     }
 
+    /// A standing warning (a view that went away) until the trader picks
+    /// a view.
+    fn post_warning(&mut self, text: String, cx: &mut Context<Self>) {
+        self.notices.warning = Some(text);
+        self.rebuild_chrome(cx);
+    }
+
     /// The factory stored new settings: the refresh interval and the stale
-    /// threshold apply at once.
+    /// threshold apply at once; changed views rebuild the tabs, falling
+    /// back to the default (with a notice) when the shown one went, and
+    /// ask again only for what the new columns need.
     pub(crate) fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        let views_changed = {
+            let s = self.shared.settings.borrow();
+            s.views != self.applied_views
+        };
+        if views_changed {
+            self.applied_views = self.shared.settings.borrow().views.clone();
+            if let Some(name) = self
+                .state
+                .view
+                .take_if(|n| self.applied_views.get(n).is_none())
+            {
+                self.post_warning(format!("view {name} is gone"), cx);
+            }
+            self.rebuild_columns();
+            self.sync_sort();
+            self.resubmit(false, cx);
+        }
         let vega = self.shared.settings.borrow().vega.clone();
         if vega != self.vega.setting {
             self.forget_vega();
@@ -492,8 +580,8 @@ impl VolwatchTile {
     }
 
     /// Show `name`: the cursor, the filter, the board and every answer on
-    /// its way belonged to the previous list; the view, lookback and sort
-    /// are the tile's and stay.
+    /// its way belonged to the previous list; the view, lens and sort are
+    /// the tile's and stay.
     fn show(&mut self, name: &str, cx: &mut Context<Self>) {
         if self.state.list.as_deref() != Some(name) {
             self.state.list = Some(name.to_string());
@@ -560,9 +648,15 @@ impl VolwatchTile {
             .as_deref()
             .map_or(&[][..], |b| b.notes.as_slice());
         self.readout = match (row, column, self.board_ask.as_ref()) {
-            (Some(row), Some(column), Some(asked)) => {
-                crate::core::model::readout(row, column, asked, notes, &self.clock).into()
-            }
+            (Some(row), Some(column), Some(asked)) => crate::core::model::readout(
+                row,
+                column,
+                asked,
+                notes,
+                &self.clock,
+                &self.state.lens,
+            )
+            .into(),
             _ => SharedString::default(),
         };
     }
@@ -592,9 +686,10 @@ impl VolwatchTile {
         } else {
             NO_MATCH
         });
+        let view = self.shown_view().map(|v| v.name).unwrap_or_default();
         self.table.update(cx, |t, cx| {
             let d = t.delegate_mut();
-            let relayout = d.set_model(prepared, columns, sorted, self.state.view);
+            let relayout = d.set_model(prepared, columns, sorted, &view);
             d.set_view(visible, cursor, selection, empty);
             if relayout {
                 t.refresh(cx);
@@ -657,7 +752,7 @@ impl VolwatchTile {
     /// The header's sort chip: the column's head with its group (an ATFM
     /// group by tenor alone), wrapped in `|…|` for an absolute order, then
     /// the direction (`↓` descending, `↑` ascending): `|Δ 3M| ↓`,
-    /// `vol 3M ↑`, `ATFM 3M ↓` under Levels.
+    /// `vol 3M ↑`.
     pub(crate) fn sort_label(&self) -> Option<String> {
         let (id, order) = self.state.sort.as_ref()?;
         let c = self.columns.iter().find(|c| c.id == *id)?;
@@ -688,7 +783,7 @@ impl VolwatchTile {
             .state
             .sort
             .as_ref()
-            .and_then(|s| order_for(s, &self.columns, asked));
+            .and_then(|s| order_for(s, &self.columns, asked, self.state.lens));
         let same_key = self.grid.sort().map(|o| &o.key) == order.as_ref().map(|o| &o.key);
         if same_key && self.sorted_with.as_ref() == self.board_ask.as_ref() {
             return;
@@ -719,7 +814,7 @@ impl VolwatchTile {
         }
     }
 
-    /// `volwatch` with its mode. No `counts` flag: the digits pick views.
+    /// `volwatch` with its mode. No `counts` flag: the digits pick tabs.
     /// `tilelist` while a menu is up, so the shell's `j`/`k` step its rows.
     pub(crate) fn key_context(&self) -> KeyContext {
         let ctx = KeyContext::new(KIND).pair("mode", self.mode());
@@ -745,7 +840,10 @@ impl VolwatchTile {
             self.user_acted(cx);
         }
         if let Some(i) = VIEW_ACTIONS.iter().position(|a| *a == id) {
-            self.set_view(View::ALL[i], cx);
+            // A digit past the last tab does nothing.
+            if let Some(name) = self.tabs().get(i).cloned() {
+                let _ = self.set_view_by_name(&name, cx);
+            }
             return true;
         }
         if self.menu.is_none()
@@ -806,9 +904,13 @@ impl VolwatchTile {
                 }
                 cx.notify();
             }
-            VIEW_NEXT_ACTION => self.set_view(self.state.view.next(), cx),
-            VIEW_PREV_ACTION => self.set_view(self.state.view.prev(), cx),
+            VIEW_NEXT_ACTION => self.step_view(1, cx),
+            VIEW_PREV_ACTION => self.step_view(-1, cx),
             LOOKBACK_ACTION => self.cycle_lookback(cx),
+            LENS_ACTION => self.set_lens(|l| l.lens = l.lens.toggle(), false, cx),
+            METRIC_ACTION => self.set_lens(|l| l.metric = l.metric.toggle(), false, cx),
+            WINDOW_ACTION => self.set_lens(|l| l.window = l.window.next(), true, cx),
+            SHOWN_ACTION => self.set_lens(|l| l.shown = l.shown.toggle(), false, cx),
             REFRESH_ACTION => {
                 self.resubmit(true, cx);
                 cx.notify();
@@ -905,15 +1007,10 @@ impl VolwatchTile {
             return;
         };
         let measure = match &c.kind {
-            ColumnKind::Level { measure, .. }
-            | ColumnKind::Change { measure }
-            | ColumnKind::ForwardChange { measure }
-            | ColumnKind::Pctl { measure }
-            | ColumnKind::Bar { measure } => Some(measure),
-            ColumnKind::Underlying
-            | ColumnKind::Spark { .. }
-            | ColumnKind::Term
-            | ColumnKind::Vega => None,
+            ColumnKind::Level { measure }
+            | ColumnKind::Companion { measure }
+            | ColumnKind::Single { measure } => Some(measure),
+            ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Vega => None,
         };
         let name = self
             .grid
@@ -990,13 +1087,59 @@ impl VolwatchTile {
         }
     }
 
-    /// A view switch lays out its columns and asks again only when its ask
-    /// is not inside the last one.
-    fn set_view(&mut self, view: View, cx: &mut Context<Self>) {
-        self.state.view = view;
+    /// Show the tab `name` (a digit, the strip, the menu, `:view`): its
+    /// columns are laid out and the board asked again only when its ask
+    /// is not inside the last one. A name the document lacks refuses.
+    fn set_view_by_name(&mut self, name: &str, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.shared.settings.borrow().views.get(name).is_none() {
+            return Err(format!("no view '{name}'"));
+        }
+        self.state.view = Some(name.to_string());
+        self.notices.warning = None;
         self.rebuild_columns();
         self.sync_sort();
         self.resubmit(false, cx);
+        self.prepare();
+        self.sync_table(cx);
+        self.rebuild_chrome(cx);
+        cx.notify();
+        Ok(())
+    }
+
+    /// `tab` / `shift+tab`: the next or previous tab, wrapping; nothing
+    /// with no views.
+    fn step_view(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let tabs = self.tabs();
+        let Some(current) = self.shown_view() else {
+            return;
+        };
+        let n = tabs.len() as isize;
+        let at = tabs.iter().position(|t| *t == current.name).unwrap_or(0) as isize;
+        let next = ((at + delta) % n + n) % n;
+        let _ = self.set_view_by_name(&tabs[next as usize], cx);
+    }
+
+    /// One door for every lens key and chip: the columns are rebuilt (the
+    /// companion head and a single view's group heads follow the lens),
+    /// the sort re-resolved, and the board asked again only when
+    /// `requery` (a window or lookback change; a lens, metric or shown
+    /// change paints from the board held).
+    pub(super) fn set_lens(
+        &mut self,
+        f: impl FnOnce(&mut LensState),
+        requery: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.state.lens;
+        f(&mut self.state.lens);
+        if self.state.lens == before {
+            return;
+        }
+        self.rebuild_columns();
+        self.sync_sort();
+        if requery {
+            self.resubmit(false, cx);
+        }
         self.prepare();
         self.sync_table(cx);
         cx.notify();
@@ -1004,38 +1147,27 @@ impl VolwatchTile {
 
     /// D1 → W1 → M1 → D1; the request carries the one in force.
     fn cycle_lookback(&mut self, cx: &mut Context<Self>) {
-        let next = match self.state.lookback {
+        let next = match self.state.lens.lookback {
             Lookback::D1 => Lookback::W1,
             Lookback::W1 => Lookback::M1,
             Lookback::M1 => Lookback::D1,
         };
-        self.set_lookback(next, cx);
+        self.set_lens(|l| l.lookback = next, true, cx);
     }
 
-    /// The one door a lookback change takes (`d`, a header chip): the
-    /// chip moves at once and the board is asked again.
-    fn set_lookback(&mut self, lookback: Lookback, cx: &mut Context<Self>) {
-        if self.state.lookback == lookback {
-            return;
-        }
-        self.state.lookback = lookback;
-        self.resubmit(false, cx);
-        self.prepare();
-        self.sync_table(cx);
-        cx.notify();
-    }
-
-    /// `:sort <col> [asc|desc|abs]`, bare `:sort` restores member order.
+    /// `:sort <col> [asc|desc|abs]`, bare `:sort` restores member order;
+    /// `:view <name>` shows a tab.
     pub(crate) fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
         match commands::parse(line, &self.columns)? {
             Command::Sort { column, order } => self.set_sort(Some((column, order)), cx),
             Command::SortClear => self.set_sort(None, cx),
+            Command::View(name) => self.set_view_by_name(&name, cx)?,
         }
         Ok(())
     }
 
     pub(crate) fn completions(&self, line: &str, cursor: usize) -> Vec<String> {
-        commands::completions(line, cursor, &self.columns)
+        commands::completions(line, cursor, &self.columns, &self.tabs())
     }
 
     /// `/` narrows as the query is typed; committing keeps it, cancelling
@@ -1144,7 +1276,8 @@ impl VolwatchTile {
                     .ok_or(NOTHING_TO_FIT)?,
             )
         };
-        let prefix = sized_key(self.state.view, "");
+        let view = self.shown_view().map(|v| v.name).unwrap_or_default();
+        let prefix = sized_key(&view, "");
         self.table.update(cx, |t, cx| {
             let mut fitted = t.delegate().fitted.clone();
             fitted.retain(|k, _| !k.starts_with(&prefix));

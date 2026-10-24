@@ -30,8 +30,8 @@ impl VolwatchTile {
     }
 
     /// Ask the surface for its tenors, once per list shown. The board does
-    /// not wait for it: the views lay out their conventional tenors until
-    /// it answers.
+    /// not wait for it: the band lays out the conventional tenors until it
+    /// answers.
     pub(crate) fn ask_keys(&mut self, cx: &mut Context<Self>) {
         let tag = self.keys_tag + 1;
         let params = HistoryKeysParams {
@@ -52,19 +52,22 @@ impl VolwatchTile {
         }
     }
 
-    /// Ask for the board the view, lookback and band imply. Unforced, it
-    /// asks only when that ask is not inside the one that will answer (the
-    /// one out, else the landed board's): a narrower ask never requeries.
+    /// Ask for the board the view, lens and band imply. Unforced, it asks
+    /// only when that ask is not inside the one that will answer (the one
+    /// out, else the landed board's): a narrower ask never requeries.
     /// `force` (`shift+r`, the timer, new members) asks regardless, under a
-    /// new tag. Nothing is asked for an empty member list.
+    /// new tag. Nothing is asked for an empty member list or with no view.
     pub(crate) fn resubmit(&mut self, force: bool, cx: &mut Context<Self>) {
         if self.members.is_empty() {
             return;
         }
+        let Some(view) = self.shown_view() else {
+            return;
+        };
         let next = ask(
-            self.state.view,
+            &view,
+            &self.state.lens,
             &self.ordered_tenors(),
-            self.state.lookback,
             self.state.band,
         );
         let base = if self.in_flight {
@@ -87,7 +90,7 @@ impl VolwatchTile {
             surface: SURFACE.into(),
             realized: Some(REALIZED.into()),
             varswap: Some(VARSWAP.into()),
-            tables: Vec::new(),
+            tables: next.tables(),
             members: self.members.clone(),
             measures: next.measures.clone(),
             lookbacks: vec![next.lookback],
@@ -130,7 +133,7 @@ impl VolwatchTile {
         cx.notify();
     }
 
-    /// The tenor listing lands: Term and Skew lay out the surface's own
+    /// The tenor listing lands: the band lays out the surface's own
     /// tenors, and the board is asked again only for a tenor the ask lacks.
     /// A source that cannot enumerate leaves the conventions.
     pub(crate) fn deliver_keys(&mut self, outcome: HistoryKeysOutcome, cx: &mut Context<Self>) {
@@ -221,8 +224,9 @@ impl VolwatchTile {
             rows: self.grid.rows(),
             columns: &self.columns,
             asked,
-            board_lookback: asked_lookback(self.board_ask.as_ref(), self.state.lookback),
-            shown: self.state.lookback,
+            board_lookback: asked_lookback(self.board_ask.as_ref(), self.state.lens.lookback),
+            lens: self.state.lens,
+            cells: self.cells,
             paint: self.paint,
             stale_after: self.shared.settings.borrow().stale_after,
             now: Utc::now(),

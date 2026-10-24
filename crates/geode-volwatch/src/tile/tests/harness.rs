@@ -17,7 +17,7 @@ use geode_core::query::{HistoryKeysOutcome, HistoryKeysParams, QueryKey, Referen
 use geode_core::reference::ReferenceData;
 use geode_core::scopes::SavedScopes;
 use geode_core::volboard::{
-    Cell, Change, Lookback, Role, VolBoard, VolBoardOutcome, VolBoardParams, VolRow,
+    Cell, Change, Role, Stats, VolBoard, VolBoardOutcome, VolBoardParams, VolRow,
 };
 use geode_core::watchlist::Watchlist;
 use geode_core::watchlist::members::{Member, Origin};
@@ -34,7 +34,8 @@ use geode_shell::watchlist::WatchlistGlobal;
 use gpui::{AppContext as _, Entity, Window};
 
 use crate::content::{VolwatchFactory, VolwatchSettings};
-use crate::core::views::{Ask, View};
+use crate::core::lens::LensState;
+use crate::core::views::Ask;
 use crate::tile::VolwatchTile;
 
 pub(super) const TILE: u64 = 7;
@@ -264,9 +265,9 @@ pub(super) fn restored(list: &str) -> toml::Table {
 
 /// A board answering `asked` for `members`: every asked cell 15.9 with a
 /// +1.1 change from 14.8 on 2026-10-09 over the ask's one lookback, a
-/// 91st-percentile rank of 251 when a window was asked, 30 points per
-/// sparkline; a member outside the surface fixture is `missing`, its row
-/// blank.
+/// 91st-percentile rank of 251 with a mean of 14.5 and an sd of 1.2 when
+/// a window was asked, 30 points per sparkline; a member outside the
+/// surface fixture is `missing`, its row blank.
 pub(super) fn board_for(members: &[&str], asked: &Ask) -> VolBoard {
     let at = Utc.with_ymd_and_hms(2026, 10, 9, 21, 0, 0).unwrap();
     let now = Utc::now();
@@ -286,7 +287,11 @@ pub(super) fn board_for(members: &[&str], asked: &Ask) -> VolBoard {
                     at,
                 })],
                 pctl: (present && asked.window.is_some()).then_some((0.91, 251)),
-                stats: None,
+                stats: (present && asked.window.is_some()).then_some(Stats {
+                    mean: 14.5,
+                    sd: 1.2,
+                    count: 251,
+                }),
             })
             .collect();
         let sparks = asked
@@ -307,18 +312,27 @@ pub(super) fn board_for(members: &[&str], asked: &Ask) -> VolBoard {
     board
 }
 
+/// The session record showing [`LIST`] in `view`.
+pub(super) fn restored_on(view: &str) -> toml::Table {
+    crate::core::session::to_table(&crate::core::session::State {
+        list: Some(LIST.into()),
+        view: Some(view.into()),
+        ..Default::default()
+    })
+}
+
 /// A tile restored on [`LIST`] in `view`, its first board asked and not
 /// answered.
 pub(super) fn open_on(
     cx: &mut gpui::TestAppContext,
-    view: View,
+    view: &str,
 ) -> (Harness, gpui::VisualTestContext) {
-    let record = crate::core::session::to_table(&crate::core::session::State {
-        list: Some(LIST.into()),
-        view,
-        ..Default::default()
-    });
-    open_with(cx, one_list(), Some(record), VolwatchSettings::default())
+    open_with(
+        cx,
+        one_list(),
+        Some(restored_on(view)),
+        VolwatchSettings::default(),
+    )
 }
 
 /// Blank every cell of `board` that reads `role`, as a failed dataset
@@ -354,18 +368,14 @@ pub(super) fn column_index(h: &Harness, vcx: &gpui::VisualTestContext, id: &str)
     h.column_index(vcx, id)
 }
 
-/// A tile on [`LIST`] (`DAX, SX5E, NEW`) whose first board has landed,
-/// with `edit` applied to that board first; the requests are drained.
+/// A tile on [`LIST`] (`DAX, SX5E, NEW`) in the `vol` view whose first
+/// board has landed, with `edit` applied to that board first; the
+/// requests are drained.
 pub(super) fn landed_board(
     cx: &mut gpui::TestAppContext,
     edit: impl FnOnce(&mut VolBoard),
 ) -> (Harness, gpui::VisualTestContext) {
-    let (h, mut vcx) = open_with(
-        cx,
-        one_list(),
-        Some(restored(LIST)),
-        VolwatchSettings::default(),
-    );
+    let (h, mut vcx) = open_on(cx, "vol");
     let tag = Harness::boards(&h.requests())[0].tag;
     let asked = h.asked_of(&vcx);
     let mut board = board_for(&["DAX", "SX5E", "NEW"], &asked);
@@ -574,12 +584,25 @@ impl Harness {
         vcx.read(|cx| self.content.title(cx).to_string())
     }
 
-    pub(super) fn view(&self, vcx: &gpui::VisualTestContext) -> View {
-        self.tile.read_with(vcx, |t, _| t.state.view)
+    /// The shown view's name; empty with no views.
+    pub(super) fn view(&self, vcx: &gpui::VisualTestContext) -> String {
+        self.tile.read_with(vcx, |t, _| {
+            t.shown_view().map(|v| v.name).unwrap_or_default()
+        })
     }
 
-    pub(super) fn lookback(&self, vcx: &gpui::VisualTestContext) -> Lookback {
-        self.tile.read_with(vcx, |t, _| t.state.lookback)
+    pub(super) fn lens(&self, vcx: &gpui::VisualTestContext) -> LensState {
+        self.tile.read_with(vcx, |t, _| t.state.lens)
+    }
+
+    /// The `:` line's completions at `cursor`, through the content door.
+    pub(super) fn completions(
+        &self,
+        vcx: &gpui::VisualTestContext,
+        line: &str,
+        cursor: usize,
+    ) -> Vec<String> {
+        vcx.read(|cx| self.content.completions(line, cursor, cx))
     }
 
     pub(super) fn cursor(&self, vcx: &gpui::VisualTestContext) -> Option<String> {

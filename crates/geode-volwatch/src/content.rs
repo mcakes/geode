@@ -8,6 +8,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use geode_core::context::DimensionContext;
+use geode_core::volviews::VolViews;
 use geode_data::DataHandle;
 use geode_shell::actions::{ActionDef, ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
@@ -42,6 +43,9 @@ pub struct VolwatchSettings {
     /// The view and column book vega is read from; `None`: no vega column.
     pub vega: Option<VegaSetting>,
     pub stale_after: Duration,
+    /// The tabs, from `vol_views.toml`; the builtin four when the app
+    /// supplies none.
+    pub views: VolViews,
 }
 
 impl Default for VolwatchSettings {
@@ -50,6 +54,7 @@ impl Default for VolwatchSettings {
             refresh: Some(DEFAULT_REFRESH),
             vega: None,
             stale_after: DEFAULT_STALE_AFTER,
+            views: crate::core::views::builtin(),
         }
     }
 }
@@ -70,13 +75,21 @@ pub struct VegaSetting {
 
 /// Registered actions and their palette titles.
 pub const ACTIONS: &[(&str, &str)] = &[
-    ("volwatch::view_1", "Vol: Changes view"),
-    ("volwatch::view_2", "Vol: Levels view"),
-    ("volwatch::view_3", "Vol: Rich / cheap view"),
-    ("volwatch::view_4", "Vol: Term view"),
-    ("volwatch::view_5", "Vol: Skew view"),
+    ("volwatch::view_1", "Vol: View 1"),
+    ("volwatch::view_2", "Vol: View 2"),
+    ("volwatch::view_3", "Vol: View 3"),
+    ("volwatch::view_4", "Vol: View 4"),
+    ("volwatch::view_5", "Vol: View 5"),
+    ("volwatch::view_6", "Vol: View 6"),
+    ("volwatch::view_7", "Vol: View 7"),
+    ("volwatch::view_8", "Vol: View 8"),
+    ("volwatch::view_9", "Vol: View 9"),
     ("volwatch::view_next", "Vol: Next view"),
     ("volwatch::view_prev", "Vol: Previous view"),
+    ("volwatch::lens", "Vol: Toggle moves / rich-cheap"),
+    ("volwatch::metric", "Vol: Toggle z-score / percentile"),
+    ("volwatch::window", "Vol: Cycle window"),
+    ("volwatch::shown", "Vol: Swap level / companion"),
     ("volwatch::lookback", "Vol: Cycle lookback"),
     ("volwatch::paint", "Vol: Toggle paint"),
     ("volwatch::sort", "Vol: Sort by column"),
@@ -98,9 +111,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
 ];
 
 /// Bindings scoped to the factory's `volwatch` context. The context
-/// publishes no `counts` flag: the digits pick views. `g` alone is
-/// unbound, so `g g` and `g w` stay reachable. While a menu is up the tile
-/// publishes `tilelist`, so the shell's shared `j`/`k` step its rows.
+/// publishes no `counts` flag: the digits pick the first nine tabs. `g`
+/// alone is unbound, so `g g` and `g w` stay reachable. While a menu is
+/// up the tile publishes `tilelist`, so the shell's shared `j`/`k` step
+/// its rows.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "volwatch && mode == normal"
@@ -110,8 +124,16 @@ context = "volwatch && mode == normal"
 "3" = "volwatch::view_3"
 "4" = "volwatch::view_4"
 "5" = "volwatch::view_5"
+"6" = "volwatch::view_6"
+"7" = "volwatch::view_7"
+"8" = "volwatch::view_8"
+"9" = "volwatch::view_9"
 "tab" = "volwatch::view_next"
 "shift+tab" = "volwatch::view_prev"
+"r" = "volwatch::lens"
+"q" = "volwatch::metric"
+"w" = "volwatch::window"
+"m" = "volwatch::shown"
 "d" = "volwatch::lookback"
 "p" = "volwatch::paint"
 "s" = "volwatch::sort"
@@ -384,7 +406,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 29 + 5 + 3);
+        assert_eq!(count, 37 + 5 + 3);
         let mut registry = ActionRegistry::default();
         geode_shell::defaults::register_builtin_actions(&mut registry);
         let (data, _rx) = DataHandle::for_tests();

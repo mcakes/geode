@@ -16,7 +16,8 @@ use std::time::Instant;
 
 use super::harness::*;
 use crate::content::{MIN_REFRESH, VolwatchSettings};
-use crate::core::views::{ALL_TENORS, ColumnKind, SPARK_30D, WINDOW_1Y};
+use crate::core::lens::Window;
+use crate::core::views::{ALL_TENORS, ColumnKind, SPARK_30D};
 use crate::tile::{MenuKind, MenuState};
 
 #[gpui::test]
@@ -41,9 +42,49 @@ fn opening_on_a_list_lists_the_tenors_and_asks_one_board(cx: &mut gpui::TestAppC
     assert_eq!(boards.len(), 1);
     assert_eq!(boards[0].members, ["DAX", "SX5E", "NEW"]);
     assert_eq!(boards[0].lookbacks, [Lookback::D1]);
-    assert_eq!(boards[0].window, None);
+    assert_eq!(
+        boards[0].window,
+        Some(Window::Y1.duration()),
+        "a measure column asks the window in force"
+    );
     assert_eq!(boards[0].sparklines, [(Measure::atfm("3M"), SPARK_30D)]);
     assert_eq!(boards[0].key, KEY);
+    assert!(boards[0].tables.is_empty());
+}
+
+#[gpui::test]
+fn a_view_naming_a_table_dataset_lists_it_in_the_request(cx: &mut gpui::TestAppContext) {
+    let mut settings = VolwatchSettings::default();
+    let doc = geode_core::volviews::VolViewsDoc {
+        views: vec![geode_core::volviews::VolViewSpec {
+            name: "ssr".into(),
+            cells: geode_core::volviews::Cells::Pair,
+            columns: vec![geode_core::volviews::VolColumnSpec::Measure {
+                measure: geode_core::volviews::parse_measure("ssr 3M").unwrap(),
+                label: None,
+                group: None,
+            }],
+        }],
+        default: None,
+    };
+    let (views, _) = geode_core::volviews::resolve(&doc, &|n| {
+        (n == "ssr").then_some(geode_core::volviews::TableShape {
+            key_len: 2,
+            values: 1,
+        })
+    });
+    settings.views = views;
+    let (h, _vcx) = open_with(cx, one_list(), Some(restored(LIST)), settings);
+    let reqs = h.requests();
+    let boards = Harness::boards(&reqs);
+    assert_eq!(boards[0].tables, vec!["ssr".to_string()]);
+    assert_eq!(
+        boards[0].measures,
+        vec![Measure::Table {
+            dataset: "ssr".into(),
+            suffix: vec!["3M".into()]
+        }]
+    );
 }
 
 #[gpui::test]
@@ -237,7 +278,7 @@ fn a_hidden_tile_does_not_refresh(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn the_tenor_listing_rebuilds_term_columns_and_asks_again_for_a_tenor_it_did_not_have(
+fn the_tenor_listing_relays_the_band_and_asks_again_for_a_tenor_it_did_not_have(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = open_with(
@@ -248,16 +289,15 @@ fn the_tenor_listing_rebuilds_term_columns_and_asks_again_for_a_tenor_it_did_not
     );
     let reqs = h.requests();
     let ktag = Harness::keys_asks(&reqs)[0].tag;
-    h.press(&mut vcx, "4"); // Term over ALL_TENORS meanwhile
+    h.press(&mut vcx, "enter"); // the band over ALL_TENORS meanwhile
     let _ = h.requests();
     h.answer_keys(&mut vcx, ktag, Some(vec!["1M", "3M", "9M"]));
-    let cols = h.tile.read_with(&vcx, |t, _| {
-        t.columns.iter().map(|c| c.id.clone()).collect::<Vec<_>>()
-    });
-    assert!(cols.contains(&"atfm-9M-level".into()));
-    // ALL_TENORS asked atfm for eight tenors; the listing names 9M, which
-    // that ask lacks, so one board is asked again.
-    assert_eq!(Harness::boards(&h.requests()).len(), 1);
+    // ALL_TENORS asked the band's points for its ten tenors; the listing
+    // names 9M, which that ask lacks, so one board is asked again.
+    let reqs = h.requests();
+    let boards = Harness::boards(&reqs);
+    assert_eq!(boards.len(), 1);
+    assert!(boards[0].measures.contains(&Measure::atfm("9M")));
 }
 
 #[gpui::test]
@@ -270,7 +310,7 @@ fn a_tenor_listing_inside_the_last_ask_asks_nothing(cx: &mut gpui::TestAppContex
     );
     let reqs = h.requests();
     let ktag = Harness::keys_asks(&reqs)[0].tag;
-    h.press(&mut vcx, "4");
+    h.press(&mut vcx, "enter");
     let _ = h.requests();
     h.answer_keys(&mut vcx, ktag, Some(vec!["1M", "3M", "1Y"]));
     assert!(
@@ -460,7 +500,7 @@ fn enter_opens_the_band_on_the_cursor_row_grows_the_ask_and_keeps_the_cursor(
     let reqs = h.requests();
     let b = Harness::boards(&reqs);
     assert_eq!(b.len(), 1);
-    assert_eq!(b[0].window, Some(WINDOW_1Y));
+    assert_eq!(b[0].window, Some(Window::Y1.duration()));
     assert_eq!(b[0].sparklines.len(), 3);
     assert!(b[0].measures.contains(&Measure::Point {
         tenor: "1M".into(),
@@ -568,7 +608,7 @@ fn a_restored_open_band_asks_for_its_measures_and_shows_once_the_row_lands(
     let b = Harness::boards(&reqs);
     assert_eq!(
         b[0].window,
-        Some(WINDOW_1Y),
+        Some(Window::Y1.duration()),
         "the first ask carries the band"
     );
     assert_eq!(b[0].sparklines.len(), 3);
