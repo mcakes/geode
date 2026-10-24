@@ -6,7 +6,9 @@
 use crate::watchlists::{WatchlistCache, fold_watchlists, object_provenance, scopes_and_named};
 use geode_blotter::BlotterFactory;
 use geode_core::colour::NamedColours;
-use geode_core::config::{Config, DIMENSIONS_DOC, Diagnostic, Layer, Severity, load_views};
+use geode_core::config::{
+    Config, DIMENSIONS_DOC, Diagnostic, Layer, Severity, VOL_VIEWS_DOC, load_views,
+};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
 use geode_core::egress_config;
@@ -18,6 +20,7 @@ use geode_core::schema::{ColumnType, SchemaSpec};
 use geode_core::scopes::SavedScopes;
 use geode_core::source_config::{SourceShape, parse_duration};
 use geode_core::view::ViewSpec;
+use geode_core::volviews;
 use geode_data::adapter::AdapterRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{
@@ -321,7 +324,8 @@ pub fn data_setup(
     diagnostics.extend(underlying_diags);
     let (payout, payout_diags) = pricing_payout_currency_from_config(config, &service.schema);
     diagnostics.extend(payout_diags);
-    let (volwatch_settings, volwatch_diags) = volwatch_settings_from_config(config);
+    let (volwatch_settings, volwatch_diags) =
+        volwatch_settings_from_config(config, &service.schema);
     diagnostics.extend(volwatch_diags);
     let pricer_settings = PricerSettings {
         pricer: pricer_name.clone(),
@@ -424,7 +428,18 @@ pub fn stale_after_from_config(config: &Config) -> Duration {
 /// own one-day default (a daily surface is not the blotter's feed, so the
 /// tile does not read `[blotter] stale_after`). Absent keys use the
 /// defaults silently.
-pub fn volwatch_settings_from_config(config: &Config) -> (VolwatchSettings, Vec<Diagnostic>) {
+///
+/// The tabs come from the `vol_views` document, resolved against `schema`
+/// (the startup one: datasets are restart-required, so the tabs a reload
+/// pushes name only tables the service serves). A column naming no such
+/// table drops with a warning and a view left with none is skipped; a
+/// document left with no view falls back to the builtin tabs with a
+/// warning, never an empty tile. No document at all is the builtin tabs
+/// silently.
+pub fn volwatch_settings_from_config(
+    config: &Config,
+    schema: &SchemaSpec,
+) -> (VolwatchSettings, Vec<Diagnostic>) {
     use geode_volwatch::content::{DEFAULT_REFRESH, DEFAULT_STALE_AFTER, MIN_REFRESH};
     let warn = |key: &str, message: String| Diagnostic {
         severity: Severity::Warning,
@@ -494,6 +509,45 @@ pub fn volwatch_settings_from_config(config: &Config) -> (VolwatchSettings, Vec<
             )),
         }
     }
+    if let Some(doc) = config.doc(VOL_VIEWS_DOC) {
+        let (parsed, mut d) = volviews::from_doc(doc);
+        // A measure dataset is a history table whose first key column is
+        // the underlying; the resolver checks the rest of the key and the
+        // value count against the measure text.
+        let shape = |name: &str| -> Option<volviews::TableShape> {
+            let ds = schema.dataset(name).filter(|d| d.is_history())?;
+            (ds.key.first().map(String::as_str) == Some("underlying_ref")).then(|| {
+                volviews::TableShape {
+                    key_len: ds.key.len(),
+                    values: ds.history_values().len(),
+                }
+            })
+        };
+        let (views, d2) = volviews::resolve(&parsed, &shape);
+        d.extend(d2);
+        // The reader's paths are `vol_views.<view>...`; provenance is keyed
+        // without the document prefix (stripped once: a view may share the
+        // document's name).
+        for diag in &mut d {
+            diag.layer = diag.path.as_deref().and_then(|p| {
+                config.explain(VOL_VIEWS_DOC, p.strip_prefix("vol_views.").unwrap_or(p))
+            });
+        }
+        diags.extend(d);
+        if views.is_empty() {
+            diags.push(Diagnostic {
+                severity: Severity::Warning,
+                // Document-level: no single layer supplied the empty result.
+                layer: None,
+                file: None,
+                message: "vol_views: no valid view; the tile shows the builtin tabs".to_string(),
+                path: Some(VOL_VIEWS_DOC.to_string()),
+            });
+            settings.views = geode_volwatch::core::views::builtin();
+        } else {
+            settings.views = views;
+        }
+    }
     (settings, diags)
 }
 
@@ -505,6 +559,8 @@ pub struct VolwatchConfigKey {
     refresh: Option<toml::Value>,
     vega: Option<toml::Value>,
     stale_after: Option<toml::Value>,
+    /// The merged `vol_views` document, so an edited tab pushes.
+    vol_views: Option<toml::Table>,
 }
 
 pub fn volwatch_config_key(config: &Config) -> VolwatchConfigKey {
@@ -512,6 +568,7 @@ pub fn volwatch_config_key(config: &Config) -> VolwatchConfigKey {
         refresh: config.get("app", "volwatch.refresh").cloned(),
         vega: config.get("app", "volwatch.vega").cloned(),
         stale_after: config.get("app", "volwatch.stale_after").cloned(),
+        vol_views: config.doc(VOL_VIEWS_DOC).map(|d| d.value.clone()),
     }
 }
 
@@ -1819,10 +1876,13 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
         .detach();
     }
 
-    // `[volwatch]` is hot: re-read on each applied reload, pushed only when
-    // something it reads changed so an unchanged bad value warns once.
+    // `[volwatch]` and `vol_views` are hot: re-read on each applied reload,
+    // pushed only when something they read changed so an unchanged bad
+    // value warns once. The tabs resolve against the startup schema, the
+    // one the service serves for the run.
     {
         let volwatch = bridge.volwatch.clone();
+        let schema = bridge.schema.clone();
         let diagnostics = diagnostics.clone();
         let shell = shell.clone();
         let frame = shell.read(cx).frame().clone();
@@ -1843,7 +1903,7 @@ pub fn attach(bridge: &Bridge, window: WindowHandle<Root>, cx: &mut App) {
                     return;
                 }
                 *last_key.borrow_mut() = Some(key);
-                volwatch_settings_from_config(config)
+                volwatch_settings_from_config(config, &schema)
             };
             volwatch.set_settings(settings, cx);
             for d in &diags {
@@ -2714,11 +2774,81 @@ role = "key"
 
     /// An `app` doc alone, for the `[pricing]` readers.
     fn app_config(text: &str) -> Config {
+        config_with_docs(&[("app", text)])
+    }
+
+    /// Several builtin docs by name, for readers that take a document
+    /// beside `app`.
+    fn config_with_docs(docs: &[(&str, &str)]) -> Config {
         Config::load(&ConfigSources {
-            builtin: vec![LayerDoc::builtin("app", text).unwrap()],
+            builtin: docs
+                .iter()
+                .map(|(doc, text)| LayerDoc::builtin(doc, text).unwrap())
+                .collect(),
             desk: None,
             user: None,
         })
+    }
+
+    /// A schema with one history dataset `name`, keyed by `key` (utf8
+    /// columns) and carrying the float value columns `values`.
+    fn schema_with_history(name: &str, key: &[&str], values: &[&str]) -> SchemaSpec {
+        let mut text = format!(
+            "[{name}]\nfamily = \"history\"\nkey = [{}]\n",
+            key.iter()
+                .map(|k| format!("\"{k}\""))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        for k in key {
+            text.push_str(&format!(
+                "[{name}.columns.{k}]\ntype = \"utf8\"\nrole = \"dimension\"\n"
+            ));
+        }
+        for v in values {
+            text.push_str(&format!(
+                "[{name}.columns.{v}]\ntype = \"f64\"\nrole = \"value\"\n"
+            ));
+        }
+        let (schema, diags) = SchemaSpec::from_doc(&geode_core::config::merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", &text).unwrap()],
+        ));
+        assert!(diags.is_empty(), "{diags:?}");
+        schema
+    }
+
+    #[test]
+    fn volwatch_settings_read_the_vol_views_document_against_the_schema() {
+        let schema = schema_with_history("ssr", &["underlying_ref", "tenor"], &["ssr"]);
+        let config = config_with_docs(&[
+            ("app", ""),
+            (
+                "vol_views",
+                "config_version = 1\ndefault = \"mine\"\n[mine]\n[[mine.columns]]\nmeasure = \"ssr 3M\"\n[[mine.columns]]\nmeasure = \"nope 3M\"\n",
+            ),
+        ]);
+        let (s, diags) = volwatch_settings_from_config(&config, &schema);
+        assert_eq!(s.views.views.len(), 1);
+        assert_eq!(s.views.views[0].name, "mine");
+        assert_eq!(s.views.views[0].columns.len(), 1);
+        assert_eq!(diags.len(), 1);
+        assert!(
+            diags[0]
+                .message
+                .contains("'nope' is not a history dataset keyed by underlying_ref"),
+            "{}",
+            diags[0].message
+        );
+        assert_eq!(diags[0].path.as_deref(), Some("vol_views.mine.columns.1"));
+        // No document at all: the builtin tabs.
+        let (s, diags) = volwatch_settings_from_config(&app_config(""), &schema);
+        assert!(diags.is_empty());
+        assert_eq!(s.views, geode_volwatch::core::views::builtin());
+        // The key changes with the document.
+        let a = volwatch_config_key(&app_config(""));
+        let b = volwatch_config_key(&config);
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -2726,7 +2856,7 @@ role = "key"
         let config = app_config(
             "[volwatch]\nrefresh = \"3s\"\nvega = { view = \"by_underlying\", column = \"vega01_usd\" }\n",
         );
-        let (s, diags) = volwatch_settings_from_config(&config);
+        let (s, diags) = volwatch_settings_from_config(&config, &SchemaSpec::default());
         assert_eq!(s.refresh, Some(Duration::from_secs(10)));
         assert_eq!(
             diags[0].message,
@@ -2739,24 +2869,31 @@ role = "key"
                 column: "vega01_usd".into()
             })
         );
-        let (s, diags) =
-            volwatch_settings_from_config(&app_config("[volwatch]\nvega = \"wide\"\n"));
+        let (s, diags) = volwatch_settings_from_config(
+            &app_config("[volwatch]\nvega = \"wide\"\n"),
+            &SchemaSpec::default(),
+        );
         assert_eq!(s.vega, None);
         assert!(
             diags[0]
                 .message
                 .starts_with("[volwatch] vega needs view and column")
         );
-        let (s, diags) =
-            volwatch_settings_from_config(&app_config("[volwatch]\nrefresh = \"off\"\n"));
+        let (s, diags) = volwatch_settings_from_config(
+            &app_config("[volwatch]\nrefresh = \"off\"\n"),
+            &SchemaSpec::default(),
+        );
         assert_eq!((s.refresh, diags.len()), (None, 0));
-        let (s, diags) = volwatch_settings_from_config(&app_config("[volwatch]\nrefresh = 5\n"));
+        let (s, diags) = volwatch_settings_from_config(
+            &app_config("[volwatch]\nrefresh = 5\n"),
+            &SchemaSpec::default(),
+        );
         assert_eq!(s.refresh, Some(Duration::from_secs(60)));
         assert_eq!(
             diags[0].message,
             "[volwatch] refresh = 5 is not a duration or \"off\"; using 60s"
         );
-        let (s, diags) = volwatch_settings_from_config(&app_config(""));
+        let (s, diags) = volwatch_settings_from_config(&app_config(""), &SchemaSpec::default());
         assert_eq!(
             (s.refresh, s.vega, diags.len()),
             (Some(Duration::from_secs(60)), None, 0)
@@ -2793,15 +2930,21 @@ role = "key"
 
     #[test]
     fn volwatch_reads_its_own_stale_after_and_not_the_blotters() {
-        let (s, diags) =
-            volwatch_settings_from_config(&app_config("[blotter]\nstale_after = \"5m\"\n"));
+        let (s, diags) = volwatch_settings_from_config(
+            &app_config("[blotter]\nstale_after = \"5m\"\n"),
+            &SchemaSpec::default(),
+        );
         assert!(diags.is_empty());
         assert_eq!(s.stale_after, geode_volwatch::content::DEFAULT_STALE_AFTER);
-        let (s, _) =
-            volwatch_settings_from_config(&app_config("[volwatch]\nstale_after = \"2h\"\n"));
+        let (s, _) = volwatch_settings_from_config(
+            &app_config("[volwatch]\nstale_after = \"2h\"\n"),
+            &SchemaSpec::default(),
+        );
         assert_eq!(s.stale_after, Duration::from_secs(2 * 3600));
-        let (s, diags) =
-            volwatch_settings_from_config(&app_config("[volwatch]\nstale_after = \"soon\"\n"));
+        let (s, diags) = volwatch_settings_from_config(
+            &app_config("[volwatch]\nstale_after = \"soon\"\n"),
+            &SchemaSpec::default(),
+        );
         assert_eq!(s.stale_after, geode_volwatch::content::DEFAULT_STALE_AFTER);
         assert_eq!(diags.len(), 1);
         assert_eq!(
@@ -2809,8 +2952,10 @@ role = "key"
             "[volwatch] stale_after = \"soon\" is not a duration; using 24h"
         );
         assert_eq!(diags[0].path.as_deref(), Some("app.volwatch.stale_after"));
-        let (s, diags) =
-            volwatch_settings_from_config(&app_config("[volwatch]\nstale_after = \"0s\"\n"));
+        let (s, diags) = volwatch_settings_from_config(
+            &app_config("[volwatch]\nstale_after = \"0s\"\n"),
+            &SchemaSpec::default(),
+        );
         assert_eq!(s.stale_after, geode_volwatch::content::DEFAULT_STALE_AFTER);
         assert_eq!(diags.len(), 1, "a zero threshold is refused");
     }

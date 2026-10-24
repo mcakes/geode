@@ -380,6 +380,14 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_scenario::core::spec::BUILTIN_SCENARIOS,
         )
         .expect("BUILTIN_SCENARIOS is well-formed TOML"),
+        // The vol watchlist's builtin tabs. `vol_views` replaces per view
+        // name, so a desk or user document adds tabs beside these or
+        // replaces one whole.
+        LayerDoc::builtin(
+            geode_core::config::VOL_VIEWS_DOC,
+            geode_volwatch::core::views::BUILTIN_VOL_VIEWS,
+        )
+        .expect("BUILTIN_VOL_VIEWS is well-formed TOML"),
     ];
     builtin.extend(geode_compose::builtin_data_layer(demo_root));
     builtin
@@ -696,6 +704,33 @@ label = "skew"
     #[test]
     fn an_unrecognised_flag_is_a_usage_error() {
         assert!(parse_args(&["--nonesuch".to_string()]).is_err());
+    }
+
+    /// The builtin `vol_views` document resolves against the builtin
+    /// datasets with no warning: four tabs, `vol` first, the same form the
+    /// tile falls back to when a document leaves it no valid view.
+    #[test]
+    fn the_builtin_layer_carries_the_four_vol_views_tabs() {
+        let config = Config::load(&ConfigSources {
+            builtin: builtin_layer(None),
+            desk: None,
+            user: None,
+        });
+        let (schema, diags) = geode_core::schema::SchemaSpec::from_doc(
+            config.doc("datasets").expect("the builtin datasets doc"),
+        );
+        assert!(diags.is_empty(), "{diags:?}");
+        let (settings, diags) = bridge::volwatch_settings_from_config(&config, &schema);
+        assert!(diags.is_empty(), "{diags:?}");
+        let names: Vec<&str> = settings
+            .views
+            .views
+            .iter()
+            .map(|v| v.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["vol", "skew", "varswap", "surface"]);
+        assert_eq!(settings.views.default, 0);
+        assert_eq!(settings.views, geode_volwatch::core::views::builtin());
     }
 
     /// The two bundled views are `views` doc entries over the `pricer`
