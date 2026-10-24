@@ -11,7 +11,7 @@ use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::query::normalize_key;
 use crate::schema::ColumnType;
 use crate::source_config::parse_duration;
-use crate::volboard::{Measure, delta_text};
+use crate::volboard::Measure;
 
 /// The spark span when a column names none.
 pub const DEFAULT_SPARK_SPAN: Duration = Duration::from_secs(30 * 86_400);
@@ -152,12 +152,21 @@ pub fn parse_measure(text: &str) -> Result<MeasureText, String> {
     let m = match head_lc.as_str() {
         "point" => match rest {
             [tenor, delta] => {
-                let delta: f64 = delta
+                // The surface key's own normalization: finite, and spelled
+                // as the stored key is, so `0.50` reads as the `0.5` point.
+                // A NaN or infinite delta would be a kept column that never
+                // matches a key and a `Measure` unequal to itself.
+                let canonical = normalize_key(delta, ColumnType::F64)
+                    .map_err(|_| format!("point: '{delta}' is not a delta"))?;
+                let value: f64 = canonical
                     .parse()
                     .map_err(|_| format!("point: '{delta}' is not a delta"))?;
+                if !(value > 0.0 && value < 1.0) {
+                    return Err(format!("point: '{delta}' is not a delta between 0 and 1"));
+                }
                 Measure::Point {
                     tenor: key_text(tenor, ColumnType::Utf8),
-                    delta: delta_text(delta).parse().unwrap_or(delta),
+                    delta: value,
                 }
             }
             _ => return Err("point needs a tenor and a delta: `point 3M 0.25`".into()),
@@ -558,6 +567,28 @@ mod tests {
             measure_text(&parse_measure("POINT 3M 0.5").unwrap()),
             "atfm 3M"
         );
+    }
+
+    #[test]
+    fn a_point_delta_is_a_finite_number_strictly_between_0_and_1() {
+        for (text, err) in [
+            ("point 3M NaN", "point: 'NaN' is not a delta"),
+            ("point 3M inf", "point: 'inf' is not a delta"),
+            ("point 3M 25", "point: '25' is not a delta between 0 and 1"),
+            ("point 3M 0", "point: '0' is not a delta between 0 and 1"),
+            ("point 3M 1", "point: '1' is not a delta between 0 and 1"),
+        ] {
+            assert_eq!(parse_measure(text).unwrap_err(), err, "{text}");
+        }
+        let m = parse_measure("point 3M 0.250").unwrap();
+        assert_eq!(
+            m,
+            MeasureText::Builtin(Measure::Point {
+                tenor: "3M".into(),
+                delta: 0.25
+            })
+        );
+        assert_eq!(measure_text(&m), "point 3M 0.25");
     }
 
     #[test]
