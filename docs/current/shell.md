@@ -1152,7 +1152,9 @@ row follows it across the rebuild, a cursor nobody moved keeps its index,
 and a restored cursor waits for the rows that hold its name. The vol
 watchlist gives it a tree (group rows over members, in preorder): a sort
 orders siblings under one parent, `/` keeps a group while a member under it
-matches, and a collapsed group hides its members and keeps its row.
+matches, and a collapsed group hides its members and keeps its row; a fold
+hiding the put cursor's row rests the cursor on that group, and the row takes
+it back when the group unfolds.
 
 ### Pages
 
