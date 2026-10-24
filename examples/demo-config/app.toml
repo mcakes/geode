@@ -18,6 +18,7 @@ payout_currency = "underlyings.currency"
 
 # The vol watchlist tile: board refresh (min 10s, or "off") and the book vega
 # column, read from a configured grouped view joined by underlying.
+# Tabs come from vol_views.toml (builtin: vol, skew, varswap, surface).
 [volwatch]
 refresh = "60s"
 vega = { view = "by_underlying", column = "vega01_usd" }

@@ -814,6 +814,31 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
+- A Vol views object dialog (browse, edit columns, measure completion from
+  the grammar and the schema's history datasets); until then
+  `vol_views.toml` is edited by file and hot-reloaded.
+- A z of the move (how unusual today's Δ is) as a third rich/cheap metric.
+- Measures over two tables (an open-form arithmetic such as `a − b`).
+- Hiding the strip's key hints once learned, per tile or per settings.
+- A per-view default lens or window, if a desk wants the surface tab to
+  open under rich/cheap.
+- Grouping and `:group` (plan 6b): the frame's classification over
+  `underlying_ref`, group rows as averages, the fold keys and the emitted
+  group path.
+- An under-wide open-form suffix (`ssr` with no tenor against a two-key
+  table) that reaches a request makes a malformed `Exact` source call on
+  every refresh: an explicit error, never a wrong value. The document
+  resolver refuses the shape today; a submission-time width check in
+  `vol_board` is the fix for every caller.
+- Duplicate view names in `vol_views.toml` are not refused: the last
+  table wins the id and the earlier one is silently gone.
+- A blank single cell's dash paints flush at the cell's right while the
+  numbers carry the chip inset; paint-off shifts a single column by the
+  inset, column-wide.
+- The lens, metric and swap keys (`r`, `q`, `m`) have no pointer route:
+  the `.` menu lists the lookback verb and not them.
+- The band's Δ chip tints by the raw change where the grid tints by the
+  displayed one.
 - The inspection band is a region docked under the grid, not a taller row
   in place (spec §5.2): `DataTable` lays rows out at one height, so a band
   in place needs a custom non-uniform list element replacing it in this
@@ -829,6 +854,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   `geode_tile::grid::WindowCache`.
 - A hovered row's spark ring is the row's resting fill, not `DataTable`'s
   hover fill.
+- The header's dataset times and health chips cover the three fixed
+  datasets only; a table dataset named by a tab has a danger chip on
+  failure but no source time and no health entry.
 - The realized and varswap header times' stale path (per-dataset time
   runs armed on the shared stale timer) has no test.
 - In a narrow tile the band's three blocks clip rather than wrap (display
@@ -853,48 +881,68 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   next `:autosize` or drag.
 - Request: a same-members reorder of the list requeries (comparing sets
   would not); the refresh timer re-arms after a resubmit that had nothing
-  to ask and wakes for nothing.
+  to ask and wakes for nothing; a views push prepares and syncs the table
+  twice (the views branch and the tail).
 - Vega: a standing `effective_scope` error re-enters `submit_vega` and
   re-submits on every frame notify (remember the error); the vega column is
   blank for a member the surface lacks even when the risk carries vega for
   it; a flat answer (no `row_depth`) maps
   silently to dashes; the scope-error, flat-result and query-refusal
   branches have no tests.
-- Model minors: `column_scale` runs for columns that never use it; `selection_tint` is computed per row per frame; two
+- Model minors: `selection_tint` is computed per row per frame; two
   columns sharing a one-word head resolve `:sort` to the first silently;
   `Open timeseries` and `Yank cell` are never disabled with no row; `spell`
   is copied from the watchlist (a `geode-tile` lift candidate);
-  `inspect` before a board lands opens on dashes.
+  `inspect` before a board lands opens on dashes; under rich/cheap · z a
+  pair companion with short stats and no rank paints a dash un-muted; the
+  moves scale pass folds a stale-lookback companion into the column scale;
+  `shown_view()` clones a `VolView` per render and per cursor move and
+  `tabs()` allocates per render; `order_for` keys on the whole lens state,
+  so a window or lookback change re-sorts for nothing.
 - Schema minors carried from the history merge: a measures axis column
   carries `ColumnSpec.order = Lexical` beside `AxisOrder::Tenor` (nothing
   reads it for an axis today); `sort_axis_text` and `sort_text` are the
   same body over two enums; the stamp test
   `the_format_counts_the_history_tables` now covers axes too.
 - Spark tails are cut by proportion of the board's span (`spark_tail`),
-  which assumes the values fill it: under the band's 1Y ask a member with
-  ~40 days of history draws ~4 in the `ATFM 3M · 30d` column until the
-  next refresh narrows the ask. Recorded as a known limit; the spark shape
-  is unchanged.
+  which assumes the values fill it: under the band's window-long ask a
+  member with ~40 days of history draws ~4 in the `ATFM 3M · 30d` column
+  until the next refresh narrows the ask. Recorded as a known limit; the
+  spark shape is unchanged.
 - Every board error is labelled `surface:` in the notice, including the
   data service's own refusals, which name no dataset.
 - A member added to the list reads `not in surface` while its first board
   is in flight: the reconciled row has no cells yet and the old board
   lacks it.
-- The prepare bench rose from 76.5 to 114.8 µs between Task 4 and the app
-  wiring (`docs/perf.md`); the cause is unverified and not chased.
+- The prepare bench reads 148 µs under the 19-column `vol` tab, from
+  114.8 µs under the 18-column Changes view and 76.5 µs before the app
+  wiring; each companion now costs three cell lookups (the value, the
+  board cell and the mute check) where it cost one. Unchased; well inside
+  the budget.
 - Board minors: a short `spark_from_days` yields `None` silently (a
   length `debug_assert` would be tighter); duplicate `Input`s fill
   separate slots, last copy wins (undocumented); the duplicate-day refusal
   indexes `tuples[asked_ix]` on an implicit bound.
+- Reader minors: the `KEYWORDS` guard has no test of its own; `span =
+  "0d"` and `columns = "x"` messages mislabel the fault; `slope 1Y-1M-2M`
+  parses; unknown column keys are silently ignored; the app closure's
+  `underlying_ref`-first check is untested through the app reader.
 
 ### Display checks
 
-- The view strip and its lit chip, and the lit lookback chip, on light and
-  dark themes.
+- The six mockup states of one tile, light and dark: the `vol` tab under
+  moves and under rich/cheap (z and percentile), the `skew` tab, the
+  `surface` tab showing the level and showing the companion after `m`.
+- The single view's tint under `m` (the companion's own text over the
+  same tint).
+- The header chips under both lenses (`Δ 1d` lit among the lookbacks;
+  `z · 1Y` lit among the windows) and a press on each.
+- The strip at a narrow tile: the tabs clip before the lens readout and
+  the hints do.
+- The tenth tab: painted without a digit, reachable by a press, `tab`,
+  the menu and `:view`.
 - The change chip's tint ceiling (0.25, a tint under a colored number)
   against its text awaits the owner's eye.
-- The percent slider's marker in the warning tone.
-- The heat tint in Term (and Levels).
 - The band at narrow tile widths, and whether docking under the grid
   reads as "in place"; the band at a narrow tile and a real pointer drag
   on the fixed-left Underlying column are owed a real-window check.
@@ -905,6 +953,8 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The `not in surface` rows at the foot, muted.
 - `Vol: Split` in the tile picker and the palette.
 - The demo's `EU50X` row in `europe_risk` (`--demo 1000`).
+- A user `[ssr]` tab naming `ssr 3M` appearing as a fifth tab on reload in
+  `--demo`.
 
 ## Scenario tiles
 

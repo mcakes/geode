@@ -1208,8 +1208,8 @@ does not rebuild the data model. The timeseries tile hosts the time chart and
 the vol slice viewer the xy element. `spark::Spark` is the grid-cell glyph: a
 sparkline or term glyph with an optional end dot and marked point, on its own
 or a column's shared y-range, with no axes, grid or tooltip; the
-[vol watchlist](#vol-watchlist) paints its spark and term columns and
-the band's sparklines with it.
+[vol watchlist](#vol-watchlist) paints its spark columns and the band's
+sparklines with it.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
 It offers popup openers, actions for the selected slot, `Frequency…`, toggles,
@@ -1331,7 +1331,8 @@ which follows the rounded value, so a change shown as `0.0` is neither tinted
 nor barred; the host passes the slider's rank at display precision. Slider
 tracks and bar axes start at the cell's leading edge, so they line up down a
 column whatever the width of each number. The [vol watchlist](#vol-watchlist)
-tile paints its cells with them.
+tile paints its companion chips, the tint behind a single view's level and
+the band's heat range with them.
 
 ## Vol slice
 
@@ -3661,12 +3662,14 @@ module map.
 ## Vol watchlist
 
 `geode-volwatch` shows one watchlist's members as rows of a vol board:
-surface levels and their changes, ranks, realized and varswap levels, the
-term structure and the skew, with book vega beside them. It computes no
-number of its own. Every level, change, rank and sparkline is a cell of the
-[board request](data-path.md#board-requests); the only arithmetic in the
-tile is display (the forward's change as a percent of its `from`, a rank
-times a hundred, the scales and ranges the glyphs are measured against).
+surface levels, skews, varswap strikes and any precomputed per-underlying
+series, each beside the companion number the lens picks (its move over a
+lookback, or its z-score or percentile against its own history), with book
+vega beside them. It computes almost no number of its own. Every level,
+change, rank, window statistic and sparkline is a cell of the
+[board request](data-path.md#board-requests); the arithmetic in the tile is
+display (a z from the board's mean and sd, a rank times a hundred, the
+scales the chips are measured against).
 
 **Kinds.** One kind, `volwatch`, titled `Vol` (`Vol: Split` in the palette
 and the tile picker). It opens from the add-tile picker and never from a
@@ -3681,181 +3684,244 @@ from `watchlists.toml` drops the board, abandons anything in flight, shows
 lists `EU50X` in `europe_risk`, a name the demo surface does not carry, so
 the tile shows a member `not in surface`.
 
+**Tabs.** Tabs come from `vol_views.toml`
+([configuration](configuration.md#vol-watchlist)): named column lists in
+document order, on `1`–`9`, `tab` and `shift+tab` stepping with wrap, and
+`:view <name>` with completion over the names (an unknown name refuses
+with `no view '<name>'`). The strip under the header names each tab with
+its digit, the shown one lit; a tenth and later tab has no digit and is
+reached by `tab`, a press, the `.` menu or `:view`. The builtin layer ships
+`vol` (ATFM at `1W 1M 3M 6M 1Y 2Y 3Y 5Y`, a 30-day ATFM 3M sparkline, book
+vega), `skew` (25Δ skew at the same tenors and the 3M 10Δ wing), `varswap`
+(strikes at the same tenors) and `surface` (the `0.05 0.25 0.5 0.75 0.95`
+call deltas at `1M 3M 6M 1Y 2Y`, one number per cell). A column names a
+measure by text (`atfm 3M`, `skew 3M`, `point 3M 0.25`, `iv-rv 3M/20D`, …)
+or any `history` dataset keyed by `underlying_ref` (`ssr 3M`); a tenor the
+surface lacks keeps a blank column rather than shifting the grid. A reload
+that changes the document replaces the tabs, keeps the shown one by name,
+and otherwise opens the default with the standing notice `view <name> is
+gone`, which the next view pick clears. An empty or wholly refused document
+shows the builtin tabs with a configuration warning, never an empty tile.
+
+**Lens.** Every measure cell is a level and a companion. `r` flips the lens
+between moves (the Δ over the lookback; `d` cycles `1d 1w 1m`) and
+rich/cheap (the level against its own history over the window; `q`
+toggles z-score and percentile, `w` cycles `6M 1Y 2Y`). The z is
+`(level − mean) / sd` over the window's daily observations and is blank
+for a flat or short history (an sd that is not positive, or fewer than 60
+observations); the percentile is the rank the board returns and paints
+muted under 60 observations. Lens, lookback, metric, window and the shown
+number are one set per tile, shared by every tab and saved in the session.
+The strip's right side reads the lens (`moves · Δ 1d`, `rich/cheap · z ·
+1Y`) and then hints only the keys that matter from there: `r`, then `d`
+under moves or `q` and `w` under rich/cheap, then `m` in a single view,
+then `tab` for the next view; an unbound key hints nothing and the others
+stay. A pair view (`cells = "pair"`, the default) paints the level and the
+companion as two columns under one group head (`ATFM 3M` over `vol` and
+`Δ`, `z` or `pctl`); a single view (`cells = "single"`) paints one number
+per cell, the level over the companion's tint, and `m` swaps in the
+companion itself, the group head then saying `1M · Δ` and the strip
+`… · showing Δ`; `m` on a pair view changes nothing visible. The header's
+chip row shows the three lookbacks under moves and the three windows under
+rich/cheap, the one in force lit with its head (`Δ 1d`, `z · 1Y`); a press
+sets it as the key would. A lens, metric or swap change never requeries
+(the board carries the change, the rank and the statistics under either
+lens); a lookback or window change does, and until the new board lands a
+pair's companion cells paint muted and a single view's tint goes, the
+level keeping its text and tone.
+
 **Request.** One board request per ask, under the tile's key, covering
-every member: the union of the measures the view's columns read, the
-lookback in force, a one-year window when a column ranks, and each spark
-column's measure (the longest span wins when the band also asks it). While
-the band is open its measures join the ask. An ask is
-sent only when it asks something the board answering it lacks: a
-different lookback, a window it did not have, a measure or a longer
-sparkline. A narrower ask (closing the band, switching to a view that reads
-less) never requeries; the board already held answers it. `shift+r`, the
-refresh timer and a membership change always ask again. Only the latest
-admitted tag's board lands: a board for a superseded ask (`d` pressed
-twice) is dropped, never painted over the newer ask's lookback. The tag
-advances only when the service admits the request, so a refused ask does
-not orphan the one already out. On opening a list the tile asks the
-history key listing for the surface's tenor column, once per list, beside
-the first board (which does not wait for it); Term and
-Skew lay out the tenors it lists (ordered by `tenor_days`, unparsable
-labels last), and a tenor the last ask lacked asks again. A source that
-cannot enumerate leaves the conventional tenors `1M 2M 3M 6M 1Y 18M 2Y 3Y`.
-
-**Views.** Five, on `1`–`5`, `tab` stepping forward and `shift+tab`
-back, both wrapping, and the view strip under the header (a press
-switches; each bound step key is named at its right, `next view` and
-`previous view`):
-
-1. **Changes**: the 1M forward's change in percent, ATFM vol and its Δ at
-   `1M 3M 6M 1Y 2Y`, the 3M 25Δ skew and the 1Y−1M slope with their Δ, a
-   30-day ATFM 3M sparkline and book vega.
-2. **Levels**: ATFM at the same tenors with a shared heat tint, the 3M
-   forward, the 3M skew, the 1Y−1M slope, realized `5D` and `20D`, the 3M
-   varswap strike and book vega.
-3. **Rich / cheap**: ATFM 3M with its one-year rank, realized `5D` and
-   `20D`, IV 3M − RV 20d as a zero bar, the 3M varswap strike and its
-   spread to ATM as a bar, the 3M skew and the 1Y−1M slope with their
-   ranks.
-4. **Term**: a term-shape glyph on one y range across the list, then ATFM
-   and its Δ at every listed tenor (heat-tinted), and the 1Y−1M and 3Y−1Y
-   slopes with their Δ.
-5. **Skew**: the 25Δ skew and its Δ at every listed tenor, the 3M 10Δ wing
-   skew, the 3M skew's rank, and the 3M 25Δ put and call points (call
-   deltas 0.75 and 0.25).
-
-Changes and Levels name tenors by convention, so a tenor the surface lacks
-keeps a blank column rather than shifting the grid.
+every member: the union of the measures the shown tab's columns read, the
+lookback in force, the window in force whenever a measure column exists,
+the `history` datasets the open-form columns name, and each spark column's
+measure (the longest span wins when the band also asks it). While the band
+is open its measures join the ask. An ask is sent only when it asks
+something the board answering it lacks: a different lookback or window, a
+measure or a longer sparkline. A narrower ask (closing the band, switching
+to a tab that reads less) never requeries; the board already held answers
+it. `shift+r`, the refresh timer and a membership change always ask again.
+Only the latest admitted tag's board lands: a board for a superseded ask
+(`d` pressed twice) is dropped, never painted over the newer ask's
+lookback. The tag advances only when the service admits the request, so a
+refused ask does not orphan the one already out. On opening a list the
+tile asks the history key listing for the surface's tenor column, once per
+list, beside the first board (which does not wait for it); the band lays
+out the tenors it lists (ordered by `tenor_days`, unparsable labels last),
+and a tenor the last ask lacked asks again. A source that cannot enumerate
+leaves the conventional tenors `1W 1M 2M 3M 6M 1Y 18M 2Y 3Y 5Y`.
 
 **Grid.** Rows are the members in the list's order, members the board
 answered first and those it lacks at the foot, muted and blank (`not in
 surface` in the readout). The Underlying column is pinned left; the
 reference name is in the readout. Column heads group under a shared header
-row (`ATFM 3M` over `vol` and `Δ`) painted at the heads' text size, so a view
-with groups is no larger than one without; Levels has no groups. A column's
-width is its glyph's minimum plus the widest text, head included, the sort
-mark on a sortable head and the table's cell padding; at prepared widths a
-group label wider than its columns widens them, the deficit shared across
-the run (`:autosize` does not share it); a column narrower than its text
-ends it in an ellipsis, never cutting a number's leading digits, and no
-column, dragged or restored, goes narrower than its glyph's own width plus
-the padding, so a chip keeps its sign. Widths belong to a view: `:autosize` (the shell's verb,
-also in the palette) fits the shown view's columns in the real mono
+row (`ATFM 3M` over `vol` and `Δ`; in a single surface view the tenor over
+`5Δ … 95Δ`) painted at the heads' text size, so a view with groups is no
+larger than one without. A column's width is its glyph's minimum plus the
+widest text, head included, the sort mark on a sortable head and the
+table's cell padding; at prepared widths a group label wider than its
+columns widens them, the deficit shared across the run (`:autosize` does
+not share it); a column narrower than its text ends it in an ellipsis,
+never cutting a number's leading digits, and no column, dragged or
+restored, goes narrower than its glyph's own width plus the padding, so a
+chip keeps its sign. Widths belong to a view: `:autosize` (the shell's
+verb, also in the palette) fits the shown view's columns in the real mono
 metrics and refuses before a board lands, `:autosize reset` returns that
 view to its prepared widths, and a header drag sets one column's width in
 that view; all persist in the session under `column_widths` as
-`<view>:<column>`, so a width fitted in Skew never lands on the Levels
-column of the same id, whose head is wider. `j k` move rows,
-`h l` columns, `g g`/`shift+g` the ends, `v`/`shift+v` start a row
-selection, `y` yanks the cursor cell (or the cursor column over a
-selection, one row per line). `/` narrows by name and reference, keeping
-order. `s` cycles the cursor column's sort ascending → descending → member
-order, and a head press walks the shared click cycle; `:sort <column>
-[asc|desc|abs [asc|desc]]` names a column by id or one-word head, and bare
-`:sort` clears. Blanks sort last in both directions. The Underlying,
-spark and term columns refuse a sort with `<head> is not sortable`. The
-cursor row is emitted into the link group as a one-value
-`underlying_ref` path; the tile never follows a group. The header's sort
-chip names the column and the direction (`vol 3M ↑`, `|Δ 3M| ↓`), and
-`:sort` refuses a column `s` refuses with the same text.
+`<view name>:<column id>`, so a width fitted under one tab never lands on
+another tab's column of the same id, whose head may be wider. Column ids
+are the measure text with dashes and a suffix (`atfm-3M-level`,
+`atfm-3M-companion`, `atfm-3M-single`, `spark-atfm-3M`, `vega`), so a
+width survives a relabel. `j k` move rows, `h l` columns, `g g`/`shift+g`
+the ends, `v`/`shift+v` start a row selection, `y` yanks the cursor cell
+(or the cursor column over a selection, one row per line). `/` narrows by
+name and reference, keeping order. Every column but Underlying and a
+sparkline sorts: `s` cycles the cursor column's sort ascending →
+descending → member order, a head press walks the shared click cycle, and
+`:sort <column> [asc|desc|abs [asc|desc]]` names a column by id or
+one-word head, bare `:sort` clearing. A pair's level and companion sort
+separately; a single column sorts by the number it shows. Blanks sort last
+in both directions. The Underlying and spark columns refuse with `<head>
+is not sortable`, in `:sort` with the same text. The cursor row is emitted
+into the link group as a one-value `underlying_ref` path; the tile never
+follows a group. The header's sort chip names the column and the direction
+(`vol 3M ↑`, `|Δ 3M| ↓`) and follows a relabel.
 
 **Glyphs.** The cells paint through the shared
-[cell glyphs](#cell-glyphs): a Δ is a delta chip scaled to the column's
-largest magnitude, its tint capped at a quarter so the chip stays a tint
-under a colored number rather than a filled pill, a rank a percent
-slider, IV−RV and the varswap spread zero bars, Levels and Term levels a
-heat tint on one range across the grid, the spark column a 30-day
-sparkline with an end dot. Every host
-passes the sign of the displayed text, so a change shown as `0.0` takes no
-fill, and the rank at display precision, so a rank shown as `90` takes the
-slider's warning tone. Sign colors are the theme's bullish and bearish
-chart tokens. A Δ from a board asked under another lookback than the one
-shown paints muted (after `d`, until the new board lands); a rank over
-fewer than 60 observations paints muted with its count in the readout; a
-row older than `[volwatch] stale_after` (a day) shows its name in the
-muted tone, in the grid and in the band, and its numbers as they are,
-since they are still that row's numbers; the header's surface time turns stale with the oldest row. `p` drops
-every tint, slider and bar and keeps the numbers, without a requery. A
-theme change rebuilds the paints.
+[cell glyphs](#cell-glyphs). A companion is a chip: sign-colored text over
+a tint whose strength is the magnitude against a ceiling, capped at a
+quarter so the chip stays a tint under a colored number rather than a
+filled pill. A Δ measures against the column's largest displayed magnitude,
+a z against 2.0, and a percentile by its distance from the median (above
+or below it is the sign; a rank at the median takes no tint). In a single
+view the same tint sits behind the level, and after `m` behind the
+companion's own text. The chip tints what the eye reads: a change shown as
+`0.0` takes no fill, a rank shown as `90` tints as 90. The spark column is
+a 30-day sparkline with an end dot. Sign colors are the theme's bullish
+and bearish chart tokens. A companion from a board asked under another
+lookback or window than the one shown paints muted (after `d` or `w`,
+until the new board lands), as does a rank over fewer than 60
+observations, with its count in the readout; a single view drops the tint
+instead, since a wrong color under a right number misleads. A row older
+than `[volwatch] stale_after` (a day) shows its name in the muted tone, in
+the grid and in the band, and its numbers as they are, since they are
+still that row's numbers; the header's surface time turns stale with the
+oldest row. `p` drops every chip and tint and keeps the numbers, without a
+requery. A theme change rebuilds the paints.
 
 **Band.** `enter` opens the inspection band for the cursor row, docked
 between the grid and the footer; `enter` again or `escape` closes it. It
-paints at the grid's text size (the view strip and footer are chrome, a size
-smaller). It follows the cursor and shows the row's surface at fixed deltas
-(`10p 25p atm 25c 10c` as call deltas `0.90 0.75 0.50 0.25 0.10`, every
-listed tenor, the 25Δ skew and its Δ, one heat range over the table), three
-one-year sparklines (ATFM 3M, 25Δ skew 3M, realized 20D) captioned with
-their rank and range and IV−RV's rank, and context pairs (the 3M varswap
-strike, its spread to ATM, book vega, and the surface, realized and varswap
-times). Opening grows the ask; closing never requeries. A member the board
-lacks refuses with `<name> is not in the surface`. Before a board lands
-the band opens on dashes.
+paints at the grid's text size (the view strip and footer are chrome, a
+size smaller). It follows the cursor and shows the row's surface at fixed
+deltas (`10p 25p atm 25c 10c` as call deltas `0.90 0.75 0.50 0.25 0.10`,
+every listed tenor, the 25Δ skew and its Δ, one heat range over the
+table), three sparklines over the window in force (ATFM 3M, 25Δ skew 3M,
+realized 20D) captioned with their rank and range and IV−RV's rank, and
+context pairs (the 3M varswap strike, its spread to ATM, book vega, and
+the surface, realized and varswap times). Opening grows the ask; closing
+never requeries. A member the board lacks refuses with `<name> is not in
+the surface`. Before a board lands the band opens on dashes.
 
 **Vega.** With `[volwatch] vega` set (see
 [configuration](configuration.md#vol-watchlist)), book vega is one
 ordinary grouped query over the named view, scoped to the frame scope
 narrowed to the members, under the tile's key but never with the board.
 Its depth-1 rows join by `underlying_ref` into the `vega k` column
-(thousands); the depth-0 total is never read. A frame scope or as-of change
-asks vega alone. A query that is refused, or a view that fails or lacks the
-column, drops the column with a standing warning `[volwatch] vega: <reason>`
-and the board keeps painting; the next answer restores it.
+(thousands) of a tab whose document lists `kind = "vega"`; the depth-0
+total is never read. A frame scope or as-of change asks vega alone. A
+query that is refused, or a view that fails or lacks the column, drops the
+column with a standing warning `[volwatch] vega: <reason>` and the board
+keeps painting; the next answer restores it.
 
-**Keys.** Normal mode: `1`–`5`, `tab` and `shift+tab` views, `d` the
-lookback (`1d → 1w → 1m`), `p` paint, `s` sort, `enter` the band, `t`
-the timeseries refusal (below), `y` yank, `shift+r` refresh now, `g w`
-the switcher, `.` the action menu, `v`/`shift+v` a row selection, motions
-and `escape`. A right press on a row moves the cursor there (unless inside
-a selection) and opens the action menu at the pointer; `⋯` opens it under
-the header. The menu lists every verb with its chord, the view and paint
-ticks, and a disabled row's reason. `escape` peels one layer at a time:
-the menu, the band, a selection, a `/` narrowing, then the notices.
+**Keys.** Normal mode: `1`–`9`, `tab` and `shift+tab` tabs, `r` the lens,
+`d` the lookback (`1d → 1w → 1m`), `q` the metric, `w` the window
+(`6M → 1Y → 2Y`), `m` the shown number in a single view, `p` paint, `s`
+sort, `enter` the band, `t` the timeseries refusal (below), `y` yank,
+`shift+r` refresh now, `g w` the switcher, `.` the action menu,
+`v`/`shift+v` a row selection, motions and `escape`. A right press on a
+row moves the cursor there (unless inside a selection) and opens the
+action menu at the pointer; `⋯` opens it under the header. The menu lists
+the switcher, every tab with its digit and the shown one ticked, then the
+lookback, paint, sort, inspect, timeseries, yank and refresh verbs with
+their chords, the paint tick, and a disabled row's reason. `escape` peels one layer at a time: the menu, the band, a selection, a `/`
+narrowing, then the notices.
 
 **Header and footer.** The header carries the switch control
-(`Vol · <list> ▾`), the member count, the three lookback chips (the one in
-force lit as `Δ 1d`; a press sets it), the sort chip, `<n> not in surface`
-in the warning tone, a danger chip per failed dataset, then the shared
-cluster: `…` while a board is in flight, one time per dataset (`surface`
-from the stalest present row, `realized` and `varswap` when the view reads
-them), each in the stale tone once past `[volwatch] stale_after`, link chips, the
-health of the three history datasets, `⋯` and ×. The footer shows the
-first notice and the cursor readout
-(`SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · 1Y pctl 91 of 251`).
-A cell with a level but no change reads `Δ1d —` followed, when the board
-carries one, by its note for the measure's dataset
-(`SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01`, or
-`no observation at or before <date>`).
+(`Vol · <list> ▾`), the member count, the lens chips (the lookbacks under
+moves, the one in force lit as `Δ 1d`; the windows under rich/cheap, lit
+as `z · 1Y` or `pctl · 6M`; a press sets it), the sort chip, `<n> not in
+surface` in the warning tone, a danger chip per failed dataset, then the
+shared cluster: `…` while a board is in flight, one time per dataset
+(`surface` from the stalest present row, `realized` and `varswap` when
+the tab reads them), each in the stale tone once past `[volwatch]
+stale_after`, link chips, the health of the three history datasets, `⋯`
+and ×. The footer shows the first notice and the cursor readout, which
+carries everything the lens hides, read from the ask the board answered:
+`SX5E · ATFM 3M 19.6 · Δ1d +0.8 from 18.8 on 2026-10-22 · z 1Y +1.4 ·
+pctl 1Y 91 of 251 · mean 16.9 · sd 1.9`. A z blank for a short history
+says so (`z 1Y — (12 of 60)`). A cell with a level but no change reads
+`Δ1d —` followed, when the board carries one, by its note for the
+measure's dataset (`SX5E · ATFM 3M 15.9 · Δ1d — · history starts
+2026-09-01`, or `no observation at or before <date>`).
 
-**Session.** The table saves the list, the view, the lookback, the sort,
-the cursor's name, whether the band is open and column widths per view
-(`column_widths`, keyed `<view>:<column>`; an entry without a view prefix
-is dropped). An unreadable key is dropped with its own notice and the rest
-kept. A restored
-cursor rests on its row at once (the members are blank rows before any
-board); a restored open band puts its measures into the first ask.
+**Session.** The table saves the list, the view name, the lens keys
+(`lens`, `lookback`, `metric`, `window`, `shown`, each a word), the sort
+by column id, the cursor's name, whether the band is open and column
+widths per view (`column_widths`, keyed `<view name>:<column id>`; an
+entry without a view prefix is dropped). An unreadable key is dropped with
+its own notice and the rest kept. A view name the document no longer
+declares (a record from before the configured tabs naming `changes`,
+`levels`, `richcheap` or `term`) opens the default with `view <name> is
+gone`; `skew` survives because the builtin ships a `skew` tab. A record
+without the lens keys reads the default lens. A restored cursor rests on
+its row at once (the members are blank rows before any board); a restored
+open band puts its measures into the first ask.
 
 **Failures.** A refused submission is a warning (`the data service is busy
 — shift+r retries`) and nothing retries by itself, except that a refused
 timer refresh asks again at the next interval. A surface failure keeps the
 last board, marks every present row stale (its name in the muted tone, its
-numbers as they are) and stands
-`surface: <error> — shift+r retries`; the next good board clears it. A
-failed realized or varswap dataset blanks its columns and shows its danger
-chip while the rest of the board paints. The refresh timer
-(`[volwatch] refresh`, never below 10 s) runs only while the tile is shown,
-and a timer that fires while a board is in flight asks nothing. A
-`[volwatch] stale_after` reload re-arms the rows' stale wake-ups at the new
-threshold.
+numbers as they are) and stands `surface: <error> — shift+r retries`; the
+next good board clears it. A failed realized, varswap or table dataset
+blanks its columns and shows its danger chip while the rest of the board
+paints. The refresh timer (`[volwatch] refresh`, never below 10 s) runs
+only while the tile is shown, and a timer that fires while a board is in
+flight asks nothing. A `[volwatch] stale_after` reload re-arms the rows'
+stale wake-ups at the new threshold.
 
 The tile asks for the history datasets `vol_surface`, `realized_vol` and
-`varswap` by name. Each must be declared as a history dataset of the
-right shape: if any of the three is undeclared or misshaped, the data
-service refuses every board (a configuration gap, not a runtime one) and
-the tile stands `surface: <error> — shift+r retries`. Only a declared
-realized or varswap dataset that has drifted or has no source blanks its
-own columns while the rest paints.
+`varswap` by name, and for any dataset an open-form column names. The
+three fixed ones must be declared as history datasets of the right shape:
+if any is undeclared or misshaped, the data service refuses every board (a
+configuration gap, not a runtime one) and the tile stands `surface:
+<error> — shift+r retries`. An open-form column whose dataset is not a
+`history` dataset keyed by `underlying_ref` first with exactly one value
+column is dropped where the document is validated, so the tile never asks
+it (see [typed documents](typed-documents.md#vol-views)). Only a declared
+dataset that has drifted or has no source blanks its own columns while
+the rest paints.
+
+In `--demo` the Hanweck simulator serves the surface at `1W 1M 2M 3M 6M 1Y
+18M 2Y 3Y 5Y` and the call deltas `0.05 0.10 0.25 0.50 0.75 0.90 0.95`,
+and a precomputed `ssr` table keyed by underlying and tenor, so a user
+`vol_views.toml` naming `ssr 3M` paints in the demo without new code (see
+[real sources](real-sources.md)). A demo store written before those keys
+existed needs no deletion: the adapter enumerates its keys and coverage
+fetches a new tuple on demand.
 
 Known limitations:
 
+- `vol_views.toml` has no object dialog yet: tabs are edited by file and
+  hot-reloaded.
+- A measure over two tables (`a − b` between open-form datasets) is not
+  expressible; the open form reads one tuple of one dataset.
+- The surface tab at the eight laddered tenors is wider than a screen, so
+  the builtin ships five; a user view may name more.
+- The header's dataset times and health chips cover the three fixed
+  datasets; a table dataset shows a danger chip on failure but no time.
+- The lens, metric and swap keys (`r`, `q`, `m`) have no pointer route:
+  the `.` menu lists the lookback verb and not them; the header chips give
+  the pointer the lookback and the window only.
 - The band is a region docked under the grid, not a taller row in place:
   gpui-component's `DataTable` lays rows out at one row height.
 - The band's book vega is the column's; a vega bucket (by expiry) needs a
@@ -3863,8 +3929,9 @@ Known limitations:
 - `t` is refused with a notice naming the series
   (`timeseries cannot open a history series yet: vol_surface [SX5E, 3M, 0.5] vol`):
   the timeseries tile has no history-series slot.
-- The request carries only the lookback in force, so `d` requeries; the
-  changes paint muted from the last board until the new one lands.
+- The request carries only the lookback and the window in force, so `d`
+  and `w` requery; the companions paint muted (or a single view's tint
+  goes) from the last board until the new one lands.
 - Rows are prepared whole, not windowed: a list of tens of members
   prepares in well under a millisecond. Past about 256 members the grid
   should move to `WindowCache`.
@@ -3878,10 +3945,11 @@ Known limitations:
 - A same-members reorder of the list requeries.
 - A spark column cuts its tail from the board's sparkline by proportion of
   the board's span, assuming one value a day across it. Under the band's
-  1Y ask a member with about 40 days of history draws about 4 in the
-  30-day column until the next ask narrows the span.
-- The dataset names are fixed (`vol_surface`, `realized_vol`, `varswap`);
-  no setting renames them.
+  window-long ask a member with about 40 days of history draws about 4 in
+  the 30-day column until the next ask narrows the span.
+- The three fixed dataset names (`vol_surface`, `realized_vol`,
+  `varswap`) cannot be renamed; only a table dataset is named by the
+  document.
 
 See the [crate guide](../../crates/geode-volwatch/README.md) for the
 module map.

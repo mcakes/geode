@@ -99,6 +99,7 @@ The main configuration documents have distinct owners:
 | `scopes.toml` | Named scopes |
 | `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
 | `watchlists.toml` | Named lists of underlyings: manual names, exclusions, and rules deriving names from a dataset under a saved scope or expression |
+| `vol_views.toml` | The vol watchlist's tabs: named column lists over the board's measures (hot) |
 | `colors.toml` | Named semantic data colors |
 | `value_colors.toml` | A color per value of a text dimension: a colors.toml name or an inline { hue } / { token } table |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
@@ -827,7 +828,7 @@ Accepted candidates update runtime state according to their inputs:
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, colors, value colors, watchlists, scopes, or expressions | Emit `ConfigReloaded` for the app bridge |
 | `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter, panel and scenario factories |
-| `app.volwatch` (`refresh`, `vega`, `stale_after`) | The vol watchlist's own revision observer re-reads `[volwatch]` and pushes it to the factory; an unchanged key neither pushes nor repeats a warning |
+| `app.volwatch` (`refresh`, `vega`, `stale_after`) or `vol_views` | The vol watchlist's own revision observer re-reads `[volwatch]` and `vol_views.toml`, resolves the tabs against the startup schema and pushes the settings whole to the factory; an unchanged key or document neither pushes nor repeats a warning |
 | Sources, datasets, egress, positions, panels, scenarios, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
@@ -1082,16 +1083,19 @@ slice answers with that reason. Changing `model` marks restart required, as `[pr
 ## Vol watchlist
 
 `[volwatch]` in `app.toml` configures the vol watchlist tile (see
-[Vol watchlist](features.md#vol-watchlist)). All three keys are hot: a
-reload that changes any of them pushes the new settings to the factory and
-the open tiles; a `stale_after` change re-arms each tile's stale wake-ups.
+[Vol watchlist](features.md#vol-watchlist)) and `vol_views.toml` declares
+its tabs. All three `[volwatch]` keys and the tabs are hot: a reload that
+changes any of them pushes the new settings whole to the factory and the
+open tiles; a `stale_after` change re-arms each tile's stale wake-ups; a
+changed document replaces each tile's tabs, keeping the shown one by name.
 The tile does not read `[blotter] stale_after`.
 
 The tile reads three history datasets by fixed name: `vol_surface`,
-`realized_vol` and `varswap`. A deployment that shows the tile declares
-all three as history datasets of the shapes the board reads; while any
-one is undeclared or misshaped, the data service refuses every board and
-the tile shows `surface: <error>`. There is no setting to rename them.
+`realized_vol` and `varswap`, and any further `history` dataset a tab's
+open-form column names. A deployment that shows the tile declares the
+three as history datasets of the shapes the board reads; while any one is
+undeclared or misshaped, the data service refuses every board and the tile
+shows `surface: <error>`. There is no setting to rename them.
 
 - `refresh` is a duration or `"off"`; the default is `"60s"`. Below the 10s
   minimum it is raised to 10s with a warning; a value that is neither a
@@ -1109,6 +1113,50 @@ the tile shows `surface: <error>`. There is no setting to rename them.
   (`[volwatch] stale_after = … is not a duration; using 24h`) and uses the
   default. A stale row keeps its numbers' colors and shows its name in the
   muted tone; the header's surface time turns stale with the oldest row.
+
+`vol_views.toml` is one top-level table per view, in document order, each
+with a `columns` array, and a top-level string `default` naming the
+opening tab (without one the first view opens). Layers replace whole views
+by name, so a user view appends after the builtin four (`vol`, `skew`,
+`varswap`, `surface`) unless it replaces one of them. `cells = "pair"` (the
+default) lays each measure out as a level and a companion column under one
+group head; `cells = "single"` as one number per cell. A column is exactly
+one of `measure = "<text>"` (with an optional `label` for the sub-head and
+`group` for the group head), `spark = "<measure text>"` with `span` (a
+duration; default `30d`), or `kind = "vega"` (book vega, painted only with
+`[volwatch] vega` set). The measure text is one of the ten built-in forms
+(`point <tenor> <delta>`, `atfm <tenor>`, `forward <tenor>`, `skew
+<tenor>`, `wing skew <tenor>`, `slope <long>-<short>`, `realized <window>`,
+`iv-rv <tenor>/<window>`, `varswap <tenor>`, `vs spread <tenor>`) or the
+open form `<dataset> [<k1>] [<k2>]`, which names a `history` dataset keyed
+by `underlying_ref` first with exactly one value column and supplies its
+remaining key values in key order (`ssr 3M`); the grammar and the
+resolver's rules are in [typed documents](typed-documents.md#vol-views).
+Every problem warns at its key (`vol_views.<view>.columns.<n>`): a column
+that does not read or resolve drops alone, a view with no valid column is
+skipped, a `default` naming no view falls to the first, and a document
+that leaves no valid view at all warns `vol_views: no valid view; the tile
+shows the builtin tabs` and the builtin document stands in. Resolution
+runs in the app against the schema the data service started with, as
+watchlist rules do, so a dataset added since launch needs a restart before
+a column may name it.
+
+```toml
+config_version = 1
+default = "vol"
+
+[ssr]                      # a fifth tab beside the builtin four
+[[ssr.columns]]
+measure = "ssr 3M"         # the demo's precomputed skew-stickiness ratio
+[[ssr.columns]]
+measure = "atfm 3M"
+label = "3m vol"
+[[ssr.columns]]
+spark = "atfm 3M"
+span = "30d"
+[[ssr.columns]]
+kind = "vega"
+```
 
 ## Maintaining configuration
 

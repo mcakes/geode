@@ -1,10 +1,12 @@
 # geode-volwatch
 
-The vol watchlist tile: one watchlist's members as rows of a vol board.
-Every level, change, rank and sparkline it paints is a cell of the data
-tier's board request (`DataHandle::vol_board`); the crate's only arithmetic
-is display (a forward change as a percent, a rank times a hundred, glyph
-scales and ranges). Behaviour and limits are in the features guide's
+The vol watchlist tile: one watchlist's members as rows of a vol board,
+under tabs read from `vol_views.toml` and a lens that picks the companion
+beside every level. Every level, change, rank, window statistic and
+sparkline it paints is a cell of the data tier's board request
+(`DataHandle::vol_board`); the crate's arithmetic is display (a z from
+the board's mean and sd, a rank times a hundred, the scales a chip is
+measured against). Behaviour and limits are in the features guide's
 "Vol watchlist" section.
 
 ## Module map
@@ -12,52 +14,76 @@ scales and ranges). Behaviour and limits are in the features guide's
 - `content.rs`: `VolwatchFactory` (kind `volwatch`, title `Vol`, accepts
   no dimension), `VolwatchSettings` (`refresh` clamped to `MIN_REFRESH`,
   `vega`, the tile's own `stale_after`, a day by default since a surface
-  publishes daily; pushed whole by the app on a reload), the tile's
-  `TileContent` door (`emits()` is `true`, `follows()` is not; `deliver`
-  matches every `Delivery` variant with no wildcard: `VolBoard`,
-  `HistoryKeys` and the vega `Query`), `ACTIONS` and the `DEFAULT_KEYMAP`
-  fragment.
+  publishes daily, and `views`, the resolved tabs; pushed whole by the app
+  on a reload), the tile's `TileContent` door (`emits()` is `true`,
+  `follows()` is not; `deliver` matches every `Delivery` variant with no
+  wildcard: `VolBoard`, `HistoryKeys` and the vega `Query`), `ACTIONS` and
+  the `DEFAULT_KEYMAP` fragment.
 - `core/`: pure state, tested without gpui.
-  - `views.rs`: the five views (Changes, Levels, Rich / cheap, Term, Skew)
-    as column tables with `next`/`prev` stepping (`tab`/`shift+tab`,
-    wrapping), `order_tenors`, the board `Ask` each view implies
-    (the union of its columns' measures, plus the band's while open),
+  - `views.rs`: the tabs from `VolViews` (`builtin()` resolves the shipped
+    `BUILTIN_VOL_VIEWS` document: `vol`, `skew`, `varswap`, `surface`).
+    `columns` lays a view out under the lens (a pair view as a level and a
+    companion column per measure; a single view as one column, headed by
+    tenor and delta when every column is a surface point), `measure_id`
+    (the width and sort key stem), `family_label` and `unit` (the heads
+    and the readout), `order_tenors`, the board `Ask` a view implies
+    (`ask`: the union of its measure columns, the window in force whenever
+    one exists, each spark, and the band's measures while open;
+    `Ask::tables` the datasets its open-form measures read),
     `needs_requery`, which asks again only for something the last ask
     lacked, and `sortable`, the one test `s`, a head press and `:sort`
     share.
+  - `lens.rs`: `LensState` (lens, lookback, metric, window, shown) with
+    each key's cycle and session word, `z_score` (blank under
+    `PCTL_MIN_COUNT` observations or a non-positive sd), `companion` (the
+    number the lens picks from a cell), `pctl_side` (a rank's distance
+    from the median), `Z_CEILING` and the strip's lens readout.
   - `model.rs`: the prepared model. `rows` (members in list order, the
-    board's missing at the foot), `prepare` (each cell's text, glyph core,
-    id and muted flag, the column widths; glyph hosts get the displayed
-    sign and the rank at display precision), `readout` (a cell with no
-    change names the board's note for its dataset), `sort_value`,
-    `prepare_band` (`BandModel`) and `header` (`HeaderModel`).
-  - `session.rs`: the session table (list, view, lookback, sort, cursor,
-    band, the sized widths keyed `view:id`); an unreadable key drops alone
-    with a notice.
-  - `commands.rs`: the `:sort` grammar and its completions; an
-    unsortable column refuses as `s` does.
+    board's missing at the foot), `prepare` (each cell's text, chip or
+    tint, id and muted flag, the column widths; a chip gets the displayed
+    sign and the companion at display precision; a single column's tint
+    goes where a pair's chip would paint muted), `readout` (the change,
+    the z, the rank and the statistics from the ask the board answered; a
+    cell with no change names the board's note for its dataset),
+    `sort_value` (follows the lens), `prepare_band` (`BandModel`) and
+    `header` (`HeaderModel`: the lookback chips under moves, the window
+    chips under rich/cheap).
+  - `session.rs`: the session table (list, view name, the lens keys as
+    words, sort by column id, cursor, band); an unreadable key drops alone
+    with a notice, and a record without the lens keys reads the default
+    lens.
+  - `commands.rs`: the `:sort` and `:view` grammar and their completions;
+    an unsortable column refuses as `s` does; whether a view name exists
+    is the tile's to say.
 - `tile/`: the hosted entity.
   - `mod.rs`: the entity, the watchlist snapshot settle, the keys and the
-    escape order, `t`'s refusal, yank, emission and autosize (the shown
-    view's columns only; `reset` clears that view's).
+    escape order, the tabs (`set_view_by_name`, `step_view`), one door for
+    every lens key and chip (`set_lens`; a window or lookback change
+    requeries, the rest paint from the board held), `settings_changed` (a
+    views push replaces the tabs, keeps the shown one by name or opens
+    the default with `view <name> is gone`), the strip's hints, `t`'s
+    refusal, yank, emission and autosize (the shown view's columns only;
+    `reset` clears that view's).
   - `data.rs`: the board's request lifecycle (tags, `deliver_board`,
     `deliver_keys`, the refresh and stale timers, the prepared model, the
     header's dataset times).
   - `chrome.rs`: notices, the empty state, the switcher and the `.` action
-    menu.
+    menu (the tabs as rows, the shown one ticked).
   - `table.rs`: the grid's `TableDelegate` and `Paints` (one per theme);
     it formats nothing. It adds the table's fixed chrome (cell padding and
     the cursor border, `chrome_px`) to a prepared width, floors every
     column at its glyph's own width plus that chrome (`min_widths`, so a
     drag or a restored width cannot cut a chip's sign), truncates a cut
-    cell or head with a trailing ellipsis, and sizes a group head to
-    the heads' text (the table leaves it to the delegate). Sized widths (an
-    `:autosize` fit, a header drag through `record_widths`) are keyed
-    `view:id` (`sized_key`): a column id is shared across views whose heads
-    and glyphs differ. `restored_widths` drops a session entry without a
-    view prefix silently.
-  - `header.rs`: the header, the view strip, the band's slot and the
-    footer.
+    cell or head with a trailing ellipsis, sizes a group head to the
+    heads' text (the table leaves it to the delegate), and paints every
+    tint cell in the chip's inset box so a column's levels share one
+    right edge. Sized widths (an `:autosize` fit, a header drag through
+    `record_widths`) are keyed `<view name>:<column id>` (`sized_key`): a
+    column id is shared across views whose heads differ. `restored_widths`
+    drops a session entry without a view prefix silently.
+  - `header.rs`: the header (the switch control, the lens chips), the
+    view strip (the tabs with their digits, the lens readout and the key
+    hints), the band's slot and the footer.
   - `band.rs`: the inspection band's paint, docked between the grid and
     the footer, at the grid's text size; the name takes the grid row's
     stale tone.
@@ -73,5 +99,5 @@ cargo bench -p geode-volwatch
 ```
 
 The `prepare` bench times `core::model::prepare` for 25 members under the
-Changes view (18 columns, named `prepare_25x24` after the planned 24); it
-measures well under a millisecond (see the performance guide).
+builtin `vol` tab (19 columns; named `prepare_25x24` after the planned
+24); it measures well under a millisecond (see the performance guide).

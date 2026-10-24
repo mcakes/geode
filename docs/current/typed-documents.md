@@ -393,6 +393,69 @@ elsewhere, and restoring a stored snapshot would silently revert that edit.
 `to_toml` writes `include`, then `exclude` and `rules` when nonempty, each
 rule `dataset` then its `scope` or `expression`, and reads back equal.
 
+## Vol views
+
+[`volviews`](../../crates/geode-core/src/volviews.rs) reads
+`vol_views.toml`, the vol watchlist's tabs: one top-level table per view
+in document order, each with a `columns` array, and a top-level string
+`default`. `from_doc` parses without the schema and keeps every column
+whose text reads, answering a `VolViewsDoc` of `VolViewSpec`s whose
+measures are `MeasureText` (a built-in `Measure`, or a `Table` name with
+its key words). `resolve` turns each open-form text into a board
+`Measure::Table` against a `TableShape` lookup (a dataset's key length and
+value-column count, derived from the schema by the caller) and answers the
+`VolViews` the tile shows, with `default` as an index.
+
+A measure text is one of:
+
+| Text | Measure |
+|---|---|
+| `point <tenor> <delta>` | `Point` (call delta as the surface stores it: `0.25` is the 25Δ call, `0.75` the 25Δ put) |
+| `atfm <tenor>` | `Point { delta: 0.5 }`; the half-delta point reads back as `atfm` |
+| `forward <tenor>` | `Forward` |
+| `skew <tenor>` | `Skew` (vol(0.75) − vol(0.25)) |
+| `wing skew <tenor>` | `WingSkew` (vol(0.90) − vol(0.10)) |
+| `slope <long>-<short>` | `Slope` |
+| `realized <window>` | `Realized` |
+| `iv-rv <tenor>/<window>` | `IvRv` |
+| `varswap <tenor>` | `Varswap` |
+| `vs spread <tenor>` | `VsSpread` |
+| `<dataset> [<k1>] [<k2>]` | `Table` over a `history` dataset |
+
+Keywords read case-insensitively. Tenor, window and delta words are the
+data's key spellings, normalized as the surface reader normalizes them
+(`0.50` reads as the `0.5` point), and a point delta must be a finite
+number strictly between 0 and 1. The open form names a `history` dataset
+by its schema name and qualifies when the dataset's key is `underlying_ref`
+followed by zero, one or two more columns and it has exactly one value
+column; the words after the name are the remaining key values in key
+order (`spotvol_cov`, `ssr 3M`, `smile_curv 3M 0.25`), whatever the key
+columns are called. A built-in keyword is never read as a dataset name, so
+a dataset called `skew` is unreachable by the open form and the resolver
+says so.
+
+Failure semantics, each a warning at its key (`vol_views.<view>`,
+`vol_views.<view>.columns.<n>`, `vol_views.default`), never an error, so
+a bad tab cannot cost a desk its others: a column with none or more than
+one of `measure`, `spark` and `kind`, a measure or spark text that does
+not parse, a `span` that is not a non-zero duration, or a `kind` other
+than `vega` drops that column alone (`vol_views: <view> column <n>: <why>;
+dropped`); `cells` other than `pair` or `single` warns and reads as
+`pair`; a view that is not a table, has no `columns` array, or is left
+with no valid column is skipped (`vol_views: '<view>' has no valid
+column; skipped`). At `resolve`, an open-form column whose dataset the
+lookup lacks, has more than one value column, or takes another number of
+key words than the text supplies drops alone, a view left with no column
+is skipped, and a `default` naming no resolved view warns and the first
+view opens (`default` is `0`, also with no view at all). Resolution runs
+in the app (`volwatch_settings_from_config`) against the schema the data
+service started with, as watchlist rules are, with a lookup that admits
+only a `history` dataset whose first key column is `underlying_ref`; a
+document that resolves to no view warns `vol_views: no valid view; the
+tile shows the builtin tabs` and the builtin document stands in. The
+resolved `VolViews` travels inside `VolwatchSettings` and is pushed whole
+on every reload, so the tile never re-reads the document itself.
+
 ## Colors and numeric formatting
 
 [`NamedColours`](../../crates/geode-core/src/colour/mod.rs) reads a hue or a
