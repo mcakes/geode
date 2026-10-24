@@ -15,6 +15,8 @@ pub const GROUP_USAGE: &str = "group needs dimensions, slot N or none";
 pub const REFUSED_GROUP_SAVE: &str =
     "saving a slot is in the Grouping dialog (palette: Pick a grouping\u{2026})";
 const SLOT_USAGE: &str = "group slot needs a number 1\u{2013}9";
+/// Followed by `: <dimension>`; a chain groups by a level once.
+const GROUP_TWICE: &str = "group names a dimension twice";
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Command {
@@ -102,6 +104,13 @@ pub fn parse(line: &str, columns: &[Column]) -> Result<Command, String> {
                     // `none` is the flat pin, never a dimension.
                     if dims.iter().any(|d| d == "none") {
                         return Err("none stands alone: `group none`".into());
+                    }
+                    if let Some(d) = dims
+                        .iter()
+                        .enumerate()
+                        .find_map(|(i, d)| dims[..i].contains(d).then_some(d))
+                    {
+                        return Err(format!("{GROUP_TWICE}: {d}"));
                     }
                     Ok(Command::Group(dims))
                 }
@@ -328,6 +337,10 @@ mod tests {
             assert_eq!(parse(empty, &cols).unwrap_err(), GROUP_USAGE, "{empty}");
         }
         assert_eq!(parse("group save", &cols).unwrap_err(), REFUSED_GROUP_SAVE);
+        assert_eq!(
+            parse("group region sector region", &cols).unwrap_err(),
+            "group names a dimension twice: region"
+        );
         assert_eq!(
             parse("group slot", &cols).unwrap_err(),
             "group slot needs a number 1\u{2013}9"

@@ -141,9 +141,12 @@ fn read_slot(v: &Value) -> Result<Pin, String> {
         .ok_or_else(|| "not a slot 1\u{2013}9".into())
 }
 
+/// A list of group paths, each at least one label long: an empty path
+/// would be a fold of nothing that no group row could ever match.
 fn read_collapsed(v: &Value) -> Result<BTreeSet<Vec<String>>, String> {
     v.as_array()
-        .and_then(|a| a.iter().map(read_strings).collect())
+        .and_then(|a| a.iter().map(read_strings).collect::<Option<BTreeSet<_>>>())
+        .filter(|paths| paths.iter().all(|p| !p.is_empty()))
         .ok_or_else(|| "not a list of group paths".into())
 }
 
@@ -420,9 +423,6 @@ mod tests {
         );
     }
 
-    use crate::core::grouping::Pin;
-    use std::collections::BTreeSet;
-
     fn paths(p: &[&[&str]]) -> BTreeSet<Vec<String>> {
         p.iter()
             .map(|path| path.iter().map(|s| s.to_string()).collect())
@@ -485,6 +485,23 @@ mod tests {
         assert_eq!(
             notices,
             ["session: dropped pinned: not a list of dimensions"]
+        );
+    }
+
+    #[test]
+    fn an_empty_collapsed_path_drops_the_key() {
+        // A group path names at least one label; an empty inner list would
+        // be a fold of nothing that the tree could never match.
+        let mut t = to_table(&State::default());
+        t.insert(
+            "collapsed".into(),
+            toml::Value::Array(vec![toml::Value::Array(Vec::new())]),
+        );
+        let (back, notices) = from_table(&t);
+        assert!(back.collapsed.is_empty());
+        assert_eq!(
+            notices,
+            ["session: dropped collapsed: not a list of group paths"]
         );
     }
 

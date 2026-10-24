@@ -190,6 +190,10 @@ pub struct PreparedRow {
     pub depth: usize,
     /// `Some(member count)` for a group row.
     pub group: Option<usize>,
+    /// The chevron's element id and selector (`volwatch-fold-<row name>`)
+    /// on a group row, built here so paint formats nothing; empty on a
+    /// member.
+    pub fold_id: SharedString,
     pub cells: Vec<PreparedCell>,
 }
 
@@ -276,8 +280,15 @@ fn column_cell<'r>(row: &'r Row, kind: &ColumnKind, asked: &Ask) -> Option<&'r C
     }
 }
 
-/// A group row's aggregate for a measure column, by the measure's position
-/// in the ask, as a member's cell is found.
+/// A group row's aggregate for `measure`, by the measure's position in the
+/// ask, as a member's cell is found, and only while the cell there is that
+/// measure (means built for another ask are not read).
+fn group_cell_of<'g>(g: &'g GroupInfo, measure: &Measure, asked: &Ask) -> Option<&'g GroupCell> {
+    let pos = asked.measures.iter().position(|m| m == measure)?;
+    g.cells.get(pos).filter(|c| c.measure == *measure)
+}
+
+/// A group row's aggregate for a measure column.
 fn group_cell<'g>(g: &'g GroupInfo, kind: &ColumnKind, asked: &Ask) -> Option<&'g GroupCell> {
     let measure = match kind {
         ColumnKind::Level { measure }
@@ -285,8 +296,7 @@ fn group_cell<'g>(g: &'g GroupInfo, kind: &ColumnKind, asked: &Ask) -> Option<&'
         | ColumnKind::Single { measure } => measure,
         ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Vega => return None,
     };
-    let pos = asked.measures.iter().position(|m| m == measure)?;
-    g.cells.get(pos).filter(|c| c.measure == *measure)
+    group_cell_of(g, measure, asked)
 }
 
 /// The companion a group row shows under `lens`: the members' mean Δ, z
@@ -526,6 +536,10 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
                 stale,
                 depth: row.depth(),
                 group: row.group.as_ref().map(|g| g.members.len()),
+                fold_id: match &row.group {
+                    Some(_) => format!("volwatch-fold-{}", row.name).into(),
+                    None => SharedString::default(),
+                },
                 cells,
             }
         })
@@ -747,11 +761,7 @@ pub fn readout(
         let mut parts = vec![format!("{} \u{b7} {} members", g.label, g.members.len())];
         match column_measure(column) {
             Some(m) => {
-                let c = asked
-                    .measures
-                    .iter()
-                    .position(|x| x == m)
-                    .and_then(|pos| g.cells.get(pos));
+                let c = group_cell_of(g, m, asked);
                 let num = |v: Option<f64>| v.map_or_else(dash, |v| format_number(v, &ONE_DP).text);
                 let sgn = |v: Option<f64>| v.map_or_else(dash, |v| signed(v, &ONE_DP).text);
                 parts.push(format!(
@@ -1171,9 +1181,9 @@ pub enum ChipKind {
 
 /// The header's left side, every string formatted when its inputs change
 /// so paint only clones: the switch control's title, the member count,
-/// the lens chips (`Δ 1d` lit, `1w`, `1m`; or `6M`, `z · 1Y` lit, `2Y`),
-/// the sort chip, the missing members (`1 not in surface`) and the failed
-/// datasets.
+/// the grouping chip (`region`, `pinned ungrouped`), the lens chips (`Δ
+/// 1d` lit, `1w`, `1m`; or `6M`, `z · 1Y` lit, `2Y`), the sort chip, the
+/// missing members (`1 not in surface`) and the failed datasets.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeaderModel {
     pub title: SharedString,

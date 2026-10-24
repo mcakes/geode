@@ -367,7 +367,9 @@ impl VolwatchTile {
             }
         })
         .detach();
-        // Only the vega query reads the frame; the board does not.
+        // A frame change regroups first (an unpinned tile follows the
+        // frame's chain), then the vega query checks its scope and as-of;
+        // the board never reads the frame.
         cx.observe(frame.entity(), |this, _, cx| this.on_frame_changed(cx))
             .detach();
         let paints = Paints::from_theme(cx.theme());
@@ -1133,10 +1135,13 @@ impl VolwatchTile {
             }
             Fold::Toggle | Fold::Open | Fold::Close => {}
         }
-        let Some(at) = self.grid.cursor() else {
+        let Some(&i) = self
+            .grid
+            .cursor()
+            .and_then(|at| self.grid.visible().get(at))
+        else {
             return;
         };
-        let i = self.grid.visible()[at];
         let target = if self.grid.is_group(i) {
             Some(i)
         } else if verb == Fold::Toggle {

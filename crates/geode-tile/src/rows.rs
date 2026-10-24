@@ -364,6 +364,10 @@ impl<R: GridRow> RowModel<R> {
         self.refilter();
     }
 
+    /// The names of the collapsed groups, as [`set_collapsed`] handed
+    /// them, whether or not a row of that name is held.
+    ///
+    /// [`set_collapsed`]: RowModel::set_collapsed
     pub fn collapsed(&self) -> &HashSet<String> {
         &self.collapsed
     }
@@ -378,6 +382,8 @@ impl<R: GridRow> RowModel<R> {
         self.children.get(i).is_some_and(|c| !c.is_empty())
     }
 
+    /// The row `i` nests under (the nearest earlier row one depth up);
+    /// `None` for a root and for an index out of range.
     pub fn parent(&self, i: usize) -> Option<usize> {
         self.parent.get(i).copied().flatten()
     }
@@ -1097,8 +1103,8 @@ mod tests {
         g.move_cursor(down(2), false);
         assert_eq!(g.cursor_name(), Some("SX5E"));
         g.set_collapsed(["g:Core".to_string()]);
-        // The nearest shown index: the hidden row's index clamps to the
-        // group's (0 after the children go), and the hidden name is kept.
+        // The fold rests the cursor on the collapsed group that hid it,
+        // and the hidden row takes the cursor back on unfold.
         assert_eq!(g.cursor_name(), Some("g:Core"));
         g.set_collapsed(Vec::<String>::new());
         assert_eq!(

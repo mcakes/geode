@@ -67,16 +67,17 @@ measured against). Behaviour and limits are in the features guide's
     chip and whether it is muted).
   - `session.rs`: the session table (list, view name, the lens keys as
     words, sort by column id, cursor, band, the pin as `pinned` or
-    `pinned_slot` and the collapsed group paths); an unreadable key drops
-    alone with a notice, and a record without the lens keys reads the
-    default lens.
+    `pinned_slot` and the collapsed group paths, each at least one label
+    long); an unreadable key drops alone with a notice, and a record
+    without the lens keys reads the default lens.
   - `commands.rs`: the `:sort`, `:view`, `:group <dims> | slot N | none`
     and `:unpin` grammar and their completions (`group` completes the
     leaf, then the classifications over it in name order, then `none` and
     `slot`);
     an unsortable column refuses as `s` does; commas alone refuse as a
-    bare `group` does; whether a view name, a dimension or a slot exists
-    is the tile's to say.
+    bare `group` does and a dimension named twice refuses by name;
+    whether a view name, a dimension or a slot exists is the tile's to
+    say.
 - `tile/`: the hosted entity.
   - `mod.rs`: the entity, the watchlist snapshot settle, the keys and the
     escape order, the tabs (`set_view_by_name`, `step_view`), one door for
@@ -139,5 +140,7 @@ cargo bench -p geode-volwatch
 The `prepare` bench times `core::model::prepare` for 25 members under the
 builtin `vol` tab (19 columns; named `prepare_25x24` after the planned
 24); `prepare_25x24_grouped` times the same under five `region` groups
-(30 rows). Both measure well under a millisecond (see the performance
+(30 rows); the group rows' means are built by `group_rows` on every row
+rebuild (each board landing or refresh and each regroup), outside the
+timing. Both measure well under a millisecond (see the performance
 guide).

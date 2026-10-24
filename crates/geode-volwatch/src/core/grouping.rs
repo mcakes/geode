@@ -9,8 +9,14 @@
 //! `region` while the frame says `region / lhu` would be a plausible wrong
 //! grouping.
 
-use geode_core::dimensions::DerivedDimensions;
+use geode_core::classification::labels;
+use geode_core::dimensions::{DerivedDimension, DerivedDimensions};
 use geode_core::link::UNDERLYING;
+use geode_core::volboard::{Cell, Measure};
+
+use super::lens::z_score;
+use super::model::Row;
+use super::views::Ask;
 
 /// The group a member the classification does not map falls under: the
 /// blotter's absent group, last among its siblings.
@@ -72,7 +78,9 @@ pub fn vocabulary(dims: &DerivedDimensions) -> Vec<String> {
 
 /// The tile's grouping override. `None` follows the frame; `Grouping` and
 /// `Flat` stand whatever the frame does; `Slot` re-reads its slot when the
-/// slot changes.
+/// slot changes. The caller computes the [`Applicable`] chain from the
+/// pin's own chain under `Grouping` (the slot's under `Slot`), from the
+/// frame's under `None`, and from the empty chain under `Flat`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Pin {
     #[default]
@@ -105,14 +113,6 @@ pub fn chip_text(pin: &Pin, a: &Applicable) -> String {
 pub fn group_name(path: &[String]) -> String {
     format!("{GROUP_PREFIX}{}", path.join("/"))
 }
-
-use geode_core::classification::labels;
-use geode_core::dimensions::DerivedDimension;
-use geode_core::volboard::{Cell, Measure};
-
-use super::lens::z_score;
-use super::model::Row;
-use super::views::Ask;
 
 /// One measure's aggregate over a group's members: the arithmetic mean of
 /// the members' levels, of their changes, of their z-scores and of their
@@ -304,11 +304,10 @@ fn group_row(label: &str, path: &[String], leaves: &[&Row], asked: &Ask) -> Row 
 
 #[cfg(test)]
 mod tests {
+    use super::fixtures::*;
     use super::*;
     use geode_core::volboard::Stats;
     use geode_tile::rows::GridRow;
-
-    use super::fixtures::*;
 
     fn chain(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
@@ -508,9 +507,10 @@ mod tests {
 
     #[test]
     fn nested_groups_average_over_leaves_not_over_child_means() {
-        // region/sector: Core/Index holds DAX and SX5E; Isles/Index holds
-        // UKX. The top-level group's mean is over its leaves whichever
-        // way it is nested, so the test nests both ways and compares.
+        // sector/region: Index holds Core (DAX, SX5E) and Isles (UKX).
+        // The top-level group's mean is over its three leaves, not over
+        // its two child groups' means, which would weight UKX as much as
+        // DAX and SX5E together.
         let leaves = || {
             vec![
                 leaf("DAX", Some(10.0), 0.0, 0.5, None),
@@ -555,11 +555,10 @@ mod tests {
 /// Fixtures the grouping and model tests share.
 #[cfg(test)]
 pub(crate) mod fixtures {
+    use super::*;
     use chrono::Utc;
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::volboard::{Change, Stats, VolRow};
-
-    use super::*;
 
     pub(crate) fn dims(toml: &str) -> DerivedDimensions {
         let doc = merge_docs(

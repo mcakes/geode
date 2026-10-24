@@ -729,7 +729,7 @@ impl TableDelegate for GridDelegate {
                 let lead = design(row.depth as f32 * TREE_INDENT_PX);
                 let group = row.group.is_some();
                 let collapsed = self.collapsed.get(row_ix).copied().unwrap_or(false);
-                let fold_name: SharedString = format!("volwatch-fold-{}", row.name).into();
+                let fold_name = row.fold_id.clone();
                 let fold_sel = fold_name.clone();
                 let chevron = p.chevron;
                 h_flex()

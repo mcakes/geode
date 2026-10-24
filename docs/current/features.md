@@ -3810,8 +3810,9 @@ groups). A `:group` naming nothing applicable refuses and keeps the
 grouping (`nothing in lhu applies to a vol tile: it groups by
 underlying_ref or a classification over it`); `:group underlying_ref`
 alone pins the flat list; bare `:group` and `:group ,` refuse with `group
-needs dimensions, slot N or none`, and `:group save` points at the
-Grouping dialog. The tree is built when the rows are rebuilt: after a
+needs dimensions, slot N or none`, a dimension named twice with `group
+names a dimension twice: <dim>`, and `:group save` points at the Grouping
+dialog. The tree is built when the rows are rebuilt: after a
 board lands and whenever the grouping or the classifications (pushed by
 the app at startup and on every dimensions reload) change; a lens change
 re-prepares the stored means and rebuilds nothing. One group row per
