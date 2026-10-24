@@ -822,9 +822,16 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Hiding the strip's key hints once learned, per tile or per settings.
 - A per-view default lens or window, if a desk wants the surface tab to
   open under rich/cheap.
-- Grouping and `:group` (plan 6b): the frame's classification over
-  `underlying_ref`, group rows as averages, the fold keys and the emitted
-  group path.
+- A group row's companion never mutes for its members' short histories
+  (a member's short-history z is already blank and contributes nothing;
+  its rank still enters the mean).
+- A collapsed set keeps dead paths after a relabel until a regroup prunes
+  by depth; harmless, but the session carries them.
+- Grouped rows are prepared whole like members; the group rows add at
+  most one row per label per level.
+- The blotter's `:group` grammar shares two gaps the vol tile's grammar
+  closes: `:group ,` parses to an empty grouping, and completion after
+  `group slot N` offers dimensions the parser refuses.
 - An under-wide open-form suffix (`ssr` with no tenor against a two-key
   table) that reaches a request makes a malformed `Exact` source call on
   every refresh: an explicit error, never a wrong value. The document
@@ -953,6 +960,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The demo's `EU50X` row in `europe_risk` (`--demo 1000`).
 - A user `[ssr]` tab naming `ssr 3M` appearing as a fifth tab on reload in
   `--demo`.
+- A grouped tile (`:group region` in `--demo`) with a collapsed group: the
+  chevron, the `<label> · <n>` name cell, the mean cells and the grouping
+  chip in the header.
+- A chevron click on an unfocused tile focusing it and folding the group
+  in one press.
 
 ## Scenario tiles
 

@@ -1,6 +1,7 @@
 //! The prepared model over a synthetic 25-member board under the builtin
 //! vol tab: every cell's text, glyph core, id and width, as the tile
-//! rebuilds it when a board lands or the view, lens or paint changes. Runs
+//! rebuilds it when a board lands or the view, lens or paint changes;
+//! flat, and under five `region` groups of five members (30 rows). Runs
 //! on the UI thread; painting is excluded. Reference measurements are in
 //! `docs/current/performance.md`.
 
@@ -10,7 +11,10 @@ use std::time::Duration;
 
 use chrono::{TimeZone as _, Utc};
 use criterion::{Criterion, criterion_group, criterion_main};
+use geode_core::config::{LayerDoc, merge_docs};
+use geode_core::dimensions::DerivedDimensions;
 use geode_core::volboard::{Cell, Change, Lookback, VolBoard, VolRow};
+use geode_volwatch::core::grouping::group_rows;
 use geode_volwatch::core::lens::LensState;
 use geode_volwatch::core::model::{Inputs, prepare, rows};
 use geode_volwatch::core::views::{ask, builtin, columns, order_tenors};
@@ -67,9 +71,9 @@ fn bench_prepare(c: &mut Criterion) {
         .map(|(i, n)| (n.clone(), (i as f64 - 12.0) * 25_000.0))
         .collect();
     let rows = rows(&members, Some(&board), &|_| None, Some(&vega));
-    let inputs = Inputs {
+    let inputs = |rows| Inputs {
         tile: 1,
-        rows: &rows,
+        rows,
         columns: &cols,
         asked: &asked,
         board_lookback: Lookback::D1,
@@ -83,7 +87,35 @@ fn bench_prepare(c: &mut Criterion) {
     };
     // The name predates the configured tabs; the vol tab lays out 19
     // columns (Underlying, eight level-and-companion pairs, a spark, vega).
-    c.bench_function("prepare_25x24", |b| b.iter(|| prepare(black_box(&inputs))));
+    let flat = inputs(&rows);
+    c.bench_function("prepare_25x24", |b| b.iter(|| prepare(black_box(&flat))));
+
+    // The same members under five `region` groups of five: 30 rows, the
+    // group rows' means built once by `group_rows`, outside the timing, as
+    // the tile builds them once per regroup.
+    let grouped = group_rows(rows.clone(), &["region".into()], &regions(&members), &asked);
+    assert_eq!(grouped.len(), 30);
+    let grouped = inputs(&grouped);
+    c.bench_function("prepare_25x24_grouped", |b| {
+        b.iter(|| prepare(black_box(&grouped)))
+    });
+}
+
+/// A `region` classification over `underlying_ref` mapping `members`
+/// into five labels of five, as a dimensions document would.
+fn regions(members: &[String]) -> DerivedDimensions {
+    let mut toml = String::from("[region]\nfrom = \"underlying_ref\"\n[region.values]\n");
+    for (i, chunk) in members.chunks(5).enumerate() {
+        let names: Vec<String> = chunk.iter().map(|n| format!("\"{n}\"")).collect();
+        toml.push_str(&format!("R{i} = [{}]\n", names.join(", ")));
+    }
+    let doc = merge_docs(
+        "dimensions",
+        &[LayerDoc::builtin("dimensions", &toml).expect("the bench's dimensions parse")],
+    );
+    let (dims, diags) = DerivedDimensions::from_doc(&doc);
+    assert!(diags.is_empty(), "{diags:?}");
+    dims
 }
 
 criterion_group!(benches, bench_prepare);

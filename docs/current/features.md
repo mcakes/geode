@@ -3782,10 +3782,64 @@ descending → member order, a head press walks the shared click cycle, and
 one-word head, bare `:sort` clearing. A pair's level and companion sort
 separately; a single column sorts by the number it shows. Blanks sort last
 in both directions. The Underlying and spark columns refuse with `<head>
-is not sortable`, in `:sort` with the same text. The cursor row is emitted
-into the link group as a one-value `underlying_ref` path; the tile never
-follows a group. The header's sort chip names the column and the direction
-(`vol 3M ↑`, `|Δ 3M| ↓`) and follows a relabel.
+is not sortable`, in `:sort` with the same text. `:group <dims> | slot N |
+none` and `:unpin` set the grouping (below); `:group` completes the
+applicable dimensions, then `none` and `slot`. The cursor row is emitted
+into the link group as its path: the applicable group values in chain
+order, then `underlying_ref` on a member, so a follower narrows to the
+group on a group row and to the member on a leaf; the flat list posts
+`underlying_ref` alone. A path through the `—` group names its dimension
+as NULL and posts nothing (the group keeps its scope, as for the blotter).
+The tile never follows a group. The header's sort chip names the column
+and the direction (`vol 3M ↑`, `|Δ 3M| ↓`) and follows a relabel.
+
+**Grouping.** The grid groups its members as the blotter groups positions.
+The chain is, in order of precedence, a `:group <dims>` pin; a `:group
+slot N` pin (re-read when the slot changes; an empty slot refuses `slot N
+is empty`); a `:group none` pin (flat); else the frame's active grouping,
+read from the `Frame` the tile already observes, so a frame grouping
+change regroups an unpinned tile and never asks the board again. `:unpin`
+releases. Only `underlying_ref` (the leaf, which closes the chain) and
+classifications whose `from` is `underlying_ref` apply; the rest is
+skipped and the header's grouping chip says so (`region`, `region ·
+sector`, `region · lhu skipped`, `ungrouped · lhu, position_ref not
+applicable`, `pinned region`, `pinned ungrouped`; muted while nothing
+groups). A `:group` naming nothing applicable refuses and keeps the
+grouping (`nothing in lhu applies to a vol tile: it groups by
+underlying_ref or a classification over it`); `:group underlying_ref`
+alone pins the flat list; bare `:group` and `:group ,` refuse with `group
+needs dimensions, slot N or none`, and `:group save` points at the
+Grouping dialog. The tree is built in the prepare step, after the board
+lands and whenever the grouping, the classifications (pushed by the app
+at startup and on every dimensions reload) or the lens changes: one group
+row per classification label in the order the classification lists them,
+members under it in list order, a member the classification does not map
+under `—` last. A group row's name cell reads `Banks · 6` behind a
+chevron; its measure cells are the arithmetic mean over the members
+beneath it that have a value, for the level and for each companion
+separately (the mean of the members' Δ, of their z, of their percentile
+ranks — never the z of the mean level), so nesting changes no top-level
+number; vega sums over every member that has one; the sparkline is blank;
+a group with no child value is blank. Its companion mutes only on a
+lookback or window mismatch: a member's short history already blanks the
+z it would contribute. The readout on a group row reads `Core · 2 members
+· ATFM 1M mean 15.5 (2 of 2) · Δ1d mean +0.8 · z 1Y mean +0.5 · pctl 1Y
+mean 70`, the parenthesis counting the members with a board row. `space`
+(and `z a`) toggles the cursor's group row and folds nothing on a member;
+`z o` and `z c` open and close the cursor's group (a member's being its
+parent; closing puts the cursor on the group); `z shift+r` and `z
+shift+m` open and close every group; a press on the chevron toggles its
+group on mouse-down without moving the cursor (an unfocused tile takes
+focus too, since the shell's click-to-focus sees the same press); the `.`
+menu lists the three fold verbs. The collapsed set is saved by group path
+and survives a rebuild; a regroup drops paths deeper than the new chain
+and keeps the rest, so a label the classifications no longer hold stays
+in the session, harmless, until a flatter chain prunes it (`:group none`
+drops every fold). A sort applies at each depth: sibling groups by their
+aggregate, members within their group, blanks last; `/` matches members
+and keeps a group while a member under it matches. `enter` on a group row
+refuses `inspect needs an underlying`, `t` refuses `timeseries needs an
+underlying`, and `y` yanks the group's member names one per line.
 
 **Glyphs.** The cells paint through the shared
 [cell glyphs](#cell-glyphs). A companion is a chip: sign-colored text over
@@ -3838,19 +3892,24 @@ keeps painting; the next answer restores it.
 (`6M → 1Y → 2Y`), `m` the shown number in a single view, `p` paint, `s`
 sort, `enter` the band, `t` the timeseries refusal (below), `y` yank,
 `shift+r` refresh now, `g w` the switcher, `.` the action menu,
-`v`/`shift+v` a row selection, motions and `escape`. A right press on a
+`space`/`z a` toggle the cursor's group, `z o`/`z c` open and close it,
+`z shift+r`/`z shift+m` every group, `v`/`shift+v` a row selection,
+motions and `escape`. A right press on a
 row moves the cursor there (unless inside a selection) and opens the
 action menu at the pointer; `⋯` opens it under the header. The menu lists
 the switcher, every tab with its digit and the shown one ticked, then the
 lens, lookback, metric, window and swap verbs (the pointer's route to
 `r`, `d`, `q`, `w` and `m`; the swap is disabled in a pair view with the
-reason `a pair view shows both`), then paint, sort, inspect, timeseries,
-yank and refresh, each with its chord, the paint tick, and a disabled
-row's reason in place of its chord. `escape` peels one layer at a time:
+reason `a pair view shows both`), then paint, sort, the three fold verbs
+(Toggle group on a group row, Expand all groups and Collapse all groups
+while grouped), inspect (disabled on a group row with `inspect needs an
+underlying`), timeseries, yank and refresh, each with its chord, the
+paint tick, and a disabled row's reason in place of its chord. `escape` peels one layer at a time:
 the menu, the band, a selection, a `/` narrowing, then the notices.
 
 **Header and footer.** The header carries the switch control
-(`Vol · <list> ▾`), the member count, the lens chips (the lookbacks under
+(`Vol · <list> ▾`), the member count, the grouping chip (above), the lens
+chips (the lookbacks under
 moves, the one in force lit as `Δ 1d`; the windows under rich/cheap, lit
 as `z · 1Y` or `pctl · 6M`; a press sets it), the sort chip, `<n> not in
 surface` in the warning tone, a danger chip per failed dataset, then the
@@ -3869,8 +3928,10 @@ measure's dataset (`SX5E · ATFM 3M 15.9 · Δ1d — · history starts
 
 **Session.** The table saves the list, the view name, the lens keys
 (`lens`, `lookback`, `metric`, `window`, `shown`, each a word), the sort
-by column id, the cursor's name, whether the band is open and column
-widths per view (`column_widths`, keyed `<view name>:<column id>`; an
+by column id, the grouping pin (`pinned`, a list of dimensions, empty for
+`:group none`; or `pinned_slot`), the collapsed group paths (`collapsed`,
+written only while a group is folded), the cursor's name, whether the
+band is open and column widths per view (`column_widths`, keyed `<view name>:<column id>`; an
 entry without a view prefix is dropped). An unreadable key is dropped with
 its own notice and the rest kept. A view name the document no longer
 declares (a record from before the configured tabs naming `changes`,
@@ -3950,6 +4011,14 @@ Known limitations:
 - The three fixed dataset names (`vol_surface`, `realized_vol`,
   `varswap`) cannot be renamed; only a table dataset is named by the
   document.
+- A group row's z is the mean of its members' z, not a z of the group's
+  mean level against a pooled history; the two differ, and the readout
+  says `mean`.
+- A group's vega sums every member's vega including members the surface
+  lacks; its means exclude them, so a group's vega and its level may
+  count different names (the readout's `(n of m)` names the difference).
+- The fold chevron is the only pointer route to a single fold;
+  expand-all and collapse-all are in the `.` menu.
 
 See the [crate guide](../../crates/geode-volwatch/README.md) for the
 module map.

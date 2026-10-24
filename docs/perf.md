@@ -3373,3 +3373,26 @@ the Lever C runs above:
 
 Both views stay inside the 50 ms board-read budget; the tile adds nothing
 to the read.
+
+## Vol watchlist grouped prepare (2026-10-24)
+
+Head `041fe0c9` (the grouping code as of `c1853812`): the vol watchlist
+tile under the frame's grouping. Load averages (1 / 5 / 15 min, 18
+cores) 2.54 / 3.27 / 2.80 at the start and 7.71 / 4.58 / 3.29 at the
+end; the mutation sweep had just finished and no other build ran.
+Criterion medians, 100 samples (`cargo bench -p geode-volwatch --
+prepare`).
+
+| Benchmark | Median |
+|---|---|
+| `prepare_25x24` | 94.7 µs (interval 94.4–95.0) |
+| `prepare_25x24_grouped` | 113.3 µs (interval 112.9–113.8) |
+
+`prepare_25x24_grouped` is the same 25 members and `vol` columns under
+five `region` groups of five (30 rows): `group_rows` builds the five group
+rows' means once, outside the timing, as the tile does once per regroup;
+`prepare` then formats 30 rows instead of 25 and adds the tree lead to
+the name column's width. The grouped case is 1.20× the flat one, five
+more rows and no extra work per cell. The flat case reads 94.7 µs here
+against the 148 µs recorded at load 5 to 12 on 2026-10-16; the machine
+was quiet for this run, and the figure is not a code change.
