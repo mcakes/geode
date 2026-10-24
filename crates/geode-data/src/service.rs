@@ -5869,34 +5869,17 @@ mod tests {
         }
     }
 
-    /// The demo's three history declarations, without history windows so
-    /// a fake starting a year ago is never swept, and `ssr`: a table
-    /// dataset keyed `(underlying_ref, tenor)` with the one value `ssr`.
+    /// The demo's four history declarations (the surface, realized,
+    /// varswap and the `ssr` table keyed `(underlying_ref, tenor)` with
+    /// the one value `ssr`), without history windows so a fake starting a
+    /// year ago is never swept.
     fn board_schema() -> SchemaSpec {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../../examples/demo-config/datasets.toml"
         ))
         .unwrap();
-        let ssr = r#"
-[ssr]
-family = "history"
-key = ["underlying_ref", "tenor"]
-[ssr.columns.underlying_ref]
-type = "utf8"
-role = "dimension"
-textual = true
-[ssr.columns.tenor]
-type = "utf8"
-role = "dimension"
-[ssr.columns.ssr]
-type = "f64"
-role = "value"
-"#;
-        let doc = merge_docs(
-            "datasets",
-            &[LayerDoc::builtin("datasets", &format!("{text}\n{ssr}")).unwrap()],
-        );
+        let doc = merge_docs("datasets", &[LayerDoc::builtin("datasets", &text).unwrap()]);
         let (schema, diags) = SchemaSpec::from_doc(&doc);
         assert!(diags.is_empty(), "{diags:?}");
         let mut out = SchemaSpec::default();
