@@ -4,5 +4,6 @@
 
 mod chrome;
 mod data;
+mod grouping;
 mod harness;
 mod keys;

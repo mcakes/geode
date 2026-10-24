@@ -10,7 +10,8 @@ use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use chrono::{TimeZone as _, Utc};
-use geode_core::config::Layer;
+use geode_core::config::{Layer, LayerDoc, merge_docs};
+use geode_core::dimensions::DerivedDimensions;
 use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
 use geode_core::query::{HistoryKeysOutcome, HistoryKeysParams, QueryKey, ReferenceTable};
@@ -411,6 +412,54 @@ pub(super) fn landed_with_reference(
     landed(cx)
 }
 
+/// `region` (Core = DAX, SX5E; Isles = UKX) and `sector` (Index = all
+/// three) over the underlying; `desk` over `book`, which never applies.
+pub(super) fn europe_dims() -> DerivedDimensions {
+    dims_from(
+        r#"
+[region]
+from = "underlying_ref"
+[region.values]
+Core = ["DAX", "SX5E"]
+Isles = ["UKX"]
+
+[sector]
+from = "underlying_ref"
+[sector.values]
+Index = ["DAX", "SX5E", "UKX"]
+
+[desk]
+from = "book"
+[desk.values]
+Flow = ["b1"]
+"#,
+    )
+}
+
+pub(super) fn dims_from(toml: &str) -> DerivedDimensions {
+    let doc = merge_docs(
+        "dimensions",
+        &[LayerDoc::builtin("dimensions", toml).unwrap()],
+    );
+    let (dims, diags) = DerivedDimensions::from_doc(&doc);
+    assert!(diags.is_empty(), "{diags:?}");
+    dims
+}
+
+/// [`landed`] with `record` as the tile's session record (the fixture
+/// board answered as in `landed_board`).
+pub(super) fn landed_with_record(
+    cx: &mut gpui::TestAppContext,
+    record: toml::Table,
+) -> (Harness, gpui::VisualTestContext) {
+    let (h, mut vcx) = open_with(cx, one_list(), Some(record), VolwatchSettings::default());
+    let tag = Harness::boards(&h.requests())[0].tag;
+    let asked = h.asked_of(&vcx);
+    h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    h.requests();
+    (h, vcx)
+}
+
 #[allow(dead_code, reason = "the key, chrome and band tests drive the rest")]
 impl Harness {
     /// Every action id the keymap matched so far, in order.
@@ -617,6 +666,43 @@ impl Harness {
 
     pub(super) fn band_open(&self, vcx: &gpui::VisualTestContext) -> bool {
         self.tile.read_with(vcx, |t, _| t.state.band)
+    }
+
+    /// Push `dims` through the factory, as the bridge does on a reload.
+    pub(super) fn set_dims(&self, vcx: &mut gpui::VisualTestContext, dims: DerivedDimensions) {
+        vcx.update(|_, cx| self.factory.set_dims(dims, cx));
+    }
+
+    /// Make `chain` the workspace lane's ad hoc grouping, as the Grouping
+    /// dialog does; an empty chain returns the lane to the view default.
+    pub(super) fn set_frame_chain(&self, vcx: &mut gpui::VisualTestContext, chain: &[&str]) {
+        let chain: Vec<String> = chain.iter().map(|s| s.to_string()).collect();
+        self.frame.update(vcx, |f, cx| {
+            let mut lane = f.view_mut(WorkspaceIx::FIRST);
+            if chain.is_empty() {
+                lane.forget_ad_hoc();
+            } else {
+                lane.set_ad_hoc(chain);
+            }
+            cx.notify();
+        });
+    }
+
+    /// Store `chain` in grouping slot `slot` (the other slots kept).
+    pub(super) fn set_slot(&self, vcx: &mut gpui::VisualTestContext, slot: u8, chain: &[&str]) {
+        let chain: Vec<String> = chain.iter().map(|s| s.to_string()).collect();
+        self.frame.update(vcx, |f, cx| {
+            let mut slots = f.slots().clone();
+            slots.set(slot, chain);
+            f.replace_slots(slots);
+            cx.notify();
+        });
+    }
+
+    /// The header's grouping chip text.
+    pub(super) fn grouping_chip(&self, vcx: &gpui::VisualTestContext) -> String {
+        self.tile
+            .read_with(vcx, |t, _| t.header.grouping.to_string())
     }
 }
 

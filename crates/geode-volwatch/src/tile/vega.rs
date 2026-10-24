@@ -118,9 +118,11 @@ impl VolwatchTile {
         }
     }
 
-    /// The frame changed: vega alone is asked again, and only when the
-    /// scope or as-of it reads moved.
+    /// The frame moved: the grouping is re-read first (a pinned tile's
+    /// request does not change, so it regroups nothing), then vega asks
+    /// again when its scope or as-of moved.
     pub(crate) fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
+        self.regroup(false, cx);
         if self.vega.setting.is_none() || self.members.is_empty() {
             return;
         }

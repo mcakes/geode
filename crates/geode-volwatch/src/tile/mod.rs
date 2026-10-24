@@ -60,6 +60,7 @@ use table::{GridDelegate, GridEvent, Paints, restored_widths, sized_key, sortabl
 
 use crate::content::Shared;
 use crate::core::commands::{self, Command};
+use crate::core::grouping::{self, Applicable, Pin, group_name, group_rows};
 use crate::core::lens::{Lens, LensState, Metric, Shown};
 use crate::core::model::{BandModel, HeaderModel, Prepared, Row, sort_value};
 use crate::core::session::{self, State};
@@ -203,6 +204,11 @@ pub struct VolwatchTile {
     pub(crate) board_ask: Option<Ask>,
     /// The shown list's live members, as the last snapshot gave them.
     pub(crate) members: Vec<String>,
+    /// The chain the tile last resolved (pin, slot or frame), so a frame
+    /// or dimensions notify that moves neither asks for no regroup.
+    chain: Vec<String>,
+    /// The chain applied: what groups and what the header names skipped.
+    pub(crate) grouping: Applicable,
     pub(crate) grid: RowModel<Row>,
     /// The board ask the grid's sort comparator reads values through.
     sorted_with: Option<Ask>,
@@ -403,6 +409,8 @@ impl VolwatchTile {
             board: None,
             board_ask: None,
             members: Vec::new(),
+            chain: Vec::new(),
+            grouping: Applicable::default(),
             grid,
             sorted_with: None,
             prepared: Rc::default(),
@@ -450,8 +458,63 @@ impl VolwatchTile {
             stack: None,
         };
         this.rebuild_columns();
+        // The restored pin resolves against the startup dimensions before
+        // the first rows are built, so the restore groups at once.
+        this.chain = this.requested_chain(cx);
+        this.grouping = grouping::applicable(&this.chain, &this.shared.dims.borrow());
+        let depth = this.chain.len();
+        this.state.collapsed.retain(|p| p.len() <= depth);
         this.settle(cx);
         this
+    }
+
+    /// The chain the pin asks for: a pinned list, a pinned slot's current
+    /// content, nothing for a flat pin, else the frame's active grouping.
+    fn requested_chain(&self, cx: &App) -> Vec<String> {
+        let frame = self.frame.read(cx);
+        match &self.state.pin {
+            Pin::Grouping(g) => g.clone(),
+            Pin::Slot(n) => frame
+                .slots()
+                .get(*n)
+                .map(<[String]>::to_vec)
+                .unwrap_or_default(),
+            Pin::Flat => Vec::new(),
+            Pin::None => frame
+                .active_grouping()
+                .map(<[String]>::to_vec)
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Resolve the chain against the dimensions and rebuild the tree when
+    /// either changed (or on `force`: a pin verb, a dimensions push whose
+    /// labels may have moved). Collapsed paths deeper than the requested
+    /// chain cannot exist under it and go; the rest stay, dead or not: a
+    /// path whose dimension is skipped today folds again when a reload
+    /// brings the classification back. Never a board requery: the tree is
+    /// arranged from the rows held.
+    pub(super) fn regroup(&mut self, force: bool, cx: &mut Context<Self>) {
+        let chain = self.requested_chain(cx);
+        let applicable = grouping::applicable(&chain, &self.shared.dims.borrow());
+        if !force && chain == self.chain && applicable == self.grouping {
+            return;
+        }
+        self.chain = chain;
+        self.grouping = applicable;
+        let depth = self.chain.len();
+        self.state.collapsed.retain(|p| p.len() <= depth);
+        self.rebuild_rows(cx);
+        self.rebuild_chrome(cx);
+        cx.notify();
+    }
+
+    /// The row under the cursor.
+    fn cursor_row(&self) -> Option<&Row> {
+        self.grid
+            .cursor()
+            .and_then(|at| self.grid.visible().get(at))
+            .map(|&i| self.grid.row(i))
     }
 
     /// The tenors the views lay out: the listing, else the conventions.
@@ -599,12 +662,10 @@ impl VolwatchTile {
         cx.notify();
     }
 
-    /// The factory stored new dimensions: regroup. (Task 7 routes this
-    /// through `regroup`.)
+    /// The factory stored new dimensions: the labels may have moved, so
+    /// the tree is rebuilt even under an unchanged chain.
     pub(crate) fn dims_changed(&mut self, cx: &mut Context<Self>) {
-        self.rebuild_rows(cx);
-        self.rebuild_chrome(cx);
-        cx.notify();
+        self.regroup(true, cx);
     }
 
     /// Whether the tile names a list the snapshot holds.
@@ -689,7 +750,8 @@ impl VolwatchTile {
     }
 
     /// Rebuild the rows from the members, the board and the reference
-    /// tables, then everything painted from them.
+    /// tables, arranged under the applicable chain with the saved folds
+    /// applied, then everything painted from them.
     pub(crate) fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         let reference = reference(cx);
         let lookup = |name: &str| {
@@ -697,14 +759,24 @@ impl VolwatchTile {
                 .lookup(REFERENCE_DATASET, name, REFERENCE_NAME)
                 .map(str::to_string)
         };
-        let rows = crate::core::model::rows(
+        let leaves = crate::core::model::rows(
             &self.members,
             self.board.as_deref(),
             &lookup,
             self.vega.values.as_ref(),
         );
+        let empty = Ask::default();
+        let asked = self.board_ask.as_ref().unwrap_or(&empty);
+        let rows = group_rows(
+            leaves,
+            &self.grouping.kept,
+            &self.shared.dims.borrow(),
+            asked,
+        );
         self.sync_sort();
         self.grid.set_rows(rows);
+        self.grid
+            .set_collapsed(self.state.collapsed.iter().map(|p| group_name(p)));
         self.prepare();
         self.arm_stale(cx);
         self.sync_table(cx);
@@ -714,17 +786,12 @@ impl VolwatchTile {
     /// ask; empty with no cursor or before any board lands (a row is not
     /// yet known to be missing).
     fn rebuild_readout(&mut self) {
-        let row = self
-            .grid
-            .cursor()
-            .and_then(|at| self.grid.visible().get(at))
-            .map(|&i| self.grid.row(i));
         let column = self.columns.get(self.cursor_col);
         let notes = self
             .board
             .as_deref()
             .map_or(&[][..], |b| b.notes.as_slice());
-        self.readout = match (row, column, self.board_ask.as_ref()) {
+        self.readout = match (self.cursor_row(), column, self.board_ask.as_ref()) {
             (Some(row), Some(column), Some(asked)) => crate::core::model::readout(
                 row,
                 column,
@@ -1021,11 +1088,13 @@ impl VolwatchTile {
         let Some(at) = self.grid.cursor() else {
             return;
         };
-        let Some(row) = self.grid.visible().get(at).map(|&i| self.grid.row(i)) else {
-            return;
+        let refused = match self.cursor_row() {
+            None => return,
+            Some(row) => (self.board.is_some() && !row.present)
+                .then(|| format!("{} is not in the surface", row.name)),
         };
-        if self.board.is_some() && !row.present {
-            self.notices.refused = Some(format!("{} is not in the surface", row.name));
+        if let Some(text) = refused {
+            self.notices.refused = Some(text);
             self.rebuild_chrome(cx);
             cx.notify();
             return;
@@ -1089,11 +1158,7 @@ impl VolwatchTile {
             | ColumnKind::Single { measure } => Some(measure),
             ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Vega => None,
         };
-        let name = self
-            .grid
-            .cursor()
-            .and_then(|at| self.grid.visible().get(at))
-            .map(|&i| self.grid.row(i).name.clone());
+        let name = self.cursor_row().map(|r| r.name.clone());
         let text = match (measure.and_then(|m| m.inputs().into_iter().next()), name) {
             (Some(input), Some(member)) => {
                 let dataset = match &input.role {
@@ -1150,11 +1215,7 @@ impl VolwatchTile {
     /// The cursor row's member as a one-value `underlying_ref` path;
     /// `Nothing` while no row is under the cursor.
     pub(crate) fn emission(&self) -> Emission {
-        let name = self
-            .grid
-            .cursor()
-            .and_then(|at| self.grid.visible().get(at))
-            .map(|&i| self.grid.row(i).name.as_str());
+        let name = self.cursor_row().map(|r| r.name.as_str());
         Emission {
             cursor: match name {
                 Some(name) => CursorScope::Path(underlying_scope(name)),
@@ -1233,22 +1294,49 @@ impl VolwatchTile {
     }
 
     /// `:sort <col> [asc|desc|abs]`, bare `:sort` restores member order;
-    /// `:view <name>` shows a tab.
+    /// `:view <name>` shows a tab; `:group <dims> | slot N | none` pins a
+    /// grouping and `:unpin` releases it to the frame. A pin that groups
+    /// nothing refuses rather than pin an ungrouped list the trader did
+    /// not ask for; `:group underlying_ref` alone is the flat list by name
+    /// and pins.
     pub(crate) fn command(&mut self, line: &str, cx: &mut Context<Self>) -> Result<(), String> {
         match commands::parse(line, &self.columns)? {
             Command::Sort { column, order } => self.set_sort(Some((column, order)), cx),
             Command::SortClear => self.set_sort(None, cx),
             Command::View(name) => self.set_view_by_name(&name, cx)?,
-            // The pin lands with the grouping wiring; the grammar is ahead of it.
-            Command::Group(_) | Command::GroupSlot(_) | Command::GroupNone | Command::Unpin => {
-                return Err("grouping arrives in the next task".into());
+            Command::Group(dims) => {
+                let a = grouping::applicable(&dims, &self.shared.dims.borrow());
+                if a.kept.is_empty() && !dims.iter().any(|d| d == geode_core::link::UNDERLYING) {
+                    return Err(format!(
+                        "nothing in {} applies to a vol tile: it groups by underlying_ref or a classification over it",
+                        dims.join(" ")
+                    ));
+                }
+                self.state.pin = Pin::Grouping(dims);
+                self.regroup(true, cx);
+            }
+            Command::GroupSlot(n) => {
+                if self.frame.read(cx).slots().get(n).is_none() {
+                    return Err(format!("slot {n} is empty"));
+                }
+                self.state.pin = Pin::Slot(n);
+                self.regroup(true, cx);
+            }
+            Command::GroupNone => {
+                self.state.pin = Pin::Flat;
+                self.regroup(true, cx);
+            }
+            Command::Unpin => {
+                self.state.pin = Pin::None;
+                self.regroup(true, cx);
             }
         }
         Ok(())
     }
 
     pub(crate) fn completions(&self, line: &str, cursor: usize) -> Vec<String> {
-        commands::completions(line, cursor, &self.columns, &self.tabs(), &[])
+        let dims = grouping::vocabulary(&self.shared.dims.borrow());
+        commands::completions(line, cursor, &self.columns, &self.tabs(), &dims)
     }
 
     /// `/` narrows as the query is typed; committing keeps it, cancelling

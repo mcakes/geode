@@ -16,6 +16,7 @@ use super::{
     SHOWN_ACTION, SORT_ACTION, SWITCH_ACTION, TIMESERIES_ACTION, VIEW_ACTIONS, VolwatchTile,
     WINDOW_ACTION, YANK_ACTION, snapshot,
 };
+use crate::core::grouping;
 use crate::core::model::header;
 
 /// Which menu is up. Menu mode, its keys and its pick door are shared by
@@ -255,12 +256,7 @@ impl VolwatchTile {
             Some(c) => Err(SharedString::from(format!("{} is not sortable", c.head))),
             None => Err(SharedString::new_static("no column")),
         };
-        let row = self
-            .grid
-            .cursor()
-            .and_then(|at| self.grid.visible().get(at))
-            .map(|&i| self.grid.row(i));
-        let inspect = match row {
+        let inspect = match self.cursor_row() {
             None => Err(SharedString::new_static("no row")),
             Some(r) if self.board.is_some() && !r.present => Err(SharedString::from(format!(
                 "{} is not in the surface",
@@ -324,9 +320,10 @@ impl VolwatchTile {
             .collect()
     }
 
-    /// The header's title, count, lens chips and board counts, from the
-    /// shown list's name: rebuilt with the chrome, so a list switch or a
-    /// restore whose snapshot has not arrived names its list at once.
+    /// The header's title, count, lens chips, grouping chip and board
+    /// counts, from the shown list's name: rebuilt with the chrome, so a
+    /// list switch or a restore whose snapshot has not arrived names its
+    /// list at once. The grouping chip is muted while nothing groups.
     pub(crate) fn rebuild_header(&mut self) {
         let sort = self.sort_label();
         self.header = header(
@@ -335,10 +332,8 @@ impl VolwatchTile {
             &self.state.lens,
             sort.as_deref(),
             self.board.as_deref(),
-            // The grouping chip's text and mute; the applicable chain
-            // replaces these placeholders once the tile holds one.
-            "ungrouped",
-            true,
+            &grouping::chip_text(&self.state.pin, &self.grouping),
+            self.grouping.kept.is_empty(),
         );
     }
 
