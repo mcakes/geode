@@ -42209,8 +42209,8 @@ run_mutation "volwatch: the percentile chip takes the rank at display precision"
 # A rank over fewer than PCTL_MIN_COUNT observations paints muted.
 run_mutation "volwatch: a short window paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '                || c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT)' \
-  '                || c.pctl.is_some_and(|(_, count)| count < 1)' \
+  '        || (i.lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT))' \
+  '        || (i.lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < 1))' \
   geode-volwatch \
   a_short_count_mutes_the_rank_and_blanks_the_z
 
@@ -42288,11 +42288,13 @@ run_mutation "volwatch: an unchanged snapshot asks nothing" \
   geode-volwatch \
   an_unchanged_snapshot_asks_nothing
 
-# The cursor row is emitted as a one-value underlying path for followers.
+# The cursor row is emitted as its path (the group values, then the
+# underlying on a member) for followers; a flat list posts the one-value
+# underlying path.
 run_mutation "volwatch: emission names the cursor row" \
   crates/geode-volwatch/src/tile/mod.rs \
-  '                Some(name) => CursorScope::Path(underlying_scope(name)),' \
-  '                Some(_) => CursorScope::Nothing,' \
+  '                    None => CursorScope::Path(path_scope(&pairs)),' \
+  '                    None => CursorScope::Nothing,' \
   geode-volwatch \
   the_cursor_row_is_emitted_as_a_one_value_underlying_path
 
@@ -42308,8 +42310,12 @@ run_mutation "volwatch: the restored cursor waits for its row" \
 # a silent key reads as broken.
 run_mutation "volwatch: t is refused with a notice" \
   crates/geode-volwatch/src/tile/mod.rs \
-  '        self.notices.refused = Some(text);' \
-  '        let _ = text;' \
+  '            (Some(_), None) => return,
+        };
+        self.notices.refused = Some(text);' \
+  '            (Some(_), None) => return,
+        };
+        let _ = text;' \
   geode-volwatch \
   t_is_refused_with_a_notice_naming_the_gap
 
@@ -42456,9 +42462,9 @@ run_mutation "volwatch: the chip ceiling is a tint, not a fill" \
 # the old threshold. Staleness is the name's tone and the header run.
 run_mutation "volwatch: a stale row keeps its cells' tone" \
   crates/geode-volwatch/src/core/model.rs \
-  '                    let px = cell.text.chars().count() as f32 * i.mono_advance_px;' \
+  '                    let mut px = cell.text.chars().count() as f32 * i.mono_advance_px;' \
   '                    cell.muted |= stale;
-                    let px = cell.text.chars().count() as f32 * i.mono_advance_px;' \
+                    let mut px = cell.text.chars().count() as f32 * i.mono_advance_px;' \
   geode-volwatch \
   a_stale_row_keeps_its_cells_tone_and_mutes_only_its_flag
 
@@ -42764,8 +42770,8 @@ run_mutation "volwatch: the demo ssr table is keyed by tenor" \
 # reads as a 2Y one.
 run_mutation "volwatch: a companion from another window paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '            i.board_window != Some(i.lens.window.duration())' \
-  '            false' \
+  '        Lens::Rich => i.board_window != Some(i.lens.window.duration()),' \
+  '        Lens::Rich => false,' \
   geode-volwatch \
   a_companion_from_another_window_than_the_one_shown_paints_muted
 
@@ -42778,6 +42784,103 @@ run_mutation "volwatch: the menu offers the lens verbs" \
   $'            {\n                let _ = LENS_ACTION;\n                MenuRow::Action(self.verb(LOOKBACK_ACTION, "Cycle lookback"))\n            },' \
   geode-volwatch \
   the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches
+
+# ---- Vol watchlist: grouping ----
+#
+# The frame's classifications over `underlying_ref` group the members;
+# a group row averages its members; the fold keys hide members; the
+# cursor posts its group path.
+
+# `lhu` is not a classification over the underlying: keeping it would be
+# a plausible wrong grouping named in the header.
+run_mutation "volwatch: a skipped dimension never groups" \
+  crates/geode-volwatch/src/core/grouping.rs \
+  '        if over_underlying && !out.kept.contains(name) {' \
+  '        if !out.kept.contains(name) {' \
+  geode-volwatch \
+  the_chain_keeps_only_underlying_ref_classifications_in_order
+
+# A mean over every member, present or not, halves a group with one
+# missing name.
+run_mutation "volwatch: a group mean divides by the members with a value" \
+  crates/geode-volwatch/src/core/grouping.rs \
+  '                    .filter_map(|r| cell_of(r, pos, m)?.current)
+                    .filter_map(finite),
+            ),
+            delta: mean(' \
+  '                    .filter_map(|r| cell_of(r, pos, m)?.current)
+                    .filter_map(finite),
+            )
+            .map(|v| v * present.len() as f64 / leaves.len() as f64),
+            delta: mean(' \
+  geode-volwatch \
+  a_group_counts_every_member_and_averages_only_those_with_a_value
+
+# A nested group averages every leaf beneath it, not its first.
+run_mutation "volwatch: a group averages every member beneath it" \
+  crates/geode-volwatch/src/core/grouping.rs \
+  '        let leaves: Vec<&Row> = mine.iter().map(|(_, r)| r).collect();' \
+  '        let leaves: Vec<&Row> = mine.iter().map(|(_, r)| r).take(1).collect();' \
+  geode-volwatch \
+  nested_groups_average_over_leaves_not_over_child_means
+
+# The unmapped group is last among its siblings, never first.
+run_mutation "volwatch: the unmapped group falls last" \
+  crates/geode-volwatch/src/core/grouping.rs \
+  '        if l == UNMAPPED {
+            usize::MAX' \
+  '        if l == UNMAPPED {
+            0' \
+  geode-volwatch \
+  groups_follow_the_labels_order_members_keep_list_order_and_unmapped_falls_last
+
+# A pinned list reads the frame: the pin would be decoration.
+run_mutation "volwatch: a pinned tile ignores a frame grouping change" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '            Pin::Grouping(g) => g.clone(),' \
+  '            Pin::Grouping(_) => frame
+                .active_grouping()
+                .map(<[String]>::to_vec)
+                .unwrap_or_default(),' \
+  geode-volwatch \
+  colon_group_pins_and_a_frame_change_does_not_regroup_until_unpin
+
+# `:group none` that follows the frame is not a flat pin.
+run_mutation "volwatch: group none pins a flat list" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '                self.state.pin = Pin::Flat;' \
+  '                self.state.pin = Pin::None;' \
+  geode-volwatch \
+  colon_group_none_flattens_while_the_frame_stays_grouped
+
+# A collapsed group that still shows its members hides nothing.
+run_mutation "volwatch: a collapsed group hides its members" \
+  crates/geode-tile/src/rows.rs \
+  '            if !kept[i] || self.under_collapsed(i) {' \
+  '            if !kept[i] {' \
+  geode-tile \
+  a_collapsed_group_hides_its_descendants_and_keeps_its_row
+
+# Members sorted only at the roots would keep list order under a group.
+run_mutation "volwatch: siblings sort within their parent" \
+  crates/geode-tile/src/rows.rs \
+  '        let mut kids = self.children[i].clone();
+        self.sort_siblings(&mut kids);' \
+  '        let kids = self.children[i].clone();' \
+  geode-tile \
+  a_tree_sorts_siblings_within_their_parent_and_blanks_last
+
+# A member that posts its name alone widens a follower to the whole
+# list's underlying rather than the group's.
+run_mutation "volwatch: a member emits its group path before the underlying" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '                    (None, _) => pairs.push((UNDERLYING.to_string(), row.name.clone())),' \
+  '                    (None, _) => {
+                        pairs.clear();
+                        pairs.push((UNDERLYING.to_string(), row.name.clone()));
+                    }' \
+  geode-volwatch \
+  the_cursor_emits_the_group_path_on_a_group_and_the_member_under_it_on_a_leaf
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
