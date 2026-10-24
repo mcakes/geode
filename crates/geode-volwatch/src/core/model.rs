@@ -1336,6 +1336,29 @@ mod tests {
     }
 
     #[test]
+    fn the_percentile_chip_takes_the_rank_at_display_precision() {
+        // 0.8951 shows `90`: the chip sits at the displayed rank's side of
+        // the median (0.80), not the raw rank's (0.79).
+        let vol = vol();
+        let pctl = LensState {
+            lens: Lens::Rich,
+            metric: Metric::Pctl,
+            ..LensState::default()
+        };
+        let p = prepare(&inputs(rows_with_pctl(0.8951, 251), &vol, pctl));
+        let comp = &p.rows[0].cells[column_index(&vol, &pctl, "atfm-3M-companion")];
+        assert_eq!(comp.text.as_ref(), "90");
+        let Glyph::Chip(Some(chip)) = comp.glyph else {
+            panic!("{:?}", comp.glyph)
+        };
+        assert!(
+            (chip.alpha - 0.80 * CHIP_CEILING).abs() < 1e-4,
+            "the tint follows the displayed rank: {}",
+            chip.alpha
+        );
+    }
+
+    #[test]
     fn the_chip_ceiling_is_a_tint_not_a_fill() {
         // The column's largest move takes the ceiling itself.
         let vol = vol();

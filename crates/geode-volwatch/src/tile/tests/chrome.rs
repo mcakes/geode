@@ -353,6 +353,47 @@ fn a_reload_that_relabels_a_column_reaches_the_grid_without_a_board(cx: &mut gpu
 }
 
 #[gpui::test]
+fn a_reload_that_relabels_the_sorted_column_renames_the_sort_chip(cx: &mut gpui::TestAppContext) {
+    use geode_core::volboard::Measure;
+    use geode_core::volviews::VolColumn;
+    let (h, mut vcx) = landed(cx);
+    h.command(&mut vcx, "sort atfm-3M-level").unwrap();
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.header.sort.clone()),
+        Some("vol 3M \u{2191}".into())
+    );
+    let mut settings = VolwatchSettings::default();
+    let vol = settings
+        .views
+        .views
+        .iter_mut()
+        .find(|v| v.name == "vol")
+        .unwrap();
+    for c in &mut vol.columns {
+        if let VolColumn::Measure { measure, label, .. } = c
+            && *measure == Measure::atfm("3M")
+        {
+            *label = Some("3m vol".into());
+        }
+    }
+    vcx.update(|_, cx| h.factory.set_settings(settings, cx));
+    assert!(
+        Harness::boards(&h.requests()).is_empty(),
+        "a label asks nothing of the board"
+    );
+    // The chip is rebuilt from the new columns, not the ones it was set on.
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.header.sort.clone()),
+        Some("3m vol 3M \u{2191}".into())
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.state.sort.clone()),
+        Some(("atfm-3M-level".into(), geode_core::sort::SortOrder::Asc)),
+        "the sort stays on the column by id"
+    );
+}
+
+#[gpui::test]
 fn a_reload_that_keeps_the_shown_view_keeps_it_and_requeries_only_for_new_measures(
     cx: &mut gpui::TestAppContext,
 ) {

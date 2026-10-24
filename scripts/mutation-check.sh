@@ -42088,21 +42088,23 @@ run_mutation "history: a deeper coverage row in the batch covers a prefix ask" \
   geode-data \
   missing_by_key_batches_a_prefix_ask_like_covered_spans
 
-# ---- Vol watchlist Part 4: the tile ----
+# ---- Vol watchlist: the tile ----
 #
 # The tile asks one board for the union of its view's columns (and the
 # band's measures while open), drops a superseded answer, keeps the last
 # board on a failure, and prepares every glyph from the displayed number.
-# Entry names start "volwatch:" so one substring selects exactly this set.
+# Tabs come from `vol_views.toml`; the lens picks the companion beside
+# every level. Entry names start "volwatch:" so one substring selects
+# exactly this set.
 
-# The same ask asks nothing: a requery on every view or band change would
-# put a board request on the queue for nothing.
+# The same ask asks nothing: a requery on every lens, view or band change
+# would put a board request on the queue for nothing.
 run_mutation "volwatch: a view switch requeries only when the ask grows" \
   crates/geode-volwatch/src/core/views.rs \
   '    next.lookback != last.lookback' \
   '    true || next.lookback != last.lookback' \
   geode-volwatch \
-  a_view_switch_requeries_only_when_the_ask_changes
+  a_lens_or_shown_flip_never_requeries_but_a_window_change_does
 
 # A narrower ask is answered by the board already held: closing the band
 # or switching to a view that reads less never requeries.
@@ -42112,7 +42114,7 @@ run_mutation "volwatch: a narrower ask does not requery" \
   '        || next.measures.iter().any(|m| !last.measures.contains(m))
         || next.measures.len() != last.measures.len()' \
   geode-volwatch \
-  the_band_joins_the_ask_only_while_open
+  the_band_joins_the_ask_at_the_window_in_force_and_closing_never_requeries
 
 # A measure the last ask lacks requeries: without it a view switch paints
 # columns the board was never asked for, as blanks.
@@ -42121,35 +42123,30 @@ run_mutation "volwatch: a measure the last ask lacks requeries" \
   '        || next.measures.iter().any(|m| !last.measures.contains(m))' \
   '        || next.measures.iter().any(|m| false && !last.measures.contains(m))' \
   geode-volwatch \
-  digits_switch_views_and_requery_only_when_the_ask_grows
+  digits_and_tab_walk_the_configured_tabs_and_requery_only_when_the_ask_grows
 
-# The band's measures (every surface point, the year window, three
-# one-year sparks) join the ask only while it is open.
+# The band's measures (every surface point, the window in force, three
+# window-long sparks) join the ask only while it is open.
 run_mutation "volwatch: the band's measures join the ask only while open" \
   crates/geode-volwatch/src/core/views.rs \
   '    if band {' \
   '    if false {' \
   geode-volwatch \
-  the_band_joins_the_ask_only_while_open
+  the_band_joins_the_ask_at_the_window_in_force_and_closing_never_requeries
 
-# A 25-delta put is the 0.75 call delta. Swapped, the Skew view's put and
-# call columns read each other's wing.
-run_mutation "volwatch: the skew view's put column reads the 0.75 call delta" \
+# The band's IV - RV pairs the 3M surface with the 20-day realized window.
+run_mutation "volwatch: the band's IV-RV reads the 20-day window" \
   crates/geode-volwatch/src/core/views.rs \
-  '                    delta: 0.75,' \
-  '                    delta: 0.25,' \
+  '    out.push(Measure::IvRv {
+        tenor: "3M".into(),
+        window: "20D".into(),
+    });' \
+  '    out.push(Measure::IvRv {
+        tenor: "3M".into(),
+        window: "5D".into(),
+    });' \
   geode-volwatch \
-  the_skew_points_and_the_ivrv_window_are_pinned
-
-# IV - RV pairs the 3M surface with the 20-day realized window.
-run_mutation "volwatch: the rich/cheap IV-RV bar reads the 20-day window" \
-  crates/geode-volwatch/src/core/views.rs \
-  '                tenor: "3M".into(),
-                window: "20D".into(),' \
-  '                tenor: "3M".into(),
-                window: "5D".into(),' \
-  geode-volwatch \
-  the_skew_points_and_the_ivrv_window_are_pinned
+  the_band_reads_the_surface_by_tenor_and_delta_and_captions_its_sparks
 
 # Only the latest admitted tag's board lands: a board for a superseded ask
 # (`d` pressed twice fast) would paint the old lookback over the new one.
@@ -42185,39 +42182,44 @@ run_mutation "volwatch: a missing member keeps its row at the foot" \
 # not paint a bullish fill under a zero.
 run_mutation "volwatch: the chip takes the displayed sign" \
   crates/geode-volwatch/src/core/model.rs \
-  '                Glyph::Chip(chip(v, sign, scale, CHIP_CEILING))' \
-  '                Glyph::Chip(chip(
-                    v,
-                    if v > 0.0 { Sign::Positive } else if v < 0.0 { Sign::Negative } else { Sign::Zero },
-                    scale,
-                    CHIP_CEILING,
-                ))' \
+  '        Glyph::Chip(companion_chip(
+            displayed_companion(v, &i.lens),
+            sign,
+            scale,
+            &i.lens,
+        ))' \
+  '        Glyph::Chip(companion_chip(
+            displayed_companion(v, &i.lens),
+            if v > 0.0 { Sign::Positive } else if v < 0.0 { Sign::Negative } else { Sign::Zero },
+            scale,
+            &i.lens,
+        ))' \
   geode-volwatch \
   the_chip_takes_the_displayed_sign_and_the_columns_scale
 
-# The slider reads the rank at display precision: 0.8951 shows `90` and
-# must take the warning tone the text implies.
-run_mutation "volwatch: the slider rank is rounded to display precision" \
+# The percentile chip tints by the rank at display precision: 0.8951
+# shows `90` and must sit at 90's distance from the median, not 89.5's.
+run_mutation "volwatch: the percentile chip takes the rank at display precision" \
   crates/geode-volwatch/src/core/model.rs \
-  '            ColumnKind::Pctl { .. } => Glyph::Slider(slider(rank_percent(v) / 100.0)),' \
-  '            ColumnKind::Pctl { .. } => Glyph::Slider(slider(v)),' \
+  '        (Lens::Rich, Metric::Pctl) => rank_percent(v) / 100.0,' \
+  '        (Lens::Rich, Metric::Pctl) => v,' \
   geode-volwatch \
-  the_slider_gets_the_rank_at_display_precision
+  the_percentile_chip_takes_the_rank_at_display_precision
 
 # A rank over fewer than PCTL_MIN_COUNT observations paints muted.
 run_mutation "volwatch: a short window paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '            .is_some_and(|(_, count)| count < PCTL_MIN_COUNT),' \
-  '            .is_some_and(|(_, count)| count < 1),' \
+  '        Lens::Rich => c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT),' \
+  '        Lens::Rich => c.pctl.is_some_and(|(_, count)| count < 1),' \
   geode-volwatch \
-  a_short_window_paints_muted_with_its_count_in_the_readout
+  a_short_count_mutes_the_rank_and_blanks_the_z
 
 # A change over a lookback other than the one shown (the new board not yet
 # landed) paints muted.
 run_mutation "volwatch: a change from another lookback than the one shown paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '        ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } => i.board_lookback != i.shown,' \
-  '        ColumnKind::Change { .. } | ColumnKind::ForwardChange { .. } => false,' \
+  '        Lens::Moves => i.board_lookback != i.lens.lookback,' \
+  '        Lens::Moves => false,' \
   geode-volwatch \
   a_change_from_another_lookback_than_the_one_shown_paints_muted
 
@@ -42227,7 +42229,7 @@ run_mutation "volwatch: paint off drops the glyphs" \
   '    let glyph = if !i.paint {' \
   '    let glyph = if false {' \
   geode-volwatch \
-  paint_off_keeps_the_numbers_and_drops_tints_sliders_and_bars
+  paint_off_keeps_the_numbers_and_drops_the_chips_and_tints
 
 # The band's surface columns read 10p 25p atm 25c 10c as call deltas
 # 0.90 0.75 0.50 0.25 0.10; reversed, puts paint under the call heads.
@@ -42241,10 +42243,10 @@ run_mutation "volwatch: the band's delta order" \
 # The lit lookback chip is the lookback in force.
 run_mutation "volwatch: the lookback chip lit is the one in force" \
   crates/geode-volwatch/src/core/model.rs \
-  '    let lookbacks = Lookback::ALL.map(|l| (l, l == shown));' \
-  '    let lookbacks = Lookback::ALL.map(|l| (l, false && l == shown));' \
+  '                let lit = l == lens.lookback;' \
+  '                let lit = false && l == lens.lookback;' \
   geode-volwatch \
-  the_header_names_the_list_count_lookback_sort_and_the_missing
+  the_header_chips_are_the_lookbacks_under_moves_and_the_windows_under_rich
 
 # Blanks sort last in both directions: a member the surface lacks must not
 # head an ascending sort. Both arms swap together: the default order already
@@ -42342,8 +42344,8 @@ run_mutation "tile: the row model keeps a put cursor on its row across a rebuild
 # missing fix.
 run_mutation "volwatch: the readout names where a changeless cell's history starts" \
   crates/geode-volwatch/src/core/model.rs \
-  '                if let Some(note) = note_for(notes, measure_dataset(m)) {' \
-  '                if let Some(note) = None::<&str> {' \
+  '                if let Some(note) = note_for(notes, &measure_dataset(m)) {' \
+  '                if let Some(note) = note_for(notes, &measure_dataset(m)).filter(|_| false) {' \
   geode-volwatch \
   a_cell_without_a_change_names_where_its_history_starts
 
@@ -42403,11 +42405,15 @@ run_mutation "volwatch: widths add the table's fixed chrome" \
   relayout_adds_the_tables_fixed_chrome_to_every_width
 
 # A width belongs to a column in a view: keyed by the bare id, a fit in
-# Changes lands on Levels' column of the same id, whose head is wider.
+# one view lands on another view's column of the same id, whose head is
+# wider.
 run_mutation "volwatch: widths are keyed by view" \
   crates/geode-volwatch/src/tile/table.rs \
-  '    format!("{}:{}", view.key(), id)' \
-  '    id.to_string()' \
+  '    format!("{view}:{id}")' \
+  '    {
+        let _ = view;
+        id.to_string()
+    }' \
   geode-volwatch \
   autosize_sizes_only_the_current_view_and_a_view_switch_keeps_it
 
@@ -42424,10 +42430,7 @@ run_mutation "volwatch: a header drag records the dragged column" \
 # keyed by view) is dropped, not applied to every view.
 run_mutation "volwatch: a record without view prefixes is ignored" \
   crates/geode-volwatch/src/tile/table.rs \
-  '    fitted.retain(|k, _| {
-        k.split_once('"'"':'"'"')
-            .is_some_and(|(v, _)| View::ALL.iter().any(|view| view.key() == v))
-    });' \
+  '    fitted.retain(|k, _| k.split_once('"'"':'"'"').is_some_and(|(v, _)| !v.is_empty()));' \
   '    fitted.retain(|_, _| true);' \
   geode-volwatch \
   a_part_4_record_without_view_prefixes_is_ignored
@@ -42490,14 +42493,14 @@ run_mutation "volwatch: a stale row's band keeps its tone" \
   geode-volwatch \
   a_stale_rows_band_keeps_its_cells_tone
 
-# shift+tab is the inverse of tab: off by one it skips a view in one
-# direction and lands on the same view in the other.
+# shift+tab is the inverse of tab: stepping forward under both keys lands
+# on the wrong tab and never wraps backwards.
 run_mutation "volwatch: shift+tab steps back and wraps" \
-  crates/geode-volwatch/src/core/views.rs \
-  '        Self::ALL[(usize::from(self.digit()) + n - 2) % n]' \
-  '        Self::ALL[(usize::from(self.digit()) + n - 1) % n]' \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '        let next = ((at + delta) % n + n) % n;' \
+  '        let next = ((at + delta.abs()) % n + n) % n;' \
   geode-volwatch \
-  prev_is_the_inverse_of_next_and_wraps
+  digits_and_tab_walk_the_configured_tabs_and_requery_only_when_the_ask_grows
 
 # The band reads as part of the grid above it: at the chrome's smaller
 # size it reads as a footer instead.
@@ -42563,21 +42566,197 @@ run_mutation "volwatch: the band's name follows the grid's stale verdict" \
   geode-volwatch \
   a_stale_after_reload_rearms_the_row_wake_ups
 
-# Each step key hints on its own; zipped, unbinding one hid both.
-run_mutation "volwatch: the strip hints each bound step key on its own" \
-  crates/geode-volwatch/src/tile/chrome.rs \
-  '        self.strip_keys = (
-            tips::chord_for(&self.chords, VIEW_NEXT_ACTION),
-            tips::chord_for(&self.chords, VIEW_PREV_ACTION),
-        );' \
-  '        self.strip_keys = match tips::chord_for(&self.chords, VIEW_NEXT_ACTION)
-            .zip(tips::chord_for(&self.chords, VIEW_PREV_ACTION))
-        {
-            Some((n, p)) => (Some(n), Some(p)),
-            None => (None, None),
-        };' \
+# Each hint names only its own key: unbinding one action drops its hint
+# and keeps the others; all-or-nothing hid every hint over one removal.
+run_mutation "volwatch: the strip hints each bound key on its own" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '        self.strip_hints = wanted
+            .into_iter()
+            .filter_map(|(action, label)| {
+                Some((action, tips::chord_for(&self.chords, action)?, label))
+            })
+            .collect();' \
+  '        let n = wanted.len();
+        self.strip_hints = wanted
+            .into_iter()
+            .filter_map(|(action, label)| {
+                Some((action, tips::chord_for(&self.chords, action)?, label))
+            })
+            .collect();
+        if self.strip_hints.len() != n {
+            self.strip_hints.clear();
+        }' \
   geode-volwatch \
-  the_strip_names_each_bound_step_key_on_its_own
+  the_strip_lists_the_tabs_with_digits_the_lens_readout_and_the_hints
+
+# ---- Vol watchlist: configured tabs, the lens and the open measure form ----
+
+# z = (level - mean) / sd: with the sign flipped a level far above its
+# mean reads as an ordinary z.
+run_mutation "volwatch: the z-score subtracts the mean" \
+  crates/geode-volwatch/src/core/lens.rs \
+  '    finite((current - stats.mean) / stats.sd)' \
+  '    finite((current + stats.mean) / stats.sd)' \
+  geode-volwatch \
+  z_is_blank_for_a_zero_sd_or_a_short_count
+
+# A non-positive sd is not a dispersion: a division by zero already
+# reads as blank, so the guard's observable half is a negative sd, which
+# would otherwise show a plausible z of the wrong sign.
+run_mutation "volwatch: a non-positive sd blanks the z" \
+  crates/geode-volwatch/src/core/lens.rs \
+  '        || !stats.sd.is_finite()
+        || stats.sd <= 0.0
+' \
+  '        || !stats.sd.is_finite()
+' \
+  geode-volwatch \
+  a_count_of_exactly_sixty_yields_a_z_and_a_negative_sd_blanks_it
+
+# Fewer than PCTL_MIN_COUNT observations blank the z: a z over a dozen
+# days says nothing about a year.
+run_mutation "volwatch: a short count blanks the z" \
+  crates/geode-volwatch/src/core/lens.rs \
+  '    if stats.count < PCTL_MIN_COUNT' \
+  '    if stats.count < 1' \
+  geode-volwatch \
+  z_is_blank_for_a_zero_sd_or_a_short_count
+
+# The minimum is inclusive: exactly sixty observations show their z.
+run_mutation "volwatch: the z count boundary" \
+  crates/geode-volwatch/src/core/lens.rs \
+  '    if stats.count < PCTL_MIN_COUNT' \
+  '    if stats.count <= PCTL_MIN_COUNT' \
+  geode-volwatch \
+  a_count_of_exactly_sixty_yields_a_z_and_a_negative_sd_blanks_it
+
+# The board's sd is the population's over the window's observations; a
+# sample correction shrinks every z by the same silent factor.
+run_mutation "volwatch: stats are over the population" \
+  crates/geode-core/src/volboard/reduce.rs \
+  '    let var = values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;' \
+  '    let var = values.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / (n - 1.0);' \
+  geode-core \
+  stats_are_the_population_mean_and_sd_of_the_window
+
+# A window or lookback change asks again: the board held answers another
+# window, and the companion cells would keep painting it under the new
+# chip.
+run_mutation "volwatch: a window change requeries" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '        if requery {
+            self.resubmit(false, cx);
+        }' \
+  '        if requery && false {
+            self.resubmit(false, cx);
+        }' \
+  geode-volwatch \
+  r_q_and_m_change_the_lens_without_a_requery_and_w_and_d_requery
+
+# The window is asked under every lens, so `r` never requeries: asked
+# only under rich/cheap, every flip to it puts a board on the queue.
+run_mutation "volwatch: a lens flip does not requery" \
+  crates/geode-volwatch/src/core/views.rs \
+  '                push_unique(&mut measures, measure.clone());
+                window = Some(lens.window.duration());' \
+  '                push_unique(&mut measures, measure.clone());
+                window = Some(lens.window.duration()).filter(|_| lens.lens == super::lens::Lens::Rich);' \
+  geode-volwatch \
+  a_lens_or_shown_flip_never_requeries_but_a_window_change_does
+
+# A table measure's dataset is listed in the request; unlisted, the data
+# service refuses or reads nothing for an open-form column.
+run_mutation "volwatch: the table measure lists its dataset" \
+  crates/geode-volwatch/src/core/views.rs \
+  '            if let Measure::Table { dataset, .. } = m
+                && !out.contains(dataset)' \
+  '            if let Measure::Table { dataset, .. } = m
+                && false
+                && !out.contains(dataset)' \
+  geode-volwatch \
+  the_ask_is_the_union_with_the_window_in_force_and_the_tables_read
+
+# A reload keeps the shown view by name; inverted, every reload throws
+# the trader back to the default tab.
+run_mutation "volwatch: a reload keeps the shown view by name" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '                .take_if(|n| self.applied_views.get(n).is_none())' \
+  '                .take_if(|n| self.applied_views.get(n).is_some())' \
+  geode-volwatch \
+  a_reload_that_keeps_the_shown_view_keeps_it_and_requeries_only_for_new_measures
+
+# A reload that drops the shown view posts its name even when the
+# default's ask is inside the last board and nothing is asked; the chrome
+# is rebuilt after the columns, not left to the next action.
+run_mutation "volwatch: a views push rebuilds the chrome after the columns" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '            self.rebuild_rows(cx);
+            self.rebuild_chrome(cx);
+        }
+        let vega' \
+  '            self.rebuild_rows(cx);
+        }
+        let vega' \
+  geode-volwatch \
+  a_reload_that_drops_the_shown_view_opens_the_default_with_a_notice
+
+# A percentile chip's magnitude and sign are its distance from the
+# median: measured from zero every rank reads as above it.
+run_mutation "volwatch: a percentile chip takes its side of the median" \
+  crates/geode-volwatch/src/core/lens.rs \
+  '    (rank - 0.5) / 0.5' \
+  '    (rank - 0.0) / 0.5' \
+  geode-volwatch \
+  the_companion_follows_the_lens_and_the_metric
+
+# A single view shows the level until `m`; reading the companion before
+# the swap paints a change in a level's place.
+run_mutation "volwatch: a single view shows the level until m" \
+  crates/geode-volwatch/src/core/model.rs \
+  '        ColumnKind::Level { .. } | ColumnKind::Single { .. } => {
+            column_cell(row, kind, asked)?.current.and_then(finite)
+        }' \
+  '        ColumnKind::Level { .. } => column_cell(row, kind, asked)?.current.and_then(finite),
+        ColumnKind::Single { .. } => companion(column_cell(row, kind, asked)?, lens),' \
+  geode-volwatch \
+  a_single_cell_shows_the_level_over_the_tint_and_m_swaps_in_the_companion
+
+# A single view of mixed families keeps the family heads: with the
+# all-points switch forced, an ATFM column in a mixed view heads as a
+# bare tenor and delta.
+run_mutation "volwatch: the all-points grouping switch" \
+  crates/geode-volwatch/src/core/views.rs \
+  '    let all_points = view.columns.iter().all(|c| match c {' \
+  '    let all_points = true || view.columns.iter().all(|c| match c {' \
+  geode-volwatch \
+  a_single_surface_view_groups_by_tenor_and_heads_by_delta
+
+# An open-form measure reads one value column; a two-value table would
+# pick one silently.
+run_mutation "volwatch: the resolver refuses a two-value table" \
+  crates/geode-core/src/volviews.rs \
+  '            if shape.values != 1 {' \
+  '            if shape.values == 0 {' \
+  geode-core \
+  resolve_refuses_a_table_of_the_wrong_shape
+
+# A table role's dataset is keyed by underlying_ref first: the member is
+# the first key cell of every asked tuple.
+run_mutation "volwatch: check_dataset needs underlying_ref first for a table role" \
+  crates/geode-data/src/query/volboard.rs \
+  '            if ds.key.first().map(String::as_str) != Some("underlying_ref") {' \
+  '            if ds.key.first().map(String::as_str) == Some("underlying_ref") {' \
+  geode-data \
+  a_table_role_needs_a_history_dataset_keyed_by_underlying_with_one_value
+
+# The demo ssr table is keyed by underlying and tenor, the shape the
+# builtin `ssr 3M` open form reads.
+run_mutation "volwatch: the demo ssr table is keyed by tenor" \
+  crates/geode-compose/src/demo_hanweck.rs \
+  '        "ssr" => Some(&["underlying_ref", "tenor"]),' \
+  '        "ssr" => Some(&["underlying_ref", "tenor", "delta"]),' \
+  geode-compose \
+  the_surface_ladders_1w_to_5y_at_seven_deltas_and_ssr_is_a_fourth_table
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

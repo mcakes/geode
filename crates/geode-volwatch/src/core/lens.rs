@@ -373,6 +373,39 @@ mod tests {
         assert_eq!(z_score(&cell(Some(19.6), None, None, None)), None);
     }
 
+    /// Sixty observations is enough: the minimum is inclusive, so a
+    /// window exactly at it shows its z rather than a blank. A negative
+    /// sd, or a mean or level that is not a number, blanks it: a division
+    /// by zero already reads as blank, so the sign guard is what keeps a
+    /// corrupt sd from showing a plausible z.
+    #[test]
+    fn a_count_of_exactly_sixty_yields_a_z_and_a_negative_sd_blanks_it() {
+        let at_minimum = cell(Some(19.6), None, None, Some((16.9, 1.9, PCTL_MIN_COUNT)));
+        assert!((z_score(&at_minimum).unwrap() - (19.6 - 16.9) / 1.9).abs() < 1e-12);
+        assert_eq!(
+            z_score(&cell(
+                Some(19.6),
+                None,
+                None,
+                Some((16.9, 1.9, PCTL_MIN_COUNT - 1))
+            )),
+            None
+        );
+        assert_eq!(
+            z_score(&cell(Some(19.6), None, None, Some((16.9, -1.9, 251)))),
+            None,
+            "a negative sd is not a dispersion"
+        );
+        assert_eq!(
+            z_score(&cell(Some(19.6), None, None, Some((f64::NAN, 1.9, 251)))),
+            None
+        );
+        assert_eq!(
+            z_score(&cell(Some(f64::NAN), None, None, Some((16.9, 1.9, 251)))),
+            None
+        );
+    }
+
     #[test]
     fn the_companion_follows_the_lens_and_the_metric() {
         let c = cell(Some(19.6), Some(0.8), Some(0.91), Some((16.9, 1.9, 251)));
