@@ -1149,7 +1149,10 @@ board) goes through `geode_tile::rows::RowModel`, which the watchlist and
 the vol watchlist run over their own row types. The cursor, a selection's
 anchor and a restored cursor are held by name: a cursor the trader put on a
 row follows it across the rebuild, a cursor nobody moved keeps its index,
-and a restored cursor waits for the rows that hold its name.
+and a restored cursor waits for the rows that hold its name. The vol
+watchlist gives it a tree (group rows over members, in preorder): a sort
+orders siblings under one parent, `/` keeps a group while a member under it
+matches, and a collapsed group hides its members and keeps its row.
 
 ### Pages
 

@@ -15,6 +15,7 @@
 //! (`default_cmp`, by default the order they were given in).
 
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::fmt;
 use std::ops::Range;
 use std::rc::Rc;
@@ -40,6 +41,12 @@ pub trait GridRow {
     /// `Equal` keeps the rows' given order (a stable sort).
     fn default_cmp(_a: &Self, _b: &Self) -> Ordering {
         Ordering::Equal
+    }
+    /// The row's depth in a tree given in preorder: a parent before its
+    /// descendants, which are the rows after it with a greater depth. `0`
+    /// for every row of a flat list, which is the default.
+    fn depth(&self) -> usize {
+        0
     }
 }
 
@@ -81,6 +88,15 @@ pub struct RowModel<R: GridRow> {
     rows: Vec<R>,
     /// Excluded rows, counted when the rows are set.
     excluded: usize,
+    /// Each row's parent in the tree the depths describe; `None` at a root.
+    parent: Vec<Option<usize>>,
+    /// Each row's children in given order; empty for a leaf.
+    children: Vec<Vec<usize>>,
+    /// The roots in given order.
+    roots: Vec<usize>,
+    /// Group rows (by name) whose descendants are hidden. Held by name so
+    /// a fold survives a rebuild, as the cursor does.
+    collapsed: HashSet<String>,
     sort: Option<Order<R>>,
     /// Indices into `rows` in sort order.
     order: Vec<usize>,
@@ -119,6 +135,10 @@ impl<R: GridRow> Default for RowModel<R> {
         Self {
             rows: Vec::new(),
             excluded: 0,
+            parent: Vec::new(),
+            children: Vec::new(),
+            roots: Vec::new(),
+            collapsed: HashSet::new(),
             sort: None,
             order: Vec::new(),
             query: String::new(),
@@ -168,6 +188,7 @@ impl<R: GridRow> RowModel<R> {
     pub fn set_rows(&mut self, rows: Vec<R>) {
         self.excluded = rows.iter().filter(|r| r.excluded()).count();
         self.rows = rows;
+        self.link();
         self.reorder();
         self.refilter();
     }
@@ -335,6 +356,121 @@ impl<R: GridRow> RowModel<R> {
         self.marks.get(visible_i)
     }
 
+    /// Hide the descendants of the group rows named; a name that is not a
+    /// group row (or not a row) is kept and ignored, so a fold saved
+    /// before a regroup does no harm.
+    pub fn set_collapsed(&mut self, names: impl IntoIterator<Item = String>) {
+        self.collapsed = names.into_iter().collect();
+        self.refilter();
+    }
+
+    pub fn collapsed(&self) -> &HashSet<String> {
+        &self.collapsed
+    }
+
+    /// Whether row `i` is a collapsed group.
+    pub fn is_collapsed(&self, i: usize) -> bool {
+        self.is_group(i) && self.collapsed.contains(self.rows[i].name())
+    }
+
+    /// Whether row `i` has rows beneath it.
+    pub fn is_group(&self, i: usize) -> bool {
+        self.children.get(i).is_some_and(|c| !c.is_empty())
+    }
+
+    pub fn parent(&self, i: usize) -> Option<usize> {
+        self.parent.get(i).copied().flatten()
+    }
+
+    /// The leaves beneath row `i` in given order (none for a leaf).
+    pub fn leaves_under(&self, i: usize) -> Vec<usize> {
+        let mut out = Vec::new();
+        let mut stack: Vec<usize> = self.children.get(i).cloned().unwrap_or_default();
+        stack.reverse();
+        while let Some(j) = stack.pop() {
+            if self.children[j].is_empty() {
+                out.push(j);
+            } else {
+                stack.extend(self.children[j].iter().rev().copied());
+            }
+        }
+        out
+    }
+
+    /// Every row with children, in given order.
+    pub fn group_rows(&self) -> Vec<usize> {
+        (0..self.rows.len()).filter(|&i| self.is_group(i)).collect()
+    }
+
+    /// Link the preorder rows into parents, children and roots: a row's
+    /// parent is the nearest earlier row with a smaller depth.
+    fn link(&mut self) {
+        let n = self.rows.len();
+        self.parent = vec![None; n];
+        self.children = vec![Vec::new(); n];
+        self.roots.clear();
+        let mut open: Vec<usize> = Vec::new();
+        for i in 0..n {
+            let d = self.rows[i].depth();
+            while open.last().is_some_and(|&p| self.rows[p].depth() >= d) {
+                open.pop();
+            }
+            match open.last() {
+                Some(&p) => {
+                    self.parent[i] = Some(p);
+                    self.children[p].push(i);
+                }
+                None => self.roots.push(i),
+            }
+            open.push(i);
+        }
+    }
+
+    /// The ancestor that folds the row named away: the topmost collapsed
+    /// one, the only one of them still shown.
+    fn folding(&self, name: &str) -> Option<usize> {
+        let mut i = self.rows.iter().position(|r| r.name() == name)?;
+        let mut top = None;
+        while let Some(p) = self.parent[i] {
+            if self.collapsed.contains(self.rows[p].name()) {
+                top = Some(p);
+            }
+            i = p;
+        }
+        top
+    }
+
+    /// Whether any ancestor of row `i` is collapsed.
+    fn under_collapsed(&self, mut i: usize) -> bool {
+        while let Some(p) = self.parent[i] {
+            if self.collapsed.contains(self.rows[p].name()) {
+                return true;
+            }
+            i = p;
+        }
+        false
+    }
+
+    /// Order `ids` (siblings) by the default order, then stably by the
+    /// sort's comparator.
+    fn sort_siblings(&self, ids: &mut [usize]) {
+        let rows = &self.rows;
+        ids.sort_by(|&a, &b| Self::default_order(&rows[a], &rows[b]));
+        if let Some(order) = &self.sort {
+            ids.sort_by(|&a, &b| (order.cmp)(&rows[a], &rows[b]));
+        }
+    }
+
+    /// Append row `i` and its subtree to `order`, siblings sorted.
+    fn emit(&self, i: usize, order: &mut Vec<usize>) {
+        order.push(i);
+        let mut kids = self.children[i].clone();
+        self.sort_siblings(&mut kids);
+        for k in kids {
+            self.emit(k, order);
+        }
+    }
+
     /// Where `name` shows, if it does.
     fn position(&self, name: &str) -> Option<usize> {
         self.visible
@@ -365,32 +501,49 @@ impl<R: GridRow> RowModel<R> {
             .then_with(|| R::default_cmp(a, b))
     }
 
+    /// The order: every parent before its subtree, siblings by the sort
+    /// over the default order. A flat list is one set of siblings.
     fn reorder(&mut self) {
-        self.order.clear();
-        self.order.extend(0..self.rows.len());
-        let rows = &self.rows;
-        self.order
-            .sort_by(|&a, &b| Self::default_order(&rows[a], &rows[b]));
-        let Some(order) = &self.sort else {
-            return;
-        };
-        // Stable over the default order, which breaks every tie.
-        self.order.sort_by(|&a, &b| (order.cmp)(&rows[a], &rows[b]));
+        let mut roots = self.roots.clone();
+        self.sort_siblings(&mut roots);
+        let mut order = Vec::with_capacity(self.rows.len());
+        for r in roots {
+            self.emit(r, &mut order);
+        }
+        self.order = order;
     }
 
-    /// Rebuild the shown rows from the order and the filter, then reseat
-    /// the cursor on its name when shown, else at the nearest index. A
-    /// selection whose anchor no longer shows ends.
+    /// Rebuild the shown rows from the order, the filter and the folds,
+    /// then reseat the cursor on its name when shown, else at the nearest
+    /// index. Leaves match the filter; a group stays while a descendant
+    /// does; a collapsed group hides its descendants. A selection whose
+    /// anchor no longer shows ends.
     fn refilter(&mut self) {
         let mut narrow = Narrow::new(&self.query);
+        let n = self.rows.len();
+        let mut kept = vec![false; n];
+        let mut marks: Vec<ColumnMarks> = vec![ColumnMarks::default(); n];
+        // Preorder puts children after their parent, so the reverse walk
+        // settles every child before its parent reads them.
+        for &i in self.order.iter().rev() {
+            if self.children[i].is_empty() {
+                let columns = self.rows[i].narrow_fields();
+                if let Some(m) = narrow.row(&columns) {
+                    kept[i] = true;
+                    marks[i] = m;
+                }
+            } else {
+                kept[i] = self.children[i].iter().any(|&c| kept[c]);
+            }
+        }
         self.visible.clear();
         self.marks.clear();
         for &i in &self.order {
-            let columns = self.rows[i].narrow_fields();
-            if let Some(m) = narrow.row(&columns) {
-                self.visible.push(i);
-                self.marks.push(m);
+            if !kept[i] || self.under_collapsed(i) {
+                continue;
             }
+            self.visible.push(i);
+            self.marks.push(std::mem::take(&mut marks[i]));
         }
         // A selection whose anchor or cursor row is no longer shown ends:
         // the cursor would fall to a neighbour, and the span re-resolved
@@ -436,7 +589,15 @@ impl<R: GridRow> RowModel<R> {
                 {
                     self.hidden = Some(s.to_string());
                 }
-                self.set_cursor(self.cursor.map_or(0, |c| c.min(len - 1)));
+                // A fold hiding the row rests the cursor on the group that
+                // folded it, where the trader pressed: the old index would
+                // land on whichever row slid up beneath it.
+                let folded = put
+                    .and_then(|s| self.folding(s))
+                    .and_then(|g| self.position(self.rows[g].name()));
+                self.set_cursor(
+                    folded.unwrap_or_else(|| self.cursor.map_or(0, |c| c.min(len - 1))),
+                );
             }
         }
     }
@@ -446,6 +607,7 @@ impl<R: GridRow> RowModel<R> {
 struct Row {
     name: &'static str,
     reference: Option<&'static str>,
+    depth: usize,
 }
 
 #[cfg(test)]
@@ -455,6 +617,9 @@ impl GridRow for Row {
     }
     fn narrow_fields(&self) -> Vec<&str> {
         vec![self.name, self.reference.unwrap_or("")]
+    }
+    fn depth(&self) -> usize {
+        self.depth
     }
 }
 
@@ -469,6 +634,7 @@ mod tests {
         Row {
             name,
             reference: None,
+            depth: 0,
         }
     }
 
@@ -476,7 +642,29 @@ mod tests {
         Row {
             name,
             reference: Some(reference),
+            depth: 0,
         }
+    }
+
+    fn deep(name: &'static str, depth: usize) -> Row {
+        Row {
+            name,
+            reference: None,
+            depth,
+        }
+    }
+
+    /// Core → DAX, SX5E; Isles → UKX; `—` → NEW. Preorder.
+    fn tree() -> Vec<Row> {
+        vec![
+            deep("g:Core", 0),
+            deep("DAX", 1),
+            deep("SX5E", 1),
+            deep("g:Isles", 0),
+            deep("UKX", 1),
+            deep("g:—", 0),
+            deep("NEW", 1),
+        ]
     }
 
     fn rows(names: &[&'static str]) -> Vec<Row> {
@@ -811,5 +999,112 @@ mod tests {
         g.start_selection();
         assert!(g.targets().is_empty());
         assert_eq!(g.counts(), (0, 0));
+    }
+
+    #[test]
+    fn a_tree_links_parents_children_and_leaves() {
+        let mut g = RowModel::new();
+        g.set_rows(tree());
+        assert!(g.is_group(0));
+        assert!(!g.is_group(1));
+        assert_eq!(g.parent(1), Some(0));
+        assert_eq!(g.parent(0), None);
+        assert_eq!(g.leaves_under(0), vec![1, 2]);
+        assert_eq!(g.group_rows(), vec![0, 3, 5]);
+        assert_eq!(
+            names(&g),
+            ["g:Core", "DAX", "SX5E", "g:Isles", "UKX", "g:—", "NEW"]
+        );
+    }
+
+    #[test]
+    fn a_tree_sorts_siblings_within_their_parent_and_blanks_last() {
+        // The comparator orders by a number each row carries in its name's
+        // position here: g:Isles (7) > g:Core (3); UKX blank; leaves within
+        // Core: SX5E (9) > DAX (2).
+        let value = |r: &Row| -> Option<f64> {
+            match r.name {
+                "g:Core" => Some(3.0),
+                "g:Isles" => Some(7.0),
+                "g:—" => None,
+                "DAX" => Some(2.0),
+                "SX5E" => Some(9.0),
+                "UKX" => None,
+                "NEW" => None,
+                _ => None,
+            }
+        };
+        let desc = Order {
+            key: "v desc".into(),
+            cmp: Rc::new(move |a: &Row, b: &Row| match (value(a), value(b)) {
+                (Some(x), Some(y)) => y.total_cmp(&x),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            }),
+        };
+        let mut g = RowModel::new();
+        g.set_rows(tree());
+        g.set_sort(Some(desc));
+        assert_eq!(
+            names(&g),
+            ["g:Isles", "UKX", "g:Core", "SX5E", "DAX", "g:—", "NEW"],
+            "groups by their value, blank last; leaves within their group"
+        );
+        g.set_sort(None);
+        assert_eq!(
+            names(&g),
+            ["g:Core", "DAX", "SX5E", "g:Isles", "UKX", "g:—", "NEW"],
+            "no sort: the given order"
+        );
+    }
+
+    #[test]
+    fn a_filter_keeps_a_group_while_a_leaf_under_it_matches() {
+        let mut g = RowModel::new();
+        g.set_rows(tree());
+        g.set_filter("SX");
+        assert_eq!(names(&g), ["g:Core", "SX5E"]);
+        g.set_filter("Core");
+        assert_eq!(
+            names(&g),
+            Vec::<&str>::new(),
+            "a group's own label never matches"
+        );
+        g.set_filter("");
+        assert_eq!(g.visible().len(), 7);
+    }
+
+    #[test]
+    fn a_collapsed_group_hides_its_descendants_and_keeps_its_row() {
+        let mut g = RowModel::new();
+        g.set_rows(tree());
+        g.set_collapsed(["g:Core".to_string()]);
+        assert_eq!(names(&g), ["g:Core", "g:Isles", "UKX", "g:—", "NEW"]);
+        assert!(g.is_collapsed(0));
+        assert!(!g.is_collapsed(3));
+        // The collapsed set survives a rebuild of the same names.
+        g.set_rows(tree());
+        assert_eq!(names(&g), ["g:Core", "g:Isles", "UKX", "g:—", "NEW"]);
+        g.set_collapsed(Vec::<String>::new());
+        assert_eq!(g.visible().len(), 7);
+    }
+
+    #[test]
+    fn a_collapsed_group_hiding_the_put_cursor_rests_it_on_the_group() {
+        let mut g = RowModel::new();
+        g.set_rows(tree());
+        g.move_cursor(down(2), false);
+        assert_eq!(g.cursor_name(), Some("SX5E"));
+        g.set_collapsed(["g:Core".to_string()]);
+        // The nearest shown index: the hidden row's index clamps to the
+        // group's (0 after the children go), and the hidden name is kept.
+        assert_eq!(g.cursor_name(), Some("g:Core"));
+        g.set_collapsed(Vec::<String>::new());
+        assert_eq!(
+            g.cursor_name(),
+            Some("SX5E"),
+            "the filter returns the cursor"
+        );
     }
 }
