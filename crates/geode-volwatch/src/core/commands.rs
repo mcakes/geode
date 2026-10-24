@@ -1,7 +1,8 @@
 //! The tile's `:` grammar: `sort <column> [asc|desc|abs [asc|desc]]`, a bare
-//! `sort` or `sort clear` to restore the default order. A column is named by
-//! its id, or by its head when the head is one word; a column `s` refuses
-//! (underlying, a sparkline, the term curve) refuses here too.
+//! `sort` or `sort clear` to restore the default order, and `view <name>`
+//! to show a tab by name. A column is named by its id, or by its head when
+//! the head is one word; a column `s` refuses (underlying, a sparkline)
+//! refuses here too. Whether a view name exists is the tile's to say.
 
 use geode_core::sort::{SortArg, SortOrder};
 
@@ -11,6 +12,7 @@ use super::views::{Column, sortable};
 pub enum Command {
     Sort { column: String, order: SortOrder },
     SortClear,
+    View(String),
 }
 
 /// Resolve a typed word to a sortable column id: exact id first, then a
@@ -45,13 +47,20 @@ pub fn parse(line: &str, columns: &[Column]) -> Result<Command, String> {
                 resolve(&column, columns).map(|column| Command::Sort { column, order })
             }
         },
+        "view" => match rest.split_whitespace().collect::<Vec<_>>().as_slice() {
+            [] => Err("view needs a name".into()),
+            [name] => Ok(Command::View((*name).to_string())),
+            _ => Err("view takes one name".into()),
+        },
         "" => Err("empty command".into()),
         other => Err(format!("unknown command '{other}'")),
     }
 }
 
-/// The candidates for the word at `cursor`, sorted and de-duplicated.
-pub fn completions(line: &str, cursor: usize, columns: &[Column]) -> Vec<String> {
+/// The candidates for the word at `cursor`, sorted and de-duplicated:
+/// the verbs first, then a column id or order word after `sort`, or one
+/// of `views` after `view`.
+pub fn completions(line: &str, cursor: usize, columns: &[Column], views: &[String]) -> Vec<String> {
     let mut cursor = cursor.min(line.len());
     while !line.is_char_boundary(cursor) {
         cursor -= 1;
@@ -66,11 +75,12 @@ pub fn completions(line: &str, cursor: usize, columns: &[Column]) -> Vec<String>
         &words[..words.len() - 1]
     };
     let mut out: Vec<String> = match done {
-        [] => vec!["sort".into()],
+        [] => vec!["sort".into(), "view".into()],
         ["sort", after @ ..] => {
             let ids: Vec<String> = columns.iter().map(|c| c.id.clone()).collect();
             geode_core::sort::completions(after, &ids)
         }
+        ["view"] => views.to_vec(),
         _ => Vec::new(),
     };
     out.sort();
@@ -78,23 +88,31 @@ pub fn completions(line: &str, cursor: usize, columns: &[Column]) -> Vec<String>
     out
 }
 
-// replaced by the next task: these tests build columns from the old View.
-#[cfg(any())]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::views::{ColumnKind, View, columns, order_tenors};
+    use crate::core::lens::LensState;
+    use crate::core::views::{ColumnKind, builtin, columns};
 
     fn cols() -> Vec<Column> {
-        columns(View::Changes, &order_tenors(None))
+        columns(builtin().get("vol").unwrap(), &LensState::default(), true)
+    }
+
+    fn views() -> Vec<String> {
+        vec!["vol".to_string(), "skew".into()]
     }
 
     #[test]
     fn colon_sort_names_a_column_by_head_or_id_and_bare_sort_clears() {
         let cols = cols();
+        let level = cols
+            .iter()
+            .find(|c| matches!(c.kind, ColumnKind::Level { .. }))
+            .expect("a level column");
         assert_eq!(
-            parse("sort atfm-3M-change abs", &cols).unwrap(),
+            parse(&format!("sort {} abs", level.id), &cols).unwrap(),
             Command::Sort {
-                column: "atfm-3M-change".into(),
+                column: level.id.clone(),
                 order: SortOrder::AbsDesc
             }
         );
@@ -105,9 +123,8 @@ mod tests {
 
     #[test]
     fn colon_sort_refuses_a_column_s_refuses() {
-        let mut cols = cols();
-        cols.extend(columns(View::Term, &order_tenors(None)));
-        for kind in ["underlying", "spark", "term"] {
+        let cols = cols();
+        for kind in ["underlying", "spark"] {
             let c = cols
                 .iter()
                 .find(|c| {
@@ -115,7 +132,6 @@ mod tests {
                         (&c.kind, kind),
                         (ColumnKind::Underlying, "underlying")
                             | (ColumnKind::Spark { .. }, "spark")
-                            | (ColumnKind::Term, "term")
                     )
                 })
                 .expect(kind);
@@ -157,25 +173,47 @@ mod tests {
     }
 
     #[test]
-    fn completions_offer_ids_then_order_words() {
+    fn colon_view_names_a_view_and_completes_the_names() {
         let cols = cols();
-        let first = completions("sort ", 5, &cols);
-        assert!(first.contains(&"clear".to_string()));
-        assert!(first.contains(&cols[0].id));
-        assert_eq!(completions("sort atfm", 9, &cols).len(), first.len());
-        let id = &cols[0].id;
-        let line = format!("sort {id} ");
+        let views = views();
         assert_eq!(
-            completions(&line, line.len(), &cols),
-            ["abs", "asc", "desc"]
+            parse("view skew", &cols).unwrap(),
+            Command::View("skew".into())
         );
-        assert_eq!(completions("", 0, &cols), ["sort"]);
+        assert_eq!(parse("view", &cols).unwrap_err(), "view needs a name");
+        assert_eq!(parse("view a b", &cols).unwrap_err(), "view takes one name");
+        assert_eq!(completions("", 0, &cols, &views), ["sort", "view"]);
+        assert_eq!(completions("view ", 5, &cols, &views), ["skew", "vol"]);
+        assert_eq!(completions("view s", 6, &cols, &views), ["skew", "vol"]);
+        assert!(completions("view skew ", 10, &cols, &views).is_empty());
     }
 
     #[test]
-    fn a_first_word_other_than_sort_completes_to_nothing() {
+    fn completions_offer_ids_then_order_words() {
         let cols = cols();
-        assert!(completions("filter x", 8, &cols).is_empty());
-        assert!(completions("filter ", 7, &cols).is_empty());
+        let views = views();
+        let first = completions("sort ", 5, &cols, &views);
+        assert!(first.contains(&"clear".to_string()));
+        assert!(first.contains(&cols[0].id));
+        assert_eq!(
+            completions("sort atfm", 9, &cols, &views).len(),
+            first.len()
+        );
+        let id = &cols[0].id;
+        let line = format!("sort {id} ");
+        assert_eq!(
+            completions(&line, line.len(), &cols, &views),
+            ["abs", "asc", "desc"]
+        );
+        assert_eq!(completions("", 0, &cols, &views), ["sort", "view"]);
+        assert_eq!(completions("so", 2, &cols, &views), ["sort", "view"]);
+    }
+
+    #[test]
+    fn a_first_word_other_than_sort_or_view_completes_to_nothing() {
+        let cols = cols();
+        let views = views();
+        assert!(completions("filter x", 8, &cols, &views).is_empty());
+        assert!(completions("filter ", 7, &cols, &views).is_empty());
     }
 }

@@ -1,38 +1,30 @@
-//! The tile's session table: the watchlist shown, the view and lookback,
-//! the sort, the member under the cursor and whether the band is open. Bad
-//! input is repaired, never refused: a value that cannot be read drops its
-//! key with a notice, so one stale field cannot cost the tile its others.
+//! The tile's session table: the watchlist shown, the view by name, the
+//! lens and its lookback, metric, window and shown number, the sort, the
+//! member under the cursor and whether the band is open. Bad input is
+//! repaired, never refused: a value that cannot be read drops its key with
+//! a notice, so one stale field cannot cost the tile its others.
 
 use geode_core::sort::SortOrder;
 use geode_core::volboard::Lookback;
 use toml::{Table, Value};
 
-use super::views::View;
+use super::lens::{Lens, LensState, Metric, Shown, Window};
 
+// The lens keys are additive: a record written before them still reads,
+// with the default lens, so the version stays.
 const VERSION: i64 = 1;
 
-/// Everything a tile restores. `sort` names a column id.
-#[derive(Debug, Clone, PartialEq)]
+/// Everything a tile restores. `view` names a tab in the vol views
+/// document; whether that name still exists is the tile's to say. `sort`
+/// names a column id.
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct State {
     pub list: Option<String>,
-    pub view: View,
-    pub lookback: Lookback,
+    pub view: Option<String>,
+    pub lens: LensState,
     pub sort: Option<(String, SortOrder)>,
     pub cursor: Option<String>,
     pub band: bool,
-}
-
-impl Default for State {
-    fn default() -> Self {
-        State {
-            list: None,
-            view: View::Changes,
-            lookback: Lookback::D1,
-            sort: None,
-            cursor: None,
-            band: false,
-        }
-    }
 }
 
 fn order_word(o: SortOrder) -> &'static str {
@@ -56,15 +48,26 @@ fn parse_order(w: &str) -> Option<SortOrder> {
 }
 
 /// `version`, then each set key; an unset key is absent and restores unset.
-/// `sort` is `[column id, order word]`.
+/// The lens keys are always written, as a word each. `sort` is
+/// `[column id, order word]`.
 pub fn to_table(s: &State) -> Table {
     let mut t = Table::new();
     t.insert("version".into(), Value::Integer(VERSION));
     if let Some(list) = &s.list {
         t.insert("list".into(), Value::String(list.clone()));
     }
-    t.insert("view".into(), Value::String(s.view.key().into()));
-    t.insert("lookback".into(), Value::String(s.lookback.label().into()));
+    if let Some(view) = &s.view {
+        t.insert("view".into(), Value::String(view.clone()));
+    }
+    let lens = &s.lens;
+    t.insert(
+        "lookback".into(),
+        Value::String(lens.lookback.label().into()),
+    );
+    t.insert("lens".into(), Value::String(lens.lens.word().into()));
+    t.insert("metric".into(), Value::String(lens.metric.word().into()));
+    t.insert("window".into(), Value::String(lens.window.word().into()));
+    t.insert("shown".into(), Value::String(lens.shown.word().into()));
     if let Some((id, order)) = &s.sort {
         t.insert(
             "sort".into(),
@@ -88,16 +91,17 @@ fn read_name(v: &Value) -> Result<String, String> {
         .ok_or_else(|| "not a name".into())
 }
 
-fn read_view(v: &Value) -> Result<View, String> {
-    v.as_str()
-        .and_then(View::parse)
-        .ok_or_else(|| "not a view name".into())
+/// A string key whose text is one of a closed set of words.
+fn read_word<T>(
+    v: &Value,
+    parse: impl Fn(&str) -> Option<T>,
+    why: &'static str,
+) -> Result<T, String> {
+    v.as_str().and_then(parse).ok_or_else(|| why.into())
 }
 
-fn read_lookback(v: &Value) -> Result<Lookback, String> {
-    v.as_str()
-        .and_then(|w| Lookback::ALL.into_iter().find(|l| l.label() == w))
-        .ok_or_else(|| "not a lookback".into())
+fn parse_lookback(w: &str) -> Option<Lookback> {
+    Lookback::ALL.into_iter().find(|l| l.label() == w)
 }
 
 fn read_sort(v: &Value) -> Result<(String, SortOrder), String> {
@@ -119,7 +123,7 @@ fn read_band(v: &Value) -> Result<bool, String> {
 
 /// Restore a state from a session table. A missing key takes its default;
 /// an unreadable one drops with a `session: dropped <key>: <why>` notice.
-/// Whether the list or column still exists is the tile's to say.
+/// Whether the list, view or column still exists is the tile's to say.
 pub fn from_table(t: &Table) -> (State, Vec<String>) {
     let mut notices = Vec::new();
     fn read<T>(
@@ -133,10 +137,32 @@ pub fn from_table(t: &Table) -> (State, Vec<String>) {
             .ok()
     }
     let d = State::default();
+    let lens = LensState {
+        lookback: read(t, "lookback", &mut notices, |v| {
+            read_word(v, parse_lookback, "not a lookback")
+        })
+        .unwrap_or(d.lens.lookback),
+        lens: read(t, "lens", &mut notices, |v| {
+            read_word(v, Lens::parse, "not a lens")
+        })
+        .unwrap_or(d.lens.lens),
+        metric: read(t, "metric", &mut notices, |v| {
+            read_word(v, Metric::parse, "not a metric")
+        })
+        .unwrap_or(d.lens.metric),
+        window: read(t, "window", &mut notices, |v| {
+            read_word(v, Window::parse, "not a window")
+        })
+        .unwrap_or(d.lens.window),
+        shown: read(t, "shown", &mut notices, |v| {
+            read_word(v, Shown::parse, "not level or companion")
+        })
+        .unwrap_or(d.lens.shown),
+    };
     let state = State {
         list: read(t, "list", &mut notices, read_name),
-        view: read(t, "view", &mut notices, read_view).unwrap_or(d.view),
-        lookback: read(t, "lookback", &mut notices, read_lookback).unwrap_or(d.lookback),
+        view: read(t, "view", &mut notices, read_name),
+        lens,
         sort: read(t, "sort", &mut notices, read_sort),
         cursor: read(t, "cursor", &mut notices, read_name),
         band: read(t, "band", &mut notices, read_band).unwrap_or(d.band),
@@ -147,13 +173,24 @@ pub fn from_table(t: &Table) -> (State, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::lens::{Lens, Metric, Shown, Window};
+
+    fn rich() -> LensState {
+        LensState {
+            lens: Lens::Rich,
+            lookback: Lookback::M1,
+            metric: Metric::Pctl,
+            window: Window::Y2,
+            shown: Shown::Companion,
+        }
+    }
 
     #[test]
     fn a_session_round_trips_and_drops_an_unreadable_key_with_a_notice() {
         let s = State {
             list: Some("europe_risk".into()),
-            view: View::Term,
-            lookback: Lookback::M1,
+            view: Some("skew".into()),
+            lens: rich(),
             sort: Some(("atfm-3M-change".into(), SortOrder::AbsDesc)),
             cursor: Some("SX5E".into()),
             band: true,
@@ -164,36 +201,42 @@ mod tests {
         let mut t = to_table(&s);
         t.insert("view".into(), toml::Value::Integer(3));
         let (back, notices) = from_table(&t);
-        assert_eq!(back.view, View::Changes);
-        assert_eq!(notices, ["session: dropped view: not a view name"]);
+        assert_eq!(back.view, None);
+        assert_eq!(back.lens, rich(), "the lens keeps its keys");
+        assert_eq!(notices, ["session: dropped view: not a name"]);
     }
 
     #[test]
-    fn every_view_lookback_and_order_round_trips_through_text() {
-        for view in [
-            View::Changes,
-            View::Levels,
-            View::RichCheap,
-            View::Term,
-            View::Skew,
-        ] {
+    fn every_lens_key_and_order_round_trips_through_text() {
+        for lens in [Lens::Moves, Lens::Rich] {
             for lookback in Lookback::ALL {
-                for order in [
-                    SortOrder::Asc,
-                    SortOrder::Desc,
-                    SortOrder::AbsDesc,
-                    SortOrder::AbsAsc,
-                ] {
-                    let s = State {
-                        view,
-                        lookback,
-                        sort: Some(("c".into(), order)),
-                        ..State::default()
-                    };
-                    let text = toml::to_string(&to_table(&s)).unwrap();
-                    let (back, notices) = from_table(&text.parse().unwrap());
-                    assert_eq!(back, s);
-                    assert!(notices.is_empty(), "{notices:?}");
+                for metric in [Metric::Z, Metric::Pctl] {
+                    for window in Window::ALL {
+                        for shown in [Shown::Level, Shown::Companion] {
+                            for order in [
+                                SortOrder::Asc,
+                                SortOrder::Desc,
+                                SortOrder::AbsDesc,
+                                SortOrder::AbsAsc,
+                            ] {
+                                let s = State {
+                                    lens: LensState {
+                                        lens,
+                                        lookback,
+                                        metric,
+                                        window,
+                                        shown,
+                                    },
+                                    sort: Some(("c".into(), order)),
+                                    ..State::default()
+                                };
+                                let text = toml::to_string(&to_table(&s)).unwrap();
+                                let (back, notices) = from_table(&text.parse().unwrap());
+                                assert_eq!(back, s);
+                                assert!(notices.is_empty(), "{notices:?}");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -205,9 +248,25 @@ mod tests {
         assert_eq!(s, State::default());
         assert!(notices.is_empty());
         let t = to_table(&State::default());
-        for key in ["list", "sort", "cursor"] {
+        for key in ["list", "view", "sort", "cursor"] {
             assert!(!t.contains_key(key), "{key}");
         }
+        for key in ["lookback", "lens", "metric", "window", "shown", "band"] {
+            assert!(t.contains_key(key), "{key} is always written");
+        }
+    }
+
+    #[test]
+    fn the_lens_keys_are_words_a_hand_can_type() {
+        let t = to_table(&State {
+            lens: rich(),
+            ..State::default()
+        });
+        assert_eq!(t["lens"].as_str(), Some("rich"));
+        assert_eq!(t["lookback"].as_str(), Some("1m"));
+        assert_eq!(t["metric"].as_str(), Some("pctl"));
+        assert_eq!(t["window"].as_str(), Some("2Y"));
+        assert_eq!(t["shown"].as_str(), Some("companion"));
     }
 
     #[test]
@@ -215,9 +274,15 @@ mod tests {
         for (key, text, why) in [
             ("list", "list = 7", "not a name"),
             ("list", "list = \" \"", "not a name"),
-            ("view", "view = \"wide\"", "not a view name"),
+            ("view", "view = 3", "not a name"),
+            ("view", "view = \" \"", "not a name"),
             ("lookback", "lookback = \"2w\"", "not a lookback"),
             ("lookback", "lookback = 1", "not a lookback"),
+            ("lens", "lens = \"both\"", "not a lens"),
+            ("lens", "lens = 1", "not a lens"),
+            ("metric", "metric = \"sd\"", "not a metric"),
+            ("window", "window = \"3Y\"", "not a window"),
+            ("shown", "shown = \"delta\"", "not level or companion"),
             ("sort", "sort = [\"c\"]", "not [column, order]"),
             ("sort", "sort = 3", "not [column, order]"),
             ("sort", "sort = [\"c\", \"up\"]", "not [column, order]"),
@@ -235,22 +300,47 @@ mod tests {
     }
 
     #[test]
+    fn an_old_five_view_name_reads_as_a_name_for_the_tile_to_judge() {
+        let (s, notices) = from_table(&"view = \"richcheap\"\nversion = 1".parse().unwrap());
+        assert_eq!(s.view.as_deref(), Some("richcheap"));
+        assert!(notices.is_empty());
+    }
+
+    #[test]
+    fn a_record_without_the_lens_keys_reads_the_default_lens() {
+        let text = "version = 1\nlist = \"l\"\nview = \"vol\"\nlookback = \"1w\"\nband = false";
+        let (s, notices) = from_table(&text.parse().unwrap());
+        assert_eq!(
+            s.lens,
+            LensState {
+                lookback: Lookback::W1,
+                ..LensState::default()
+            }
+        );
+        assert_eq!(s.view.as_deref(), Some("vol"));
+        assert!(notices.is_empty());
+    }
+
+    #[test]
     fn two_unreadable_keys_drop_with_two_notices_and_the_rest_stays() {
         let s = State {
             list: Some("l".into()),
-            lookback: Lookback::W1,
+            lens: LensState {
+                lookback: Lookback::W1,
+                ..LensState::default()
+            },
             cursor: Some("SPX".into()),
             ..State::default()
         };
         let mut t = to_table(&s);
-        t.insert("view".into(), Value::Integer(3));
+        t.insert("metric".into(), Value::String("sd".into()));
         t.insert("band".into(), Value::String("yes".into()));
         let (back, notices) = from_table(&t);
         assert_eq!(back, s);
         assert_eq!(
             notices,
             [
-                "session: dropped view: not a view name",
+                "session: dropped metric: not a metric",
                 "session: dropped band: not a bool"
             ]
         );

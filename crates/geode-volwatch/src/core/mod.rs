@@ -3,7 +3,5 @@
 pub mod commands;
 pub mod lens;
 pub mod model;
-// replaced by the next task
-#[cfg(any())]
 pub mod session;
 pub mod views;
