@@ -852,3 +852,45 @@ fn a_part_4_record_without_view_prefixes_is_ignored(cx: &mut gpui::TestAppContex
             .read_with(&vcx, |t, cx| t.table.read(cx).delegate().fitted.is_empty())
     );
 }
+
+#[gpui::test]
+fn a_single_view_paints_the_level_over_a_tint_and_m_swaps_the_number(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "4");
+    let asked = h.asked_of(&vcx);
+    let tag = h.tag_of(&vcx);
+    h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    h.draw(&mut vcx);
+    let id = h.tile.read_with(&vcx, |t, _| {
+        let col = t
+            .columns
+            .iter()
+            .position(|c| c.id == "atfm-3M-single")
+            .expect("the 0.5 point is the ATFM column");
+        t.prepared.rows[0].cells[col].id.to_string()
+    });
+    assert!(vcx.debug_bounds(format!("{id}-tint").leak()).is_some());
+    let text = vcx.debug_bounds(format!("{id}-text").leak()).unwrap();
+    let tint = vcx.debug_bounds(format!("{id}-tint").leak()).unwrap();
+    // Edge to edge: the text may end flush with the tint's right edge,
+    // which `Bounds::contains` (half-open) would call outside.
+    let (t0, t1, x0, x1) = (
+        tint.origin,
+        tint.bottom_right(),
+        text.origin,
+        text.bottom_right(),
+    );
+    assert!(
+        x0.x >= t0.x && x0.y >= t0.y && x1.x <= t1.x && x1.y <= t1.y,
+        "the text sits inside the tint: {tint:?} vs {text:?}"
+    );
+    h.press(&mut vcx, "m");
+    h.draw(&mut vcx);
+    assert!(
+        vcx.debug_bounds(format!("{id}-chip").leak()).is_some(),
+        "a companion chip after m"
+    );
+    assert!(vcx.debug_bounds(format!("{id}-tint").leak()).is_none());
+}

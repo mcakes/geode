@@ -14,8 +14,8 @@ use geode_shell::colfit::{
 use geode_shell::fonts;
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
-use geode_widgets::cell::design;
 use geode_widgets::cell::heat::HeatPaint;
+use geode_widgets::cell::{design, widths};
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, Pixels,
@@ -685,9 +685,9 @@ impl TableDelegate for GridDelegate {
             // text, so a column narrower than its number cuts the trailing
             // side into an ellipsis; a child that kept its own width would
             // be pushed out on the leading side by the right-aligned cell
-            // and show a plausible wrong number. A single column's tint
-            // paints as plain text until the tint cell exists.
-            Glyph::None | Glyph::Tint(_) => div()
+            // and show a plausible wrong number. A tint with no chip (no
+            // companion to tint by) paints the same.
+            Glyph::None | Glyph::Tint(None) => div()
                 .w_full()
                 .min_w_0()
                 .text_color(tone)
@@ -696,6 +696,35 @@ impl TableDelegate for GridDelegate {
                 .debug_selector(move || format!("{id}-text"))
                 .child(text)
                 .into_any_element(),
+            // A single view's level over its companion's tint: the whole
+            // cell takes the sign color at the companion's alpha and the
+            // number keeps the foreground tone, so the level reads as a
+            // level and the color alone says how far the companion moved.
+            // The text shrinks with the cell as plain text does.
+            Glyph::Tint(Some(chip)) => {
+                let paint = if muted { p.chip_muted } else { p.chip };
+                let tint_sel = id.clone();
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .justify_end()
+                    .rounded(paint.radius)
+                    .when(chip.alpha > 0.0, |d| {
+                        d.bg(paint.text_color(chip.sign).opacity(chip.alpha))
+                            .debug_selector(move || format!("{tint_sel}-tint"))
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .px(design(widths::CHIP_INSET))
+                            .text_color(tone)
+                            .truncate()
+                            .debug_selector(move || format!("{id}-text"))
+                            .child(text),
+                    )
+                    .into_any_element()
+            }
             Glyph::Chip(chip) => {
                 let paint = if muted { p.chip_muted } else { p.chip };
                 delta_chip::paint(text, *chip, paint, id).into_any_element()

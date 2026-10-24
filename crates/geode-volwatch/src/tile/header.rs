@@ -1,18 +1,21 @@
 //! The tile's chrome, top to bottom: the shared header strip (the mark,
 //! the `Vol · <list> ▾` switch control with the switcher hung beneath it,
-//! the member count, the lookback chips with the one in force lit, the
-//! sort chip, the members not in the surface in the warning tone, one chip
-//! per failed dataset in the danger tone; in the cluster the mode, the
-//! in-flight `…`, the per-dataset source times, link chips, health, `⋯`
-//! and ×), the view strip (the tabs with their digits, the active one
-//! lit, the step keys at the right), the grid or the empty state, and the
-//! footer (the first reported notice on the left, the cursor readout on
-//! the right).
+//! the member count, the lens chips (the lookbacks under moves, the
+//! windows under rich/cheap) with the one in force lit, the sort chip, the
+//! members not in the surface in the warning tone, one chip per failed
+//! dataset in the danger tone; in the cluster the mode, the in-flight `…`,
+//! the per-dataset source times, link chips, health, `⋯` and ×), the view
+//! strip (the tabs with their digits, the shown one lit; at the right the
+//! lens readout and the hints for the keys that matter from here), the
+//! grid or the empty state, and the footer (the first reported notice on
+//! the left, the cursor readout on the right).
 //!
 //! Every string is prepared outside render (`HeaderModel`, `times`,
-//! `readout`, `strip_keys`); paint clones them. A press takes the same
-//! door its key does: the switch control and the view strip dispatch
-//! their actions, a lookback chip sets its lookback as `d` would.
+//! `readout`, `strip_tabs`, `strip_readout`, `strip_hints`); paint clones
+//! handles. A press takes the same door its key does: the switch control
+//! and the first nine tabs dispatch their actions, a later tab takes the
+//! view door its digit would, a lens chip sets its lookback or window as
+//! `d` or `w` would.
 
 use std::rc::Rc;
 
@@ -42,15 +45,19 @@ use crate::core::model::{CHEVRON, ChipKind, MARK};
 const STRIP_HEIGHT: f32 = 20.0;
 const FOOTER_HEIGHT: f32 = 20.0;
 
-/// The lookback chips' element names, parallel to `Lookback::ALL`.
+/// The lens chips' element names: the lookbacks parallel to
+/// `Lookback::ALL`, the windows to `Window::ALL`. The header's chip kind
+/// picks the set, so a window chip never answers to a lookback's name.
 const LOOKBACK_IDS: [&str; 3] = [
     "volwatch-lookback-1d",
     "volwatch-lookback-1w",
     "volwatch-lookback-1m",
 ];
-
-/// The view digits as static text, parallel to `VIEW_ACTIONS`.
-const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
+const WINDOW_IDS: [&str; 3] = [
+    "volwatch-window-6M",
+    "volwatch-window-1Y",
+    "volwatch-window-2Y",
+];
 
 use super::MENU_ACTION;
 
@@ -239,10 +246,24 @@ fn switch_control(
 /// The three lens chips (the lookbacks under moves, the windows under
 /// rich/cheap): the one in force lit in the neutral chip tone; a press on
 /// another sets it, asking again as `d` or `w` does.
-fn lookback_chips(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTile>) -> Div {
+fn lens_chips(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTile>) -> Div {
     let id = tile.tile.0;
     let h = &tile.header;
     let kind = h.chip_kind;
+    let (ids, tip_selector, tip_title, action) = match kind {
+        ChipKind::Lookback => (
+            LOOKBACK_IDS,
+            "tip-volwatch-lookback",
+            "Change lookback",
+            LOOKBACK_ACTION,
+        ),
+        ChipKind::Window => (
+            WINDOW_IDS,
+            "tip-volwatch-window",
+            "Change window",
+            WINDOW_ACTION,
+        ),
+    };
     let lit_paint = chip_paint(theme, ChipTone::Neutral);
     h_flex()
         .flex_none()
@@ -250,7 +271,7 @@ fn lookback_chips(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchT
         .children(
             h.chips
                 .iter()
-                .zip(LOOKBACK_IDS)
+                .zip(ids)
                 .enumerate()
                 .map(|(i, ((text, lit), name))| {
                     let text = SharedString::from(text.clone());
@@ -292,15 +313,9 @@ fn lookback_chips(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchT
                             }
                         })
                         .tooltip(tips::tip_with(
-                            SharedString::new_static("tip-volwatch-lookback"),
-                            SharedString::new_static(match kind {
-                                ChipKind::Lookback => "Change lookback",
-                                ChipKind::Window => "Change window",
-                            }),
-                            Some(match kind {
-                                ChipKind::Lookback => LOOKBACK_ACTION,
-                                ChipKind::Window => WINDOW_ACTION,
-                            }),
+                            SharedString::new_static(tip_selector),
+                            SharedString::new_static(tip_title),
+                            Some(action),
                             None,
                         ))
                         .child(text)
@@ -328,7 +343,7 @@ fn render_header(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTi
                 .debug_selector(move || format!("volwatch-count-{id}"))
                 .child(h.count_text.clone()),
         )
-        .child(lookback_chips(tile, theme, cx))
+        .child(lens_chips(tile, theme, cx))
         .when_some(h.sort.clone(), |el, sort| {
             el.child(
                 div()
@@ -386,58 +401,74 @@ fn render_header(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTi
     .debug_selector(move || format!("volwatch-header-{id}"))
 }
 
-/// The tabs with their digits, the active one lit in the neutral chip
-/// tone; a press dispatches that tab's digit action. The step key sits
-/// at the right.
+/// The tabs with their digits, the shown one lit in the neutral chip
+/// tone; a press on one of the first nine dispatches its digit action, a
+/// later one takes the view door directly. At the right the lens readout,
+/// then one hint per key that matters from here.
 fn render_strip(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTile>) -> Div {
     let id = tile.tile.0;
     let lit = chip_paint(theme, ChipTone::Neutral);
     let muted = theme.muted_foreground;
-    let shown = tile.shown_view().map(|v| v.name);
-    let views =
-        tile.tabs()
-            .into_iter()
-            .zip(VIEW_ACTIONS)
-            .zip(DIGITS)
-            .map(|((name, action), digit)| {
-                let active = shown.as_deref() == Some(name.as_str());
-                let entity = cx.entity();
-                let selector = SharedString::from(format!("volwatch-view-{name}-{id}"));
-                let lit_selector = format!("volwatch-view-lit-{name}");
-                let (pointer, text) = if active {
-                    (control::for_chip(theme, &lit, theme.background), lit.text)
-                } else {
-                    (
-                        control::paint(theme, control::Rest::Bare, theme.background, muted),
-                        muted,
-                    )
-                };
-                h_flex()
-                    .id(ElementId::Name(selector.clone()))
-                    .flex_none()
-                    .gap_1()
-                    .px_1()
-                    .rounded(theme.radius_tokens().sm)
-                    .text_color(text)
-                    .when_some(lit.fill.filter(|_| active), |el, fill| el.bg(fill))
-                    .debug_selector(move || selector.to_string())
-                    .pointer_states(pointer)
-                    .capture_any_mouse_down(move |event, window, cx| {
-                        if event.button == MouseButton::Left {
-                            entity.update(cx, |t, cx| dispatch(t, action, window, cx));
-                        }
-                    })
-                    .child(
+    let views = tile
+        .strip_tabs
+        .iter()
+        .enumerate()
+        .map(|(i, (name, digit))| {
+            let active = tile.shown_name.as_ref() == Some(name);
+            let entity = cx.entity();
+            let selector = SharedString::from(format!("volwatch-view-{name}-{id}"));
+            let lit_selector = format!("volwatch-view-lit-{name}");
+            let (pointer, text) = if active {
+                (control::for_chip(theme, &lit, theme.background), lit.text)
+            } else {
+                (
+                    control::paint(theme, control::Rest::Bare, theme.background, muted),
+                    muted,
+                )
+            };
+            let action = VIEW_ACTIONS.get(i).copied();
+            let pressed = name.clone();
+            h_flex()
+                .id(ElementId::Name(selector.clone()))
+                .flex_none()
+                .gap_1()
+                .px_1()
+                .rounded(theme.radius_tokens().sm)
+                .text_color(text)
+                .when_some(lit.fill.filter(|_| active), |el, fill| el.bg(fill))
+                .debug_selector(move || selector.to_string())
+                .pointer_states(pointer)
+                .capture_any_mouse_down(move |event, window, cx| {
+                    if event.button == MouseButton::Left {
+                        entity.update(cx, |t, cx| match action {
+                            Some(action) => dispatch(t, action, window, cx),
+                            None => {
+                                t.user_acted(cx);
+                                let _ = t.set_view_by_name(&pressed, cx);
+                            }
+                        });
+                    }
+                })
+                .when_some(*digit, |el, digit| {
+                    el.child(
                         div()
                             .font_family(fonts::MONO)
                             .child(SharedString::new_static(digit)),
                     )
-                    .child(
-                        div()
-                            .when(active, |el| el.debug_selector(move || lit_selector.clone()))
-                            .child(SharedString::from(name)),
-                    )
-            });
+                })
+                .child(
+                    div()
+                        .when(active, |el| el.debug_selector(move || lit_selector.clone()))
+                        .child(name.clone()),
+                )
+        });
+    let hints = tile.strip_hints.iter().map(|(action, keys, label)| {
+        let suffix = action.strip_prefix("volwatch::").unwrap_or(action);
+        div()
+            .flex_none()
+            .debug_selector(move || format!("volwatch-strip-hint-{suffix}-{id}"))
+            .child(kbd::hint(keys, label.clone()))
+    });
     h_flex()
         .w_full()
         .h(scale::design(STRIP_HEIGHT))
@@ -458,26 +489,21 @@ fn render_strip(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTil
                 .overflow_hidden()
                 .children(views),
         )
-        // Each step key hints on its own: unbinding one keeps the other.
+        // The readout says what the lens is; each hint names only its own
+        // key, so unbinding one keeps the others.
         .child(
             h_flex()
                 .flex_none()
+                .items_center()
                 .gap_2()
                 .text_color(muted)
-                .when_some(tile.strip_keys.0.as_deref(), |el, next| {
-                    el.child(
-                        div()
-                            .debug_selector(move || format!("volwatch-strip-next-{id}"))
-                            .child(kbd::hint(next, "next view")),
-                    )
-                })
-                .when_some(tile.strip_keys.1.as_deref(), |el, prev| {
-                    el.child(
-                        div()
-                            .debug_selector(move || format!("volwatch-strip-prev-{id}"))
-                            .child(kbd::hint(prev, "previous view")),
-                    )
-                }),
+                .child(
+                    div()
+                        .font_family(fonts::MONO)
+                        .debug_selector(move || format!("volwatch-lens-readout-{id}"))
+                        .child(tile.strip_readout.clone()),
+                )
+                .children(hints),
         )
 }
 

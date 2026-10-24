@@ -12,8 +12,7 @@ use gpui::{App, Context, SharedString, Window};
 use super::table::sortable;
 use super::{
     INSPECT_ACTION, LOOKBACK_ACTION, PAINT_ACTION, REFRESH_ACTION, SORT_ACTION, SWITCH_ACTION,
-    TIMESERIES_ACTION, VIEW_ACTIONS, VIEW_NEXT_ACTION, VIEW_PREV_ACTION, VolwatchTile, YANK_ACTION,
-    snapshot,
+    TIMESERIES_ACTION, VIEW_ACTIONS, VolwatchTile, YANK_ACTION, snapshot,
 };
 use crate::core::model::header;
 
@@ -31,6 +30,9 @@ pub(crate) enum MenuKind {
 pub(crate) enum Pick {
     /// Show this watchlist.
     Show(SharedString),
+    /// Show this tab, as its digit would; a tab past the ninth has no
+    /// digit and only this door.
+    View(SharedString),
     /// Run this action id through the tile's own door, as its key would.
     Verb(&'static str),
 }
@@ -38,7 +40,7 @@ pub(crate) enum Pick {
 impl MenuPick for Pick {
     fn element_name(&self) -> SharedString {
         match self {
-            Pick::Show(name) => name.clone(),
+            Pick::Show(name) | Pick::View(name) => name.clone(),
             Pick::Verb(id) => SharedString::new_static(id),
         }
     }
@@ -111,6 +113,11 @@ impl MenuHost for VolwatchTile {
             Ok(Pick::Show(name)) => {
                 self.close_menu();
                 self.show(&name, cx);
+            }
+            Ok(Pick::View(name)) => {
+                self.close_menu();
+                self.user_acted(cx);
+                let _ = self.set_view_by_name(&name, cx);
             }
             Ok(Pick::Verb(id)) => {
                 self.close_menu();
@@ -256,11 +263,12 @@ impl VolwatchTile {
             MenuRow::Action(self.verb(SWITCH_ACTION, "Switch list\u{2026}")),
             MenuRow::Separator,
         ];
-        let shown = self.shown_view().map(|v| v.name);
-        rows.extend(self.tabs().iter().zip(VIEW_ACTIONS).map(|(name, id)| {
+        rows.extend(self.strip_tabs.iter().enumerate().map(|(i, (name, _))| {
+            let hint = VIEW_ACTIONS.get(i).map_or(Hint::None, |id| Hint::chord(id));
             MenuRow::Action(
-                self.verb(id, format!("{name} view"))
-                    .checked(shown.as_deref() == Some(name.as_str())),
+                ActionRow::new(Pick::View(name.clone()), format!("{name} view"))
+                    .hint(hint)
+                    .checked(self.shown_name.as_ref() == Some(name)),
             )
         }));
         rows.extend([
@@ -317,10 +325,7 @@ impl VolwatchTile {
     pub(crate) fn rebuild_chrome(&mut self, cx: &App) {
         self.rebuild_header();
         self.refresh_actions();
-        self.strip_keys = (
-            tips::chord_for(&self.chords, VIEW_NEXT_ACTION),
-            tips::chord_for(&self.chords, VIEW_PREV_ACTION),
-        );
+        self.rebuild_strip_hints();
         let snapshot = snapshot(cx);
         let list = self.state.list.as_deref();
         let state = list.and_then(|n| snapshot.lists.get(n));

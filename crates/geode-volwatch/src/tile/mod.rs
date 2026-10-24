@@ -60,7 +60,7 @@ use table::{GridDelegate, GridEvent, Paints, restored_widths, sized_key, sortabl
 
 use crate::content::Shared;
 use crate::core::commands::{self, Command};
-use crate::core::lens::LensState;
+use crate::core::lens::{Lens, LensState, Metric, Shown};
 use crate::core::model::{BandModel, HeaderModel, Prepared, Row, sort_value};
 use crate::core::session::{self, State};
 use crate::core::views::{
@@ -79,6 +79,9 @@ const VIEW_ACTIONS: [&str; 9] = [
     "volwatch::view_8",
     "volwatch::view_9",
 ];
+/// The tab digits as static text, parallel to `VIEW_ACTIONS`; a tenth
+/// tab paints without one.
+const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 const VIEW_NEXT_ACTION: &str = "volwatch::view_next";
 const VIEW_PREV_ACTION: &str = "volwatch::view_prev";
 const LOOKBACK_ACTION: &str = "volwatch::lookback";
@@ -229,9 +232,18 @@ pub struct VolwatchTile {
     /// time for the stale wake-ups.
     pub(crate) times: Vec<TimeRun>,
     times_at: Vec<Option<DateTime<Utc>>>,
-    /// The view strip's step keys (next, previous), each resolved on its
-    /// own when the chords change: an unbound one hides only its hint.
-    strip_keys: (Option<Vec<Keystroke>>, Option<Vec<Keystroke>>),
+    /// The strip's tabs (name, digit for the first nine) and the shown
+    /// one's name, prepared with the columns: paint clones nothing but
+    /// handles.
+    strip_tabs: Vec<(SharedString, Option<&'static str>)>,
+    shown_name: Option<SharedString>,
+    /// The strip's lens readout (`moves · Δ 1d`), prepared with the hints.
+    strip_readout: SharedString,
+    /// The strip's key hints in paint order: (action id, its live chord,
+    /// the label). Only the keys that matter under the lens and the
+    /// view's cell shape are listed, each resolved on its own when the
+    /// chords change: an unbound one hides only its hint.
+    strip_hints: Vec<(&'static str, Vec<Keystroke>, SharedString)>,
     /// The display clock the readout's dates and the times' labels read.
     clock: Clock,
     /// The body's empty state; `None` while a list is shown.
@@ -406,7 +418,10 @@ impl VolwatchTile {
             band_model: BandModel::default(),
             times: Vec::new(),
             times_at: Vec::new(),
-            strip_keys: (None, None),
+            strip_tabs: Vec::new(),
+            shown_name: None,
+            strip_readout: SharedString::default(),
+            strip_hints: Vec::new(),
             clock: app_clock(cx),
             empty: None,
             find_entry: None,
@@ -470,18 +485,74 @@ impl VolwatchTile {
 
     /// The shown view's columns under the lens; none with no views. A
     /// vega column only when the setting names a view and the query was
-    /// not refused.
+    /// not refused. The strip's tabs, shown name and hints follow, since
+    /// each reads the document, the view's cell shape or the lens.
     fn rebuild_columns(&mut self) {
         let vega = self.vega_offered();
-        let columns = match self.shown_view() {
+        let shown = self.shown_view();
+        let columns = match &shown {
             Some(view) => {
                 self.cells = view.cells;
-                columns(&view, &self.state.lens, vega)
+                columns(view, &self.state.lens, vega)
             }
             None => Vec::new(),
         };
         self.columns = Rc::new(columns);
         self.cursor_col = self.cursor_col.clamp(1, self.columns.len().max(2) - 1);
+        self.shown_name = shown.map(|v| SharedString::from(v.name));
+        self.strip_tabs = self
+            .tabs()
+            .into_iter()
+            .zip(DIGITS.iter().map(Some).chain(std::iter::repeat(None)))
+            .map(|(name, digit)| (SharedString::from(name), digit.copied()))
+            .collect();
+        self.rebuild_strip_hints();
+    }
+
+    /// The strip's readout and hints: the lens flip, then under moves the
+    /// lookback, under rich/cheap the metric and the window, then in a
+    /// single view the swap, then the step. A label names what the key
+    /// does from here (`rich/cheap`, `percentile`, `show level`).
+    fn rebuild_strip_hints(&mut self) {
+        let single = self.cells == Cells::Single;
+        let l = self.state.lens;
+        self.strip_readout = SharedString::from(l.readout(single));
+        let mut wanted: Vec<(&'static str, SharedString)> = vec![(
+            LENS_ACTION,
+            SharedString::new_static(match l.lens {
+                Lens::Moves => "rich/cheap",
+                Lens::Rich => "moves",
+            }),
+        )];
+        match l.lens {
+            Lens::Moves => wanted.push((LOOKBACK_ACTION, SharedString::new_static("lookback"))),
+            Lens::Rich => {
+                wanted.push((
+                    METRIC_ACTION,
+                    SharedString::new_static(match l.metric {
+                        Metric::Z => "percentile",
+                        Metric::Pctl => "z-score",
+                    }),
+                ));
+                wanted.push((WINDOW_ACTION, SharedString::new_static("window")));
+            }
+        }
+        if single {
+            wanted.push((
+                SHOWN_ACTION,
+                match l.shown {
+                    Shown::Level => SharedString::from(format!("show {}", l.companion_head())),
+                    Shown::Companion => SharedString::new_static("show level"),
+                },
+            ));
+        }
+        wanted.push((VIEW_NEXT_ACTION, SharedString::new_static("next view")));
+        self.strip_hints = wanted
+            .into_iter()
+            .filter_map(|(action, label)| {
+                Some((action, tips::chord_for(&self.chords, action)?, label))
+            })
+            .collect();
     }
 
     /// The factory stored new settings: the refresh interval and the stale

@@ -4,11 +4,12 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use geode_core::volboard::Role;
+use geode_core::volboard::{Lookback, Role};
 use geode_widgets::cell::widths;
 
 use super::harness::*;
 use crate::content::VolwatchSettings;
+use crate::core::lens::Window;
 use crate::tile::table::td_muted;
 
 #[gpui::test]
@@ -152,18 +153,55 @@ fn a_stale_after_reload_rearms_the_row_wake_ups(cx: &mut gpui::TestAppContext) {
 }
 
 #[gpui::test]
-fn the_strip_names_each_bound_step_key_on_its_own(cx: &mut gpui::TestAppContext) {
+fn the_strip_lists_the_tabs_with_digits_the_lens_readout_and_the_hints(
+    cx: &mut gpui::TestAppContext,
+) {
     let (h, mut vcx) = landed(cx);
-    assert!(vcx.debug_bounds("volwatch-strip-next-7").is_some());
-    assert!(vcx.debug_bounds("volwatch-strip-prev-7").is_some());
-    // Unbind the step back, as a user keymap removal would: the forward
-    // hint stays.
+    h.draw(&mut vcx);
+    for name in ["vol", "skew", "varswap", "surface"] {
+        assert!(
+            vcx.debug_bounds(format!("volwatch-view-{name}-7").leak())
+                .is_some(),
+            "{name}"
+        );
+    }
+    assert!(vcx.debug_bounds("volwatch-view-lit-vol").is_some());
+    assert!(vcx.debug_bounds("volwatch-view-lit-skew").is_none());
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.state.lens.readout(false)),
+        "moves \u{b7} \u{394} 1d"
+    );
+    assert!(vcx.debug_bounds("volwatch-lens-readout-7").is_some());
+    assert!(vcx.debug_bounds("volwatch-strip-hint-lens-7").is_some());
+    assert!(vcx.debug_bounds("volwatch-strip-hint-lookback-7").is_some());
+    assert!(vcx.debug_bounds("volwatch-strip-hint-metric-7").is_none());
+    assert!(
+        vcx.debug_bounds("volwatch-strip-hint-shown-7").is_none(),
+        "a pair view has no swap"
+    );
+    assert!(
+        vcx.debug_bounds("volwatch-strip-hint-view_next-7")
+            .is_some()
+    );
+    h.press(&mut vcx, "r");
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("volwatch-strip-hint-metric-7").is_some());
+    assert!(vcx.debug_bounds("volwatch-strip-hint-window-7").is_some());
+    assert!(vcx.debug_bounds("volwatch-strip-hint-lookback-7").is_none());
+    h.press(&mut vcx, "4");
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("volwatch-view-lit-surface").is_some());
+    assert!(
+        vcx.debug_bounds("volwatch-strip-hint-shown-7").is_some(),
+        "a single view hints the swap"
+    );
+    // Unbind the step, as a user keymap removal would: only its hint goes.
     vcx.update(|_, cx| {
         let kept: Vec<_> = cx
             .global::<geode_shell::tips::Chords>()
             .0
             .iter()
-            .filter(|b| b.action.0 != crate::tile::VIEW_PREV_ACTION)
+            .filter(|b| b.action.0 != crate::tile::VIEW_NEXT_ACTION)
             .cloned()
             .collect();
         cx.set_global(geode_shell::tips::Chords(std::sync::Arc::new(kept)));
@@ -171,13 +209,59 @@ fn the_strip_names_each_bound_step_key_on_its_own(cx: &mut gpui::TestAppContext)
     vcx.run_until_parked();
     h.draw(&mut vcx);
     assert!(
-        vcx.debug_bounds("volwatch-strip-next-7").is_some(),
-        "the bound key still hints"
+        vcx.debug_bounds("volwatch-strip-hint-view_next-7")
+            .is_none(),
+        "the unbound action hints nothing"
     );
     assert!(
-        vcx.debug_bounds("volwatch-strip-prev-7").is_none(),
-        "the unbound key hints nothing"
+        vcx.debug_bounds("volwatch-strip-hint-lens-7").is_some(),
+        "the bound ones still hint"
     );
+}
+
+#[gpui::test]
+fn a_tenth_tab_paints_without_a_digit_and_a_press_still_switches(cx: &mut gpui::TestAppContext) {
+    use geode_tile::menu::Trailing;
+    let (h, mut vcx) = landed(cx);
+    let mut settings = VolwatchSettings::default();
+    let vol = settings.views.views[0].clone();
+    for i in 5..=10 {
+        let mut v = vol.clone();
+        v.name = format!("extra{i}");
+        settings.views.views.push(v);
+    }
+    vcx.update(|_, cx| h.factory.set_settings(settings, cx));
+    h.draw(&mut vcx);
+    let tenth = vcx
+        .debug_bounds("volwatch-view-extra10-7")
+        .expect("every tab paints");
+    vcx.simulate_click(tenth.center(), gpui::Modifiers::none());
+    vcx.run_until_parked();
+    assert_eq!(h.view(&vcx), "extra10");
+    h.press(&mut vcx, ".");
+    h.tile.read_with(&vcx, |t, _| {
+        let rows: Vec<_> = t
+            .menu
+            .as_ref()
+            .unwrap()
+            .menu
+            .rows()
+            .iter()
+            .filter_map(geode_tile::menu::Row::action)
+            .cloned()
+            .collect();
+        let ninth = rows.iter().find(|a| a.title().as_ref() == "extra9 view");
+        let tenth = rows.iter().find(|a| a.title().as_ref() == "extra10 view");
+        assert!(
+            matches!(ninth.unwrap().trailing(), Trailing::Keys(_)),
+            "the ninth tab carries its digit"
+        );
+        assert!(
+            matches!(tenth.unwrap().trailing(), Trailing::None),
+            "the tenth has no digit"
+        );
+        assert_eq!(tenth.unwrap().tick(), Some(true));
+    });
 }
 
 #[gpui::test]
@@ -291,19 +375,83 @@ fn a_reload_that_keeps_the_shown_view_keeps_it_and_requeries_only_for_new_measur
 }
 
 #[gpui::test]
-fn a_lookback_chip_press_sets_that_lookback(cx: &mut gpui::TestAppContext) {
+fn the_header_chips_follow_the_lens_and_a_press_sets_the_lookback_or_the_window(
+    cx: &mut gpui::TestAppContext,
+) {
     let (h, mut vcx) = landed(cx);
-    let bounds = vcx
-        .debug_bounds("volwatch-lookback-1m")
-        .expect("the header paints every lookback");
-    vcx.simulate_click(bounds.center(), gpui::Modifiers::none());
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("volwatch-lookback-1w").is_some());
+    assert!(vcx.debug_bounds("volwatch-window-6M").is_none());
+    let at = vcx.debug_bounds("volwatch-lookback-1w").unwrap().center();
+    vcx.simulate_click(at, gpui::Modifiers::default());
     vcx.run_until_parked();
-    assert_eq!(h.lens(&vcx).lookback, geode_core::volboard::Lookback::M1);
+    assert_eq!(h.lens(&vcx).lookback, Lookback::W1);
+    let boards = h.requests();
+    let boards = Harness::boards(&boards);
+    assert_eq!(boards.len(), 1);
     assert_eq!(
-        Harness::boards(&h.requests())[0].lookbacks,
-        [geode_core::volboard::Lookback::M1],
+        boards[0].lookbacks,
+        [Lookback::W1],
         "the press asks as `d` does"
     );
+    h.press(&mut vcx, "r");
+    h.draw(&mut vcx);
+    assert!(vcx.debug_bounds("volwatch-lookback-1w").is_none());
+    assert!(vcx.debug_bounds("volwatch-window-2Y").is_some());
+    let at = vcx.debug_bounds("volwatch-window-2Y").unwrap().center();
+    vcx.simulate_click(at, gpui::Modifiers::default());
+    vcx.run_until_parked();
+    assert_eq!(h.lens(&vcx).window, Window::Y2);
+    assert_eq!(Harness::boards(&h.requests()).len(), 1);
+    assert_eq!(
+        chip_texts(&h, &vcx)[3..6],
+        ["6M".to_string(), "1Y".into(), "z \u{b7} 2Y".into()]
+    );
+}
+
+#[gpui::test]
+fn the_menu_lists_every_tab_with_its_digit_and_ticks_the_shown_one(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "2");
+    h.press(&mut vcx, ".");
+    let titles = h.menu_titles(&vcx);
+    for name in ["vol", "skew", "varswap", "surface"] {
+        assert!(
+            titles.iter().any(|t| t == &format!("{name} view")),
+            "{name} in {titles:?}"
+        );
+    }
+    // The tick is the row's own slot (`\u{2713}` in paint), as the paint
+    // verb's is; the title never carries it.
+    h.tile.read_with(&vcx, |t, _| {
+        let ticked: Vec<(String, Option<bool>)> = t
+            .menu
+            .as_ref()
+            .unwrap()
+            .menu
+            .rows()
+            .iter()
+            .filter_map(geode_tile::menu::Row::action)
+            .filter(|a| a.title().ends_with(" view"))
+            .map(|a| (a.title().to_string(), a.tick()))
+            .collect();
+        assert_eq!(
+            ticked,
+            [
+                ("vol view".to_string(), Some(false)),
+                ("skew view".into(), Some(true)),
+                ("varswap view".into(), Some(false)),
+                ("surface view".into(), Some(false)),
+            ]
+        );
+    });
+    // A pick switches through the view door, as the digit does.
+    let at = titles.iter().position(|t| t == "surface view").unwrap();
+    for _ in 0..at {
+        h.press(&mut vcx, "j");
+    }
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.view(&vcx), "surface");
 }
 
 #[gpui::test]
