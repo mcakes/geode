@@ -42822,14 +42822,25 @@ run_mutation "volviews: an empty view is kept" \
   geode-core \
   an_empty_view_is_kept_with_a_warning
 
-# A top-level value the writer does not model (a user's note) survives a
-# write; dropping it would make every save a silent edit.
+# A key inside a view's table that the writer does not model (a user's
+# note), and the table's comments, survive a write because the view is
+# written over its source table; a fresh table would make every save a
+# silent edit.
 run_mutation "volviews: the writer keeps an unknown key" \
+  crates/geode-core/src/volviews.rs \
+  '    let mut table = source.cloned().unwrap_or_default();' \
+  $'    let mut table = toml_edit::Table::default();\n    let _ = source;' \
+  geode-core \
+  the_writer_keeps_unknown_keys_and_comments_and_round_trips_the_builtin_tabs
+
+# A top-level value the writer does not model survives too, copied after
+# the views; only a table the doc no longer lists is left behind.
+run_mutation "volviews: the writer keeps a top-level value" \
   crates/geode-core/src/volviews.rs \
   '            out[key] = item.clone();' \
   '            let _ = (key, item);' \
   geode-core \
-  the_writer_keeps_unknown_keys_and_comments_and_round_trips_the_builtin_tabs
+  a_view_the_doc_dropped_is_not_written_back_from_the_source
 
 # The named tables take the order given; unsorted they keep the file's,
 # and the browse list's shift+j would move nothing.
