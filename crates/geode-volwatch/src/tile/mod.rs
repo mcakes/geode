@@ -40,6 +40,7 @@ use geode_shell::colfit::{FitMetrics, NOTHING_TO_FIT, SESSION_KEY, widths_to_tom
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext, Keystroke};
+use geode_shell::linenumbers::{LineNumbers, UiSettings};
 use geode_shell::module::{CloseHandle, ConfigObject, FindEvent, StackHandle};
 use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::scale;
@@ -147,6 +148,12 @@ pub(super) fn snapshot(cx: &App) -> Arc<WatchlistSnapshot> {
 
 /// The display clock: the app's, or the machine's where a tile is hosted
 /// without one.
+/// The shell's `[ui] line_numbers`; off before the shell publishes it.
+fn ui_line_numbers(cx: &App) -> LineNumbers {
+    cx.try_global::<UiSettings>()
+        .map_or(LineNumbers::Off, |s| s.line_numbers)
+}
+
 fn app_clock(cx: &App) -> Clock {
     cx.try_global::<geode_shell::clock::AppClock>()
         .map(|c| c.0)
@@ -219,6 +226,9 @@ pub struct VolwatchTile {
     pub(crate) grid: RowModel<Row>,
     /// The board ask the grid's sort comparator reads values through.
     sorted_with: Option<Ask>,
+    /// `[ui] line_numbers`, mirrored from the shell's `UiSettings`: the
+    /// grid's gutter follows it (`sync_table`).
+    line_numbers: LineNumbers,
     pub(crate) prepared: Rc<Prepared>,
     pub(crate) columns: Rc<Vec<Column>>,
     /// The shown view's cell shape, carried beside its columns.
@@ -352,6 +362,10 @@ impl VolwatchTile {
             cx.notify();
         })
         .detach();
+        // `[ui] line_numbers` arrives through the shell's `UiSettings`
+        // global: settings, `ui::line_numbers_cycle` and a reload alike.
+        cx.observe_global::<UiSettings>(|this, cx| this.on_ui_settings(cx))
+            .detach();
         // A stale wake-up notifies the tile; the rows it turned stale are
         // re-prepared here, outside render.
         cx.observe_self(|this, cx| {
@@ -423,6 +437,7 @@ impl VolwatchTile {
             grouping: Applicable::default(),
             grid,
             sorted_with: None,
+            line_numbers: ui_line_numbers(cx),
             prepared: Rc::default(),
             columns: Rc::default(),
             cells: Cells::Pair,
@@ -858,9 +873,11 @@ impl VolwatchTile {
         self.rebuild_readout();
         self.rebuild_band();
         let visible = self.grid.visible().to_vec();
+        let shown = visible.len();
         let cursor = self.grid.cursor().map(|r| (r, self.cursor_col));
         let selection = self.grid.selected();
         let collapsed: Vec<bool> = visible.iter().map(|&i| self.grid.is_collapsed(i)).collect();
+        let line_numbers = self.line_numbers;
         let empty = SharedString::new_static(if self.grid.query().is_empty() {
             NO_MEMBERS
         } else {
@@ -871,7 +888,8 @@ impl VolwatchTile {
             let d = t.delegate_mut();
             let relayout = d.set_model(prepared, columns, sorted, &view);
             d.set_view(visible, cursor, selection, empty, collapsed);
-            if relayout {
+            let regutter = d.set_gutter(line_numbers, shown, cursor.map(|(r, _)| r));
+            if relayout || regutter {
                 t.refresh(cx);
             }
             match cursor.map(|(r, _)| r) {
@@ -1248,6 +1266,17 @@ impl VolwatchTile {
         self.state.band = false;
         self.sync_table(cx);
         cx.notify();
+    }
+
+    /// Mirror the line-number setting and re-sync the table on a change:
+    /// the gutter's texts and the Underlying column's width follow it.
+    fn on_ui_settings(&mut self, cx: &mut Context<Self>) {
+        let mode = ui_line_numbers(cx);
+        if self.line_numbers != mode {
+            self.line_numbers = mode;
+            self.sync_table(cx);
+            cx.notify();
+        }
     }
 
     /// A row motion moves the cursor (extending a live selection); a

@@ -12,6 +12,7 @@ use geode_shell::colfit::{
     CURSOR_BORDER_PX, FitMetrics, FittedWidths, TABLE_TEXT_REM, widths_from_record,
 };
 use geode_shell::fonts;
+use geode_shell::linenumbers::{GUTTER_GAP_PX, LineNumbers};
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
@@ -30,8 +31,8 @@ use gpui_component::table::{
 use gpui_component::{ActiveTheme as _, Sizable as _, Size, Theme, h_flex};
 
 use crate::core::model::{
-    CHEVRON_PX, Glyph, Prepared, PreparedCell, PreparedRow, SORT_MARK_DESIGN_PX, TREE_INDENT_PX,
-    glyph_width,
+    CHEVRON_PX, Glyph, Gutter, Prepared, PreparedCell, PreparedRow, SORT_MARK_DESIGN_PX,
+    TREE_INDENT_PX, glyph_width, gutter,
 };
 use crate::core::views::{Column, ColumnKind};
 
@@ -267,6 +268,13 @@ pub(crate) struct GridDelegate {
     pub(crate) selection: Option<Range<usize>>,
     /// The sorted column and whether it descends, for the head's mark.
     sorted: Option<(usize, bool)>,
+    /// The line-number gutter under `[ui] line_numbers`: the shown rows'
+    /// texts and its width, prepared by `set_gutter` outside render; empty
+    /// and `0` when off. The Underlying column's width includes it.
+    gutter: Gutter,
+    /// What `gutter` was last derived from: the mode, the shown row count
+    /// and (in relative mode) the cursor row.
+    gutter_stamp: Option<(LineNumbers, usize, Option<usize>)>,
     pub(crate) paints: Paints,
     rem_px: f32,
     /// Column widths at the window's rem, from the prepared design px.
@@ -300,6 +308,8 @@ impl GridDelegate {
             cursor: None,
             selection: None,
             sorted: None,
+            gutter: Gutter::default(),
+            gutter_stamp: None,
             paints,
             rem_px: scale::DESIGN_REM,
             widths: Vec::new(),
@@ -369,6 +379,48 @@ impl GridDelegate {
         self.paints = paints;
     }
 
+    /// Re-derive the gutter when the mode, the shown row count or (in
+    /// relative mode) the cursor row changed; `true` when its width did,
+    /// so the tile refreshes the table, which caches `column()`'s widths:
+    /// a stale width would clip the name or leave a hole where the gutter
+    /// was. Nothing is rebuilt for a cursor move under `on` or `off`.
+    pub(crate) fn set_gutter(
+        &mut self,
+        mode: LineNumbers,
+        len: usize,
+        cursor: Option<usize>,
+    ) -> bool {
+        let cursor = match mode {
+            LineNumbers::Relative => cursor,
+            _ => None,
+        };
+        let stamp = (mode, len, cursor);
+        if self.gutter_stamp == Some(stamp) {
+            return false;
+        }
+        self.gutter_stamp = Some(stamp);
+        let was = self.gutter.px;
+        self.gutter = gutter(mode, len, cursor);
+        self.gutter.px != was
+    }
+
+    /// The gutter's share of column `ix`'s width: the Underlying column
+    /// carries it, every other none. Sized widths (a fit, a drag) hold the
+    /// cell's own width without it, so a drag is recorded net of it and
+    /// `width` adds it back: a sized width recorded gross would grow by
+    /// the gutter on every relayout.
+    fn gutter_for(&self, ix: usize) -> f32 {
+        match self.columns.get(ix) {
+            Some(c) if c.kind == ColumnKind::Underlying => self.gutter.px,
+            _ => 0.0,
+        }
+    }
+
+    /// The gutter's text on shown row `row`; `None` when off.
+    pub(crate) fn gutter_text(&self, row: usize) -> Option<&SharedString> {
+        self.gutter.numbers.get(row)
+    }
+
     /// Whether the press now bubbling through a row began on its chevron;
     /// cleared by the asking.
     fn take_chevron_press(&mut self) -> bool {
@@ -430,8 +482,10 @@ impl GridDelegate {
     pub(crate) fn record_widths(&mut self, widths: &[Pixels]) {
         for (ix, w) in widths.iter().enumerate().take(self.ids.len()) {
             if *w != self.width(ix) {
-                self.fitted
-                    .insert(sized_key(&self.view, &self.ids[ix]), f32::from(*w));
+                self.fitted.insert(
+                    sized_key(&self.view, &self.ids[ix]),
+                    f32::from(*w) - self.gutter_for(ix),
+                );
             }
         }
         self.relayout();
@@ -481,19 +535,22 @@ impl GridDelegate {
         )
     }
 
-    /// Column `ix`'s width. `prepare` measures every column of the view,
-    /// so a missing width is only the instant before the first model.
+    /// Column `ix`'s width, the gutter's included on the Underlying
+    /// column. `prepare` measures every column of the view, so a missing
+    /// width is only the instant before the first model.
     pub(crate) fn width(&self, ix: usize) -> Pixels {
-        self.widths.get(ix).copied().unwrap_or_default()
+        self.widths.get(ix).copied().unwrap_or_default() + px(self.gutter_for(ix))
     }
 
-    /// Column `ix`'s narrowest width: the table clamps a header drag to
-    /// it, and `relayout` a sized width.
+    /// Column `ix`'s narrowest width, the gutter's included on the
+    /// Underlying column: the table clamps a header drag to it, and
+    /// `relayout` a sized width.
     pub(crate) fn min_width(&self, ix: usize) -> Pixels {
         self.min_widths
             .get(ix)
             .copied()
             .unwrap_or(TableColumn::default().min_width)
+            + px(self.gutter_for(ix))
     }
 
     /// The fill under row `row_ix`, for a sparkline's ring.
@@ -771,6 +828,13 @@ impl TableDelegate for GridDelegate {
             // anywhere clears the record, so a press the row never asked
             // about cannot survive to a later row press. A double-click
             // toggles once, on its first click.
+            //
+            // With line numbers on, the row's number leads the whole
+            // cell, OUTSIDE the tree: the indent starts after it, so the
+            // numbers share one lane whatever the depth, and the chevron
+            // and label keep their ids and move right together. The
+            // number takes the muted tone, the cursor row's the text
+            // tone, so the row the count measures from reads at a glance.
             Glyph::None if underlying => {
                 let lead = design(row.depth as f32 * TREE_INDENT_PX);
                 let group = row.group.is_some();
@@ -778,8 +842,10 @@ impl TableDelegate for GridDelegate {
                 let fold_name = row.fold_id.clone();
                 let fold_sel = fold_name.clone();
                 let chevron = p.chevron;
-                h_flex()
-                    .w_full()
+                let number = self.gutter_text(row_ix).cloned();
+                let gutter_sel = row.gutter_id.clone();
+                let on_cursor_row = self.cursor.is_some_and(|(r, _)| r == row_ix);
+                let tree = h_flex()
                     .min_w_0()
                     .pl(lead)
                     .when(group, |el| {
@@ -832,8 +898,32 @@ impl TableDelegate for GridDelegate {
                             .truncate()
                             .debug_selector(move || format!("{id}-text"))
                             .child(text),
-                    )
-                    .into_any_element()
+                    );
+                match number {
+                    None => tree.w_full().into_any_element(),
+                    Some(number) => h_flex()
+                        .w_full()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .flex_none()
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .justify_end()
+                                .w(px(self.gutter.px))
+                                .pr(px(GUTTER_GAP_PX))
+                                .text_color(if on_cursor_row {
+                                    theme.foreground
+                                } else {
+                                    theme.muted_foreground
+                                })
+                                .debug_selector(move || gutter_sel.to_string())
+                                .child(number),
+                        )
+                        .child(tree.flex_1())
+                        .into_any_element(),
+                }
             }
             // Plain text fills the cell, shrinks with it and aligns as
             // text, so a column narrower than its number cuts the trailing

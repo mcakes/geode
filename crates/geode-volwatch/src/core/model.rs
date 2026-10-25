@@ -19,6 +19,7 @@ use geode_core::format::{Formatted, Sign, format_number};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 use geode_core::volboard::{Cell, Change, Lookback, Measure, Role, VolBoard, VolRow};
 use geode_core::volviews::{Cells, CompanionGlyph, LevelGlyph};
+use geode_shell::linenumbers::{LineNumbers, gutter_number, gutter_px};
 use geode_tile::rows::GridRow;
 use geode_widgets::cell::delta_chip::{Chip, chip};
 use geode_widgets::cell::heat::{heat, range};
@@ -205,6 +206,9 @@ pub struct PreparedRow {
     /// on a group row, built here so paint formats nothing; empty on a
     /// member.
     pub fold_id: SharedString,
+    /// The line-number gutter's selector on this row
+    /// (`<tile>-<row name>-gutter`), built here as `fold_id` is.
+    pub gutter_id: SharedString,
     pub cells: Vec<PreparedCell>,
 }
 
@@ -213,6 +217,42 @@ pub struct Prepared {
     pub rows: Vec<PreparedRow>,
     /// design px per column, from the glyph widths and the widest text
     pub widths: Vec<f32>,
+}
+
+/// The line-number gutter beside the Underlying cells under `[ui]
+/// line_numbers`: one text per shown row in painted order, and the
+/// gutter's width in px by the shell's shared rule. Both empty and `0`
+/// when the setting is off, so an off gutter paints nothing and widens
+/// nothing.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Gutter {
+    pub numbers: Vec<SharedString>,
+    pub px: f32,
+}
+
+/// The gutter over `len` shown rows (members and group rows alike, after
+/// grouping, folds and `/`) with the cursor on shown row `cursor`. `on`
+/// is the one-based row index `N shift+g` lands on; `rel` is the distance
+/// from the cursor row, which keeps its absolute number so `3j` and `3G`
+/// both read off the gutter. Relative mode with no cursor row numbers
+/// absolutely. Built here, outside render, so the paint formats nothing.
+pub fn gutter(mode: LineNumbers, len: usize, cursor: Option<usize>) -> Gutter {
+    let (mode, at) = match (mode, cursor) {
+        (LineNumbers::Off, _) => return Gutter::default(),
+        (LineNumbers::Relative, Some(c)) => (mode, c),
+        (LineNumbers::Relative, None) => (LineNumbers::On, 0),
+        (mode, _) => (mode, 0),
+    };
+    Gutter {
+        numbers: (0..len)
+            .map(|row| {
+                gutter_number(mode, row, at)
+                    .map(|n| SharedString::from(n.to_string()))
+                    .unwrap_or_default()
+            })
+            .collect(),
+        px: gutter_px(mode, len),
+    }
 }
 
 pub struct Inputs<'a> {
@@ -648,6 +688,7 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
                     Some(_) => format!("volwatch-fold-{}", row.name).into(),
                     None => SharedString::default(),
                 },
+                gutter_id: format!("{}-{}-gutter", i.tile, row.name).into(),
                 cells,
             }
         })
@@ -3460,6 +3501,107 @@ mod tests {
             );
             assert_eq!(a, b);
             assert_eq!(a, ["B", "A"]);
+        }
+    }
+
+    mod line_numbers {
+        use super::*;
+        use crate::core::grouping::fixtures::{asked, europe, leaf};
+        use crate::core::grouping::group_rows;
+        use geode_tile::rows::RowModel;
+
+        /// Core (DAX, SX5E), Isles (UKX) and the unmapped group (NEW,
+        /// SPX, NKY) under `region`: nine rows, three of them groups.
+        fn grid() -> RowModel<Row> {
+            let rows = group_rows(
+                vec![
+                    leaf("DAX", Some(14.5), 0.6, 0.5, None),
+                    leaf("SX5E", Some(16.5), 1.0, 0.9, None),
+                    leaf("UKX", Some(12.0), 0.1, 0.2, None),
+                    leaf("NEW", None, 0.0, 0.0, None),
+                    leaf("SPX", Some(13.0), 0.2, 0.4, None),
+                    leaf("NKY", Some(18.0), 0.3, 0.7, None),
+                ],
+                &["region".into()],
+                &europe(),
+                &asked(),
+            );
+            let mut g = RowModel::new();
+            g.set_rows(rows);
+            g
+        }
+
+        fn names(g: &RowModel<Row>) -> Vec<&str> {
+            g.visible()
+                .iter()
+                .map(|&i| g.row(i).name.as_str())
+                .collect()
+        }
+
+        fn texts(g: &Gutter) -> Vec<&str> {
+            g.numbers.iter().map(|n| n.as_ref()).collect()
+        }
+
+        /// The gutter numbers the shown rows, group rows included, after
+        /// a fold and a `/` narrowing; a hidden member has no number.
+        /// `rel` measures from the cursor row, which keeps its absolute
+        /// number; `Off` numbers nothing and takes no width.
+        #[test]
+        fn line_numbers_count_visible_rows_after_folds_and_narrowing() {
+            let mut g = grid();
+            assert_eq!(g.visible().len(), 9);
+            g.set_collapsed(["group:Isles".to_string()]);
+            assert_eq!(
+                names(&g),
+                [
+                    "group:Core",
+                    "DAX",
+                    "SX5E",
+                    "group:Isles",
+                    "group:\u{2014}",
+                    "NEW",
+                    "SPX",
+                    "NKY"
+                ]
+            );
+            let on = gutter(LineNumbers::On, g.visible().len(), g.cursor());
+            assert_eq!(texts(&on), ["1", "2", "3", "4", "5", "6", "7", "8"]);
+            assert_eq!(on.px, gutter_px(LineNumbers::On, 8));
+
+            g.click(2, false);
+            assert_eq!(g.cursor(), Some(2), "the cursor on SX5E, row 3");
+            let rel = gutter(LineNumbers::Relative, g.visible().len(), g.cursor());
+            assert_eq!(
+                texts(&rel),
+                ["2", "1", "3", "1", "2", "3", "4", "5"],
+                "distances, with the cursor row's own number"
+            );
+            assert_eq!(rel.px, on.px);
+
+            g.set_filter("S");
+            assert_eq!(names(&g), ["group:Core", "SX5E", "group:\u{2014}", "SPX"]);
+            assert_eq!(g.cursor(), Some(1), "the cursor follows SX5E");
+            let on = gutter(LineNumbers::On, g.visible().len(), g.cursor());
+            assert_eq!(
+                texts(&on),
+                ["1", "2", "3", "4"],
+                "the hidden rows are unnumbered"
+            );
+            let rel = gutter(LineNumbers::Relative, g.visible().len(), g.cursor());
+            assert_eq!(texts(&rel), ["1", "2", "1", "2"]);
+
+            let off = gutter(LineNumbers::Off, g.visible().len(), g.cursor());
+            assert!(off.numbers.is_empty());
+            assert_eq!(off.px, 0.0);
+        }
+
+        /// With no cursor row, relative mode numbers absolutely, as the
+        /// pricer's gutter does.
+        #[test]
+        fn relative_without_a_cursor_numbers_absolutely() {
+            let rel = gutter(LineNumbers::Relative, 3, None);
+            assert_eq!(texts(&rel), ["1", "2", "3"]);
+            assert_eq!(rel.px, gutter_px(LineNumbers::On, 3));
         }
     }
 }
