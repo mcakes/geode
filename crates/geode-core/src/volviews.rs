@@ -1289,6 +1289,11 @@ mod tests {
                 key_len: 2,
                 values: 1,
             }),
+            // Keyed by `underlying_ref` alone: the zero-suffix open form.
+            "term_slope" => Some(TableShape {
+                key_len: 1,
+                values: 1,
+            }),
             "two_values" => Some(TableShape {
                 key_len: 2,
                 values: 2,
@@ -1365,6 +1370,13 @@ mod tests {
             MeasureText::Table {
                 dataset: "spotvol_cov".into(),
                 suffix: vec!["3M".into()]
+            }
+        );
+        assert_eq!(
+            parse_measure("term_slope").unwrap(),
+            MeasureText::Table {
+                dataset: "term_slope".into(),
+                suffix: vec![]
             }
         );
         assert_eq!(
@@ -1491,7 +1503,8 @@ mod tests {
     fn resolve_keeps_builtins_resolves_tables_and_picks_the_default() {
         let (d, _) = from_doc(&doc("config_version = 1\ndefault = \"ssr\"\n\
              [vol]\n[[vol.columns]]\nmeasure = \"atfm 1M\"\n\
-             [ssr]\n[[ssr.columns]]\nmeasure = \"ssr 3M\"\n[[ssr.columns]]\nmeasure = \"spotvol_cov 3M\"\n"));
+             [ssr]\n[[ssr.columns]]\nmeasure = \"ssr 3M\"\n[[ssr.columns]]\nmeasure = \"spotvol_cov 3M\"\n\
+             [[ssr.columns]]\nmeasure = \"term_slope\"\n"));
         let (v, diags) = resolve(&d, &surface_only);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(v.default, 1);
@@ -1515,6 +1528,20 @@ mod tests {
                 measure: Measure::Table {
                     dataset: "spotvol_cov".into(),
                     suffix: vec!["3M".into()]
+                },
+                label: None,
+                group: None,
+                level: None,
+                companion: None,
+            }
+        );
+        // A dataset keyed by `underlying_ref` alone resolves with no suffix.
+        assert_eq!(
+            v.get("ssr").unwrap().columns[2],
+            VolColumn::Measure {
+                measure: Measure::Table {
+                    dataset: "term_slope".into(),
+                    suffix: vec![]
                 },
                 label: None,
                 group: None,

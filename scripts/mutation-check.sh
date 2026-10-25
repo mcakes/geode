@@ -42762,7 +42762,7 @@ run_mutation "volwatch: the demo ssr table is keyed by tenor" \
   '        "ssr" => Some(&["underlying_ref", "tenor"]),' \
   '        "ssr" => Some(&["underlying_ref", "tenor", "delta"]),' \
   geode-compose \
-  the_surface_ladders_1w_to_5y_at_seven_deltas_and_ssr_is_a_fourth_table
+  the_surface_ladders_1w_to_5y_at_seven_deltas_and_ssr_and_spotvol_cov_are_tables
 
 # After `w` the header chip names the new window while the old board's
 # ranks and z-scores are still up: a companion from another window than
