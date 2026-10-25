@@ -3396,3 +3396,48 @@ the name column's width. The grouped case is 1.20× the flat one, five
 more rows and no extra work per cell. The flat case reads 94.7 µs here
 against the 148 µs recorded at load 5 to 12 on 2026-10-16; the machine
 was quiet for this run, and the figure is not a code change.
+
+## Coverage coalesced in a batch (2026-10-25)
+
+Head `d1349808` plus the batched coverage change, `cargo bench -p geode-data
+--bench vol_board`, 20 samples per lane, load averages (1 / 5 / 15 min, 18
+cores) 10.5 / 14.2 / 10.9 at the end; a second session's demo instance and
+its builds ran throughout. Fixture unchanged: 25 members, 40 surface
+suffixes, 400 days of closes.
+
+The owner reported slow tab switches on the vol watchlist. Phase timers
+inside `append_history` (removed again) split a 96 ms prefix `Latest`
+append as dedupe 8 ms, insert 0.4 ms, coverage inserts 5 ms,
+`coalesce_coverage` 80 ms, sweep 1.5 ms; a 125-tuple `Between` append
+spent 370 of its 400 ms in `coalesce_coverage`. The function ran one
+select, one unprepared delete and one insert per span for every touched
+tuple, each scanning the coverage table, about 3 ms per tuple, and a tab
+switch waits for three to nine such appends in turn on the ingest writer.
+`uncovered_at` then cost about 170 ms of the exact `At` lane with a term
+per tuple in each of its two predicates, and `read_history` about 85 ms
+with the same shape.
+
+Three changes, all in `store::history`: coverage is coalesced through a
+staging table in four statements whatever the tuple count;
+`uncovered_at` joins its two statements on `VALUES` lists as
+`missing_by_key` already did; `read_history` matches its asked tuples
+through one `EXISTS` over a `VALUES` list.
+
+| Benchmark | Before | After |
+|---|---|---|
+| `vol_board/changes_view_25` | 457 ms | 75 ms (74.5–76.0) |
+| `vol_board/rich_cheap_view_25` | 856 ms | 106 ms (104–109) |
+| `history/prefix_latest_25` | 110 ms | 31 ms (30.0–31.2) |
+| `history/prefix_at_25_always_fetches` | 113 ms | 30 ms (29.8–30.9) |
+| `history/exact_at_250_from_coverage` | 197 ms | 30 ms (29.8–30.3) |
+| `history/exact_between_30d_250_from_coverage` | 579 ms | 61 ms (60.1–61.0) |
+| `history/plan_between_250` | 6.4 ms | 6.9 ms (6.3–7.5) |
+| `append/between_400d_prefix_answer_deduped` | 19.7 ms | 19.2 ms (19.0–19.5) |
+| `board_read/changes_view_25` | 15.4 ms | 16.4 ms (16.2–16.6) |
+| `board_read/rich_cheap_view_25` | 33.8 ms | 34.3 ms (34.0–34.6) |
+
+The one-member append and the board reads are unchanged within the
+run's variance; the lanes that touched many tuples' coverage fell four to
+nine times. A tab switch is now bounded by the board read and the
+fetches, not by the writer's bookkeeping. Both "before" columns are the
+same day's runs at the same load, not the guide's older figures.

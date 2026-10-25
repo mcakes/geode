@@ -818,23 +818,33 @@ vendors' publication lag ([real sources](real-sources.md)).
 
 An append then coalesces the coverage of every asked tuple it recorded
 coverage for: that tuple's rows (exactly its shape, trailing NULLs
-included) are replaced by its merged spans, each under the newest
-`received_at` among them. The table so holds one row per disjoint span per
-asked tuple, rather than a row per ask that a refreshing board would grow
-without bound and every lookup would scan. Lookups merge a tuple's spans
-with its prefixes' anyway, so they answer the same.
+included) are replaced by the merged spans of what it held and what the
+append records, each under the newest `received_at` among them. The table
+so holds one row per disjoint span per asked tuple, rather than a row per
+ask that a refreshing board would grow without bound and every lookup would
+scan. Lookups merge a tuple's spans with its prefixes' anyway, so they
+answer the same. The rewrite is four statements whatever the number of
+tuples: the touched tuples are staged in `staging_history_coverage`, one
+select joins their held rows and one delete removes them, and the merged
+spans go back through the staging table in one insert. A statement round
+per tuple cost a vol board ask of 125 tuples 370 ms of its 400 ms append,
+and a tab switch waits for several such appends on the one writer.
 
 A window or sparkline `Between` plans its calls from `missing_by_key`: one
 statement, whatever the number of asked tuples, joins the coverage table on
 a `VALUES` list of them, and each tuple's rows are then picked in Rust by
 the same rule `covered_spans` applies (rows equal to it or a prefix of it,
 never a row deeper than a prefix ask). At 250 tuples the plan takes about
-5 ms of the service thread, where one statement per tuple took 62 ms.
+5 ms of the service thread, where one statement per tuple took 62 ms. An
+`At` ask plans from `uncovered_at` the same way: one statement over the
+coverage table and one over the payload table (each covered tuple's last
+observation at or before `t`), both joined on a `VALUES` list; a term per
+tuple in one predicate cost 250 tuples about 170 ms of the service thread.
 
 Rows, coverage and the retention sweep commit in one writer transaction, so
 a span read as covered is a span whose rows are readable. Calls into
-`append_history` share the fixed `staging_history` table, so only the ingest
-writer runs them. An answer the worker refused (below) leaves the store
+`append_history` share the fixed `staging_history` and
+`staging_history_coverage` tables, so only the ingest writer runs them. An answer the worker refused (below) leaves the store
 exactly as it was, coverage included.
 
 ### History sources

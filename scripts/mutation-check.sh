@@ -41630,6 +41630,47 @@ run_mutation "history: covers_instant skips an unheld tuple" \
   geode-data \
   covers_instant_needs_every_tuple_and_a_point_span_counts
 
+# An append coalesces the coverage of every tuple it records in one batch,
+# each tuple's held spans found by its own staged key. Mutated to hand every
+# held row to the first tuple, NDX's held span folds into SPX's and NDX
+# forgets it: a lookup refetches a span the store already holds under the
+# wrong key.
+run_mutation "history: coalescing hands one tuple's held spans to another" \
+  crates/geode-data/src/store/history.rs \
+  '        if let Some((_, spans, newest)) = tuples.iter_mut().find(|(t, _, _)| **t == key) {' \
+  '        if let Some((_, spans, newest)) = tuples.iter_mut().next() {' \
+  geode-data \
+  one_append_coalesces_each_recorded_tuple_apart_from_the_others
+
+# The merged spans replace the rows they were read from. Mutated to keep
+# them, every refresh adds a row per tuple and lookups scan them all.
+run_mutation "history: coalescing keeps the rows it replaces" \
+  crates/geode-data/src/store/history.rs \
+  '    conn.execute(&delete, []).map_err(sql_err(&delete))?;' \
+  '    let _ = &delete;' \
+  geode-data \
+  repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
+
+# The spans recorded by this append are part of what is merged. Mutated to
+# start each tuple empty, only what was already held survives and the span
+# just fetched is asked for again on the next request.
+run_mutation "history: coalescing forgets the spans recorded now" \
+  crates/geode-data/src/store/history.rs \
+  '            None => tuples.push((tuple, vec![*span], received)),' \
+  '            None => tuples.push((tuple, Vec::new(), received)),' \
+  geode-data \
+  repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
+
+# A read matches asked tuples as VALUES rows, a NULL cell past a prefix's
+# end matching any value. Mutated to compare the cell, a prefix read names
+# no row and a tile asking by member sees an empty history.
+run_mutation "history: a read's prefix cell matches nothing" \
+  crates/geode-data/src/store/history.rs \
+  '                "(asked.a{i} IS NULL OR h.{} = CAST(asked.a{i} AS {}))",' \
+  '                "(h.{} = CAST(asked.a{i} AS {}))",' \
+  geode-data \
+  latest_answers_the_greatest_ts_per_key_under_a_prefix
+
 # Retention removes superseded versions received before its cutoff only.
 # Mutated to ignore the cutoff, a correction made yesterday erases the
 # version it replaced while the window still promises it.
@@ -41751,25 +41792,26 @@ run_mutation "history key: -0 is a key of its own" \
 # lookup scans them all on the service loop.
 run_mutation "history: coverage rows are not coalesced" \
   crates/geode-data/src/store/history.rs \
-  '    coalesce_coverage(conn, &coverage, keys, covers)?;' \
-  '    let _ = covers;' \
+  '    coalesce_coverage(conn, &coverage, keys, &recorded, received)?;' \
+  '    let _ = (&recorded, received);' \
   geode-data \
   repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
 
-# Coalescing rewrites exactly the touched tuple. Matched loosely, a
-# prefix's row is folded into a member's and the prefix loses its coverage.
+# Coalescing rewrites exactly the touched tuples. Matched loosely, every
+# held row joins every staged tuple: a tuple never covered on day 5 gains
+# another's day 5 and reports it covered.
 run_mutation "history: coalescing takes another tuple's rows" \
   crates/geode-data/src/store/history.rs \
-  '                "{} IS NOT DISTINCT FROM CAST(? AS {})",' \
-  '                "({} IS NOT DISTINCT FROM CAST(? AS {}) OR true)",' \
+  '                "c.{0} IS NOT DISTINCT FROM CAST(s.{0} AS {1})",' \
+  '                "(c.{0} IS NOT DISTINCT FROM CAST(s.{0} AS {1}) OR true)",' \
   geode-data \
-  repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
+  one_append_coalesces_each_recorded_tuple_apart_from_the_others
 
 # A coalesced row carries the newest received_at of the rows it replaces.
 run_mutation "history: coalesced coverage keeps the oldest received_at" \
   crates/geode-data/src/store/history.rs \
-  '        let Some(newest) = held.iter().map(|h| h.2).max() else {' \
-  '        let Some(newest) = held.iter().map(|h| h.2).min() else {' \
+  '            *newest = (*newest).max(at);' \
+  '            *newest = (*newest).min(at);' \
   geode-data \
   repeated_asks_on_one_tuple_coalesce_to_one_coverage_row_per_disjoint_span
 
@@ -42028,8 +42070,8 @@ run_mutation "history: a covered tuple without a row in its span is read locally
 # every exact At refetches what the cache holds.
 run_mutation "history: uncovered_at reads no prefix coverage row" \
   crates/geode-data/src/store/history.rs \
-  '            format!("({col} = CAST(? AS {ty}) OR {col} IS NULL)")' \
-  '            format!("({col} = CAST(? AS {ty}))")' \
+  '            format!("(c.{col} IS NULL OR c.{col} = CAST(asked.a{i} AS {ty}))")' \
+  '            format!("(c.{col} = CAST(asked.a{i} AS {ty}))")' \
   geode-data \
   covers_instant_reads_a_prefix_coverage_row_for_an_exact_tuple
 

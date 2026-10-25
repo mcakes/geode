@@ -13,7 +13,8 @@
 //! Both timestamps are UTC stored as naive `TIMESTAMP`, bound and read as
 //! epoch microseconds (`make_timestamp` / `epoch_us`) so session time zones
 //! cannot shift them. The ingest writer serializes calls to [`append_history`]
-//! because they share the fixed `staging_history` table.
+//! because they share the fixed `staging_history` and
+//! `staging_history_coverage` tables.
 
 use crate::adapter::HistoryRows;
 use crate::store::series::{cutoff, from_micros, merge_spans, micros, missing_spans};
@@ -26,6 +27,10 @@ use geode_core::schema::{ColumnSpec, ColumnType, DatasetSpec};
 use std::collections::{HashMap, HashSet};
 
 pub const STAGING_TABLE: &str = "staging_history";
+/// The coverage rows an append rewrites, staged like `staging_history`
+/// (text keys, epoch micros): first the touched tuples, which one select
+/// joins and one delete subtracts, then their merged spans for one insert.
+pub const STAGING_COVERAGE: &str = "staging_history_coverage";
 
 /// A half-open `[from, to)` coverage span. Named apart from
 /// `geode_core::query::Span`, the request vocabulary, so the two never meet
@@ -343,6 +348,61 @@ fn coverage_batch_sql(dataset: &str, keys: &[&ColumnSpec], n_tuples: usize) -> S
     )
 }
 
+/// The statement `uncovered_at` runs for its covered tuples: each one's
+/// last observation at or before `t` (the trailing parameter), joined on a
+/// VALUES list of the tuples like `coverage_batch_sql`, so the predicate's
+/// depth does not grow with the tuple count. A term per tuple in one
+/// predicate cost 250 tuples about 170 ms of the service thread.
+fn latest_batch_sql(dataset: &str, keys: &[&ColumnSpec], n_tuples: usize) -> String {
+    let key_list = joined(keys, |c| format!("h.{}", quote(&c.name)), ", ");
+    let row = format!("({})", vec!["CAST(? AS VARCHAR)"; keys.len()].join(", "));
+    let asked_rows = vec![row.as_str(); n_tuples].join(", ");
+    let asked_cols = (0..keys.len())
+        .map(|i| format!("a{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let on = keys
+        .iter()
+        .enumerate()
+        .map(|(i, c)| format!("h.{} = CAST(asked.a{i} AS {})", quote(&c.name), c.ty.sql()))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!(
+        "select {key_list}, max(epoch_us(h.ts)) from {} h \
+         join (values {asked_rows}) as asked({asked_cols}) on {on} \
+         where epoch_us(h.ts) <= ? group by {key_list}",
+        history_table(dataset)
+    )
+}
+
+/// The predicate `read_history` matches payload rows (alias `h`) with: a
+/// row belongs to the read when some asked tuple, bound as a VALUES row of
+/// one text cell per key column (NULL past a prefix's end), equals it on
+/// every named column. A NULL cell matches any value, so a prefix reads
+/// every deeper key, as `KeySet::Prefix` means. One EXISTS, so a row under
+/// both a prefix and an exact tuple is read once.
+fn asked_tuples_sql(keys: &[&ColumnSpec], n_tuples: usize) -> String {
+    let row = format!("({})", vec!["CAST(? AS VARCHAR)"; keys.len()].join(", "));
+    let asked_rows = vec![row.as_str(); n_tuples].join(", ");
+    let asked_cols = (0..keys.len())
+        .map(|i| format!("a{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let on = keys
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            format!(
+                "(asked.a{i} IS NULL OR h.{} = CAST(asked.a{i} AS {}))",
+                quote(&c.name),
+                c.ty.sql()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!("exists (select 1 from (values {asked_rows}) as asked({asked_cols}) where {on})")
+}
+
 /// The asked tuples the cache cannot answer `At(t)` for. A tuple is
 /// answerable when it names every key column, `t` lies inside one of its
 /// merged coverage spans `[a, b)` (rows recorded for it or for a prefix of
@@ -392,7 +452,6 @@ pub fn uncovered_at(
         return Ok(tuples);
     }
     let n = keys.len();
-    let key_list = joined(&keys, |c| quote(&c.name), ", ");
     // Key columns read back in the spelling `normalized_tuple` produces, so
     // a stored key compares equal to the asked one.
     let read_key = |r: &duckdb::Row, i: usize| -> duckdb::Result<Option<String>> {
@@ -405,20 +464,9 @@ pub fn uncovered_at(
     };
     // 1) Every coverage row that applies to an asked tuple: equal to it, or
     //    a prefix of it (trailing NULLs), the predicate `covered_spans` uses
-    //    for a full-arity tuple.
-    let one = joined(
-        &keys,
-        |c| {
-            let (col, ty) = (quote(&c.name), c.ty.sql());
-            format!("({col} = CAST(? AS {ty}) OR {col} IS NULL)")
-        },
-        " AND ",
-    );
-    let predicate = vec![format!("({one})"); tuples.len()].join(" OR ");
-    let select = format!(
-        "select {key_list}, epoch_us(from_ts), epoch_us(to_ts) from {} where {predicate}",
-        history_coverage_table(&ds.name)
-    );
+    //    for a full-arity tuple; one statement joined on a VALUES list of
+    //    the tuples (`coverage_batch_sql`).
+    let select = coverage_batch_sql(&ds.name, &keys, tuples.len());
     let params: Vec<Value> = tuples.iter().flatten().cloned().map(Value::Text).collect();
     let mut stmt = conn.prepare(&select).map_err(sql_err(&select))?;
     let rows: Vec<(Vec<Option<String>>, i64, i64)> = stmt
@@ -452,18 +500,9 @@ pub fn uncovered_at(
         }
     }
     if !starts.is_empty() {
-        // 2) Every covered tuple's last observation at or before t.
-        let exact = joined(
-            &keys,
-            |c| format!("{} = CAST(? AS {})", quote(&c.name), c.ty.sql()),
-            " AND ",
-        );
-        let predicate = vec![format!("({exact})"); starts.len()].join(" OR ");
-        let latest = format!(
-            "select {key_list}, max(epoch_us(ts)) from {} \
-             where ({predicate}) and epoch_us(ts) <= ? group by {key_list}",
-            history_table(&ds.name)
-        );
+        // 2) Every covered tuple's last observation at or before t, one
+        //    statement joined on a VALUES list of the covered tuples.
+        let latest = latest_batch_sql(&ds.name, &keys, starts.len());
         let mut params: Vec<Value> = starts
             .iter()
             .flat_map(|(tuple, _)| tuple.iter().cloned().map(Value::Text))
@@ -532,24 +571,14 @@ pub fn read_history(
         .map(|t| normalized_tuple(&key_cols, t, "asked"))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let mut params: Vec<Value> = Vec::new();
-    let predicate = tuples
+    // One statement whatever the tuple count (`asked_tuples_sql`); a term
+    // per tuple in one predicate cost a 250-tuple read about 85 ms.
+    let mut params: Vec<Value> = tuples
         .iter()
-        .map(|tuple| {
-            let matched = key_cols
-                .iter()
-                .zip(tuple)
-                .filter_map(|(c, v)| {
-                    let v = v.as_ref()?;
-                    params.push(Value::Text(v.clone()));
-                    Some(format!("{} = CAST(? AS {})", quote(&c.name), c.ty.sql()))
-                })
-                .collect::<Vec<_>>()
-                .join(" AND ");
-            format!("({matched})")
-        })
-        .collect::<Vec<_>>()
-        .join(" OR ");
+        .flatten()
+        .map(|v| v.clone().map_or(Value::Null, Value::Text))
+        .collect();
+    let predicate = asked_tuples_sql(&key_cols, tuples.len());
     let window = match span {
         Span::Latest => String::new(),
         Span::At(t) => {
@@ -581,8 +610,8 @@ pub fn read_history(
     };
     let sql = format!(
         "with live as (
-             select {key_list}, ts, {live_values} from {}
-             where ({predicate}){window}
+             select {key_list}, ts, {live_values} from {} h
+             where {predicate}{window}
              group by {key_list}, ts
          )
          {answer} order by {key_list}, ts",
@@ -645,6 +674,8 @@ pub fn append_history(
         "create or replace table {STAGING_TABLE} (\n{}\n)",
         staged.join(",\n")
     );
+    conn.execute_batch(&create).map_err(sql_err(&create))?;
+    let create = coverage_staging_sql(&keys);
     conn.execute_batch(&create).map_err(sql_err(&create))?;
     {
         let mut app = conn
@@ -750,25 +781,12 @@ fn append_in_transaction(
         .map_err(sql_err(&insert))?;
 
     // Record coverage even when deduplication leaves no new rows.
-    let cover_casts = joined(keys, |c| format!("CAST(? AS {})", c.ty.sql()), ", ");
-    let cover = format!(
-        "insert into {coverage} ({key_list}, from_ts, to_ts, received_at)
-         values ({cover_casts}, make_timestamp(?), make_timestamp(?), make_timestamp(?))"
-    );
-    for (asked, c) in covers.iter().zip(&req.covered) {
-        let mut params: Vec<Value> = asked
-            .iter()
-            .map(|v| v.clone().map_or(Value::Null, Value::Text))
-            .collect();
-        params.extend([
-            Value::BigInt(micros(c.span.0)),
-            Value::BigInt(micros(c.span.1)),
-            Value::BigInt(received),
-        ]);
-        conn.execute(&cover, duckdb::params_from_iter(params))
-            .map_err(sql_err(&cover))?;
-    }
-    coalesce_coverage(conn, &coverage, keys, covers)?;
+    let recorded: Vec<(&Vec<Option<String>>, CoverSpan)> = covers
+        .iter()
+        .zip(&req.covered)
+        .map(|(asked, c)| (asked, c.span))
+        .collect();
+    coalesce_coverage(conn, &coverage, keys, &recorded, received)?;
 
     // Bound the dataset's history in the same transaction as rows and
     // coverage.
@@ -776,81 +794,160 @@ fn append_in_transaction(
     Ok(HistoryAppended { appended, swept })
 }
 
-/// Rewrite the coverage rows of every tuple in `touched` (exactly that
-/// tuple, trailing NULLs included, never a deeper or shallower one) as its
-/// merged spans, each under the newest `received_at` among the rows it
-/// replaces. Without it a refreshing board adds a point row per tuple per
-/// ask, and every lookup scans them all on the service loop. Lookups merge
-/// a tuple's spans with its prefixes' anyway, so they answer the same.
+/// Rewrite the coverage rows of every tuple in `recorded` (exactly that
+/// tuple, trailing NULLs included, never a deeper or shallower one) as the
+/// merged spans of what it held and what this append records, each under
+/// the newest `received_at` among them (`received` for the spans recorded
+/// now). Without it a refreshing board adds a point row per tuple per ask,
+/// and every lookup scans them all on the service loop. Lookups merge a
+/// tuple's spans with its prefixes' anyway, so they answer the same.
+///
+/// Four statements whatever the tuple count: the touched tuples go through
+/// `STAGING_COVERAGE`, which one select joins and one delete subtracts, and
+/// the merged spans come back through it in one insert. A statement round
+/// per tuple cost a board ask of 125 tuples 370 ms of its 400 ms append, on
+/// the one writer every tab switch waits for.
+/// One tuple being coalesced: its spans (held and recorded) and the newest
+/// `received_at` among them.
+type Coalesced<'a> = (&'a Vec<Option<String>>, Vec<CoverSpan>, i64);
+
 fn coalesce_coverage(
     conn: &Connection,
     coverage: &str,
     keys: &[&ColumnSpec],
-    touched: &[Vec<Option<String>>],
+    recorded: &[(&Vec<Option<String>>, CoverSpan)],
+    received: i64,
 ) -> Result<(), StoreError> {
+    // Per distinct tuple, first-seen order: its spans and the newest
+    // received_at among the rows it replaces.
+    let mut tuples: Vec<Coalesced<'_>> = Vec::new();
+    for (tuple, span) in recorded {
+        match tuples.iter_mut().find(|(t, _, _)| t == tuple) {
+            Some((_, spans, _)) => spans.push(*span),
+            None => tuples.push((tuple, vec![*span], received)),
+        }
+    }
+    if tuples.is_empty() {
+        return Ok(());
+    }
+    let clear = format!("delete from {STAGING_COVERAGE}");
+    conn.execute_batch(&clear).map_err(sql_err(&clear))?;
+    stage_coverage(conn, tuples.iter().map(|(t, _, _)| (t.as_slice(), None)))?;
+    // Exactly the staged tuple: a NULL cell matches only a NULL cell.
     let same = joined(
         keys,
         |c| {
             format!(
-                "{} IS NOT DISTINCT FROM CAST(? AS {})",
+                "c.{0} IS NOT DISTINCT FROM CAST(s.{0} AS {1})",
                 quote(&c.name),
                 c.ty.sql()
             )
         },
         " and ",
     );
+    // The key comes back as staged, so it finds its tuple without a
+    // type-dependent read.
+    let staged_keys = joined(keys, |c| format!("s.{}", quote(&c.name)), ", ");
     let select = format!(
-        "select epoch_us(from_ts), epoch_us(to_ts), epoch_us(received_at) \
-         from {coverage} where {same}"
+        "select {staged_keys}, epoch_us(c.from_ts), epoch_us(c.to_ts), epoch_us(c.received_at) \
+         from {STAGING_COVERAGE} s join {coverage} c on {same}"
     );
-    let delete = format!("delete from {coverage} where {same}");
-    let key_list = joined(keys, |c| quote(&c.name), ", ");
-    let cover_casts = joined(keys, |c| format!("CAST(? AS {})", c.ty.sql()), ", ");
-    let insert = format!(
-        "insert into {coverage} ({key_list}, from_ts, to_ts, received_at)
-         values ({cover_casts}, make_timestamp(?), make_timestamp(?), make_timestamp(?))"
-    );
-    // One prepare per append, not one per touched tuple.
+    let n = keys.len();
     let mut stmt = conn.prepare(&select).map_err(sql_err(&select))?;
-    let mut done: Vec<&Vec<Option<String>>> = Vec::new();
-    for tuple in touched {
-        if done.contains(&tuple) {
-            continue;
+    let held: Vec<(Vec<Option<String>>, i64, i64, i64)> = stmt
+        .query_map([], |r| {
+            let key = (0..n)
+                .map(|i| r.get::<_, Option<String>>(i))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((key, r.get(n)?, r.get(n + 1)?, r.get(n + 2)?))
+        })
+        .map_err(sql_err(&select))?
+        .collect::<Result<_, _>>()
+        .map_err(sql_err(&select))?;
+    for (key, from, to, at) in held {
+        if let Some((_, spans, newest)) = tuples.iter_mut().find(|(t, _, _)| **t == key) {
+            spans.push((from_micros(from), from_micros(to)));
+            *newest = (*newest).max(at);
         }
-        done.push(tuple);
-        let params: Vec<Value> = tuple
+    }
+    let delete = format!(
+        "delete from {coverage} c where exists (select 1 from {STAGING_COVERAGE} s where {same})"
+    );
+    conn.execute(&delete, []).map_err(sql_err(&delete))?;
+    for (_, spans, _) in &mut tuples {
+        merge_spans(spans);
+    }
+    conn.execute_batch(&clear).map_err(sql_err(&clear))?;
+    stage_coverage(
+        conn,
+        tuples.iter().flat_map(|(tuple, spans, newest)| {
+            spans.iter().map(move |(from, to)| {
+                (
+                    tuple.as_slice(),
+                    Some((micros(*from), micros(*to), *newest)),
+                )
+            })
+        }),
+    )?;
+    let key_list = joined(keys, |c| quote(&c.name), ", ");
+    let casts = joined(
+        keys,
+        |c| format!("CAST({} AS {})", quote(&c.name), c.ty.sql()),
+        ", ",
+    );
+    let insert = format!(
+        "insert into {coverage} ({key_list}, from_ts, to_ts, received_at) \
+         select {casts}, make_timestamp(from_us), make_timestamp(to_us), make_timestamp(received_us) \
+         from {STAGING_COVERAGE}"
+    );
+    conn.execute(&insert, []).map_err(sql_err(&insert))?;
+    Ok(())
+}
+
+/// The DDL of `STAGING_COVERAGE` for a dataset's key: every key column as
+/// VARCHAR, then the span and `received_at` as epoch micros.
+fn coverage_staging_sql(keys: &[&ColumnSpec]) -> String {
+    let mut cols: Vec<String> = keys
+        .iter()
+        .map(|c| format!("  {} VARCHAR", quote(&c.name)))
+        .collect();
+    cols.extend(
+        [
+            "  \"from_us\" BIGINT",
+            "  \"to_us\" BIGINT",
+            "  \"received_us\" BIGINT",
+        ]
+        .map(String::from),
+    );
+    format!(
+        "create or replace table {STAGING_COVERAGE} (\n{}\n)",
+        cols.join(",\n")
+    )
+}
+
+/// Append `rows` to `STAGING_COVERAGE`: a key tuple as text, with its span
+/// and `received_at` in micros or NULL for a tuple staged to be looked up.
+fn stage_coverage<'a>(
+    conn: &Connection,
+    rows: impl Iterator<Item = (&'a [Option<String>], Option<(i64, i64, i64)>)>,
+) -> Result<(), StoreError> {
+    let mut app = conn
+        .appender(STAGING_COVERAGE)
+        .map_err(sql_err("appender on staging_history_coverage"))?;
+    for (tuple, span) in rows {
+        let mut row: Vec<Value> = tuple
             .iter()
             .map(|v| v.clone().map_or(Value::Null, Value::Text))
             .collect();
-        let held: Vec<(i64, i64, i64)> = stmt
-            .query_map(duckdb::params_from_iter(params.clone()), |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })
-            .map_err(sql_err(&select))?
-            .collect::<Result<_, _>>()
-            .map_err(sql_err(&select))?;
-        let Some(newest) = held.iter().map(|h| h.2).max() else {
-            continue;
-        };
-        let mut spans: Vec<CoverSpan> = held
-            .iter()
-            .map(|&(f, t, _)| (from_micros(f), from_micros(t)))
-            .collect();
-        merge_spans(&mut spans);
-        conn.execute(&delete, duckdb::params_from_iter(params.clone()))
-            .map_err(sql_err(&delete))?;
-        for (from, to) in spans {
-            let mut row = params.clone();
-            row.extend([
-                Value::BigInt(micros(from)),
-                Value::BigInt(micros(to)),
-                Value::BigInt(newest),
-            ]);
-            conn.execute(&insert, duckdb::params_from_iter(row))
-                .map_err(sql_err(&insert))?;
-        }
+        row.extend(match span {
+            Some((from, to, at)) => [Value::BigInt(from), Value::BigInt(to), Value::BigInt(at)],
+            None => [Value::Null, Value::Null, Value::Null],
+        });
+        app.append_row(duckdb::appender_params_from_iter(row))
+            .map_err(sql_err("append row into staging_history_coverage"))?;
     }
-    Ok(())
+    app.flush()
+        .map_err(sql_err("flush staging_history_coverage"))
 }
 
 /// Apply retention across a history dataset. `append_history` calls this
@@ -1257,6 +1354,91 @@ mod tests {
             merged_received,
             micros(ts("2026-01-14T09:00:23Z")),
             "a coalesced row carries the newest received_at"
+        );
+    }
+
+    #[test]
+    fn one_append_coalesces_each_recorded_tuple_apart_from_the_others() {
+        let (_d, store, ds) = fixture();
+        let empty = HistoryRows {
+            ts: Vec::new(),
+            keys: vec![Vec::new(); 3],
+            values: vec![Vec::new(); 2],
+        };
+        let tuple =
+            |u: &str, tenor: &str| vec![u.to_string(), tenor.to_string(), "0.5".to_string()];
+        let day = |d: u32| {
+            (
+                ts(&format!("2026-01-{d:02}T00:00:00Z")),
+                ts(&format!("2026-01-{:02}T00:00:00Z", d + 1)),
+            )
+        };
+        let append = |covered: Vec<(Vec<String>, CoverSpan)>, at: &str| {
+            append_history(
+                &store,
+                &HistoryAppendRequest {
+                    dataset: &ds,
+                    source: "hanweck",
+                    rows: &empty,
+                    covered: covered
+                        .into_iter()
+                        .map(|(asked, span)| Covered { asked, span })
+                        .collect(),
+                    received_at: ts(at),
+                },
+            )
+            .unwrap();
+        };
+        // Day 5 held for two exact tuples; then one append records, in one
+        // call: a span touching SPX 3M's (merged), one apart from NDX 3M's
+        // (kept apart), a tuple never covered, the SPX prefix (its own row,
+        // never folded into SPX 3M), and SPX 3M a second time.
+        append(vec![(tuple("SPX", "3M"), day(5))], "2026-01-14T09:00:00Z");
+        append(vec![(tuple("NDX", "3M"), day(5))], "2026-01-14T09:00:00Z");
+        append(
+            vec![
+                (tuple("SPX", "3M"), day(6)),
+                (tuple("NDX", "3M"), day(8)),
+                (tuple("SPX", "1M"), day(6)),
+                (vec!["SPX".to_string()], day(6)),
+                (tuple("SPX", "3M"), day(7)),
+            ],
+            "2026-01-14T09:01:00Z",
+        );
+        let conn = store.writer();
+        assert_eq!(
+            covered_spans(conn, &ds, &tuple("SPX", "3M")).unwrap(),
+            vec![(day(5).0, day(8).0)],
+            "SPX 3M: days 5, 6 and 7 merged with the prefix's day 6"
+        );
+        assert_eq!(
+            covered_spans(conn, &ds, &tuple("NDX", "3M")).unwrap(),
+            vec![day(5), day(8)],
+            "NDX 3M: its own two spans, nothing of SPX's"
+        );
+        assert_eq!(
+            covered_spans(conn, &ds, &tuple("SPX", "1M")).unwrap(),
+            vec![day(6)],
+            "SPX 1M: its span, which the prefix's equals"
+        );
+        assert_eq!(
+            coverage_count(&store),
+            5,
+            "SPX 3M one row, NDX 3M two, SPX 1M one, the prefix one"
+        );
+        let received: Vec<i64> = {
+            let mut stmt = conn
+                .prepare("select distinct epoch_us(received_at) from vol_surface_history_coverage")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            received,
+            vec![micros(ts("2026-01-14T09:01:00Z"))],
+            "every touched tuple's rows carry the newest received_at, NDX's held day 5 included"
         );
     }
 
