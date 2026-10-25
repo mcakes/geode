@@ -215,8 +215,8 @@ fn naming_a_tab_in_another_case_of_an_existing_one_is_refused(cx: &mut gpui::Tes
 }
 
 /// `enter` on a column row opens its stage; stepping Companion to `bar`
-/// renames the row (and the stage with it) and leaving writes
-/// `companion = "bar"` under that column.
+/// renames the row (and the stage with it), a Family step to Forward keeps
+/// the glyph, and leaving writes `companion = "bar"` under that column.
 #[gpui::test]
 fn the_column_stage_edits_a_glyph_and_the_file_follows(cx: &mut gpui::TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -244,6 +244,14 @@ fn the_column_stage_edits_a_glyph_and_the_file_follows(cx: &mut gpui::TestAppCon
         dialog_state(&shell, &cx, |s| s.stage.clone()),
         Stage::Column { column, .. } if column == "ATFM 3M · bar"
     ));
+    // Back on Family, one step: ATFM → Forward. The glyph is the column's,
+    // not the family's, so it comes along.
+    cx.simulate_keystrokes("k k k space");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        Stage::Column { column, .. } if column == "Forward 3M · bar"
+    ));
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert!(matches!(
@@ -257,15 +265,16 @@ fn the_column_stage_edits_a_glyph_and_the_file_follows(cx: &mut gpui::TestAppCon
             .map(|i| i.name.clone())
             .collect::<Vec<_>>()
     });
-    assert_eq!(items, ["ATFM 3M · bar", "Book vega"]);
+    assert_eq!(items, ["Forward 3M · bar", "Book vega"]);
     assert_eq!(
         edit_draft(&shell, &cx, |d| d.row_label(d.selected_row().unwrap())),
-        "ATFM 3M · bar",
+        "Forward 3M · bar",
         "the cursor returns to the column just edited, under its new name"
     );
     flush_config_write(&mut cx);
     let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
     assert!(text.contains("companion = \"bar\""), "{text}");
+    assert!(text.contains("measure = \"forward 3M\""), "{text}");
     assert!(
         !text.contains("level") && !text.contains("label"),
         "only the set key reaches the file: {text}"

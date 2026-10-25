@@ -484,13 +484,16 @@ pub fn fold_into(item: &mut ListItem, fields: &[Field], taken: &[String]) {
 /// available rows), which knows a dataset family's exact name and whether
 /// its row carries a tenor.
 ///
-/// A `family` change resets the parts to [`ColumnChoice::new`] for the new
-/// family, keeping the old tenor when the new family takes one; the glyphs,
-/// label and group go with the old family, whose defaults they were spelled
-/// against. Otherwise each part the family takes follows its row. A label
-/// or group row still showing the text it was prefilled with is unchanged,
-/// so it keeps what the file had; typed text is set unless it is empty or
-/// equal to the default, which fold to absent.
+/// A `family` change resets the parts whose defaults depend on the family
+/// — [`ColumnChoice::new`] for the new one, keeping the old tenor when the
+/// new family takes one — and the label and group, which were spelled
+/// against the old family's defaults. The glyphs are family-independent set
+/// keys and carry across when the new family takes glyphs (a change to a
+/// spark or vega column drops them: the reader refuses them there).
+/// Otherwise each part the family takes follows its row. A label or group
+/// row still showing the text it was prefilled with is unchanged, so it
+/// keeps what the file had; typed text is set unless it is empty or equal
+/// to the default, which fold to absent.
 ///
 /// A `Raw` column folds nothing: its one row is display-only.
 pub(super) fn fold_into_from(
@@ -536,6 +539,10 @@ pub(super) fn fold_into_from(
             fresh.tenor = None;
         } else if fresh.tenor.is_some() && old.tenor.is_some() {
             fresh.tenor = old.tenor.clone();
+        }
+        if fresh.family.takes_glyphs() {
+            fresh.level = old.level;
+            fresh.companion = old.companion;
         }
         return finish(item, &fresh, taken);
     };
@@ -1075,27 +1082,38 @@ mod tests {
         assert_eq!(item.name, "ATFM 1Y");
     }
 
-    /// The glyph choices' `default` is absence in the file, and a family
-    /// change drops the glyphs with the other parts.
+    /// The glyph choices' `default` is absence in the file. The glyphs are
+    /// family-independent: a family change to another measure family keeps
+    /// them, while a change to a spark (which takes none) drops them.
     #[test]
-    fn default_glyphs_are_absent_and_a_family_change_drops_them() {
+    fn default_glyphs_are_absent_and_a_family_change_keeps_them() {
         let mut item = item_for("measure = \"atfm 3M\"\nlevel = \"heat\"\ncompanion = \"bar\"");
         let mut fields = column_fields(&item, &no_datasets());
         assert_eq!(item.name, "ATFM 3M · heat · bar");
+        select(&mut fields, "family", "25Δ skew");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "25Δ skew 3M · heat · bar");
+        let s = item.source.as_ref().unwrap();
+        assert_eq!(s.get("measure").and_then(|v| v.as_str()), Some("skew 3M"));
+        assert_eq!(s.get("level").and_then(|v| v.as_str()), Some("heat"));
+        assert_eq!(s.get("companion").and_then(|v| v.as_str()), Some("bar"));
+        let mut fields = column_fields(&item, &no_datasets());
         select(&mut fields, "level", "default");
         fold_into(&mut item, &fields, &[]);
         let s = item.source.as_ref().unwrap();
         assert!(s.get("level").is_none(), "{s}");
         assert_eq!(s.get("companion").and_then(|v| v.as_str()), Some("bar"));
-        assert_eq!(item.name, "ATFM 3M · bar");
+        assert_eq!(item.name, "25Δ skew 3M · bar");
         let mut fields = column_fields(&item, &no_datasets());
-        select(&mut fields, "family", "Surface point");
+        select(&mut fields, "family", "Sparkline");
         fold_into(&mut item, &fields, &[]);
-        assert_eq!(item.name, "Surface point 3M 0.1");
-        assert_eq!(
-            spec_of(item.source.as_ref().unwrap()),
-            Some(measure_spec("point 3M 0.1"))
+        assert_eq!(item.name, "ATFM 3M · 30d spark");
+        let s = item.source.as_ref().unwrap();
+        assert!(
+            s.get("companion").is_none() && s.get("level").is_none(),
+            "{s}"
         );
+        assert_eq!(s.get("spark").and_then(|v| v.as_str()), Some("atfm 3M"));
     }
 
     /// Through the view's catalogue a dataset label resolves to the dataset's
