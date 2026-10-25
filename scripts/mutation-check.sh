@@ -43154,17 +43154,25 @@ run_mutation "volwatch: group refuses a dimension named twice" \
   geode-volwatch \
   colon_group_parses_dimensions_slot_none_and_refuses_the_rest
 
-# The vol tile's gutter numbers through the shell's rule, so the cursor
-# row's branch lives there; its model test reads the numbers over its own
-# grouped, folded and narrowed grid, where a blank cursor row would read
-# as a row with no number. A different replacement from the shell's own
-# entry (which shows 0), so each is its own mutation.
+# The tile's gutter measures relative numbers from the grid's cursor row;
+# a gutter measuring from row 0 reads plausibly (1, 0, 1, 2 …) and puts
+# the absolute number on the wrong row.
 run_mutation "volwatch: relative line numbers keep the cursor row absolute" \
-  crates/geode-shell/src/linenumbers.rs \
-  '        LineNumbers::Relative if row == cursor => Some(row + 1),' \
-  '        LineNumbers::Relative if row == cursor => None,' \
+  crates/geode-volwatch/src/core/model.rs \
+  '        (LineNumbers::Relative, Some(c)) => (mode, c),' \
+  '        (LineNumbers::Relative, Some(_)) => (mode, 0),' \
   geode-volwatch \
   line_numbers_count_visible_rows_after_folds_and_narrowing
+
+# TableState caches column() widths: a gutter turned on without a refresh
+# widens the delegate's width but not the painted cell, and the name
+# clips under the gutter.
+run_mutation "volwatch: a line-number change relayouts the table" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '            if relayout || regutter {' \
+  '            if relayout {' \
+  geode-volwatch \
+  the_line_numbers_global_paints_a_gutter_beside_the_underlying_cell
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"

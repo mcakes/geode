@@ -146,14 +146,14 @@ pub(super) fn snapshot(cx: &App) -> Arc<WatchlistSnapshot> {
         .unwrap_or_default()
 }
 
-/// The display clock: the app's, or the machine's where a tile is hosted
-/// without one.
 /// The shell's `[ui] line_numbers`; off before the shell publishes it.
 fn ui_line_numbers(cx: &App) -> LineNumbers {
     cx.try_global::<UiSettings>()
         .map_or(LineNumbers::Off, |s| s.line_numbers)
 }
 
+/// The display clock: the app's, or the machine's where a tile is hosted
+/// without one.
 fn app_clock(cx: &App) -> Clock {
     cx.try_global::<geode_shell::clock::AppClock>()
         .map(|c| c.0)

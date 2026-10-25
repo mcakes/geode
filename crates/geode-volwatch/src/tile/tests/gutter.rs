@@ -46,6 +46,7 @@ fn the_line_numbers_global_paints_a_gutter_beside_the_underlying_cell(
         "no gutter while the setting is off (no global set)"
     );
     let width_off = h.column_width(&vcx, "underlying");
+    let cell_off = bounds(&mut vcx, "volwatch-td-7-DAX-underlying");
     let label_off = bounds(&mut vcx, "7-DAX-underlying-text");
 
     set(&h, &mut vcx, LineNumbers::On);
@@ -59,8 +60,15 @@ fn the_line_numbers_global_paints_a_gutter_beside_the_underlying_cell(
     );
     assert!(
         (h.column_width(&vcx, "underlying") - (width_off + px)).abs() < 0.5,
-        "the Underlying column widened by the gutter; the observer must \
-         refresh the table, which caches the column widths"
+        "the Underlying column's width includes the gutter"
+    );
+    let cell_on = bounds(&mut vcx, "volwatch-td-7-DAX-underlying");
+    assert!(
+        ((cell_on.size.width - cell_off.size.width) - gpui::px(px)).abs() < gpui::px(0.5),
+        "the painted cell widened by the gutter: {:?} from {:?}; the tile must \
+         refresh the table, which caches the column widths, or the name clips",
+        cell_on.size.width,
+        cell_off.size.width
     );
     let label_on = bounds(&mut vcx, "7-DAX-underlying-text");
     assert!(
@@ -94,6 +102,13 @@ fn the_line_numbers_global_paints_a_gutter_beside_the_underlying_cell(
     assert!(
         (h.column_width(&vcx, "underlying") - width_off).abs() < 0.5,
         "the column gave the width back"
+    );
+    let cell = bounds(&mut vcx, "volwatch-td-7-DAX-underlying");
+    assert!(
+        (cell.size.width - cell_off.size.width).abs() < gpui::px(0.5),
+        "and the painted cell shrank back: {:?} vs {:?}",
+        cell.size.width,
+        cell_off.size.width
     );
     let label = bounds(&mut vcx, "7-DAX-underlying-text");
     assert!((label.left() - label_off.left()).abs() < gpui::px(0.5));

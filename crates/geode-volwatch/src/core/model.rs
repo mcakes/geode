@@ -3593,6 +3593,17 @@ mod tests {
             let off = gutter(LineNumbers::Off, g.visible().len(), g.cursor());
             assert!(off.numbers.is_empty());
             assert_eq!(off.px, 0.0);
+
+            // A fold hiding the cursor rests it on the group: the group
+            // row is the one with its absolute number.
+            let mut g = grid();
+            g.click(2, false);
+            assert_eq!(g.cursor_name(), Some("SX5E"));
+            g.set_collapsed(["group:Core".to_string()]);
+            assert_eq!(g.cursor(), Some(0), "the cursor rests on group:Core");
+            assert_eq!(g.visible().len(), 7);
+            let rel = gutter(LineNumbers::Relative, g.visible().len(), g.cursor());
+            assert_eq!(texts(&rel), ["1", "1", "2", "3", "4", "5", "6"]);
         }
 
         /// With no cursor row, relative mode numbers absolutely, as the
