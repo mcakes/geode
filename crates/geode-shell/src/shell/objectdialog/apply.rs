@@ -56,6 +56,11 @@ pub(crate) const REJECTED_STATUS: &str = "saved to disk · rejected by the merge
 /// inherited object instead of keeping it empty.
 pub type ObjectEdit = Option<toml::Value>;
 
+/// A whole-document rewrite that runs on the writer after a batch's keyed
+/// edits have landed, in the same job: the tab reorder, which has to read
+/// the forked tabs the batch just wrote. Given the user directory.
+type ThenWrite = Box<dyn FnOnce(&Path) -> Result<(), String> + Send>;
+
 /// The result of rendering one object. Removal inherits the layer below; `Nothing`
 /// leaves the existing user-layer entry unchanged.
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +108,17 @@ pub(crate) struct PendingConfigWrite {
     /// its edit optimistically, so a failed write or a merge the reload
     /// rejected has to reach it as a refusal, or its labels look saved.
     tiles: Vec<TileId>,
+    /// Whole-document rewrites to run after this batch's keyed edits, in
+    /// order, on the same writer job. Taken by the flush that runs them;
+    /// a superseded flush leaves them for the one that carries the batch.
+    then_write: Vec<ThenWrite>,
+    /// The object order each document's user layer is to hold, for the
+    /// in-memory half of a reorder: applied over the folded edits on every
+    /// promote and pending read, as the rewrite in `then_write` applies it
+    /// to the file. Kept with the batch, unlike the rewrite, because a
+    /// later keystroke's promote folds the same whole-object edits again
+    /// and must find them in the same order.
+    order: Vec<(&'static str, Vec<String>)>,
 }
 
 /// The refusal a door tile hears when its batch reached disk but the merge kept
@@ -123,6 +139,9 @@ pub fn object_value(object: &str, item: toml_edit::Item, dest: Destination) -> O
         return match dest {
             // An absent overlay inherits presentation without removing the definition.
             Destination::Presentation | Destination::DatasetPresentation => ObjectWrite::Remove,
+            // A document key rendered empty is the key turned off (`default`
+            // unset): its absence is the value, so the key goes.
+            Destination::TopLevel => ObjectWrite::Remove,
             Destination::Doc => ObjectWrite::Nothing,
         };
     }
@@ -209,21 +228,32 @@ fn edits_for(shell: &ShellView) -> BTreeMap<(&'static str, String), ObjectEdit> 
     let Some(draft) = state.draft.as_ref() else {
         return out;
     };
-    for dest in draft.writes_by_destination().keys() {
-        let item = state.domain.to_table(draft, *dest);
-        let key = (dest.doc(state.domain), draft.name.clone());
-        // The three answers are kept apart here rather than flattened
-        // into an `Option`: `Nothing` must not become the `None` the
-        // batch spells "remove this object's key", which for a
-        // `Destination::Doc` document is a revert (see [`object_value`]).
-        match object_value(&draft.name, item, *dest) {
-            ObjectWrite::Set(value) => {
-                out.insert(key, Some(value));
+    for (dest, fields) in draft.writes_by_destination() {
+        // A top-level field writes the document's key named by the FIELD, not
+        // the object: `default = "<name>"` sits beside the view tables, not in
+        // one. One rendering per listed field; the adapter renders the key
+        // from the draft as a whole, since a domain holds one such field.
+        let keys: Vec<String> = if dest == Destination::TopLevel {
+            fields
+        } else {
+            vec![draft.name.clone()]
+        };
+        for object in keys {
+            let item = state.domain.to_table(draft, dest);
+            let key = (dest.doc(state.domain), object.clone());
+            // The three answers are kept apart here rather than flattened
+            // into an `Option`: `Nothing` must not become the `None` the
+            // batch spells "remove this object's key", which for a
+            // `Destination::Doc` document is a revert (see [`object_value`]).
+            match object_value(&object, item, dest) {
+                ObjectWrite::Set(value) => {
+                    out.insert(key, Some(value));
+                }
+                ObjectWrite::Remove => {
+                    out.insert(key, None);
+                }
+                ObjectWrite::Nothing => {}
             }
-            ObjectWrite::Remove => {
-                out.insert(key, None);
-            }
-            ObjectWrite::Nothing => {}
         }
     }
     out
@@ -275,7 +305,7 @@ pub(super) fn fork_notice(shell: &ShellView, domain: Domain) -> String {
 /// The fork announcement for `name` in `doc`, naming the layer the copy
 /// shadows in `config` when one does. One wording for every fork, whether
 /// a draft edit or a save to a slot made it.
-fn fork_notice_of(config: &Config, doc: &str, name: &str) -> String {
+pub(super) fn fork_notice_of(config: &Config, doc: &str, name: &str) -> String {
     match super::shadow_of(config, doc, name) {
         Some((layer, _)) => format!(
             "copied '{name}' to your config — r restores the {} copy",
@@ -715,6 +745,134 @@ pub(crate) fn refresh_definitions_now(shell: &mut ShellView, cx: &mut Context<Sh
     });
 }
 
+/// Write the browse list's new object order, `order`, for the open dialog's
+/// domain: the user document is rewritten in that order through the domain's
+/// writer, after the batch has copied into the user layer every tab the move
+/// crossed that a lower layer defines — the file can only carry an order
+/// among tabs it holds. Zero delay, on the batch's own writer job, so the
+/// copies are in the file before the reorder reads it. Each copy is recorded
+/// in the sidecar as any fork is, so `r` restores it; the announcement is one
+/// notice for them all. A move among the user's own tabs copies nothing.
+///
+/// The crossed tabs are where `order` and the current order disagree, first
+/// to last inclusive — the moved tab and every tab it passed, whichever way
+/// it went. Memory takes the order as it takes the keyed edits: the promote
+/// folds it into the user document before the re-merge, and the browse rows
+/// re-derive from what was applied; the watcher's later read of the file
+/// finds the same documents.
+pub(super) fn commit_reorder(
+    shell: &mut ShellView,
+    order: Vec<String>,
+    cx: &mut Context<ShellView>,
+) -> Option<String> {
+    let domain = shell.object_dialog.as_ref()?.domain;
+    debug_assert!(
+        domain.reorderable(),
+        "{domain:?} has no document order to write"
+    );
+    let Some(user_dir) = shell.user_dir.clone() else {
+        return Some("no writable user config directory — nothing was changed".to_string());
+    };
+    let doc = domain.doc();
+    // Pending-aware: a tab forked a moment ago is already the user's.
+    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let before: Vec<String> = domain
+        .objects(&config)
+        .into_iter()
+        .map(|row| row.name)
+        .collect();
+    let differs = |(a, b): (&String, &String)| a != b;
+    let crossed: &[String] = match (
+        order.iter().zip(&before).position(differs),
+        order.iter().zip(&before).rposition(differs),
+    ) {
+        (Some(first), Some(last)) => &order[first..=last],
+        _ => &[],
+    };
+    let mut edits: BTreeMap<(&'static str, String), ObjectEdit> = BTreeMap::new();
+    let mut forked: Vec<&String> = Vec::new();
+    for name in crossed {
+        if fork_record(&config, doc, name, &mut edits).is_some()
+            && let Some((_, value)) = super::shadow_of(&config, doc, name)
+        {
+            edits.insert((doc, name.clone()), Some(value));
+            forked.push(name);
+        }
+    }
+    let notice = match forked.as_slice() {
+        [] => None,
+        [one] => Some(fork_notice_of(&config, doc, one)),
+        many => Some(format!(
+            "copied {} tabs to your config — r restores each",
+            many.len()
+        )),
+    };
+    let memory_order = order.clone();
+    queue_batch_then(
+        shell,
+        edits,
+        user_dir,
+        Duration::ZERO,
+        Some(domain),
+        cx,
+        move |dir| {
+            config_write::try_edit(dir, Layer::User, doc, |document| {
+                geode_core::volviews::reorder(document, &order);
+                Ok(())
+            })
+        },
+    );
+    if let Some(pending) = shell.pending_config_write.as_mut() {
+        // A second move before the flush supersedes the first: one order per
+        // document, the latest, as the file ends up holding.
+        pending.order.retain(|(d, _)| *d != doc);
+        pending.order.push((doc, memory_order));
+    }
+    notice
+}
+
+/// The in-memory half of a reorder: `doc`'s user-layer table with the
+/// tables named in `order` in that order, after its top-level values
+/// (`config_version`, `default`) and before any table `order` does not name —
+/// the rule `geode_core::volviews::reorder` applies to the file, over the
+/// `toml::Table` memory holds. A document the user layer lacks is left
+/// alone: there is nothing of the user's to order.
+fn docs_reordered(mut docs: Vec<LayerDoc>, doc: &str, order: &[String]) -> Vec<LayerDoc> {
+    let Some(user) = docs
+        .iter_mut()
+        .find(|d| d.layer == Layer::User && d.name == doc)
+    else {
+        return docs;
+    };
+    let entries: Vec<(String, toml::Value)> = std::mem::take(&mut user.table).into_iter().collect();
+    let (values, tables): (Vec<_>, Vec<_>) = entries.into_iter().partition(|(_, v)| !v.is_table());
+    let (mut named, rest): (Vec<_>, Vec<_>) =
+        tables.into_iter().partition(|(k, _)| order.contains(k));
+    named.sort_by_key(|(k, _)| order.iter().position(|o| o == k));
+    for (key, value) in values.into_iter().chain(named).chain(rest) {
+        user.table.insert(key, value);
+    }
+    docs
+}
+
+/// [`queue_batch`], then `then` on the writer once the batch's keyed edits
+/// have landed — the same job, so nothing can come between them. For a
+/// rewrite that has to read what the batch wrote.
+fn queue_batch_then(
+    shell: &mut ShellView,
+    edits: BTreeMap<(&'static str, String), ObjectEdit>,
+    user_dir: PathBuf,
+    delay: Duration,
+    origin: Option<Domain>,
+    cx: &mut Context<ShellView>,
+    then: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
+) {
+    queue_batch(shell, edits, user_dir, delay, origin, cx);
+    if let Some(pending) = shell.pending_config_write.as_mut() {
+        pending.then_write.push(Box::new(then));
+    }
+}
+
 /// Capture the batch's initial documents and schedule its accumulated edits. Callers
 /// resolve the writable directory before advancing any draft baseline. `origin` is the
 /// object dialog whose draft produced the edits, if any.
@@ -747,14 +905,35 @@ fn apply_in_memory(
     shell: &mut ShellView,
     user_dir: &Path,
     edits: &BTreeMap<(&'static str, String), ObjectEdit>,
+    order: &[(&'static str, Vec<String>)],
     cx: &mut Context<ShellView>,
 ) {
-    let mut docs = shell.services.config.all_docs();
+    let config = Config::from_docs(docs_with_batch(
+        shell.services.config.all_docs(),
+        user_dir,
+        edits,
+        order,
+    ));
+    shell.apply_reload(config, cx);
+}
+
+/// `docs` with a batch folded in: each keyed edit, then each document's
+/// order — the order last, so it sees the objects the edits put there. The
+/// one spelling of what a batch does to memory, shared by the promote and
+/// the pending read.
+fn docs_with_batch(
+    mut docs: Vec<LayerDoc>,
+    user_dir: &Path,
+    edits: &BTreeMap<(&'static str, String), ObjectEdit>,
+    order: &[(&'static str, Vec<String>)],
+) -> Vec<LayerDoc> {
     for ((doc, object), value) in edits {
         docs = docs_with_object(docs, user_dir, doc, object, value.clone());
     }
-    let config = Config::from_docs(docs);
-    shell.apply_reload(config, cx);
+    for (doc, order) in order {
+        docs = docs_reordered(docs, doc, order);
+    }
+    docs
 }
 
 /// Active documents with the pending batch folded in, without applying or writing them.
@@ -765,11 +944,12 @@ fn apply_in_memory(
 /// edits when it next renders the whole object.
 pub(crate) fn config_with_pending(shell: &ShellView) -> Option<Config> {
     let pending = shell.pending_config_write.as_ref()?;
-    let mut docs = shell.services.config.all_docs();
-    for ((doc, object), value) in &pending.edits {
-        docs = docs_with_object(docs, &pending.user_dir, doc, object, value.clone());
-    }
-    Some(Config::from_docs(docs))
+    Some(Config::from_docs(docs_with_batch(
+        shell.services.config.all_docs(),
+        &pending.user_dir,
+        &pending.edits,
+        &pending.order,
+    )))
 }
 
 /// Merge edits into the pending batch and schedule a sequence-tagged timer. Only the
@@ -800,6 +980,8 @@ fn schedule_flush(
             origins: Vec::new(),
             then_color: Vec::new(),
             tiles: Vec::new(),
+            then_write: Vec::new(),
+            order: Vec::new(),
         });
     pending.seq = seq;
     pending.edits.extend(edits);
@@ -811,14 +993,14 @@ fn schedule_flush(
 
     cx.spawn(async move |this, cx| {
         cx.background_executor().timer(delay).await;
-        let Ok(Some((user_dir, edits, rejected))) =
+        let Ok(Some((user_dir, edits, then, rejected))) =
             this.update(cx, |shell, cx| promote(shell, seq, cx))
         else {
             return;
         };
         let outcome =
             config_write::submit(&user_dir.clone(), cx.background_executor(), move || {
-                run_writes(&user_dir, edits)
+                run_writes(&user_dir, edits, then)
             })
             .await;
         this.update(cx, |shell, cx| {
@@ -829,12 +1011,14 @@ fn schedule_flush(
     .detach();
 }
 
-/// Apply the current batch to memory and return its file writes plus the reload's
-/// rejection count, if any. Superseded sequences return `None`.
+/// Apply the current batch to memory and return its file writes — the keyed
+/// edits and the rewrites that follow them — plus the reload's rejection
+/// count, if any. Superseded sequences return `None`.
 ///
 /// Keep the batch on the shell while writing: failure needs its original documents, and
-/// later edits need to extend it. Capture `last_reload` immediately after apply so the
-/// completion reports this flush's memory outcome.
+/// later edits need to extend it. The rewrites are taken, not cloned: this flush runs
+/// them, and a later batch owes the file nothing of them. Capture `last_reload`
+/// immediately after apply so the completion reports this flush's memory outcome.
 #[allow(clippy::type_complexity)]
 fn promote(
     shell: &mut ShellView,
@@ -843,20 +1027,23 @@ fn promote(
 ) -> Option<(
     PathBuf,
     BTreeMap<(&'static str, String), ObjectEdit>,
+    Vec<ThenWrite>,
     Option<usize>,
 )> {
-    let pending = shell.pending_config_write.as_ref()?;
+    let pending = shell.pending_config_write.as_mut()?;
     if pending.seq != seq {
         return None;
     }
     let user_dir = pending.user_dir.clone();
     let edits = pending.edits.clone();
-    apply_in_memory(shell, &user_dir, &edits, cx);
+    let then = std::mem::take(&mut pending.then_write);
+    let order = pending.order.clone();
+    apply_in_memory(shell, &user_dir, &edits, &order, cx);
     let rejected = match &shell.last_reload {
         crate::reload::ReloadOutcome::KeptLastGood { errors } => Some(errors.len()),
         _ => None,
     };
-    Some((user_dir, edits, rejected))
+    Some((user_dir, edits, then, rejected))
 }
 
 /// Finish only the current write sequence. An older success or failure must not clear
@@ -912,7 +1099,9 @@ pub(crate) fn finish_flush(
 }
 
 /// The file half, off the render thread: one `config_write::edit` per
-/// document, setting or removing each object it holds an edit for.
+/// document, setting or removing each object it holds an edit for, then
+/// each whole-document rewrite the batch queued, in order, over what the
+/// keyed edits left.
 ///
 /// `edit`, never `write`: the read-modify-write through `toml_edit` keeps
 /// the user's comments and every other object in the file, and refuses a
@@ -920,6 +1109,7 @@ pub(crate) fn finish_flush(
 fn run_writes(
     user_dir: &Path,
     edits: BTreeMap<(&'static str, String), ObjectEdit>,
+    then: Vec<ThenWrite>,
 ) -> Result<(), String> {
     let mut by_doc: BTreeMap<&'static str, Vec<(String, ObjectEdit)>> = BTreeMap::new();
     for ((doc, object), value) in edits {
@@ -940,6 +1130,11 @@ fn run_writes(
             }
         });
         if let Err(e) = result {
+            failures.push(e);
+        }
+    }
+    for rewrite in then {
+        if let Err(e) = rewrite(user_dir) {
             failures.push(e);
         }
     }

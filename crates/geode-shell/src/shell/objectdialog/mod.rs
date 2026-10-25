@@ -347,6 +347,14 @@ impl Domain {
         matches!(self, Domain::VolViews)
     }
 
+    /// Whether `shift+j`/`shift+k` on the browse list move the selected
+    /// object and write the new order. Only a domain whose document order
+    /// means something can offer it, so this is [`Self::keeps_document_order`]'s
+    /// domain and no other.
+    pub fn reorderable(self) -> bool {
+        matches!(self, Domain::VolViews)
+    }
+
     /// Derive every domain's rows through the shared layer/override walk. Adapters
     /// supply document, summary, prefix, roster, and presentation metadata; they do not
     /// independently decide whether a destructive revert is valid.
@@ -752,13 +760,17 @@ pub enum Destination {
     Presentation,
     /// `dataset_presentation.toml`, user layer — the Schema dialog's column stage.
     DatasetPresentation,
+    /// A top-level key of the domain's own document (`vol_views.toml`'s
+    /// `default`), written by the field's key, never by the object's name.
+    /// Setting it copies no object into the user layer, so it never forks.
+    TopLevel,
 }
 
 impl Destination {
     /// The config doc (file stem) this destination writes, for `domain`.
     pub fn doc(self, domain: Domain) -> &'static str {
         match (self, domain) {
-            (Destination::Doc, domain) => domain.doc(),
+            (Destination::Doc | Destination::TopLevel, domain) => domain.doc(),
             (Destination::Presentation, Domain::Views) => views::PRESENTATION_DOC,
             // Every Groupings field is `Destination::Doc` there is nothing
             // presentational about a dimension chain), so this arm exists only to keep
@@ -3317,6 +3329,35 @@ impl ObjectDialogState {
             crate::prepared::RowText::two_line,
             |_, texts, query| crate::listfilter::rank(texts, query),
         );
+    }
+
+    /// Move the selected browse row one place by `delta` and return every
+    /// object's name in the new order — the order the file is rewritten to.
+    /// Only on the browse stage of a [`Domain::reorderable`] domain; `None`
+    /// there too at either end of the list, so the caller can say so. The
+    /// cursor follows the row.
+    ///
+    /// The swap is optimistic: the list shows the new order at once, and the
+    /// reload of the configuration this order is written to re-derives the
+    /// same rows. Neighbours are taken in the derived (document) order, not
+    /// the filtered list's, so a filter hiding the tab in between does not
+    /// make a two-place move look like one.
+    pub fn move_object(&mut self, delta: i32) -> Option<Vec<String>> {
+        if self.stage != Stage::Browse || !self.domain.reorderable() {
+            return None;
+        }
+        let from = self.rows.shown().get(self.selected)?.row;
+        let to = from.checked_add_signed(delta as isize)?;
+        if to >= self.rows.rows().len() {
+            return None;
+        }
+        self.rows.swap(from, to);
+        // The shown list is not re-ranked until the next refresh; under no
+        // filter it is the identity, so the moved row's position is its
+        // index. The caller re-ranks and re-finds the row by name for the
+        // filtered case.
+        self.selected = to;
+        Some(self.rows.rows().iter().map(|r| r.name.clone()).collect())
     }
 
     /// Drop the open question, if any, and the target it recorded — the

@@ -332,6 +332,8 @@ pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
         Destination::DatasetPresentation => {
             unreachable!("Views has no DatasetPresentation-destined fields")
         }
+        // `views.toml` has no document-level key a field edits.
+        Destination::TopLevel => unreachable!("Views has no TopLevel-destined fields"),
     };
     toml_edit::Item::Table(table)
 }

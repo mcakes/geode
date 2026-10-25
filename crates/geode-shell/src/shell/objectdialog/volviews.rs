@@ -105,11 +105,13 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             cells,
             Destination::Doc,
         ),
+        // The document's key, not the view's: written under `default` at the
+        // top of the file, so turning it on copies nothing of the view.
         Field {
             key: "default".into(),
             label: "Default".into(),
             kind: FieldKind::Bool(is_default),
-            dest: Destination::Doc,
+            dest: Destination::TopLevel,
             layer: None,
         },
         Field {
@@ -272,9 +274,22 @@ pub(super) fn added_name(entry: &ListItem, items: &[ListItem]) -> String {
 
 /// The view as `vol_views.toml` holds it: `cells` and the items' own
 /// tables in list order, over the draft's source so any key this writer
-/// does not model survives. `default` is the document's, not the view's,
-/// and is never written here.
+/// does not model survives. `default` is the document's, not the view's:
+/// for [`Destination::TopLevel`] the rendering is the view's name as the
+/// key's value when the field is on, and nothing when it is off, which the
+/// write path spells as removing the key.
 pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
+    if dest == Destination::TopLevel {
+        let on = draft
+            .fields
+            .iter()
+            .any(|f| f.key == "default" && f.kind == FieldKind::Bool(true));
+        return if on {
+            toml_edit::Item::Value(draft.name.as_str().into())
+        } else {
+            toml_edit::Item::None
+        };
+    }
     debug_assert_eq!(dest, Destination::Doc);
     let cells = match draft.choice("cells") {
         Some("single") => Cells::Single,
@@ -704,7 +719,7 @@ pub fn parse_text(key: &str, text: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{Domain, object_text};
+    use super::super::{Domain, ObjectDialogState, apply, object_text};
     use super::*;
     use crate::shell::ShellServices;
     use geode_core::config::ConfigSources;
@@ -1248,5 +1263,77 @@ mod tests {
                 .any(|d| d.severity == Severity::Error && d.message == "a view named VOL exists"),
             "{diags:?}"
         );
+    }
+
+    /// The `default` field is the document's own key: on, it renders the
+    /// view's name as a bare value under the field's key; off, it renders
+    /// nothing, which the top-level destination spells as a removal.
+    #[test]
+    fn the_default_field_writes_the_top_level_key_and_clears_it_when_off() {
+        let config = config_with(TWO_TABS, SSR_DATASET);
+        let mut draft = Domain::VolViews.draft(&config, "skew");
+        assert_eq!(draft.fields[2].key, "default");
+        assert_eq!(draft.fields[2].dest, Destination::TopLevel);
+        draft.fields[2].kind = FieldKind::Bool(true);
+        let item = Domain::VolViews.to_table(&draft, Destination::TopLevel);
+        assert!(matches!(
+            apply::object_value("default", item, Destination::TopLevel),
+            apply::ObjectWrite::Set(toml::Value::String(s)) if s == "skew"
+        ));
+        draft.fields[2].kind = FieldKind::Bool(false);
+        let item = Domain::VolViews.to_table(&draft, Destination::TopLevel);
+        assert!(matches!(
+            apply::object_value("default", item, Destination::TopLevel),
+            apply::ObjectWrite::Remove
+        ));
+        // The view's own table never carries the document's key, whatever
+        // the field says.
+        draft.fields[2].kind = FieldKind::Bool(true);
+        let text = object_text("skew", Domain::VolViews.to_table(&draft, Destination::Doc));
+        assert!(!text.contains("default"), "{text}");
+    }
+
+    /// `shift+k` on the second tab swaps it with the first and reports the
+    /// whole new order; on the first tab there is nowhere to go.
+    #[test]
+    fn move_object_swaps_neighbours_and_stops_at_the_ends() {
+        let config = config_with(TWO_TABS, SSR_DATASET);
+        let mut state = ObjectDialogState::new(Domain::VolViews);
+        state.refresh_rows(&config, (1, 0), Vec::new());
+        state.selected = 1;
+        assert_eq!(
+            state.move_object(-1),
+            Some(vec!["skew".to_string(), "vol".to_string()])
+        );
+        assert_eq!(state.selected, 0);
+        assert_eq!(
+            state
+                .rows
+                .rows()
+                .iter()
+                .map(|r| r.name.as_str())
+                .collect::<Vec<_>>(),
+            ["skew", "vol"],
+            "the list shows the move at once"
+        );
+        assert_eq!(state.move_object(-1), None);
+        assert_eq!(state.selected, 0);
+        state.selected = 1;
+        assert_eq!(state.move_object(1), None);
+    }
+
+    /// Every other domain's browse list stays put under `shift+j`.
+    #[test]
+    fn only_vol_views_reorders_from_browse() {
+        assert!(Domain::VolViews.reorderable());
+        for domain in Domain::ALL {
+            if domain != Domain::VolViews {
+                assert!(!domain.reorderable(), "{domain:?}");
+            }
+        }
+        let config = config_with(TWO_TABS, SSR_DATASET);
+        let mut state = ObjectDialogState::new(Domain::Views);
+        state.refresh_rows(&config, (1, 0), Vec::new());
+        assert_eq!(state.move_object(1), None);
     }
 }

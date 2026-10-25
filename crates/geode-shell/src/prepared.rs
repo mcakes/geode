@@ -184,6 +184,21 @@ impl<K: PartialEq + Clone, Q: PartialEq + Clone, R> Prepared<K, Q, R> {
             .iter()
             .position(|s| self.rows.get(s.row).is_some_and(&pred))
     }
+
+    /// Swap the derived rows at `a` and `b`, their texts with them, and
+    /// forget the ranking so the next [`Self::refresh`] re-ranks under the
+    /// same key: the shown list still names rows by index, and after a swap
+    /// those indices hold other rows. An optimistic move of a row the
+    /// configuration will confirm on its reload; out of range swaps nothing.
+    pub fn swap(&mut self, a: usize, b: usize) {
+        if a == b || a >= self.rows.len() || b >= self.rows.len() {
+            return;
+        }
+        self.rows.swap(a, b);
+        self.texts.swap(a, b);
+        self.searchable.swap(a, b);
+        self.ranked_for = None;
+    }
 }
 
 /// Split a match's character indices at the primary line and turn each half into

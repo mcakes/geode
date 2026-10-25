@@ -414,6 +414,14 @@ fn handle_browse_key(
                 cx.notify();
                 return true;
             }
+            // `shift+j`/`shift+k` move the selected object where the domain's
+            // document order means something (the vol watchlist's tabs); the
+            // file follows. `state`'s borrow ends at the arm.
+            NormalCommand::MoveItem(delta) if state.domain.reorderable() => {
+                move_selected_object(shell, delta, cx);
+                cx.notify();
+                return true;
+            }
             // `Toggle`, `EditText`, `MoveItem` and the rest of the letter
             // verbs are the edit stage's, and the browse footer
             // advertises none of them — so they are claimed and dropped
@@ -2098,6 +2106,58 @@ fn commit_change(shell: &mut ShellView, cx: &mut Context<ShellView>) {
     }
 }
 
+/// `shift+j`/`shift+k` on the browse list of a reorderable domain: move the
+/// selected object one place, re-rank the list so it paints the move now,
+/// keep the cursor on the moved object, and write the new order
+/// (`apply::commit_reorder`). The refusals are said: the end of the list,
+/// a read-only domain, and no user directory — checked before the swap, so
+/// the list never shows a move nothing can save.
+fn move_selected_object(shell: &mut ShellView, delta: i32, cx: &mut Context<ShellView>) {
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return;
+    };
+    if !state.domain.writable(&state.stage) {
+        set_notice(shell, READ_ONLY_NOTICE.to_string());
+        return;
+    }
+    if shell.user_dir.is_none() {
+        set_notice(
+            shell,
+            "no writable user config directory — nothing was changed".to_string(),
+        );
+        return;
+    }
+    let Some(state) = shell.object_dialog.as_mut() else {
+        return;
+    };
+    let Some(order) = state.move_object(delta) else {
+        set_notice(shell, "that is as far as this tab goes".to_string());
+        return;
+    };
+    let moved = state
+        .rows
+        .rows()
+        .get(state.selected)
+        .map(|r| r.name.clone());
+    // The swap left the ranking stale; re-rank under the same key and put
+    // the cursor back on the moved object by name, wherever the filter
+    // shows it now.
+    shell.refresh_dialog_rows(cx);
+    if let Some(state) = shell.object_dialog.as_mut() {
+        if let Some(position) = moved
+            .as_deref()
+            .and_then(|name| state.rows.position(|r| r.name == name))
+        {
+            state.selected = position;
+        }
+        let selected = state.selected;
+        shell.object_dialog_scroll.scroll_to_item(selected);
+    }
+    if let Some(notice) = apply::commit_reorder(shell, order, cx) {
+        set_notice(shell, notice);
+    }
+}
+
 /// Keep the draft's cursor visible after motion or row reordering. Promotion
 /// and demotion can move a row beyond the viewport just as navigation can;
 /// each route must scroll to the resulting selection.
@@ -2347,6 +2407,38 @@ fn removal_edits(
     Ok(keys)
 }
 
+/// The user layer's document keys (`Domain::document_keys`, each a key
+/// whose value names an object) that name the object about to be deleted,
+/// as removal keys — so deleting the default tab clears `default` with it.
+/// Only when the object leaves the configuration altogether: deleting the
+/// user's copy of an overridden object reveals the lower copy, which the key
+/// still rightly names. A key a lower layer holds is not the user's to
+/// remove, and is not reached from here.
+fn document_keys_naming_target(shell: &ShellView, domain: Domain) -> Vec<(&'static str, String)> {
+    let Some(row) = target_row(shell) else {
+        return Vec::new();
+    };
+    if row.overridden {
+        return Vec::new();
+    }
+    let doc = domain.doc();
+    let Some(user) = shell
+        .services
+        .config
+        .layered_docs(doc)
+        .iter()
+        .find(|layered| layered.layer == Layer::User)
+    else {
+        return Vec::new();
+    };
+    domain
+        .document_keys()
+        .iter()
+        .filter(|key| user.table.get(**key).and_then(|v| v.as_str()) == Some(row.name.as_str()))
+        .map(|key| (doc, (*key).to_string()))
+        .collect()
+}
+
 /// Arm deletion only for a user-defined object. Inherited objects cannot be deleted by
 /// a user-layer write. A presentation-only override instead points to revert; an
 /// unconfigured grouping slot reports that it is empty.
@@ -2510,7 +2602,12 @@ fn run_confirmed(
                 docs.push(presentation);
             }
             match removal_edits(shell, &docs) {
-                Ok(keys) => {
+                Ok(mut keys) => {
+                    // A document key naming the deleted object (Vol views'
+                    // `default`) would dangle; it goes with the object.
+                    if confirm == Confirm::Delete {
+                        keys.extend(document_keys_naming_target(shell, domain));
+                    }
                     // named in the notice only when `removal_edits` actually found an
                     // entry to remove — `keys` decides, same as every other doc in this
                     // list.
@@ -2951,6 +3048,12 @@ fn build(
                 // no creation hint is painted there.
                 if state.domain.writable(&state.stage) && state.domain.roster().is_none() {
                     hints.push(Hint::new(HintRow::Edit, &["n"], "new"));
+                }
+                if state.domain.reorderable() {
+                    hints.push(
+                        Hint::new(HintRow::Edit, &["shift+j", "shift+k"], "reorder")
+                            .selector("objectdialog-hint-reorder"),
+                    );
                 }
                 hints.push(
                     Hint::new(HintRow::Go, &["enter"], "open").selector("objectdialog-hint-enter"),

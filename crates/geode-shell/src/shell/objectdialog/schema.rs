@@ -180,6 +180,8 @@ pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
         Destination::Doc | Destination::Presentation => {
             toml_edit::Item::Table(super::toml_table_to_edit(&draft.source))
         }
+        // `datasets.toml` has no document-level key a field edits.
+        Destination::TopLevel => unreachable!("Schema has no TopLevel-destined fields"),
     }
 }
 

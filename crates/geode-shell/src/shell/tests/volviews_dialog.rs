@@ -324,3 +324,173 @@ fn a_family_change_re_derives_the_stage_and_keeps_the_tenor(cx: &mut gpui::TestA
     assert!(text.contains("measure = \"ssr 3M\""), "{text}");
     assert!(!text.contains("atfm 3M"), "{text}");
 }
+
+/// [`services_with_vol_views`] over a user layer read from `dir`, the
+/// directory the test also hands the shell to write into — so what the
+/// dialog deletes is a tab the file really holds.
+fn services_with_user_vol_views(dir: &std::path::Path) -> ShellServices {
+    let mut services = test_services();
+    let builtin = LayerDoc::builtin("vol_views", BUILTIN).unwrap();
+    let datasets = LayerDoc::builtin("datasets", SSR_DATASET).unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![builtin, datasets],
+        desk: None,
+        user: Some(dir.to_path_buf()),
+    });
+    services
+}
+
+/// `shift+j` on the browse list moves a tab down: the list shows the move at
+/// once, the user file holds the new order with both builtin tabs copied
+/// into it, and one notice reports the copies.
+#[gpui::test]
+fn shift_j_on_the_browse_list_reorders_the_tabs_and_writes_them(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("shift-j");
+    cx.run_until_parked();
+    let names = dialog_state(&shell, &cx, |s| {
+        s.rows
+            .rows()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(names, ["skew", "vol"]);
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.selected),
+        1,
+        "the cursor follows the tab"
+    );
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert_eq!(
+        notice.as_deref(),
+        Some("copied 2 tabs to your config — r restores each")
+    );
+    flush_config_write(&mut cx);
+    let names = dialog_state(&shell, &cx, |s| {
+        s.rows
+            .rows()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(
+        names,
+        ["skew", "vol"],
+        "the rows re-derived from the applied configuration hold the order"
+    );
+    assert_eq!(dialog_state(&shell, &cx, |s| s.selected), 1);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    let skew = text.find("[skew]").unwrap();
+    let vol = text.find("[vol]").unwrap();
+    assert!(skew < vol, "{text}");
+    assert!(
+        !text.contains("default"),
+        "the document's key is not the move's to write: {text}"
+    );
+    let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
+    assert!(
+        overrides.contains("vol_views.vol") && overrides.contains("vol_views.skew"),
+        "each copy is recorded so r can restore it: {overrides}"
+    );
+}
+
+/// `shift+k` on the first tab has nowhere to go: nothing moves, nothing is
+/// written, and the footer says so.
+#[gpui::test]
+fn shift_k_on_the_first_tab_is_refused_and_writes_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("shift-k");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("that is as far as this tab goes")
+    );
+    flush_config_write(&mut cx);
+    assert!(!dir.path().join("vol_views.toml").exists());
+}
+
+/// Turning Default on for `skew` writes the top-level key alone — the
+/// builtin tab is not copied — and the browse summary follows.
+#[gpui::test]
+fn the_default_bool_writes_the_top_level_key(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("j enter"); // skew
+    cx.run_until_parked();
+    // The cursor settles on `cells`; one down is Default.
+    cx.simulate_keystrokes("j space");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        d.fields[2].kind,
+        crate::shell::objectdialog::FieldKind::Bool(true)
+    )));
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_none_or(|n| !n.starts_with("copied")),
+        "the document's key is not a fork of the view: {notice:?}"
+    );
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    assert!(text.contains("default = \"skew\""), "{text}");
+    assert!(!text.contains("[skew]"), "{text}");
+    assert!(!dir.path().join("overrides.toml").exists());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let summaries = dialog_state(&shell, &cx, |s| {
+        s.rows
+            .rows()
+            .iter()
+            .map(|r| r.summary.clone())
+            .collect::<Vec<_>>()
+    });
+    assert!(summaries[1].ends_with(" · default"), "{summaries:?}");
+    assert!(!summaries[0].ends_with(" · default"), "{summaries:?}");
+}
+
+/// Deleting the default tab clears the default key with it.
+#[gpui::test]
+fn deleting_the_default_tab_clears_the_default_key(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let user =
+        "config_version = 1\ndefault = \"mine\"\n[mine]\n[[mine.columns]]\nkind = \"vega\"\n";
+    std::fs::write(dir.path().join("vol_views.toml"), user).unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_user_vol_views(dir.path()),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("shift-g"); // mine, the last row
+    cx.simulate_keystrokes("d y");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    assert!(!text.contains("default"), "{text}");
+    assert!(!text.contains("[mine]"), "{text}");
+    let names = dialog_state(&shell, &cx, |s| {
+        s.rows
+            .rows()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(names, ["vol", "skew"]);
+}
