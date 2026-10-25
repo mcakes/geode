@@ -386,10 +386,11 @@ fn companion_glyph(kind: &ColumnKind) -> CompanionGlyph {
 fn level_glyph(kind: &ColumnKind) -> LevelGlyph {
     match kind {
         ColumnKind::Level { level, .. } | ColumnKind::Single { level, .. } => *level,
-        ColumnKind::Underlying
-        | ColumnKind::Companion { .. }
-        | ColumnKind::Spark { .. }
-        | ColumnKind::Vega => LevelGlyph::Plain,
+        ColumnKind::Underlying | ColumnKind::Companion { .. } | ColumnKind::Spark { .. } => {
+            LevelGlyph::Plain
+        }
+        // Book vega heats by magnitude against its peers (`vega_ranges`).
+        ColumnKind::Vega => LevelGlyph::Heat,
     }
 }
 
@@ -581,7 +582,8 @@ pub(crate) fn glyph_width(kind: &ColumnKind, text_px: f32) -> f32 {
             ..
         } => companion(*c).max(level(*l)),
         ColumnKind::Spark { .. } => text_px.max(sizes::WIDTH_30D),
-        ColumnKind::Underlying | ColumnKind::Vega => text_px,
+        ColumnKind::Underlying => text_px,
+        ColumnKind::Vega => level(LevelGlyph::Heat),
     }
 }
 
@@ -617,7 +619,11 @@ fn companion_scale(i: &Inputs<'_>, kind: &ColumnKind) -> f64 {
 /// members and group means alike, so one scale serves the column; `None`
 /// for any other column.
 fn heat_range(i: &Inputs<'_>, kind: &ColumnKind) -> Option<(f64, f64)> {
-    if level_glyph(kind) != LevelGlyph::Heat || shows_companion(kind, &i.lens) {
+    // Vega's scale is per depth (`vega_ranges`), not per column.
+    if level_glyph(kind) != LevelGlyph::Heat
+        || shows_companion(kind, &i.lens)
+        || matches!(kind, ColumnKind::Vega)
+    {
         return None;
     }
     range(
@@ -625,6 +631,30 @@ fn heat_range(i: &Inputs<'_>, kind: &ColumnKind) -> Option<(f64, f64)> {
             .iter()
             .filter_map(|r| value(r, kind, i.asked, &i.lens)),
     )
+}
+
+/// Book vega's heat scale per row depth: the finite range of |vega| over
+/// the rows at that depth, so members scale against members and groups
+/// against their peer groups. A group's vega is its members' sum, and one
+/// scale would cool every member beside it. By magnitude, so a large short
+/// book paints as hot as a large long one and the number carries the sign.
+/// Empty without a vega column; `None` at a depth with no vega.
+fn vega_ranges(i: &Inputs<'_>) -> Vec<Option<(f64, f64)>> {
+    if !i.columns.iter().any(|c| c.kind == ColumnKind::Vega) {
+        return Vec::new();
+    }
+    let depths = i.rows.iter().map(|r| r.depth()).max().map_or(0, |d| d + 1);
+    (0..depths)
+        .map(|d| {
+            range(
+                i.rows
+                    .iter()
+                    .filter(|r| r.depth() == d)
+                    .filter_map(|r| r.vega)
+                    .map(f64::abs),
+            )
+        })
+        .collect()
 }
 
 /// Every row's cells, prepared once.
@@ -636,6 +666,7 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
         .collect();
     let ranges: Vec<Option<(f64, f64)>> =
         i.columns.iter().map(|c| heat_range(i, &c.kind)).collect();
+    let vega_ranges = vega_ranges(i);
 
     let mut col_px: Vec<f32> = i
         .columns
@@ -661,7 +692,12 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
                 .enumerate()
                 .map(|(ci, column)| {
                     let v = value(row, &column.kind, i.asked, &i.lens);
-                    let mut cell = prepare_cell(i, row, column, v, scales[ci], ranges[ci]);
+                    let heat_range = if column.kind == ColumnKind::Vega {
+                        vega_ranges.get(row.depth()).copied().flatten()
+                    } else {
+                        ranges[ci]
+                    };
+                    let mut cell = prepare_cell(i, row, column, v, scales[ci], heat_range);
                     if column.kind == ColumnKind::Underlying {
                         cell.text = match &row.group {
                             Some(g) => format!("{} \u{b7} {}", g.label, g.members.len()).into(),
@@ -823,7 +859,12 @@ fn prepare_cell(
     } else {
         match level_glyph(&column.kind) {
             LevelGlyph::Heat => {
-                Glyph::Heat(heat_range.and_then(|(lo, hi)| heat(v, lo, hi, HEAT_CEILING)))
+                let heated = if column.kind == ColumnKind::Vega {
+                    v.abs()
+                } else {
+                    v
+                };
+                Glyph::Heat(heat_range.and_then(|(lo, hi)| heat(heated, lo, hi, HEAT_CEILING)))
             }
             LevelGlyph::Tint => {
                 // A tint the pair would paint muted (a stale lookback, a
@@ -2862,6 +2903,77 @@ mod tests {
                 .iter()
                 .position(|c| c.id == id)
                 .unwrap_or_else(|| panic!("{id}"))
+        }
+
+        fn vega_alpha(p: &Prepared, row: usize, vega: usize) -> f32 {
+            match &p.rows[row].cells[vega].glyph {
+                Glyph::Heat(Some(a)) => *a,
+                g => panic!("row {row}: {g:?}"),
+            }
+        }
+
+        #[test]
+        fn book_vega_heats_by_magnitude_so_a_large_short_book_is_as_hot_as_a_long_one() {
+            let asked = asked();
+            let cols = vol_columns(&LensState::default());
+            let vega = col(&cols, "vega");
+            let rows = vec![
+                leaf("SX5E", Some(16.5), 1.0, 0.9, Some(2.0)),
+                leaf("DAX", Some(14.5), 0.6, 0.5, Some(-3.0)),
+                leaf("UKX", Some(14.0), 0.1, 0.4, Some(0.5)),
+            ];
+            let p = prepare(&inputs(&rows, &cols, &asked, LensState::default(), None));
+            assert!(
+                (vega_alpha(&p, 1, vega) - HEAT_CEILING).abs() < 1e-6,
+                "the short 3 is the largest magnitude"
+            );
+            assert_eq!(vega_alpha(&p, 2, vega), 0.0, "the smallest magnitude");
+            let mid = vega_alpha(&p, 0, vega);
+            assert!(mid > 0.0 && mid < HEAT_CEILING, "{mid}");
+            assert_eq!(
+                p.rows[1].cells[vega].value,
+                Some(-3.0),
+                "the number keeps its sign"
+            );
+        }
+
+        #[test]
+        fn book_vega_scales_members_against_members_and_groups_against_groups() {
+            let asked = asked();
+            let cols = vol_columns(&LensState::default());
+            let vega = col(&cols, "vega");
+            // Core sums to 5, past any member; Isles is UKX alone.
+            let rows = group_rows(
+                vec![
+                    leaf("SX5E", Some(16.5), 1.0, 0.9, Some(2.0)),
+                    leaf("DAX", Some(14.5), 0.6, 0.5, Some(3.0)),
+                    leaf("UKX", Some(14.0), 0.1, 0.4, Some(1.0)),
+                ],
+                &["region".into()],
+                &europe(),
+                &asked,
+            );
+            let p = prepare(&inputs(&rows, &cols, &asked, LensState::default(), None));
+            let at = |name: &str| p.rows.iter().position(|r| r.name.as_ref() == name).unwrap();
+            assert!(
+                (vega_alpha(&p, at("DAX"), vega) - HEAT_CEILING).abs() < 1e-6,
+                "the largest member takes the ceiling whatever its group sums to"
+            );
+            assert_eq!(vega_alpha(&p, at("UKX"), vega), 0.0);
+            let groups: Vec<usize> = p
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| r.group.is_some())
+                .map(|(i, _)| i)
+                .collect();
+            assert_eq!(groups.len(), 2);
+            let (core, isles) = (groups[0], groups[1]);
+            assert!(
+                (vega_alpha(&p, core, vega) - HEAT_CEILING).abs() < 1e-6,
+                "Core (5) against Isles (1)"
+            );
+            assert_eq!(vega_alpha(&p, isles, vega), 0.0);
         }
 
         #[test]

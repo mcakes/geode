@@ -43226,6 +43226,52 @@ run_mutation "volwatch: a line-number change relayouts the table" \
   geode-volwatch \
   the_line_numbers_global_paints_a_gutter_beside_the_underlying_cell
 
+# Book vega heats by magnitude: a large short book is as hot as a large
+# long one. Mutated to the signed value, the short book paints coolest and
+# the eye reads it as a small exposure.
+run_mutation "volwatch: book vega heats signed" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                    .map(f64::abs),' \
+  '                    .map(|v| v),' \
+  geode-volwatch \
+  book_vega_heats_by_magnitude_so_a_large_short_book_is_as_hot_as_a_long_one
+
+# The cell heats the same magnitude the range was taken over. Mutated to
+# the signed value against a magnitude range, a short book clamps to cold.
+run_mutation "volwatch: a vega cell heats its signed value" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                let heated = if column.kind == ColumnKind::Vega {
+                    v.abs()' \
+  '                let heated = if column.kind == ColumnKind::Vega {
+                    v' \
+  geode-volwatch \
+  book_vega_heats_by_magnitude_so_a_large_short_book_is_as_hot_as_a_long_one
+
+# Vega scales per depth: a group's vega is its members' sum, and one scale
+# over every row cools every member beside it.
+run_mutation "volwatch: book vega scales against every depth at once" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                    .filter(|r| r.depth() == d)' \
+  '                    .filter(|_| true)' \
+  geode-volwatch \
+  book_vega_scales_members_against_members_and_groups_against_groups
+
+# A member reads the scale of its own depth, not the root's.
+run_mutation "volwatch: a vega cell reads the root depth's scale" \
+  crates/geode-volwatch/src/core/model.rs \
+  '                        vega_ranges.get(row.depth()).copied().flatten()' \
+  '                        vega_ranges.first().copied().flatten()' \
+  geode-volwatch \
+  book_vega_scales_members_against_members_and_groups_against_groups
+
+# Vega is a heat level; plain, it paints no glyph.
+run_mutation "volwatch: book vega paints plain" \
+  crates/geode-volwatch/src/core/model.rs \
+  '        ColumnKind::Vega => LevelGlyph::Heat,' \
+  '        ColumnKind::Vega => LevelGlyph::Plain,' \
+  geode-volwatch \
+  book_vega_heats_by_magnitude_so_a_large_short_book_is_as_hot_as_a_long_one
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

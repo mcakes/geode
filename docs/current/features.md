@@ -1337,7 +1337,11 @@ column whatever the width of each number. The [vol watchlist](#vol-watchlist)
 tile paints its companion chips, the tint behind a single view's level and
 the band's heat range with them, and a view's `level = "heat"`,
 `companion = "bar"` and `companion = "slider"` columns with the heat tint
-(over the column's present levels, group means included), the bar (a rank
+(over the column's present levels, group means included; the book vega
+column always heats, by the magnitude of the vega so a large short book
+is as hot as a large long one, and against the rows at its own depth, so
+members scale against members and groups against their peer groups, a
+group's vega being its members' sum), the bar (a rank
 barred by its side of the median) and the slider (under the percentile
 metric; a chip under z or moves, with the readout noting `slider needs the
 percentile metric`). A tab with no columns paints its strip and an empty

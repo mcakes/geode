@@ -68,7 +68,9 @@ measured against). Behaviour and limits are in the features guide's
     node (`GridRow::depth`), `prepare` (each cell's text, glyph, id and
     muted flag, the column widths; the glyph is the column's resolved
     `LevelGlyph`/`CompanionGlyph`: a heat level over the column's range
-    (`heat_range`, members and group means alike), a chip or zero bar
+    (`heat_range`, members and group means alike; book vega always heats,
+    by |vega| and per row depth in `vega_ranges`, since a group's vega is
+    its members' sum), a chip or zero bar
     over the column's scale, a slider under the percentile metric and a
     chip otherwise, with the readout saying why; every glyph gets the
     displayed sign and the companion at display precision; a single
