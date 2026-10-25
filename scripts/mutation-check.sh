@@ -42897,6 +42897,25 @@ run_mutation "volviews: the revert keeps the startup set" \
   geode-shell \
   the_restart_warning_survives_a_failed_writes_revert
 
+# A `[[columns]]` table the reader refuses is written back as it was read;
+# with nothing to render from a spec, the save would delete it.
+run_mutation "volviews: a refused column survives a save" \
+  crates/geode-shell/src/shell/objectdialog/volviews.rs \
+  '            None => super::toml_table_to_edit(source),' \
+  '            None => toml_edit::Table::new(),' \
+  geode-shell \
+  a_refused_column_is_carried_raw_and_written_in_place
+
+# The shipped tabs a move crosses are copied into the user file first:
+# the file can only carry an order among tabs it holds, and crossing none
+# the rewrite would order nothing the merge can see.
+run_mutation "volviews: a move forks the shipped tabs it crosses" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        (Some(first), Some(last)) => &order[first..=last],' \
+  '        (Some(_first), Some(_last)) => &[],' \
+  geode-shell \
+  shift_j_on_the_browse_list_reorders_the_tabs_and_writes_them
+
 # A fork lands at its merged position: without the order rewrite the user
 # file holds the copies in the order they were made, which the merge reads
 # as the tab order, and an edit moves a tab.

@@ -525,6 +525,197 @@ fn an_edit_on_a_later_tab_does_not_reorder_the_tabs(cx: &mut gpui::TestAppContex
     );
 }
 
+/// A hand-written column the reader refuses (`measure = "atfm 3m x"`) is
+/// carried through the dialog as it was read: a `Cells` edit on its tab
+/// forks the tab and the refused column is still in the file.
+#[gpui::test]
+fn a_refused_column_survives_a_save(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let builtin = "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3m x\"\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n";
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_over(builtin), dir.path(), "config::vol_views");
+    cx.simulate_keystrokes("enter"); // vol
+    cx.run_until_parked();
+    let items = edit_draft(&shell, &cx, |d| {
+        d.list_items("columns")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(items, ["atfm 3m x", "ATFM 3M"]);
+    cx.simulate_keystrokes("space"); // Cells: pair → single
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    assert!(text.contains("cells = \"single\""), "{text}");
+    assert!(text.contains("measure = \"atfm 3m x\""), "{text}");
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle}: {text}"))
+    };
+    assert!(at("atfm 3m x") < at("measure = \"atfm 3M\""), "{text}");
+}
+
+/// `space` on Default for the tab a lower layer's `default` names is
+/// refused: the user file has no key to remove, so the field would snap
+/// back with nothing written. Nothing reaches the file.
+#[gpui::test]
+fn un_defaulting_the_shipped_default_is_refused(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("enter"); // vol, the builtin default
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j space"); // Default
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("vol is the shipped default — make another tab the default instead")
+    );
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        d.fields[2].kind,
+        crate::shell::objectdialog::FieldKind::Bool(true)
+    )));
+    flush_config_write(&mut cx);
+    assert!(!dir.path().join("vol_views.toml").exists());
+}
+
+/// A `default` the user layer holds is the user's to remove: Default off
+/// on that tab clears the key.
+#[gpui::test]
+fn un_defaulting_a_user_default_removes_the_key(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let user =
+        "config_version = 1\ndefault = \"mine\"\n[mine]\n[[mine.columns]]\nkind = \"vega\"\n";
+    std::fs::write(dir.path().join("vol_views.toml"), user).unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_user_vol_views(dir.path()),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("shift-g enter"); // mine
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j space"); // Default
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| matches!(
+        d.fields[2].kind,
+        crate::shell::objectdialog::FieldKind::Bool(false)
+    )));
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    assert!(!text.contains("default"), "{text}");
+    assert!(text.contains("[mine]"), "{text}");
+}
+
+/// Two moves before one flush: `shift+j` twice from `vol` on three tabs
+/// writes the final order once, and the second move's notice names only
+/// the tab it crossed that the first had not already copied.
+#[gpui::test]
+fn two_moves_before_a_flush_write_the_final_order(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let three = "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n[skew]\n[[skew.columns]]\nmeasure = \"skew 1Y\"\n[varswap]\n[[varswap.columns]]\nmeasure = \"varswap 3M\"\n";
+    let (shell, mut cx) =
+        dialog_test_shell_in_dir(cx, services_over(three), dir.path(), "config::vol_views");
+    cx.simulate_keystrokes("shift-j");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("copied 2 tabs to your config — r restores each")
+    );
+    cx.simulate_keystrokes("shift-j");
+    cx.run_until_parked();
+    let names = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        dialog_state(shell, cx, |s| {
+            s.rows
+                .rows()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(names(&shell, &cx), ["skew", "varswap", "vol"]);
+    assert_eq!(dialog_state(&shell, &cx, |s| s.selected), 2);
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert_eq!(
+        notice.as_deref(),
+        Some("copied 'varswap' to your config — r restores the builtin copy"),
+        "vol was already the user's after the first move"
+    );
+    flush_config_write(&mut cx);
+    assert_eq!(names(&shell, &cx), ["skew", "varswap", "vol"]);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle}: {text}"))
+    };
+    assert!(at("[skew]") < at("[varswap]"), "{text}");
+    assert!(at("[varswap]") < at("[vol]"), "{text}");
+    let overrides = std::fs::read_to_string(dir.path().join("overrides.toml")).unwrap();
+    for tab in ["vol", "skew", "varswap"] {
+        assert!(
+            overrides.contains(&format!("vol_views.{tab}")),
+            "{overrides}"
+        );
+    }
+}
+
+/// A move that crosses only the user's own tabs forks nothing: no sidecar,
+/// no copy notice, and the file holds the new order. The user layer holds
+/// `mine` and its copy of the shipped `wing`, which the merge places
+/// between `skew` and `wing`; `shift+k` on `wing` crosses `mine` alone.
+#[gpui::test]
+fn a_move_across_a_user_tab_forks_nothing(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let builtin = "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n[skew]\n[[skew.columns]]\nmeasure = \"skew 1Y\"\n[wing]\n[[wing.columns]]\nmeasure = \"wing skew 1Y\"\n";
+    let user = "config_version = 1\n[mine]\n[[mine.columns]]\nkind = \"vega\"\n[wing]\n[[wing.columns]]\nmeasure = \"wing skew 3M\"\n";
+    std::fs::write(dir.path().join("vol_views.toml"), user).unwrap();
+    let mut services = services_over(builtin);
+    let datasets = LayerDoc::builtin("datasets", SSR_DATASET).unwrap();
+    (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
+        builtin: vec![LayerDoc::builtin("vol_views", builtin).unwrap(), datasets],
+        desk: None,
+        user: Some(dir.path().to_path_buf()),
+    });
+    let (shell, mut cx) = dialog_test_shell_in_dir(cx, services, dir.path(), "config::vol_views");
+    let names = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        dialog_state(shell, cx, |s| {
+            s.rows
+                .rows()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(names(&shell, &cx), ["vol", "skew", "mine", "wing"]);
+    cx.simulate_keystrokes("shift-g shift-k"); // wing up, across mine
+    cx.run_until_parked();
+    assert_eq!(names(&shell, &cx), ["vol", "skew", "wing", "mine"]);
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_none_or(|n| !n.starts_with("copied")),
+        "{notice:?}"
+    );
+    flush_config_write(&mut cx);
+    assert_eq!(names(&shell, &cx), ["vol", "skew", "wing", "mine"]);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle}: {text}"))
+    };
+    assert!(at("[wing]") < at("[mine]"), "{text}");
+    assert!(
+        !text.contains("[vol]") && !text.contains("[skew]"),
+        "the shipped tabs the move did not cross stay shipped: {text}"
+    );
+    assert!(!dir.path().join("overrides.toml").exists());
+}
+
 /// Turning Default on for `skew` writes the top-level key alone — the
 /// builtin tab is not copied — and the browse summary follows.
 #[gpui::test]
