@@ -444,19 +444,22 @@ pub struct Raw {
     pub text: String,
 }
 
-/// The realized windows a picker offers until a source lists its own; the
-/// reader accepts any window text.
-pub const WINDOWS: [&str; 3] = ["20D", "60D", "120D"];
+/// The realized windows a picker offers until a source lists its own
+/// (the demo's `WINDOWS`); the reader accepts any window text.
+pub const WINDOWS: [&str; 3] = ["5D", "20D", "60D"];
+/// A new realized or IV − RV column opens at the desk's usual 20-day
+/// window, not the shortest offered.
+const FIRST_WINDOW: &str = "20D";
 
 impl ColumnChoice {
     /// The family at its firsts: the first tenor, the first delta, the
-    /// 30-day span, the first window, and `1Y-1M` for a slope.
+    /// 30-day span, the 20-day window, and `1Y-1M` for a slope.
     pub fn new(family: Family) -> ColumnChoice {
         let tenor = family.takes_tenor().then(|| ALL_TENORS[0].to_string());
         ColumnChoice {
             long: family.takes_slope().then(|| "1Y".to_string()),
             short: family.takes_slope().then(|| "1M".to_string()),
-            window: family.takes_window().then(|| WINDOWS[0].to_string()),
+            window: family.takes_window().then(|| FIRST_WINDOW.to_string()),
             delta: family.takes_delta().then_some(DELTAS[0]),
             span: family.takes_span().then_some(SPARK_30D),
             tenor,
@@ -668,12 +671,20 @@ impl ColumnChoice {
     }
 }
 
-/// `7d`, `30d`, `90d`, `1y` for the spans the picker offers; a whole
-/// number of days otherwise. `parse_duration` reads each back.
+/// `7d`, `30d`, `90d`, `1y` for the spans the picker offers; otherwise the
+/// coarsest unit of `parse_duration`'s grammar that spells the duration
+/// exactly (days, hours, seconds, milliseconds), so a hand-written `12h`
+/// is never rounded to a `0d` the reader refuses.
 pub fn span_text(d: Duration) -> String {
-    match d.as_secs() / 86_400 {
-        365 => "1y".to_string(),
-        n => format!("{n}d"),
+    let ms = d.as_millis();
+    if !ms.is_multiple_of(1_000) {
+        return format!("{ms}ms");
+    }
+    match d.as_secs() {
+        s if s == 365 * 86_400 => "1y".to_string(),
+        s if s.is_multiple_of(86_400) => format!("{}d", s / 86_400),
+        s if s.is_multiple_of(3_600) => format!("{}h", s / 3_600),
+        s => format!("{s}s"),
     }
 }
 
@@ -737,8 +748,35 @@ pub fn to_table(view: &VolViewSpec, source: Option<&toml_edit::Table>) -> toml_e
     toml_edit::Item::Table(table)
 }
 
+/// Give every table its serialized position in iteration order, depth
+/// first. `Display` orders tables by the position parsing gave them (a
+/// fresh table inherits its predecessor's), so a table cloned or moved from
+/// a source document would otherwise print where it was read, not where
+/// the doc puts it.
+fn renumber(table: &mut toml_edit::Table, next: &mut isize) {
+    for (_, item) in table.iter_mut() {
+        match item {
+            toml_edit::Item::Table(t) => {
+                t.set_position(Some(*next));
+                *next += 1;
+                renumber(t, next);
+            }
+            toml_edit::Item::ArrayOfTables(a) => {
+                for t in a.iter_mut() {
+                    t.set_position(Some(*next));
+                    *next += 1;
+                    renumber(t, next);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The whole document: `config_version`, `default`, the views in order,
-/// then any top-level key the source held that this writer does not model.
+/// then any top-level value the source held that this writer does not
+/// model. A source table the doc no longer lists is a deleted view and is
+/// not copied: the reader takes every table for a view.
 pub fn to_document(
     doc: &VolViewsDoc,
     source: Option<&toml_edit::DocumentMut>,
@@ -758,19 +796,22 @@ pub fn to_document(
         for (key, item) in s.as_table().iter() {
             if key == "config_version"
                 || key == "default"
-                || doc.views.iter().any(|v| v.name == key)
+                || item.is_table_like()
+                || item.is_array_of_tables()
             {
                 continue;
             }
             out[key] = item.clone();
         }
     }
+    renumber(out.as_table_mut(), &mut 0);
     out
 }
 
 /// Move the named view tables to the front in `order`; tables not named
 /// keep their relative order after them; `config_version` and `default`
-/// stay first. Removing and re-inserting keeps each table's decor.
+/// stay first. Removing and re-inserting keeps each table's decor; the
+/// tables are then renumbered so the order reaches the file.
 pub fn reorder(document: &mut toml_edit::DocumentMut, order: &[String]) {
     let table = document.as_table_mut();
     let keys: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
@@ -791,6 +832,7 @@ pub fn reorder(document: &mut toml_edit::DocumentMut, order: &[String]) {
     for (k, item) in head.into_iter().chain(named).chain(rest) {
         table.insert(&k, item);
     }
+    renumber(table, &mut 0);
 }
 
 fn read_column(
@@ -1679,6 +1721,15 @@ mod tests {
         let t = ColumnChoice::new(Family::Table("ssr".into()));
         assert_eq!(t.tenor.as_deref(), Some("1W"));
         assert_eq!(t.head(), "SSR 1W");
+        assert_eq!(WINDOWS, ["5D", "20D", "60D"]);
+        assert_eq!(
+            ColumnChoice::new(Family::Realized).window.as_deref(),
+            Some("20D")
+        );
+        assert_eq!(
+            ColumnChoice::new(Family::IvRv).window.as_deref(),
+            Some("20D")
+        );
     }
 
     #[test]
@@ -1725,6 +1776,20 @@ mod tests {
         assert!(out.contains("level = \"heat\""), "{out}");
         let (again, _) = from_doc(&doc(&out));
         assert_eq!(again, d);
+        // The doc's order wins over the source's: a source table keeps its
+        // parsed position unless the writer renumbers it.
+        let mut swapped = d.clone();
+        swapped.views.reverse();
+        let out = to_document(&swapped, Some(&source)).to_string();
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {out}"))
+        };
+        assert!(at("[skew]") < at("[[skew.columns]]"), "{out}");
+        assert!(at("[[skew.columns]]") < at("[vol]"), "{out}");
+        assert!(at("[vol]") < at("[[vol.columns]]"), "{out}");
+        let (again, _) = from_doc(&doc(&out));
+        assert_eq!(again, swapped);
         // The builtin tabs, read and written, read identically.
         let builtin = crate::volviews::tests_builtin_text();
         let (b, _) = from_doc(&doc(builtin));
@@ -1753,5 +1818,43 @@ mod tests {
         reorder(&mut document, &["c".into(), "a".into()]);
         let names: Vec<&str> = document.as_table().iter().map(|(k, _)| k).collect();
         assert_eq!(names, ["config_version", "c", "a", "b"]);
+        let out = document.to_string();
+        let at = |needle: &str| {
+            out.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {out}"))
+        };
+        assert!(at("[c]") < at("[[c.columns]]"), "{out}");
+        assert!(at("[[c.columns]]") < at("[a]"), "{out}");
+        assert!(at("[[a.columns]]") < at("[b]"), "{out}");
+        assert!(at("[b]") < at("[[b.columns]]"), "{out}");
+    }
+
+    #[test]
+    fn a_view_the_doc_dropped_is_not_written_back_from_the_source() {
+        let text = "config_version = 1\nnote = \"kept\"\n[vol]\n[[vol.columns]]\nkind = \"vega\"\n[gone]\n[[gone.columns]]\nkind = \"vega\"\n";
+        let source: toml_edit::DocumentMut = text.parse().unwrap();
+        let (mut d, _) = from_doc(&doc(text));
+        d.views.retain(|v| v.name == "vol");
+        let out = to_document(&d, Some(&source)).to_string();
+        assert!(!out.contains("gone"), "{out}");
+        assert!(out.contains("note = \"kept\""), "{out}");
+        let (again, _) = from_doc(&doc(&out));
+        assert_eq!(again.views.len(), 1);
+    }
+
+    #[test]
+    fn a_span_is_written_at_the_grain_the_reader_takes_and_reads_back_equal() {
+        for text in ["7d", "30d", "90d", "1y", "12h", "36h", "90s", "500ms"] {
+            let d = parse_duration(text).unwrap();
+            assert_eq!(span_text(d), text, "{text}");
+        }
+        let text = "config_version = 1\n[vol]\n[[vol.columns]]\nspark = \"atfm 3M\"\nspan = \"12h\"\n[[vol.columns]]\nspark = \"atfm 1M\"\nspan = \"36h\"\n";
+        let (d, _) = from_doc(&doc(text));
+        let out = to_document(&d, None).to_string();
+        assert!(out.contains("span = \"12h\""), "{out}");
+        assert!(out.contains("span = \"36h\""), "{out}");
+        let (again, diags) = from_doc(&doc(&out));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(again, d);
     }
 }
