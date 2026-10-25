@@ -412,7 +412,8 @@ optional `span`, a non-zero duration, `30d` by default) or `kind =
 and the group head; blank reads as absent) and two glyph keys: `level`,
 one of `plain`, `heat` or `tint`, how the level cell paints, and
 `companion`, one of `chip`, `bar` or `slider`, how the companion cell
-paints. The keys are exact lower-case words: the file is written by the
+paints (a slider shows the percentile rank under every lens, the other
+two the lens's number). The keys are exact lower-case words: the file is written by the
 dialog or by hand, and a near miss is reported, not guessed. Absent means
 the view's default (a plain level and a chip in a pair view; a tinted
 level in a single view), which the tile resolves, so the reader carries

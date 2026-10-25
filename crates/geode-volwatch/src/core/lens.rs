@@ -188,6 +188,17 @@ impl Shown {
 }
 
 impl LensState {
+    /// This lens with the percentile rank as its companion: what a slider
+    /// column reads under any lens, the lookback, window and shown number
+    /// kept.
+    pub fn rank_lens(&self) -> LensState {
+        LensState {
+            lens: Lens::Rich,
+            metric: Metric::Pctl,
+            ..*self
+        }
+    }
+
     /// `Δ`, `z` or `pctl`: the companion's head and the readout's word.
     pub fn companion_head(&self) -> &'static str {
         match (self.lens, self.metric) {

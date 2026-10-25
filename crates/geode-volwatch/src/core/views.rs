@@ -302,6 +302,12 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
             } => {
                 let stem = measure_id(measure);
                 let companion = companion.unwrap_or(CompanionGlyph::Chip);
+                // A slider places a rank whatever the lens shows, so its
+                // head says so; the other glyphs follow the lens.
+                let companion_lens = match companion {
+                    CompanionGlyph::Slider => lens.rank_lens(),
+                    CompanionGlyph::Chip | CompanionGlyph::Bar => *lens,
+                };
                 match view.cells {
                     Cells::Pair => {
                         let g = group.clone().unwrap_or_else(|| family_label(measure));
@@ -317,7 +323,7 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                         cols.push(Column {
                             id: format!("{stem}-companion"),
                             group: Some(g),
-                            head: lens.companion_head().into(),
+                            head: companion_lens.companion_head().into(),
                             kind: ColumnKind::Companion {
                                 measure: measure.clone(),
                                 companion,
@@ -333,7 +339,7 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                         };
                         let mut g = group.clone().unwrap_or(g);
                         if lens.shown == Shown::Companion {
-                            g = format!("{g} \u{b7} {}", lens.companion_head());
+                            g = format!("{g} \u{b7} {}", companion_lens.companion_head());
                         }
                         cols.push(Column {
                             id: format!("{stem}-single"),

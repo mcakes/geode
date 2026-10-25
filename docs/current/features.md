@@ -3963,11 +3963,12 @@ flat column tints nothing; in a single view it replaces the sign tint) or
 column's largest displayed magnitude, a rank by its side of the median
 against the half-track, as the chip tints it) or `slider` (a track filled
 to the rank at display precision, with quartile ticks and a marker in
-the warning color at or beyond 0.10 and 0.90). Only the percentile
-metric has a rank to place, so under z or moves a slider column shows
-the chip and the readout
-ends ` · slider needs the percentile metric`; a slider that would paint
-muted (a short history, another window) is its number alone. The spark
+the warning color at or beyond 0.10 and 0.90). A slider places a rank
+and nothing else, so a slider column is the percentile rank under every
+lens: its head reads `pctl`, `r` and `q` leave it alone, its number
+sorts as a rank, a window change mutes it and a lookback change does
+not; a slider that would paint muted (a short history, another window)
+is its number alone, and a cell with no rank is blank. The spark
 column is a 30-day sparkline with an end dot. Sign colors are the theme's
 bullish and bearish chart tokens. A companion from a board asked under another
 lookback or window than the one shown paints muted (after `d` or `w`,
