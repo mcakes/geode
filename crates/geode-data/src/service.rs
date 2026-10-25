@@ -416,16 +416,24 @@ fn result_event(r: QueryResult, health_tracker: &HealthTracker) -> DataEvent {
                 Err(e) => Err(e),
             },
         }),
-        RequestKind::VolBoard { requester } => DataEvent::VolBoard(VolBoardOutcome {
-            key: requester,
-            tag: r.tag,
-            submitted: r.submitted,
-            result: match r.payload {
-                Ok(Payload::VolBoard(board)) => Ok(*board),
-                Ok(_) => Err("internal: a board request answered with another payload".into()),
-                Err(e) => Err(e),
-            },
-        }),
+        RequestKind::VolBoard { requester } => {
+            tracing::info!(
+                target: "geode::query",
+                "board {}: answered {:?} after submission",
+                r.tag,
+                r.submitted.elapsed()
+            );
+            DataEvent::VolBoard(VolBoardOutcome {
+                key: requester,
+                tag: r.tag,
+                submitted: r.submitted,
+                result: match r.payload {
+                    Ok(Payload::VolBoard(board)) => Ok(*board),
+                    Ok(_) => Err("internal: a board request answered with another payload".into()),
+                    Err(e) => Err(e),
+                },
+            })
+        }
     }
 }
 
@@ -3334,6 +3342,33 @@ impl DataService {
                 }
             }
         }
+        // What a tab switch costs the writer: every call is one fetch and
+        // one append in turn.
+        tracing::info!(
+            target: "geode::query",
+            "board {}: {} call(s) planned{}",
+            params.tag,
+            calls.len(),
+            calls
+                .iter()
+                .map(|(_, r, _)| {
+                    let kind = match &r.keys {
+                        KeySet::Prefix(t) => format!("prefix({})", t.len()),
+                        KeySet::Exact(t) => format!("exact({})", t.len()),
+                    };
+                    let span = match r.span {
+                        Span::Latest => "latest".to_string(),
+                        Span::At(t) => format!("at {}", t.format("%m-%dT%H:%M:%S")),
+                        Span::Between { from, to, .. } => format!(
+                            "{}..{}",
+                            from.format("%m-%dT%H:%M:%S"),
+                            to.format("%m-%dT%H:%M:%S")
+                        ),
+                    };
+                    format!("; {} {kind} {span}", r.table)
+                })
+                .collect::<String>()
+        );
         let plan = BoardPlan {
             params,
             now,
@@ -6888,9 +6923,16 @@ mod tests {
         assert_eq!(asked.len(), 2, "the unsettled tail is asked again");
         match asked[1].span {
             Span::Between { from, to, .. } => {
+                // The end is floored to the minute, so it may precede the
+                // fetch time less the margin by up to a minute, never follow it.
                 assert!(
-                    from >= now - settle && from <= before - settle,
+                    from >= now - settle - chrono::Duration::minutes(1) && from <= before - settle,
                     "coverage ended at the fetch time less the settle margin: {from}"
+                );
+                assert_eq!(
+                    (from.timestamp(), from.timestamp_subsec_micros()),
+                    (from.timestamp() - from.timestamp() % 60, 0),
+                    "on the minute: {from}"
                 );
                 assert!(to >= before && to <= after, "and is asked up to now: {to}");
             }

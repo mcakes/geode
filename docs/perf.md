@@ -3441,3 +3441,29 @@ run's variance; the lanes that touched many tuples' coverage fell four to
 nine times. A tab switch is now bounded by the board read and the
 fetches, not by the writer's bookkeeping. Both "before" columns are the
 same day's runs at the same load, not the guide's older figures.
+
+### Same day: the minute floor and the empty-answer path
+
+The owner's own instance log then showed a surface tab of 25 columns
+opening a ticket of 25 `vol_surface` calls per switch, each a fetch and an
+append of 0 rows about 25 ms apart (release build): every column had been
+added to the tab in its own request, so each tuple's coverage ended at its
+own fetch time less the margin, and every refetch re-stamped its own end,
+so the `Between` planner's gap groups never merged. Two changes: a
+coverage end is floored to the minute (`covered_by`), so one refetch of
+every tail in one request leaves them equal and the next plan is one
+call; and an append with no rows skips the dedupe and the insert. Same
+fixture and bench, load 10 to 14:
+
+| Benchmark | Batch only | With both |
+|---|---|---|
+| `vol_board/changes_view_25` | 75 ms | 59 ms (58.5–58.7) |
+| `vol_board/rich_cheap_view_25` | 106 ms | 79 ms (78.6–80.3) |
+| `history/exact_between_30d_250_from_coverage` | 61 ms | 23 ms (22.7–22.9) |
+| `history/prefix_latest_25` | 31 ms | 30 ms |
+| `history/exact_at_250_from_coverage` | 30 ms | 31 ms |
+
+The bench never fragments its coverage (one request covers every tuple),
+so the floor shows there only through the empty-answer path; the owner's
+case goes from 25 calls to one `Latest` and one `Between` per switch after
+the first visit under the new build.

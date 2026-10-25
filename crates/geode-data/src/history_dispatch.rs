@@ -25,7 +25,7 @@ use crate::query::volboard::{BoardPlan, BoardRead, board_pool_key};
 use crate::service::{DataEvent, EventSink};
 use crate::store::StoreError;
 use crate::store::history::{CoverSpan, Covered, covers_instant, missing_by_key, uncovered_at};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use geode_core::query::{HistoryOutcome, HistoryParams, KeySet, QueryKey, Span, normalize_key};
 use geode_core::schema::{DatasetSpec, SchemaSpec};
 use geode_core::snapshot::Provenance;
@@ -443,6 +443,15 @@ pub(crate) fn covered_by(
         .ok()
         .and_then(|settle| fetched_at.checked_sub_signed(settle))
         .unwrap_or(fetched_at);
+    // Floored to the minute: tuples whose tails were fetched seconds apart
+    // (a column added to a tab after its neighbours) would otherwise keep
+    // distinct coverage ends, each refetch re-stamping its own, and the
+    // Between planner would call the source once per group for good. A
+    // surface tab paid 25 calls per switch that way.
+    let bound = bound
+        .with_second(0)
+        .and_then(|b| b.with_nanosecond(0))
+        .unwrap_or(bound);
     let latest_of = |tuple: &[String]| {
         (0..rows.ts.len())
             .filter(|&i| {
@@ -666,6 +675,72 @@ mod tests {
             )
             .is_empty(),
             "a prefix point past the bound records nothing"
+        );
+    }
+
+    /// Two tuples whose tails were fetched seconds apart (a column added
+    /// to a tab after its neighbours) must not stay two calls for good:
+    /// each refetch re-stamps its own end, so the groups would never merge.
+    #[test]
+    fn tails_fetched_within_a_minute_share_one_call() {
+        use crate::store::history::{HistoryAppendRequest, append_history};
+        let (_d, store, ds) = covered_store();
+        let spx = exact(&["SPX", "3M", "0.5"]);
+        let ndx = exact(&["NDX", "3M", "0.5"]);
+        let empty = HistoryRows {
+            ts: Vec::new(),
+            keys: vec![Vec::new(); 3],
+            values: vec![Vec::new(); 2],
+        };
+        for (tuple, fetched_at) in [
+            (&spx, ts("2026-01-10T12:00:10Z")),
+            (&ndx, ts("2026-01-10T12:00:35Z")),
+        ] {
+            let request = HistoryRequest {
+                table: String::new(),
+                keys: KeySet::Exact(vec![tuple.clone()]),
+                span: Span::Between {
+                    from: ts("2026-01-10T00:00:00Z"),
+                    to: fetched_at,
+                    step: None,
+                },
+            };
+            append_history(
+                &store,
+                &HistoryAppendRequest {
+                    dataset: &ds,
+                    source: "hanweck",
+                    rows: &empty,
+                    covered: covered_by(&request, &empty, fetched_at),
+                    received_at: fetched_at,
+                },
+            )
+            .unwrap();
+        }
+        let now = ts("2026-01-10T13:00:00Z");
+        let calls = plan_calls(
+            store.writer(),
+            &ds,
+            "surface",
+            &KeySet::Exact(vec![spx.clone(), ndx.clone()]),
+            Span::Between {
+                from: ts("2026-01-05T00:00:00Z"),
+                to: now,
+                step: None,
+            },
+            now,
+        )
+        .unwrap();
+        assert_eq!(calls.len(), 1, "one tail call for both tuples: {calls:?}");
+        assert_eq!(calls[0].keys, KeySet::Exact(vec![spx, ndx]));
+        assert_eq!(
+            calls[0].span,
+            Span::Between {
+                from: ts("2026-01-10T11:30:00Z"),
+                to: now,
+                step: None,
+            },
+            "both coverage ends sit on the minute"
         );
     }
 

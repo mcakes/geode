@@ -719,9 +719,53 @@ fn append_in_transaction(
     let table = history_table(&req.dataset.name);
     let coverage = history_coverage_table(&req.dataset.name);
     let received = micros(req.received_at);
+
+    // Nothing staged: no dedupe and no insert to run, only coverage to
+    // record. A refetched tail that brought nothing new is most appends.
+    let appended = if req.rows.is_empty() {
+        0
+    } else {
+        append_staged(conn, &table, keys, values, received)?
+    };
+
+    // Record coverage even when deduplication leaves no new rows.
+    let recorded: Vec<(&Vec<Option<String>>, CoverSpan)> = covers
+        .iter()
+        .zip(&req.covered)
+        .map(|(asked, c)| (asked, c.span))
+        .collect();
+    coalesce_coverage(conn, &coverage, keys, &recorded, received)?;
+
+    // Bound the dataset's history in the same transaction as rows and
+    // coverage.
+    let swept = sweep_history(conn, req.dataset, req.received_at)?;
+    Ok(HistoryAppended { appended, swept })
+}
+
+/// Rewrite the coverage rows of every tuple in `recorded` (exactly that
+/// tuple, trailing NULLs included, never a deeper or shallower one) as the
+/// merged spans of what it held and what this append records, each under
+/// the newest `received_at` among them (`received` for the spans recorded
+/// now). Without it a refreshing board adds a point row per tuple per ask,
+/// and every lookup scans them all on the service loop. Lookups merge a
+/// tuple's spans with its prefixes' anyway, so they answer the same.
+///
+/// Four statements whatever the tuple count: the touched tuples go through
+/// `STAGING_COVERAGE`, which one select joins and one delete subtracts, and
+/// the merged spans come back through it in one insert. A statement round
+/// per tuple cost a board ask of 125 tuples 370 ms of its 400 ms append, on
+/// the one writer every tab switch waits for.
+/// Move the staged rows into `table` under `received`, less those equal to
+/// the live version of their (key, ts); returns how many went in.
+fn append_staged(
+    conn: &Connection,
+    table: &str,
+    keys: &[&ColumnSpec],
+    values: &[&ColumnSpec],
+    received: i64,
+) -> Result<usize, StoreError> {
     let key_list = joined(keys, |c| quote(&c.name), ", ");
     let value_list = joined(values, |c| quote(&c.name), ", ");
-
     // Drop a staged row equal in every value column to the live version of
     // its (key, ts), so an overlapping refetch grows nothing. Live is the
     // greatest received_at per (key, ts), expressed inline; the match is on
@@ -776,37 +820,10 @@ fn append_in_transaction(
          select {casts}, make_timestamp(ts_us), make_timestamp(?), {value_list} \
          from {STAGING_TABLE}"
     );
-    let appended = conn
-        .execute(&insert, duckdb::params![received])
-        .map_err(sql_err(&insert))?;
-
-    // Record coverage even when deduplication leaves no new rows.
-    let recorded: Vec<(&Vec<Option<String>>, CoverSpan)> = covers
-        .iter()
-        .zip(&req.covered)
-        .map(|(asked, c)| (asked, c.span))
-        .collect();
-    coalesce_coverage(conn, &coverage, keys, &recorded, received)?;
-
-    // Bound the dataset's history in the same transaction as rows and
-    // coverage.
-    let swept = sweep_history(conn, req.dataset, req.received_at)?;
-    Ok(HistoryAppended { appended, swept })
+    conn.execute(&insert, duckdb::params![received])
+        .map_err(sql_err(&insert))
 }
 
-/// Rewrite the coverage rows of every tuple in `recorded` (exactly that
-/// tuple, trailing NULLs included, never a deeper or shallower one) as the
-/// merged spans of what it held and what this append records, each under
-/// the newest `received_at` among them (`received` for the spans recorded
-/// now). Without it a refreshing board adds a point row per tuple per ask,
-/// and every lookup scans them all on the service loop. Lookups merge a
-/// tuple's spans with its prefixes' anyway, so they answer the same.
-///
-/// Four statements whatever the tuple count: the touched tuples go through
-/// `STAGING_COVERAGE`, which one select joins and one delete subtracts, and
-/// the merged spans come back through it in one insert. A statement round
-/// per tuple cost a board ask of 125 tuples 370 ms of its 400 ms append, on
-/// the one writer every tab switch waits for.
 /// One tuple being coalesced: its spans (held and recorded) and the newest
 /// `received_at` among them.
 type Coalesced<'a> = (&'a Vec<Option<String>>, Vec<CoverSpan>, i64);

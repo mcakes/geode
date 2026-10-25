@@ -41671,6 +41671,16 @@ run_mutation "history: a read's prefix cell matches nothing" \
   geode-data \
   latest_answers_the_greatest_ts_per_key_under_a_prefix
 
+# A coverage end is floored to the minute so tails fetched seconds apart
+# merge on the next refetch. Mutated to keep the seconds, every tuple
+# fetched in its own call stays its own Between call for good.
+run_mutation "history: a coverage end keeps its seconds" \
+  crates/geode-data/src/history_dispatch.rs \
+  '        .with_second(0)' \
+  '        .with_second(bound.second())' \
+  geode-data \
+  tails_fetched_within_a_minute_share_one_call
+
 # Retention removes superseded versions received before its cutoff only.
 # Mutated to ignore the cutoff, a correction made yesterday erases the
 # version it replaced while the window still promises it.

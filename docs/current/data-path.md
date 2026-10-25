@@ -814,7 +814,14 @@ for good. A span the clip empties records nothing, so an `At` or `Latest`
 point inside the last 30 minutes, and any `At` in the future, is never
 answered from the cache. The cost is that the last 30 minutes of any span
 are asked for again on the next request. The margin is a guess at the
-vendors' publication lag ([real sources](real-sources.md)).
+vendors' publication lag ([real sources](real-sources.md)). The end is then
+floored to the minute. Without that, tuples whose tails were fetched
+seconds apart (a column added to a tab after its neighbours, or any two
+calls of one request) keep distinct coverage ends, each refetch re-stamps
+its own, and the `Between` planner calls the source once per group for
+good: a surface tab of 25 columns paid 25 calls per switch. On the minute,
+one refetch of every tail in one request leaves them equal, and the next
+plan is one call.
 
 An append then coalesces the coverage of every asked tuple it recorded
 coverage for: that tuple's rows (exactly its shape, trailing NULLs
@@ -840,6 +847,10 @@ never a row deeper than a prefix ask). At 250 tuples the plan takes about
 coverage table and one over the payload table (each covered tuple's last
 observation at or before `t`), both joined on a `VALUES` list; a term per
 tuple in one predicate cost 250 tuples about 170 ms of the service thread.
+
+An answer with no rows (a refetched tail that brought nothing new, which
+is most of them) skips the dedupe and the insert and records only its
+coverage, still under the sweep.
 
 Rows, coverage and the retention sweep commit in one writer transaction, so
 a span read as covered is a span whose rows are readable. Calls into
