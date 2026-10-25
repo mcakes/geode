@@ -820,6 +820,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   are the routes.
 - The Vol views browse list reorders by `shift+j`/`shift+k` only; the
   member rows' grip drag has no tab counterpart yet.
+- A column move in the vol tile (`shift+h`/`shift+l`, saved per view as
+  `column_order`) has no pointer route and no `.` menu row; two columns
+  over one measure in a tab share a stem and move as one.
 - A `[[columns]]` entry that is not a table (`columns = ["x"]`) cannot be
   a list item and is dropped by the next save of its tab; the reader warns
   about it on every load.
