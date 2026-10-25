@@ -32,7 +32,7 @@ use geode_core::volviews::{
     Raw, SPANS, SPARK_30D, TableShape, VolColumnSpec, VolViewSpec, WINDOWS, span_text,
 };
 
-use super::{Destination, Domain, Draft, Field, FieldKind, ListItem};
+use super::{Destination, Domain, Draft, EditRow, Field, FieldKind, ListItem};
 
 pub const DOC: &str = VOL_VIEWS_DOC;
 
@@ -470,6 +470,34 @@ fn validate_against(
         }
     }
     diags
+}
+
+/// The one step this domain refuses before the draft takes it: `Default`
+/// off on the tab a lower layer's `default` names. The user file has no
+/// key to remove — the field renders off as a removal — so the write would
+/// change nothing and the field would snap back on the next read; the way
+/// out is to make another tab the default, which replaces the key. A
+/// `default` the user layer holds is the user's to remove.
+pub fn step_refusal(draft: &Draft, config: &Config) -> Option<String> {
+    let Some(EditRow::Field(i)) = draft.selected_row() else {
+        return None;
+    };
+    let field = draft.fields.get(i)?;
+    if field.key != "default" || field.kind != FieldKind::Bool(true) {
+        return None;
+    }
+    let doc = config.doc(DOC)?;
+    if doc.value.get("default").and_then(|v| v.as_str()) != Some(draft.name.as_str()) {
+        return None;
+    }
+    let layer = *doc.provenance.get("default")?;
+    if layer == Layer::User {
+        return None;
+    }
+    Some(format!(
+        "{} is the shipped default — make another tab the default instead",
+        draft.name
+    ))
 }
 
 /// What each field means, for the edit footer's help line; under ~90
@@ -1476,6 +1504,48 @@ mod tests {
         draft.fields[2].kind = FieldKind::Bool(true);
         let text = object_text("skew", Domain::VolViews.to_table(&draft, Destination::Doc));
         assert!(!text.contains("default"), "{text}");
+    }
+
+    /// Default off on the tab the builtin `default` names is refused, with
+    /// the field unchanged; on a tab the builtin does not name, and on a
+    /// user-layer default, the step is the draft's to take.
+    #[test]
+    fn un_defaulting_the_shipped_default_is_refused_before_the_step() {
+        let config = config_with(TWO_TABS, SSR_DATASET);
+        let mut draft = Domain::VolViews.draft(&config, "vol");
+        let default_row = draft
+            .rows()
+            .iter()
+            .position(|r| *r == super::super::EditRow::Field(2))
+            .unwrap();
+        draft.selected = default_row;
+        assert_eq!(
+            Domain::VolViews.step_refusal(&draft, &config),
+            Some("vol is the shipped default — make another tab the default instead".to_string())
+        );
+        assert_eq!(draft.fields[2].kind, FieldKind::Bool(true));
+        // Any other row, and any other domain, refuse nothing here.
+        draft.selected = 0;
+        assert_eq!(Domain::VolViews.step_refusal(&draft, &config), None);
+        let mut skew = Domain::VolViews.draft(&config, "skew");
+        skew.selected = default_row;
+        assert_eq!(Domain::VolViews.step_refusal(&skew, &config), None);
+        // A `default` the user layer holds steps off.
+        let docs = vec![
+            LayerDoc::builtin("vol_views", TWO_TABS).unwrap(),
+            LayerDoc::builtin("datasets", SSR_DATASET).unwrap(),
+        ];
+        let user = LayerDoc {
+            layer: Layer::User,
+            name: "vol_views".into(),
+            file: "user".into(),
+            table: "config_version = 1\ndefault = \"vol\"\n".parse().unwrap(),
+        };
+        let config = Config::from_docs(docs.into_iter().chain([user]).collect());
+        let mut draft = Domain::VolViews.draft(&config, "vol");
+        draft.selected = default_row;
+        assert_eq!(draft.fields[2].kind, FieldKind::Bool(true));
+        assert_eq!(Domain::VolViews.step_refusal(&draft, &config), None);
     }
 
     /// `shift+k` on the second tab swaps it with the first and reports the

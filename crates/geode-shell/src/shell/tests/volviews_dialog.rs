@@ -198,6 +198,31 @@ fn a_new_tab_opens_empty_and_writes_an_empty_column_list(cx: &mut gpui::TestAppC
     );
 }
 
+/// The new tab's Name row shows the name the prompt committed, not a blank
+/// the tab would only fill once reopened.
+#[gpui::test]
+fn a_new_tab_shows_its_name_in_the_view_stage(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("analytics");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.text("name").map(str::to_string)),
+        Some("analytics".into())
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| !d.is_dirty()),
+        "the seeded name is the baseline, not an edit"
+    );
+}
+
 /// A name differing only in case from an existing tab is the reader's
 /// duplicate (`from_doc` skips the second), so the naming prompt refuses it
 /// and nothing reaches the user file.

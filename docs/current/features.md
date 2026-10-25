@@ -3736,8 +3736,10 @@ with `'<name>' already exists — open it instead`, and `default` and
 when it named it. A tab's stage shows its name (display-only: a rename is
 a delete and a create), `Cells`, `Default` (the document's `default` key,
 written at the top of the file without copying the tab; turning it off on
-the builtin's own default changes nothing, since the shipped `default =
-"vol"` stands until another tab is made default) and its columns: the
+the tab the shipped `default` names is refused, `<tab> is the shipped
+default — make another tab the default instead`, since the user's file has
+no key to remove, while a default the user's file holds is cleared) and
+its columns: the
 members in order over a catalogue of families — ATFM, Forward, 25Δ skew,
 Wing skew, Slope, Realized, IV − RV, Varswap, VS spread, Surface point,
 Sparkline, Book vega, then every `history` dataset keyed by

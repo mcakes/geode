@@ -308,9 +308,13 @@ The document's `default` key is edited as the tab's `Default` field, a
 object's name, so the existing keyed write path serves it; on it renders the
 tab's name as the key's value, off renders nothing, which the write path
 spells as removing the key. The field forks nothing — turning it on for a
-shipped tab copies no `[tab]` into the user file — and turning it off on the
-builtin's own default is a no-op, since the shipped `default = "vol"` stands
-until another tab is made default. `Domain::document_keys` names such keys;
+shipped tab copies no `[tab]` into the user file. Turning it off on the tab
+a lower layer's `default` names is refused before the draft steps
+(`Domain::step_refusal`, consulted by the step path ahead of the draft:
+`<tab> is the shipped default — make another tab the default instead`): the
+user file has no key to remove, so the write would change nothing and the
+field would snap back on the next read. A `default` the user layer holds is
+the user's to remove. `Domain::document_keys` names such keys;
 the browse list never lists them, and deleting the tab the user layer's
 `default` names removes the key with it (`document_keys_naming_target`),
 only when the tab leaves the configuration altogether — deleting the user's

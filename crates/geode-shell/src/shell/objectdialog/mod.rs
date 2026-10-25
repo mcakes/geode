@@ -3042,9 +3042,27 @@ impl Domain {
     /// A naming seed (a Colors definition from the value-color list) replaces these
     /// initial fields before committing creation.
     pub fn new_draft(self, config: &Config, name: &str) -> Draft {
-        let mut draft = Draft::new_object(name, self.fields(config, None), toml::Table::new());
+        let fields = match self {
+            // The display-only Name row shows the name the prompt committed;
+            // every other domain's empty shape has no row for the name.
+            Domain::VolViews => volviews::new_fields(config, name),
+            _ => self.fields(config, None),
+        };
+        let mut draft = Draft::new_object(name, fields, toml::Table::new());
         draft.diagnostics = self.validate(&draft, config);
         draft
+    }
+
+    /// A step of the selected row that the adapter refuses before the draft
+    /// takes it, with the reason — a refusal the draft alone cannot judge
+    /// because it reads the layered configuration. Vol views alone: turning
+    /// `Default` off on the tab a lower layer's `default` names
+    /// (`volviews::step_refusal`). `None` lets the step proceed.
+    pub fn step_refusal(self, draft: &Draft, config: &Config) -> Option<String> {
+        match self {
+            Domain::VolViews => volviews::step_refusal(draft, config),
+            _ => None,
+        }
     }
 
     /// The draft rendered as the item that would be written to `dest`.

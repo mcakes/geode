@@ -1902,6 +1902,18 @@ fn step_selected_row(
     filtering: bool,
     cx: &mut Context<ShellView>,
 ) {
+    // The adapter's own refusal first (`Domain::step_refusal`): said as the
+    // reason alone, since the verb hint `refuse_step` adds is about the
+    // object's user copy, which is not what this step was reaching for.
+    let refused = shell.object_dialog.as_ref().and_then(|state| {
+        state
+            .domain
+            .step_refusal(state.draft.as_ref()?, &shell.services.config)
+    });
+    if let Some(reason) = refused {
+        set_notice(shell, reason);
+        return;
+    }
     let stepped = draft_mut(shell).map(|draft| {
         if forward {
             draft.toggle_selected()
