@@ -12,7 +12,7 @@ use crate::config::{Diagnostic, MergedDoc, Severity};
 use crate::query::normalize_key;
 use crate::schema::ColumnType;
 use crate::source_config::parse_duration;
-use crate::volboard::Measure;
+use crate::volboard::{Measure, delta_text};
 
 /// The spark span when a column names none.
 pub const DEFAULT_SPARK_SPAN: Duration = Duration::from_secs(30 * 86_400);
@@ -320,6 +320,478 @@ pub fn measure_text(m: &MeasureText) -> String {
     }
 }
 
+/// The picker's families: the grammar's forms, the two non-measure columns
+/// and an open-form history dataset.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Family {
+    Atfm,
+    Forward,
+    Skew,
+    Wing,
+    Slope,
+    Realized,
+    IvRv,
+    Varswap,
+    Vs,
+    Point,
+    Spark,
+    Vega,
+    Table(String),
+}
+
+impl Family {
+    /// The catalogue in its order: the common form first, the open-form
+    /// datasets (schema-dependent) are listed by the caller after these.
+    pub fn builtin_families() -> [Family; 12] {
+        [
+            Family::Atfm,
+            Family::Forward,
+            Family::Skew,
+            Family::Wing,
+            Family::Slope,
+            Family::Realized,
+            Family::IvRv,
+            Family::Varswap,
+            Family::Vs,
+            Family::Point,
+            Family::Spark,
+            Family::Vega,
+        ]
+    }
+
+    /// The catalogue entry and the default `group` of a measure column.
+    pub fn label(&self) -> String {
+        match self {
+            Family::Atfm => "ATFM".into(),
+            Family::Forward => "Forward".into(),
+            Family::Skew => "25Δ skew".into(),
+            Family::Wing => "Wing skew".into(),
+            Family::Slope => "Slope".into(),
+            Family::Realized => "Realized".into(),
+            Family::IvRv => "IV − RV".into(),
+            Family::Varswap => "Varswap".into(),
+            Family::Vs => "VS spread".into(),
+            Family::Point => "Surface point".into(),
+            Family::Spark => "Sparkline".into(),
+            Family::Vega => "Book vega".into(),
+            Family::Table(name) => name.to_ascii_uppercase(),
+        }
+    }
+
+    /// A dataset's one key word after the underlying is held as its tenor.
+    pub fn takes_tenor(&self) -> bool {
+        matches!(
+            self,
+            Family::Atfm
+                | Family::Forward
+                | Family::Skew
+                | Family::Wing
+                | Family::IvRv
+                | Family::Varswap
+                | Family::Vs
+                | Family::Point
+                | Family::Spark
+                | Family::Table(_)
+        )
+    }
+
+    pub fn takes_delta(&self) -> bool {
+        matches!(self, Family::Point)
+    }
+
+    pub fn takes_span(&self) -> bool {
+        matches!(self, Family::Spark)
+    }
+
+    pub fn takes_window(&self) -> bool {
+        matches!(self, Family::Realized | Family::IvRv)
+    }
+
+    pub fn takes_slope(&self) -> bool {
+        matches!(self, Family::Slope)
+    }
+
+    /// Glyph keys belong to measure columns; the reader refuses them on a
+    /// spark or vega column.
+    pub fn takes_glyphs(&self) -> bool {
+        !matches!(self, Family::Spark | Family::Vega)
+    }
+}
+
+/// A column as the pickers hold it. `None` in an optional part means the
+/// family does not take it; a part the family takes is `Some`, except a
+/// dataset keyed by the underlying alone, whose `tenor` is `None`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnChoice {
+    pub family: Family,
+    pub tenor: Option<String>,
+    pub long: Option<String>,
+    pub short: Option<String>,
+    pub window: Option<String>,
+    pub delta: Option<f64>,
+    pub span: Option<Duration>,
+    pub label: Option<String>,
+    pub group: Option<String>,
+    pub level: Option<LevelGlyph>,
+    pub companion: Option<CompanionGlyph>,
+}
+
+/// A column the pickers cannot express (a dataset with two key words, or a
+/// spark over anything but an `atfm`); kept verbatim, movable and deletable
+/// only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Raw {
+    pub text: String,
+}
+
+/// The realized windows a picker offers (the demo's windows).
+pub const WINDOWS: [&str; 3] = ["20D", "60D", "120D"];
+
+impl ColumnChoice {
+    /// The family at its firsts: the first tenor, the first delta, the
+    /// 30-day span, the first window, and `1Y-1M` for a slope.
+    pub fn new(family: Family) -> ColumnChoice {
+        let tenor = family.takes_tenor().then(|| ALL_TENORS[0].to_string());
+        ColumnChoice {
+            long: family.takes_slope().then(|| "1Y".to_string()),
+            short: family.takes_slope().then(|| "1M".to_string()),
+            window: family.takes_window().then(|| WINDOWS[0].to_string()),
+            delta: family.takes_delta().then_some(DELTAS[0]),
+            span: family.takes_span().then_some(SPARK_30D),
+            tenor,
+            label: None,
+            group: None,
+            level: None,
+            companion: None,
+            family,
+        }
+    }
+
+    /// The measure the choice names. A spark's measure is the `atfm` at its
+    /// tenor; a vega column has none and `to_spec` never asks.
+    fn measure(&self) -> MeasureText {
+        let t = |s: &Option<String>| s.clone().unwrap_or_default();
+        let m = match &self.family {
+            Family::Atfm | Family::Spark | Family::Vega => Measure::atfm(&t(&self.tenor)),
+            Family::Point => Measure::Point {
+                tenor: t(&self.tenor),
+                delta: self.delta.unwrap_or(0.5),
+            },
+            Family::Forward => Measure::Forward {
+                tenor: t(&self.tenor),
+            },
+            Family::Skew => Measure::Skew {
+                tenor: t(&self.tenor),
+            },
+            Family::Wing => Measure::WingSkew {
+                tenor: t(&self.tenor),
+            },
+            Family::Slope => Measure::Slope {
+                long: t(&self.long),
+                short: t(&self.short),
+            },
+            Family::Realized => Measure::Realized {
+                window: t(&self.window),
+            },
+            Family::IvRv => Measure::IvRv {
+                tenor: t(&self.tenor),
+                window: t(&self.window),
+            },
+            Family::Varswap => Measure::Varswap {
+                tenor: t(&self.tenor),
+            },
+            Family::Vs => Measure::VsSpread {
+                tenor: t(&self.tenor),
+            },
+            Family::Table(dataset) => {
+                return MeasureText::Table {
+                    dataset: dataset.clone(),
+                    suffix: self.tenor.iter().cloned().collect(),
+                };
+            }
+        };
+        MeasureText::Builtin(m)
+    }
+
+    pub fn to_spec(&self) -> VolColumnSpec {
+        match self.family {
+            Family::Vega => VolColumnSpec::Vega,
+            Family::Spark => VolColumnSpec::Spark {
+                measure: self.measure(),
+                span: self.span.unwrap_or(SPARK_30D),
+            },
+            _ => VolColumnSpec::Measure {
+                measure: self.measure(),
+                label: self.label.clone(),
+                group: self.group.clone(),
+                level: self.level,
+                companion: self.companion,
+            },
+        }
+    }
+
+    /// A choice the pickers can hold, or the column's text as `Raw`.
+    pub fn from_spec(spec: &VolColumnSpec) -> Result<ColumnChoice, Raw> {
+        let raw = |m: &MeasureText| Raw {
+            text: measure_text(m),
+        };
+        match spec {
+            VolColumnSpec::Vega => Ok(ColumnChoice::new(Family::Vega)),
+            VolColumnSpec::Spark { measure, span } => {
+                let mut c = ColumnChoice::new(Family::Spark);
+                match measure {
+                    MeasureText::Builtin(Measure::Point { tenor, delta }) if *delta == 0.5 => {
+                        c.tenor = Some(tenor.clone());
+                    }
+                    other => return Err(raw(other)),
+                }
+                c.span = Some(*span);
+                Ok(c)
+            }
+            VolColumnSpec::Measure {
+                measure,
+                label,
+                group,
+                level,
+                companion,
+            } => {
+                let mut c = match measure {
+                    MeasureText::Builtin(m) => Self::from_measure(m).ok_or_else(|| raw(measure))?,
+                    MeasureText::Table { dataset, suffix } => match suffix.as_slice() {
+                        [] | [_] => {
+                            let mut c = ColumnChoice::new(Family::Table(dataset.clone()));
+                            c.tenor = suffix.first().cloned();
+                            c
+                        }
+                        _ => return Err(raw(measure)),
+                    },
+                };
+                c.label = label.clone();
+                c.group = group.clone();
+                c.level = *level;
+                c.companion = *companion;
+                Ok(c)
+            }
+        }
+    }
+
+    /// The built-in measure as a choice; a `Table` measure is the open form
+    /// and reads through `MeasureText::Table`, never here.
+    fn from_measure(m: &Measure) -> Option<ColumnChoice> {
+        let with_tenor = |family: Family, tenor: &String| {
+            let mut c = ColumnChoice::new(family);
+            c.tenor = Some(tenor.clone());
+            c
+        };
+        let c = match m {
+            Measure::Point { tenor, delta } if *delta == 0.5 => with_tenor(Family::Atfm, tenor),
+            Measure::Point { tenor, delta } => {
+                let mut c = with_tenor(Family::Point, tenor);
+                c.delta = Some(*delta);
+                c
+            }
+            Measure::Forward { tenor } => with_tenor(Family::Forward, tenor),
+            Measure::Skew { tenor } => with_tenor(Family::Skew, tenor),
+            Measure::WingSkew { tenor } => with_tenor(Family::Wing, tenor),
+            Measure::Slope { long, short } => {
+                let mut c = ColumnChoice::new(Family::Slope);
+                c.long = Some(long.clone());
+                c.short = Some(short.clone());
+                c
+            }
+            Measure::Realized { window } => {
+                let mut c = ColumnChoice::new(Family::Realized);
+                c.window = Some(window.clone());
+                c
+            }
+            Measure::IvRv { tenor, window } => {
+                let mut c = with_tenor(Family::IvRv, tenor);
+                c.window = Some(window.clone());
+                c
+            }
+            Measure::Varswap { tenor } => with_tenor(Family::Varswap, tenor),
+            Measure::VsSpread { tenor } => with_tenor(Family::Vs, tenor),
+            Measure::Table { .. } => return None,
+        };
+        Some(c)
+    }
+
+    /// The group the tile shows when the column names none.
+    pub fn default_group(&self) -> String {
+        self.family.label()
+    }
+
+    /// The label the tile shows when the column names none.
+    pub fn default_label(&self) -> String {
+        let t = |s: &Option<String>| s.clone().unwrap_or_default();
+        match &self.family {
+            Family::Point => format!(
+                "{} {}",
+                t(&self.tenor),
+                self.delta.map(delta_text).unwrap_or_default()
+            ),
+            Family::Slope => format!("{}-{}", t(&self.long), t(&self.short)),
+            Family::Realized => t(&self.window),
+            Family::IvRv => format!("{}/{}", t(&self.tenor), t(&self.window)),
+            _ => t(&self.tenor),
+        }
+    }
+
+    /// The list row's text, as the tile's header reads it, with any glyph
+    /// the file names appended (`plain` included: naming it on a single
+    /// view is a deliberate override).
+    pub fn head(&self) -> String {
+        let mut s = match &self.family {
+            Family::Vega => "Book vega".to_string(),
+            Family::Spark => format!(
+                "ATFM {} · {} spark",
+                self.tenor.clone().unwrap_or_default(),
+                span_text(self.span.unwrap_or(SPARK_30D))
+            ),
+            Family::Table(_) if self.tenor.is_none() => self.family.label(),
+            _ => format!(
+                "{} {}",
+                self.group.clone().unwrap_or_else(|| self.default_group()),
+                self.label.clone().unwrap_or_else(|| self.default_label())
+            ),
+        };
+        if let Some(l) = self.level {
+            s.push_str(" · ");
+            s.push_str(l.key());
+        }
+        if let Some(c) = self.companion {
+            s.push_str(" · ");
+            s.push_str(c.key());
+        }
+        s
+    }
+}
+
+/// `7d`, `30d`, `90d`, `1y` for the spans the picker offers; a whole
+/// number of days otherwise. `parse_duration` reads each back.
+pub fn span_text(d: Duration) -> String {
+    match d.as_secs() / 86_400 {
+        365 => "1y".to_string(),
+        n => format!("{n}d"),
+    }
+}
+
+/// A column's table: only the keys the spec sets, so a default label,
+/// group or glyph is never written and the builtin tabs round-trip as
+/// they are.
+fn column_table(spec: &VolColumnSpec) -> toml_edit::Table {
+    let mut t = toml_edit::Table::new();
+    match spec {
+        VolColumnSpec::Measure {
+            measure,
+            label,
+            group,
+            level,
+            companion,
+        } => {
+            t["measure"] = toml_edit::value(measure_text(measure));
+            if let Some(l) = label {
+                t["label"] = toml_edit::value(l.as_str());
+            }
+            if let Some(g) = group {
+                t["group"] = toml_edit::value(g.as_str());
+            }
+            if let Some(l) = level {
+                t["level"] = toml_edit::value(l.key());
+            }
+            if let Some(c) = companion {
+                t["companion"] = toml_edit::value(c.key());
+            }
+        }
+        VolColumnSpec::Spark { measure, span } => {
+            t["spark"] = toml_edit::value(measure_text(measure));
+            if *span != DEFAULT_SPARK_SPAN {
+                t["span"] = toml_edit::value(span_text(*span));
+            }
+        }
+        VolColumnSpec::Vega => {
+            t["kind"] = toml_edit::value("vega");
+        }
+    }
+    t
+}
+
+/// The view's table for `vol_views.toml`: the source table when given (so
+/// its comments and any key this writer does not model survive) with
+/// `cells` and `columns` replaced; a fresh table otherwise. `cells` is
+/// written only for a single view, since pair is the reader's default.
+pub fn to_table(view: &VolViewSpec, source: Option<&toml_edit::Table>) -> toml_edit::Item {
+    let mut table = source.cloned().unwrap_or_default();
+    match view.cells {
+        Cells::Single => table["cells"] = toml_edit::value("single"),
+        Cells::Pair => {
+            table.remove("cells");
+        }
+    }
+    let mut columns = toml_edit::ArrayOfTables::new();
+    for c in &view.columns {
+        columns.push(column_table(c));
+    }
+    table["columns"] = toml_edit::Item::ArrayOfTables(columns);
+    toml_edit::Item::Table(table)
+}
+
+/// The whole document: `config_version`, `default`, the views in order,
+/// then any top-level key the source held that this writer does not model.
+pub fn to_document(
+    doc: &VolViewsDoc,
+    source: Option<&toml_edit::DocumentMut>,
+) -> toml_edit::DocumentMut {
+    let mut out = toml_edit::DocumentMut::new();
+    out["config_version"] = toml_edit::value(1);
+    if let Some(d) = &doc.default {
+        out["default"] = toml_edit::value(d.as_str());
+    }
+    for view in &doc.views {
+        let src = source
+            .and_then(|s| s.get(&view.name))
+            .and_then(|i| i.as_table());
+        out[&view.name] = to_table(view, src);
+    }
+    if let Some(s) = source {
+        for (key, item) in s.as_table().iter() {
+            if key == "config_version"
+                || key == "default"
+                || doc.views.iter().any(|v| v.name == key)
+            {
+                continue;
+            }
+            out[key] = item.clone();
+        }
+    }
+    out
+}
+
+/// Move the named view tables to the front in `order`; tables not named
+/// keep their relative order after them; `config_version` and `default`
+/// stay first. Removing and re-inserting keeps each table's decor.
+pub fn reorder(document: &mut toml_edit::DocumentMut, order: &[String]) {
+    let table = document.as_table_mut();
+    let keys: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
+    let mut head = Vec::new();
+    let mut named = Vec::new();
+    let mut rest = Vec::new();
+    for k in keys {
+        let item = table.remove(&k).expect("key listed");
+        if k == "config_version" || k == "default" {
+            head.push((k, item));
+        } else if order.contains(&k) {
+            named.push((k, item));
+        } else {
+            rest.push((k, item));
+        }
+    }
+    named.sort_by_key(|(k, _)| order.iter().position(|o| o == k));
+    for (k, item) in head.into_iter().chain(named).chain(rest) {
+        table.insert(&k, item);
+    }
+}
+
 fn read_column(
     value: &toml::Value,
     path: &str,
@@ -616,6 +1088,140 @@ pub fn resolve(
         None => 0,
     };
     (VolViews { views, default }, diags)
+}
+
+/// A test-only copy of the tile's `BUILTIN_VOL_VIEWS` (`geode-volwatch`):
+/// core cannot import the tile, and the writer's round-trip test needs the
+/// shipped tabs verbatim. Keep the two texts equal.
+#[cfg(test)]
+mod builtin_text {
+    pub(crate) const BUILTIN_VOL_VIEWS: &str = r#"config_version = 1
+default = "vol"
+
+# ATFM vol across the tenor ladder, a 30-day sparkline and book vega.
+[vol]
+[[vol.columns]]
+measure = "atfm 1W"
+[[vol.columns]]
+measure = "atfm 1M"
+[[vol.columns]]
+measure = "atfm 3M"
+[[vol.columns]]
+measure = "atfm 6M"
+[[vol.columns]]
+measure = "atfm 1Y"
+[[vol.columns]]
+measure = "atfm 2Y"
+[[vol.columns]]
+measure = "atfm 3Y"
+[[vol.columns]]
+measure = "atfm 5Y"
+[[vol.columns]]
+spark = "atfm 3M"
+span = "30d"
+[[vol.columns]]
+kind = "vega"
+
+# 25Δ skew across the ladder and the 3M wing.
+[skew]
+[[skew.columns]]
+measure = "skew 1W"
+[[skew.columns]]
+measure = "skew 1M"
+[[skew.columns]]
+measure = "skew 3M"
+[[skew.columns]]
+measure = "skew 6M"
+[[skew.columns]]
+measure = "skew 1Y"
+[[skew.columns]]
+measure = "skew 2Y"
+[[skew.columns]]
+measure = "skew 3Y"
+[[skew.columns]]
+measure = "skew 5Y"
+[[skew.columns]]
+measure = "wing skew 3M"
+
+# Varswap strikes across the ladder.
+[varswap]
+[[varswap.columns]]
+measure = "varswap 1W"
+[[varswap.columns]]
+measure = "varswap 1M"
+[[varswap.columns]]
+measure = "varswap 3M"
+[[varswap.columns]]
+measure = "varswap 6M"
+[[varswap.columns]]
+measure = "varswap 1Y"
+[[varswap.columns]]
+measure = "varswap 2Y"
+[[varswap.columns]]
+measure = "varswap 3Y"
+[[varswap.columns]]
+measure = "varswap 5Y"
+
+# The surface in one line: five deltas at five tenors, one number per
+# cell; `m` swaps the level for its companion.
+[surface]
+cells = "single"
+[[surface.columns]]
+measure = "point 1M 0.05"
+[[surface.columns]]
+measure = "point 1M 0.25"
+[[surface.columns]]
+measure = "point 1M 0.5"
+[[surface.columns]]
+measure = "point 1M 0.75"
+[[surface.columns]]
+measure = "point 1M 0.95"
+[[surface.columns]]
+measure = "point 3M 0.05"
+[[surface.columns]]
+measure = "point 3M 0.25"
+[[surface.columns]]
+measure = "point 3M 0.5"
+[[surface.columns]]
+measure = "point 3M 0.75"
+[[surface.columns]]
+measure = "point 3M 0.95"
+[[surface.columns]]
+measure = "point 6M 0.05"
+[[surface.columns]]
+measure = "point 6M 0.25"
+[[surface.columns]]
+measure = "point 6M 0.5"
+[[surface.columns]]
+measure = "point 6M 0.75"
+[[surface.columns]]
+measure = "point 6M 0.95"
+[[surface.columns]]
+measure = "point 1Y 0.05"
+[[surface.columns]]
+measure = "point 1Y 0.25"
+[[surface.columns]]
+measure = "point 1Y 0.5"
+[[surface.columns]]
+measure = "point 1Y 0.75"
+[[surface.columns]]
+measure = "point 1Y 0.95"
+[[surface.columns]]
+measure = "point 2Y 0.05"
+[[surface.columns]]
+measure = "point 2Y 0.25"
+[[surface.columns]]
+measure = "point 2Y 0.5"
+[[surface.columns]]
+measure = "point 2Y 0.75"
+[[surface.columns]]
+measure = "point 2Y 0.95"
+"#;
+}
+
+#[cfg(test)]
+pub(crate) fn tests_builtin_text() -> &'static str {
+    builtin_text::BUILTIN_VOL_VIEWS
 }
 
 #[cfg(test)]
@@ -1026,5 +1632,125 @@ mod tests {
         assert_eq!(LevelGlyph::parse("HEAT"), None);
         assert_eq!(SPANS, ["7d", "30d", "90d", "1y"]);
         assert_eq!(ALL_TENORS[0], "1W");
+    }
+
+    fn spec(text: &str) -> VolColumnSpec {
+        VolColumnSpec::Measure {
+            measure: parse_measure(text).unwrap(),
+            label: None,
+            group: None,
+            level: None,
+            companion: None,
+        }
+    }
+
+    #[test]
+    fn every_builtin_column_reads_into_a_choice_and_writes_back_the_same_text() {
+        let (d, _) = from_doc(&doc(crate::volviews::tests_builtin_text()));
+        for v in &d.views {
+            for c in &v.columns {
+                let choice =
+                    ColumnChoice::from_spec(c).unwrap_or_else(|r| panic!("{}: {}", v.name, r.text));
+                assert_eq!(&choice.to_spec(), c, "{} {:?}", v.name, c);
+            }
+        }
+    }
+
+    #[test]
+    fn a_choice_at_its_firsts_names_the_first_tenor_and_delta() {
+        let c = ColumnChoice::new(Family::Point);
+        assert_eq!(c.tenor.as_deref(), Some("1W"));
+        assert_eq!(c.delta, Some(0.10));
+        assert_eq!(
+            measure_text(&match c.to_spec() {
+                VolColumnSpec::Measure { measure, .. } => measure,
+                _ => unreachable!(),
+            }),
+            "point 1W 0.1"
+        );
+        let s = ColumnChoice::new(Family::Spark);
+        assert_eq!(s.span, Some(SPARK_30D));
+        assert!(matches!(s.to_spec(), VolColumnSpec::Spark { .. }));
+        assert!(matches!(
+            ColumnChoice::new(Family::Vega).to_spec(),
+            VolColumnSpec::Vega
+        ));
+        let t = ColumnChoice::new(Family::Table("ssr".into()));
+        assert_eq!(t.tenor.as_deref(), Some("1W"));
+        assert_eq!(t.head(), "SSR 1W");
+    }
+
+    #[test]
+    fn heads_read_as_the_tile_would_and_name_a_non_default_glyph() {
+        let mut c = ColumnChoice::from_spec(&spec("skew 1Y")).unwrap();
+        assert_eq!(c.head(), "25Δ skew 1Y");
+        c.level = Some(LevelGlyph::Heat);
+        c.companion = Some(CompanionGlyph::Slider);
+        assert_eq!(c.head(), "25Δ skew 1Y · heat · slider");
+        assert_eq!(
+            ColumnChoice::from_spec(&spec("point 3M 0.25"))
+                .unwrap()
+                .head(),
+            "Surface point 3M 0.25"
+        );
+        assert_eq!(
+            ColumnChoice::from_spec(&spec("atfm 3M"))
+                .unwrap()
+                .default_group(),
+            "ATFM"
+        );
+        assert_eq!(
+            ColumnChoice::from_spec(&spec("atfm 3M"))
+                .unwrap()
+                .default_label(),
+            "3M"
+        );
+    }
+
+    #[test]
+    fn a_text_the_pickers_cannot_express_is_raw() {
+        let r = ColumnChoice::from_spec(&spec("smile_curv 3M 0.25")).unwrap_err();
+        assert_eq!(r.text, "smile_curv 3M 0.25");
+    }
+
+    #[test]
+    fn the_writer_keeps_unknown_keys_and_comments_and_round_trips_the_builtin_tabs() {
+        let text = "config_version = 1\ndefault = \"vol\"\n\n# the desk's tabs\n[vol]\nnote = \"kept\"\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n[[vol.columns]]\nkind = \"vega\"\n\n[skew]\ncells = \"single\"\n[[skew.columns]]\nmeasure = \"skew 3M\"\nlabel = \"3M\"\ngroup = \"25Δ skew\"\nlevel = \"heat\"\n";
+        let source: toml_edit::DocumentMut = text.parse().unwrap();
+        let (d, _) = from_doc(&doc(text));
+        let out = to_document(&d, Some(&source)).to_string();
+        assert!(out.contains("# the desk's tabs"), "{out}");
+        assert!(out.contains("note = \"kept\""), "{out}");
+        assert!(out.contains("level = \"heat\""), "{out}");
+        let (again, _) = from_doc(&doc(&out));
+        assert_eq!(again, d);
+        // The builtin tabs, read and written, read identically.
+        let builtin = crate::volviews::tests_builtin_text();
+        let (b, _) = from_doc(&doc(builtin));
+        let (b2, _) = from_doc(&doc(&to_document(&b, None).to_string()));
+        assert_eq!(b2, b);
+    }
+
+    #[test]
+    fn to_table_writes_cells_only_for_single_and_no_default_label_or_group() {
+        let (d, _) = from_doc(&doc(
+            "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n[s]\ncells = \"single\"\n[[s.columns]]\nmeasure = \"atfm 3M\"\n",
+        ));
+        let pair = to_table(&d.views[0], None).to_string();
+        assert!(!pair.contains("cells"), "{pair}");
+        assert!(!pair.contains("label") && !pair.contains("group"), "{pair}");
+        let single = to_table(&d.views[1], None).to_string();
+        assert!(single.contains("cells = \"single\""), "{single}");
+    }
+
+    #[test]
+    fn reorder_moves_the_named_tables_and_keeps_the_rest_after() {
+        let mut document: toml_edit::DocumentMut =
+            "config_version = 1\n[a]\n[[a.columns]]\nkind = \"vega\"\n[b]\n[[b.columns]]\nkind = \"vega\"\n[c]\n[[c.columns]]\nkind = \"vega\"\n"
+                .parse()
+                .unwrap();
+        reorder(&mut document, &["c".into(), "a".into()]);
+        let names: Vec<&str> = document.as_table().iter().map(|(k, _)| k).collect();
+        assert_eq!(names, ["config_version", "c", "a", "b"]);
     }
 }
