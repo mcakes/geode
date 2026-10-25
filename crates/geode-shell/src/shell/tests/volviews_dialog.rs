@@ -213,3 +213,105 @@ fn naming_a_tab_in_another_case_of_an_existing_one_is_refused(cx: &mut gpui::Tes
     flush_config_write(&mut cx);
     assert!(!dir.path().join("vol_views.toml").exists());
 }
+
+/// `enter` on a column row opens its stage; stepping Companion to `bar`
+/// renames the row (and the stage with it) and leaving writes
+/// `companion = "bar"` under that column.
+#[gpui::test]
+fn the_column_stage_edits_a_glyph_and_the_file_follows(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("enter"); // vol
+    cx.run_until_parked();
+    // The cursor settles on `cells` (`name` is display-only); `default`, then
+    // past the list header to the first column, ATFM 3M.
+    cx.simulate_keystrokes("j j enter");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        Stage::Column { object, column } if object == "vol" && column == "ATFM 3M"
+    ));
+    // Companion is the fourth row (family, tenor, level, companion); `space`
+    // steps it default → chip → bar, each step folding and renaming the row.
+    cx.simulate_keystrokes("j j j space space");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        Stage::Column { column, .. } if column == "ATFM 3M · bar"
+    ));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        Stage::Edit { object } if object == "vol"
+    ));
+    let items = edit_draft(&shell, &cx, |d| {
+        d.list_items("columns")
+            .unwrap()
+            .iter()
+            .map(|i| i.name.clone())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(items, ["ATFM 3M · bar", "Book vega"]);
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.row_label(d.selected_row().unwrap())),
+        "ATFM 3M · bar",
+        "the cursor returns to the column just edited, under its new name"
+    );
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    assert!(text.contains("companion = \"bar\""), "{text}");
+    assert!(
+        !text.contains("level") && !text.contains("label"),
+        "only the set key reaches the file: {text}"
+    );
+}
+
+/// `shift+space` on Family wraps from ATFM to the catalogue's last family, the
+/// `ssr` dataset: the stage re-derives its rows for the new family (the tenor
+/// kept), is re-keyed to the new head, and the file names the dataset exactly.
+#[gpui::test]
+fn a_family_change_re_derives_the_stage_and_keeps_the_tenor(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("enter"); // vol
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j enter"); // ATFM 3M
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-space"); // Family: ATFM → SSR (wraps)
+    cx.run_until_parked();
+    assert!(matches!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        Stage::Column { column, .. } if column == "SSR 3M"
+    ));
+    let keys = edit_draft(&shell, &cx, |d| {
+        d.fields.iter().map(|f| f.key.clone()).collect::<Vec<_>>()
+    });
+    assert_eq!(
+        keys,
+        ["family", "tenor", "level", "companion", "label", "group"]
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("tenor").map(str::to_string)),
+        Some("3M".into())
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.text("group").map(str::to_string)),
+        Some("SSR".into()),
+        "the group row is prefilled with the new family's default"
+    );
+    flush_config_write(&mut cx);
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    assert!(text.contains("measure = \"ssr 3M\""), "{text}");
+    assert!(!text.contains("atfm 3M"), "{text}");
+}

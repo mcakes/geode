@@ -906,20 +906,24 @@ impl Provenance {
 }
 
 /// Which door opened the column stage: the Views dialog's member row (the fields write
-/// the view overlay over a desk + dataset baseline) or the Schema dialog's column row
-/// (the fields write the dataset overlay over the kind default).
+/// the view overlay over a desk + dataset baseline), the Schema dialog's column row
+/// (the fields write the dataset overlay over the kind default), or the Vol views
+/// dialog's member row (the fields rebuild the column's own table on its list item,
+/// which the view's `to_table` renders — no overlay, and nothing inherits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnDoor {
     View,
     Dataset,
+    VolColumn,
 }
 
 impl ColumnDoor {
-    /// The overlay this door's fields write.
+    /// The overlay this door's fields write — the document itself for a vol column.
     pub fn destination(self) -> Destination {
         match self {
             ColumnDoor::View => Destination::Presentation,
             ColumnDoor::Dataset => Destination::DatasetPresentation,
+            ColumnDoor::VolColumn => Destination::Doc,
         }
     }
 }
@@ -1369,9 +1373,9 @@ impl Draft {
         }
     }
 
-    /// Column stage opened by Enter on the given row: a Views member names its column,
-    /// and a Schema `columns.<name>` field names that column. An already-open column
-    /// projection has no nested column target.
+    /// Column stage opened by Enter on the given row: a Views or Vol views member names
+    /// its column, and a Schema `columns.<name>` field names that column. An
+    /// already-open column projection has no nested column target.
     ///
     /// Shared by activation and [`Self::is_cursor_stop`] so a row that opens a stage
     /// remains reachable even without value-editing commands.
@@ -1380,7 +1384,9 @@ impl Draft {
             return None;
         }
         match (domain, row) {
-            (Domain::Views, row @ EditRow::Item { .. }) => Some(self.row_label(row)),
+            (Domain::Views | Domain::VolViews, row @ EditRow::Item { .. }) => {
+                Some(self.row_label(row))
+            }
             (Domain::Schema, EditRow::Field(i)) => self
                 .fields
                 .get(i)?
@@ -1619,10 +1625,18 @@ impl Draft {
             let ctx = self.column_ctx.as_ref()?;
             let baseline = match ctx.door {
                 ColumnDoor::View => ctx.layers.below_view(),
-                ColumnDoor::Dataset => ColumnPresentation::default(),
+                ColumnDoor::Dataset | ColumnDoor::VolColumn => ColumnPresentation::default(),
             };
             (ctx.door, baseline)
         };
+        // The vol door has no presentation set to consult and no layer to
+        // reseed from: its fields ARE the column's table, and `label` — a key
+        // the reseed below would otherwise rewrite from an empty presentation —
+        // is one of them.
+        if door == ColumnDoor::VolColumn {
+            self.fold_vol_column(&name);
+            return None;
+        }
         let mut set = self
             .presentation_set
             .get(&name)
@@ -1644,6 +1658,7 @@ impl Draft {
                 let released = views::fold_into(item, &self.fields, &baseline, &mut set);
                 (released, item.clone())
             }
+            ColumnDoor::VolColumn => return None,
         };
         for field in &mut self.fields {
             if !set.has(&field.key) {
@@ -1657,6 +1672,35 @@ impl Draft {
         })
     }
 
+    /// The vol door's fold: the parent list's item named `name` takes the fields'
+    /// choice as its table and its head as its name, and the stage's fields are
+    /// re-derived from it, so a family change shows the parts the new family takes
+    /// and a cleared label shows the default it fell to.
+    ///
+    /// The stage is keyed by the item's name, and the head IS the name, so a fold
+    /// that changed it re-keys [`Draft::column`]: `leave_column` and the next fold
+    /// would otherwise look for a row that is no longer there. `render::revalidate`
+    /// moves the painted `Stage::Column` along with it.
+    fn fold_vol_column(&mut self, name: &str) -> Option<()> {
+        let parent = self.parent_fields.as_mut()?;
+        let field = parent.iter_mut().find(|f| f.key == "columns")?;
+        let FieldKind::OrderedList { items, available } = &mut field.kind else {
+            return None;
+        };
+        let taken: Vec<String> = items
+            .iter()
+            .filter(|i| i.name != name)
+            .map(|i| i.name.clone())
+            .collect();
+        let catalogue: &[ListItem] = available.as_deref().unwrap_or_default();
+        let item = items.iter_mut().find(|i| i.name == name)?;
+        volviews::fold_into_from(item, &self.fields, &taken, catalogue);
+        let families = volviews::families_of(catalogue);
+        self.fields = volviews::column_fields(item, &families);
+        self.column = Some(item.name.clone());
+        Some(())
+    }
+
     /// `r` in a column stage: the selected field stops being set at the stage's layer.
     /// The fold that follows reseeds it with the value it now inherits. `Err` is the
     /// notice for a field that already inherits, or a row with nothing to inherit.
@@ -1664,6 +1708,11 @@ impl Draft {
         let Some(column) = self.column.clone() else {
             return Err(String::new());
         };
+        // A vol column's fields are its own table, every one of them set at
+        // this layer: there is nothing below for `r` to release a key to.
+        if self.vol_door() {
+            return Err("nothing to inherit on this row".to_string());
+        }
         let Some(EditRow::Field(index)) = self.selected_row() else {
             return Err("nothing to inherit on this row".to_string());
         };
@@ -1688,12 +1737,22 @@ impl Draft {
         let Some(column) = self.column.clone() else {
             return Err(String::new());
         };
+        if self.vol_door() {
+            return Err("nothing inherits on a vol column".to_string());
+        }
         let set = self.presentation_set.entry(column).or_default();
         if !set.any() {
             return Err("nothing is set on this column".to_string());
         }
         *set = views::PresentationKeys::default();
         Ok(())
+    }
+
+    /// Whether the open column stage is the vol door's ([`ColumnDoor::VolColumn`]).
+    fn vol_door(&self) -> bool {
+        self.column_ctx
+            .as_ref()
+            .is_some_and(|ctx| ctx.door == ColumnDoor::VolColumn)
     }
 
     /// What `key` inherits from in the open column stage.
@@ -1703,6 +1762,8 @@ impl Draft {
         };
         match ctx.door {
             ColumnDoor::Dataset => FellTo::EachView,
+            // Nothing inherits on this door (`inherit_selected` refuses first).
+            ColumnDoor::VolColumn => FellTo::Default,
             ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => FellTo::Dataset,
             ColumnDoor::View if views::sets(&ctx.layers.desk, key) => FellTo::Desk,
             ColumnDoor::View => FellTo::Default,

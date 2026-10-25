@@ -12,6 +12,12 @@
 //! this domain. The `name` row is display-only — the scaffold has no path
 //! that renames an object, and a typed name the writer could not honour
 //! would fork the inherited copy for nothing.
+//!
+//! `enter` on a member row opens the column stage ([`column_fields`]):
+//! the family, the parts that family takes, and on a measure family the
+//! two glyphs, label and group. Each change folds back into the item's
+//! table ([`fold_into`]) and renames the row by its head, so the stage is
+//! re-keyed to the new name by its caller.
 
 use std::collections::BTreeSet;
 
@@ -19,8 +25,11 @@ use geode_core::config::{
     Config, Diagnostic, Layer, LayerDoc, Severity, VOL_VIEWS_DOC, merge_docs,
 };
 use geode_core::schema::SchemaSpec;
+use geode_core::source_config::parse_duration;
+use geode_core::volboard::delta_text;
 use geode_core::volviews::{
-    self, Cells, ColumnChoice, Family, Raw, TableShape, VolColumnSpec, VolViewSpec,
+    self, ALL_TENORS, Cells, ColumnChoice, CompanionGlyph, DELTAS, Family, LevelGlyph, Raw, SPANS,
+    SPARK_30D, TableShape, VolColumnSpec, VolViewSpec, WINDOWS, span_text,
 };
 
 use super::{Destination, Domain, Draft, Field, FieldKind, ListItem};
@@ -364,10 +373,301 @@ pub fn help(key: &str) -> &'static str {
     }
 }
 
-/// Help for a column stage's fields. This domain opens no column stage
-/// yet, so every key reads as the empty sentence that keeps the slot.
-pub fn column_help(_key: &str) -> &'static str {
-    ""
+/// The column stage's fields, read from the item's own table: `family`
+/// over the catalogue's labels, then only the parts the family takes
+/// (`tenor`; `long` and `short`; `window`; `delta`; `span`), then on a
+/// measure family the two glyphs — `default` meaning absent in the file —
+/// and `label` and `group`, prefilled with the default the tile would show
+/// so the row never reads blank. A value the pickers do not offer (a
+/// hand-written `9M`, a dataset the schema no longer declares) is added
+/// as the row's own option rather than read as the first one, which a
+/// later fold would then write.
+///
+/// A column the pickers cannot hold (`Raw`) has one display-only
+/// `measure` row: it stays as it was read, movable and deletable only.
+pub fn column_fields(item: &ListItem, families: &[Family]) -> Vec<Field> {
+    let dest = Destination::Doc;
+    let spec = item.source.as_ref().and_then(spec_of);
+    let c = match spec.as_ref().map(ColumnChoice::from_spec) {
+        Some(Ok(c)) => c,
+        Some(Err(raw)) => {
+            return vec![super::views::text_row("measure", "Measure", raw.text, dest)];
+        }
+        None => {
+            return vec![super::views::text_row(
+                "measure",
+                "Measure",
+                item.name.clone(),
+                dest,
+            )];
+        }
+    };
+    let labels: Vec<String> = families.iter().map(Family::label).collect();
+    let mut fields = vec![choice_with("family", "Family", labels, c.family.label())];
+    let tenors = || ALL_TENORS.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+    // `Some` exactly when the family takes a tenor and the column has one: a
+    // dataset keyed by the underlying alone offers none, since the resolver
+    // would refuse it.
+    if let Some(tenor) = &c.tenor {
+        fields.push(choice_with("tenor", "Tenor", tenors(), tenor.clone()));
+    }
+    if c.family.takes_slope() {
+        let long = c.long.clone().unwrap_or_default();
+        let short = c.short.clone().unwrap_or_default();
+        fields.push(choice_with("long", "Long", tenors(), long));
+        fields.push(choice_with("short", "Short", tenors(), short));
+    }
+    if c.family.takes_window() {
+        let windows = WINDOWS.iter().map(|w| w.to_string()).collect();
+        let window = c.window.clone().unwrap_or_default();
+        fields.push(choice_with("window", "Window", windows, window));
+    }
+    if c.family.takes_delta() {
+        let deltas = DELTAS.iter().map(|d| delta_text(*d)).collect();
+        let delta = c.delta.map(delta_text).unwrap_or_default();
+        fields.push(choice_with("delta", "Delta", deltas, delta));
+    }
+    if c.family.takes_span() {
+        let spans = SPANS.iter().map(|s| s.to_string()).collect();
+        let span = span_text(c.span.unwrap_or(SPARK_30D));
+        fields.push(choice_with("span", "Span", spans, span));
+    }
+    if c.family.takes_glyphs() {
+        let level = c.level.map_or("default", LevelGlyph::key);
+        let companion = c.companion.map_or("default", CompanionGlyph::key);
+        fields.push(choice_with(
+            "level",
+            "Level",
+            glyph_keys(&["plain", "heat", "tint"]),
+            level.to_string(),
+        ));
+        fields.push(choice_with(
+            "companion",
+            "Companion",
+            glyph_keys(&["chip", "bar", "slider"]),
+            companion.to_string(),
+        ));
+        let label = c.label.clone().unwrap_or_else(|| c.default_label());
+        let group = c.group.clone().unwrap_or_else(|| c.default_group());
+        fields.push(super::views::text_row("label", "Label", label, dest));
+        fields.push(super::views::text_row("group", "Group", group, dest));
+    }
+    fields
+}
+
+/// A `Doc` choice selected at `current`, which joins the options when none
+/// spells it (the module doc of [`column_fields`] has why).
+fn choice_with(key: &str, label: &str, mut options: Vec<String>, current: String) -> Field {
+    if !options.contains(&current) {
+        options.push(current.clone());
+    }
+    super::views::choice_row(key, label, options, current, Destination::Doc)
+}
+
+/// `default` then the glyph's keys: the file's absence is the first option.
+fn glyph_keys(keys: &[&str]) -> Vec<String> {
+    std::iter::once("default".to_string())
+        .chain(keys.iter().map(|k| k.to_string()))
+        .collect()
+}
+
+/// Fold a column stage's fields back into `item`: its table is rebuilt from
+/// the choice the fields spell and its name becomes the choice's head,
+/// de-duplicated against `taken` (the sibling rows' names). Resolves a
+/// dataset family by its label alone — see [`fold_into_from`] for the
+/// catalogue-aware fold the dialog uses.
+pub fn fold_into(item: &mut ListItem, fields: &[Field], taken: &[String]) {
+    fold_into_from(item, fields, taken, &[]);
+}
+
+/// [`fold_into`] against the view's catalogue (the `columns` list's
+/// available rows), which knows a dataset family's exact name and whether
+/// its row carries a tenor.
+///
+/// A `family` change resets the parts to [`ColumnChoice::new`] for the new
+/// family, keeping the old tenor when the new family takes one; the glyphs,
+/// label and group go with the old family, whose defaults they were spelled
+/// against. Otherwise each part the family takes follows its row. A label
+/// or group row still showing the text it was prefilled with is unchanged,
+/// so it keeps what the file had; typed text is set unless it is empty or
+/// equal to the default, which fold to absent.
+///
+/// A `Raw` column folds nothing: its one row is display-only.
+pub(super) fn fold_into_from(
+    item: &mut ListItem,
+    fields: &[Field],
+    taken: &[String],
+    catalogue: &[ListItem],
+) {
+    let Some(old) = item
+        .source
+        .as_ref()
+        .and_then(spec_of)
+        .and_then(|s| ColumnChoice::from_spec(&s).ok())
+    else {
+        return;
+    };
+    let choice_of = |key: &str| {
+        fields
+            .iter()
+            .find(|f| f.key == key)
+            .and_then(|f| match &f.kind {
+                FieldKind::Choice { options, selected } => options.get(*selected).cloned(),
+                _ => None,
+            })
+    };
+    let text_of = |key: &str| {
+        fields
+            .iter()
+            .find(|f| f.key == key)
+            .and_then(|f| match &f.kind {
+                FieldKind::Text(t) => Some(t.trim().to_string()),
+                _ => None,
+            })
+    };
+    let (family, bare) = choice_of("family")
+        .map(|label| family_of_label(&label, catalogue))
+        .unwrap_or((old.family.clone(), false));
+    let mut c = if family == old.family {
+        old.clone()
+    } else {
+        let mut fresh = ColumnChoice::new(family);
+        if bare {
+            fresh.tenor = None;
+        } else if fresh.tenor.is_some() && old.tenor.is_some() {
+            fresh.tenor = old.tenor.clone();
+        }
+        return finish(item, &fresh, taken);
+    };
+    if c.tenor.is_some()
+        && let Some(t) = choice_of("tenor")
+    {
+        c.tenor = Some(t);
+    }
+    if c.family.takes_slope() {
+        if let Some(t) = choice_of("long") {
+            c.long = Some(t);
+        }
+        if let Some(t) = choice_of("short") {
+            c.short = Some(t);
+        }
+    }
+    if c.family.takes_window()
+        && let Some(w) = choice_of("window")
+    {
+        c.window = Some(w);
+    }
+    if c.family.takes_delta()
+        && let Some(d) = choice_of("delta")
+    {
+        c.delta = d.parse().ok().or(c.delta);
+    }
+    if c.family.takes_span()
+        && let Some(s) = choice_of("span")
+    {
+        c.span = parse_duration(&s).or(c.span);
+    }
+    if c.family.takes_glyphs() {
+        if let Some(l) = choice_of("level") {
+            c.level = LevelGlyph::parse(&l);
+        }
+        if let Some(g) = choice_of("companion") {
+            c.companion = CompanionGlyph::parse(&g);
+        }
+        let shown_label = old.label.clone().unwrap_or_else(|| old.default_label());
+        let shown_group = old.group.clone().unwrap_or_else(|| old.default_group());
+        c.label = fold_text(
+            text_of("label"),
+            &shown_label,
+            old.label.clone(),
+            &c.default_label(),
+        );
+        c.group = fold_text(
+            text_of("group"),
+            &shown_group,
+            old.group.clone(),
+            &c.default_group(),
+        );
+    }
+    finish(item, &c, taken);
+}
+
+/// A label or group row's fold: text equal to what the row was prefilled
+/// with (`shown`) is unchanged and keeps `prior`; anything else is typed.
+/// Empty text and the default both fold to absent.
+fn fold_text(
+    text: Option<String>,
+    shown: &str,
+    prior: Option<String>,
+    default: &str,
+) -> Option<String> {
+    let Some(text) = text else {
+        return prior;
+    };
+    let value = if text == shown { prior } else { Some(text) };
+    value.filter(|v| !v.is_empty() && v != default)
+}
+
+/// Write the choice to the item: its table through the core writer, its
+/// name from its head.
+fn finish(item: &mut ListItem, c: &ColumnChoice, taken: &[String]) {
+    item.source = Some(column_source(&c.to_spec()));
+    item.name = item_name(Ok(c), taken);
+}
+
+/// The family a Family row's label names, and whether its catalogue row
+/// carries no tenor (a dataset keyed by the underlying alone). The
+/// catalogue's row is exact; without one the builtin labels decide, and any
+/// other label is a dataset's upper-cased name.
+fn family_of_label(label: &str, catalogue: &[ListItem]) -> (Family, bool) {
+    let listed = catalogue
+        .iter()
+        .filter(|i| i.name == label)
+        .find_map(|i| choice_of_item(i).map(|c| (c.family, c.tenor.is_none())));
+    if let Some(found) = listed {
+        return found;
+    }
+    let builtin = Family::builtin_families()
+        .into_iter()
+        .find(|f| f.label() == label);
+    (
+        builtin.unwrap_or_else(|| Family::Table(label.to_ascii_lowercase())),
+        false,
+    )
+}
+
+/// The choice a catalogue row (or any item) holds, if the pickers can.
+fn choice_of_item(item: &ListItem) -> Option<ColumnChoice> {
+    let spec = item.source.as_ref().and_then(spec_of)?;
+    ColumnChoice::from_spec(&spec).ok()
+}
+
+/// The catalogue's families in its order, read back from its rows — the
+/// same list [`catalogue_families`] built them from, without the config.
+pub(super) fn families_of(catalogue: &[ListItem]) -> Vec<Family> {
+    catalogue
+        .iter()
+        .filter_map(|i| choice_of_item(i).map(|c| c.family))
+        .collect()
+}
+
+/// Help for the column stage's fields, under ~90 characters.
+pub fn column_help(key: &str) -> &'static str {
+    match key {
+        "family" => "ATFM, skew, surface point … or a precomputed dataset",
+        "tenor" => "The expiry the column reads",
+        "long" => "The longer expiry of the slope",
+        "short" => "The shorter expiry of the slope",
+        "window" => "The realized window in trading days",
+        "delta" => "Call delta: 0.25 is the 25Δ call, 0.75 the 25Δ put",
+        "span" => "The sparkline's window",
+        "level" => "plain, heat (tinted against the column) or tint (the companion's sign)",
+        "companion" => "chip, bar (zero bar) or slider (percentile; a chip under z)",
+        "label" => "The column head; empty follows the tenor",
+        "group" => "The group head; empty follows the family",
+        "measure" => "not a measure the pickers know; kept",
+        _ => "",
+    }
 }
 
 /// Whether a text field permits typed editing: a column's label and group.
@@ -619,6 +919,236 @@ mod tests {
         assert_eq!(draft.available_items("columns").unwrap().len(), 13);
         let text = object_text("vol", Domain::VolViews.to_table(&draft, Destination::Doc));
         assert_eq!(text.matches("measure = \"ssr 1W\"").count(), 1, "{text}");
+    }
+
+    /// A `ListItem` for the one `[[columns]]` table `text` spells, named as
+    /// the view's list would name it.
+    fn item_for(text: &str) -> ListItem {
+        let source: toml::Table = text.parse().unwrap();
+        let entry = ListItem {
+            name: String::new(),
+            included: true,
+            presentation: Default::default(),
+            kind: None,
+            source: Some(source),
+        };
+        ListItem {
+            name: added_name(&entry, &[]),
+            ..entry
+        }
+    }
+
+    /// The catalogue with no dataset declared: the twelve builtin families.
+    fn no_datasets() -> Vec<Family> {
+        Family::builtin_families().to_vec()
+    }
+
+    fn select(fields: &mut [Field], key: &str, option: &str) {
+        let field = fields.iter_mut().find(|f| f.key == key).unwrap();
+        let FieldKind::Choice { options, selected } = &mut field.kind else {
+            panic!("{key} is not a choice")
+        };
+        *selected = options
+            .iter()
+            .position(|o| o == option)
+            .unwrap_or_else(|| panic!("{key} offers no {option}: {options:?}"));
+    }
+
+    fn set_text(fields: &mut [Field], key: &str, text: &str) {
+        let field = fields.iter_mut().find(|f| f.key == key).unwrap();
+        let FieldKind::Text(t) = &mut field.kind else {
+            panic!("{key} is not text")
+        };
+        *t = text.to_string();
+    }
+
+    fn measure_spec(text: &str) -> VolColumnSpec {
+        VolColumnSpec::Measure {
+            measure: volviews::parse_measure(text).unwrap(),
+            label: None,
+            group: None,
+            level: None,
+            companion: None,
+        }
+    }
+
+    fn keys(fields: &[Field]) -> Vec<String> {
+        fields.iter().map(|f| f.key.clone()).collect()
+    }
+
+    #[test]
+    fn the_column_fields_show_only_what_the_family_takes() {
+        let atfm = item_for("measure = \"atfm 3M\"");
+        assert_eq!(
+            keys(&column_fields(&atfm, &no_datasets())),
+            ["family", "tenor", "level", "companion", "label", "group"]
+        );
+        let point = item_for("measure = \"point 3M 0.25\"");
+        assert_eq!(
+            keys(&column_fields(&point, &no_datasets())),
+            [
+                "family",
+                "tenor",
+                "delta",
+                "level",
+                "companion",
+                "label",
+                "group"
+            ]
+        );
+        let spark = item_for("spark = \"atfm 3M\"\nspan = \"90d\"");
+        assert_eq!(
+            keys(&column_fields(&spark, &no_datasets())),
+            ["family", "tenor", "span"]
+        );
+        let vega = item_for("kind = \"vega\"");
+        assert_eq!(keys(&column_fields(&vega, &no_datasets())), ["family"]);
+        let raw = item_for("measure = \"smile_curv 3M 0.25\"");
+        assert_eq!(keys(&column_fields(&raw, &no_datasets())), ["measure"]);
+    }
+
+    #[test]
+    fn folding_a_family_change_resets_the_parts_and_renames_the_item() {
+        let mut item = item_for("measure = \"atfm 3M\"");
+        let mut fields = column_fields(&item, &no_datasets());
+        select(&mut fields, "family", "25Δ skew");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "25Δ skew 3M");
+        assert_eq!(
+            spec_of(item.source.as_ref().unwrap()),
+            Some(measure_spec("skew 3M"))
+        );
+        let mut fields = column_fields(&item, &no_datasets());
+        select(&mut fields, "companion", "slider");
+        select(&mut fields, "level", "heat");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "25Δ skew 3M · heat · slider");
+        let s = item.source.as_ref().unwrap();
+        assert_eq!(s.get("level").and_then(|v| v.as_str()), Some("heat"));
+        assert_eq!(s.get("companion").and_then(|v| v.as_str()), Some("slider"));
+    }
+
+    #[test]
+    fn a_label_equal_to_its_default_is_not_written() {
+        let mut item = item_for("measure = \"atfm 3M\"");
+        let mut fields = column_fields(&item, &no_datasets());
+        set_text(&mut fields, "label", "3M");
+        fold_into(&mut item, &fields, &[]);
+        assert!(item.source.as_ref().unwrap().get("label").is_none());
+        set_text(&mut fields, "label", "3 months");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(
+            item.source
+                .as_ref()
+                .unwrap()
+                .get("label")
+                .and_then(|v| v.as_str()),
+            Some("3 months")
+        );
+    }
+
+    /// The label row is prefilled with the default the tile would show; a
+    /// step on another part must not turn that prefill into a set label.
+    #[test]
+    fn a_stepped_tenor_leaves_the_prefilled_label_and_group_unset() {
+        let mut item = item_for("measure = \"atfm 3M\"");
+        let mut fields = column_fields(&item, &no_datasets());
+        assert_eq!(
+            fields.iter().find(|f| f.key == "label").map(|f| &f.kind),
+            Some(&FieldKind::Text("3M".into()))
+        );
+        select(&mut fields, "tenor", "6M");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "ATFM 6M");
+        let s = item.source.as_ref().unwrap();
+        assert!(s.get("label").is_none() && s.get("group").is_none(), "{s}");
+        // A typed label survives a later step, and clearing it folds to absent.
+        set_text(&mut fields, "label", "half");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "ATFM half");
+        let mut fields = column_fields(&item, &no_datasets());
+        select(&mut fields, "tenor", "1Y");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "ATFM half");
+        set_text(&mut fields, "label", "");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "ATFM 1Y");
+    }
+
+    /// The glyph choices' `default` is absence in the file, and a family
+    /// change drops the glyphs with the other parts.
+    #[test]
+    fn default_glyphs_are_absent_and_a_family_change_drops_them() {
+        let mut item = item_for("measure = \"atfm 3M\"\nlevel = \"heat\"\ncompanion = \"bar\"");
+        let mut fields = column_fields(&item, &no_datasets());
+        assert_eq!(item.name, "ATFM 3M · heat · bar");
+        select(&mut fields, "level", "default");
+        fold_into(&mut item, &fields, &[]);
+        let s = item.source.as_ref().unwrap();
+        assert!(s.get("level").is_none(), "{s}");
+        assert_eq!(s.get("companion").and_then(|v| v.as_str()), Some("bar"));
+        assert_eq!(item.name, "ATFM 3M · bar");
+        let mut fields = column_fields(&item, &no_datasets());
+        select(&mut fields, "family", "Surface point");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "Surface point 3M 0.1");
+        assert_eq!(
+            spec_of(item.source.as_ref().unwrap()),
+            Some(measure_spec("point 3M 0.1"))
+        );
+    }
+
+    /// Through the view's catalogue a dataset label resolves to the dataset's
+    /// own name, and a dataset keyed by the underlying alone takes no tenor.
+    #[test]
+    fn a_family_change_to_a_bare_dataset_carries_no_tenor() {
+        let bare = "[spot]\nfamily = \"history\"\nkey = [\"underlying_ref\"]\nhistory = \"800d\"\n[spot.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n[spot.columns.spot]\ntype = \"f64\"\nrole = \"value\"\n";
+        let config = config_with(TWO_TABS, bare);
+        let catalogue = catalogue(&config);
+        let families = families_of(&catalogue);
+        assert_eq!(families, catalogue_families(&config));
+        let mut item = item_for("measure = \"atfm 3M\"");
+        let mut fields = column_fields(&item, &families);
+        select(&mut fields, "family", "SPOT");
+        fold_into_from(&mut item, &fields, &[], &catalogue);
+        assert_eq!(item.name, "SPOT");
+        assert_eq!(
+            item.source
+                .as_ref()
+                .unwrap()
+                .get("measure")
+                .and_then(|v| v.as_str()),
+            Some("spot")
+        );
+        assert_eq!(
+            keys(&column_fields(&item, &families)),
+            ["family", "level", "companion", "label", "group"]
+        );
+        // Without the catalogue the label is still a dataset, by its name.
+        let mut item = item_for("measure = \"atfm 3M\"");
+        let mut fields = column_fields(&item, &families);
+        select(&mut fields, "family", "SPOT");
+        fold_into(&mut item, &fields, &[]);
+        assert_eq!(item.name, "SPOT 3M");
+    }
+
+    #[test]
+    fn a_raw_column_folds_nothing_and_a_fold_de_duplicates_the_name() {
+        let mut raw = item_for("measure = \"smile_curv 3M 0.25\"");
+        let fields = column_fields(&raw, &no_datasets());
+        assert_eq!(fields[0].kind, FieldKind::Text("smile_curv 3M 0.25".into()));
+        assert!(!text_editable("measure"));
+        fold_into(&mut raw, &fields, &["x".into()]);
+        assert_eq!(raw.name, "smile_curv 3M 0.25");
+        assert_eq!(
+            column_help("measure"),
+            "not a measure the pickers know; kept"
+        );
+        let mut item = item_for("measure = \"atfm 3M\"");
+        let mut fields = column_fields(&item, &no_datasets());
+        select(&mut fields, "tenor", "1W");
+        fold_into(&mut item, &fields, &["ATFM 1W".into()]);
+        assert_eq!(item.name, "ATFM 1W ·2");
     }
 
     #[test]

@@ -39,6 +39,9 @@ pub fn provenance_of(inputs: &ProvenanceInputs, field: &Field) -> Option<Provena
     let ctx = inputs.ctx;
     let key = field.key.as_str();
     match ctx.door {
+        // Every vol column field is the view's own: the object-level badge
+        // already says whose copy is on screen.
+        ColumnDoor::VolColumn => None,
         ColumnDoor::Dataset => inputs.set.has(key).then_some(Provenance::Dataset),
         ColumnDoor::View if inputs.set.has(key) => Some(Provenance::View),
         ColumnDoor::View if views::sets(&ctx.layers.dataset, key) => Some(Provenance::Dataset),

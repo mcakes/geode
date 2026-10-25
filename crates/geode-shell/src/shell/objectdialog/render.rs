@@ -35,6 +35,7 @@ use super::dataset_columns;
 use super::schema;
 use super::sources;
 use super::views;
+use super::volviews;
 use super::{
     ColorForValue, ColumnContext, ColumnDoor, ColumnLayers, Completions, Confirm, Destination,
     Domain, Draft, EditRow, FieldKind, Fold, NameSeed, ObjectDialogState, ObjectRow,
@@ -988,6 +989,28 @@ fn enter_column_stage(shell: &mut ShellView, column: &str, cx: &mut Context<Shel
                         ..ColumnLayers::default()
                     },
                     overlay_object,
+                    item: Some(item),
+                },
+            )
+        }
+        // The vol door: the fields are the column's own table, so the context
+        // carries neither layers nor an overlay; the item is the parent list's,
+        // folded in place like the Views door's.
+        Domain::VolViews => {
+            let Some(item) = draft
+                .list_items("columns")
+                .and_then(|items| items.iter().find(|i| i.name == column))
+                .cloned()
+            else {
+                return false;
+            };
+            let families = volviews::catalogue_families(config);
+            (
+                volviews::column_fields(&item, &families),
+                ColumnContext {
+                    door: ColumnDoor::VolColumn,
+                    layers: ColumnLayers::default(),
+                    overlay_object: toml::Table::new(),
                     item: Some(item),
                 },
             )
@@ -2112,6 +2135,14 @@ pub(super) fn revalidate(shell: &mut ShellView) {
     // Fold column fields into the item before validating or rendering a write.
     if draft.column().is_some() {
         fold = draft.fold_column();
+        // The stage is keyed by the column's name, and the vol door's fold
+        // renames the item as its head changes: re-key the painted stage, or
+        // Escape would restore the cursor to a row that is no longer there.
+        if let (Some(renamed), Stage::Column { column, .. }) = (draft.column(), &mut state.stage)
+            && column.as_str() != renamed
+        {
+            *column = renamed.to_string();
+        }
     }
     // Validated, then stored: `validate` needs the draft immutably and
     // the config from a sibling field, which is exactly the disjoint
