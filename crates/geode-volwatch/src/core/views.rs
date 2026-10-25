@@ -5,6 +5,7 @@
 //! and [`ask`] derives the board request from the same columns, so a column
 //! cannot read a measure the request omitted.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use geode_core::config::{LayerDoc, VOL_VIEWS_DOC, merge_docs};
@@ -366,6 +367,70 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
         }
     }
     cols
+}
+
+/// The unit a column moves as: a measure's stem (`atfm-3M`, shared by a
+/// pair's level and companion and a single column alike), a sparkline's
+/// or the vega column's own id. Underlying is pinned and has none.
+pub fn unit_stem(c: &Column) -> Option<String> {
+    match &c.kind {
+        ColumnKind::Underlying => None,
+        ColumnKind::Level { measure, .. }
+        | ColumnKind::Companion { measure, .. }
+        | ColumnKind::Single { measure, .. } => Some(measure_id(measure)),
+        ColumnKind::Spark { .. } | ColumnKind::Vega => Some(c.id.clone()),
+    }
+}
+
+/// The movable units of `cols` in painted order: each a run of adjacent
+/// columns sharing a stem, with its index range. Underlying is in none.
+pub fn units(cols: &[Column]) -> Vec<(String, Range<usize>)> {
+    let mut out: Vec<(String, Range<usize>)> = Vec::new();
+    for (i, c) in cols.iter().enumerate() {
+        let Some(stem) = unit_stem(c) else {
+            continue;
+        };
+        match out.last_mut() {
+            Some((last, range)) if *last == stem && range.end == i => range.end = i + 1,
+            _ => out.push((stem, i..i + 1)),
+        }
+    }
+    out
+}
+
+/// `cols` with their units in `order` (measure stems, one per unit):
+/// Underlying first, then the units `order` names in its order, then the
+/// units it does not name in their file position. A stem the columns
+/// lack is ignored and one named twice places once, so a saved order
+/// from a tab that has since changed still applies to what is left.
+pub fn reorder_columns(cols: Vec<Column>, order: &[String]) -> Vec<Column> {
+    if order.is_empty() {
+        return cols;
+    }
+    let units = units(&cols);
+    let mut placed = vec![false; units.len()];
+    let mut out: Vec<Column> = cols
+        .iter()
+        .filter(|c| c.kind == ColumnKind::Underlying)
+        .cloned()
+        .collect();
+    let mut take = |ix: usize, out: &mut Vec<Column>| {
+        if !placed[ix] {
+            placed[ix] = true;
+            out.extend(cols[units[ix].1.clone()].iter().cloned());
+        }
+    };
+    for stem in order {
+        for (ix, (s, _)) in units.iter().enumerate() {
+            if s == stem {
+                take(ix, &mut out);
+            }
+        }
+    }
+    for ix in 0..units.len() {
+        take(ix, &mut out);
+    }
+    out
 }
 
 /// What a board request must carry.
@@ -833,6 +898,92 @@ mod tests {
         );
         assert!(needs_requery(&closed, &open));
         assert!(!needs_requery(&open, &closed));
+    }
+
+    fn ids(cols: &[Column]) -> Vec<&str> {
+        cols.iter().map(|c| c.id.as_str()).collect()
+    }
+
+    fn strs(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn units_are_runs_of_one_measure_and_the_underlying_has_none() {
+        let v = view_of("vol", Cells::Pair, &["atfm 1W", "atfm 1M"]);
+        let cols = columns(&v, &LensState::default(), false);
+        let units = units(&cols);
+        assert_eq!(
+            units,
+            vec![("atfm-1W".to_string(), 1..3), ("atfm-1M".to_string(), 3..5)]
+        );
+        assert_eq!(unit_stem(&cols[0]), None, "Underlying is no unit");
+        assert_eq!(unit_stem(&cols[1]).as_deref(), Some("atfm-1W"));
+        assert_eq!(unit_stem(&cols[2]).as_deref(), Some("atfm-1W"));
+    }
+
+    #[test]
+    fn reorder_places_named_units_first_then_the_rest_in_file_order() {
+        let v = view_of("vol", Cells::Pair, &["atfm 1W", "atfm 1M", "atfm 3M"]);
+        let cols = columns(&v, &LensState::default(), false);
+        let got = reorder_columns(cols.clone(), &strs(&["atfm-3M"]));
+        assert_eq!(
+            ids(&got),
+            [
+                "underlying",
+                "atfm-3M-level",
+                "atfm-3M-companion",
+                "atfm-1W-level",
+                "atfm-1W-companion",
+                "atfm-1M-level",
+                "atfm-1M-companion",
+            ],
+            "a pair moves as one; the unnamed keep their file order"
+        );
+        // A saved id the tab no longer has is ignored; a stem named twice
+        // places once; an empty order is the file order.
+        let got = reorder_columns(cols.clone(), &strs(&["gone", "atfm-1M", "atfm-1M"]));
+        assert_eq!(
+            ids(&got),
+            [
+                "underlying",
+                "atfm-1M-level",
+                "atfm-1M-companion",
+                "atfm-1W-level",
+                "atfm-1W-companion",
+                "atfm-3M-level",
+                "atfm-3M-companion",
+            ]
+        );
+        assert_eq!(reorder_columns(cols.clone(), &[]), cols);
+        // Underlying stays first whatever the order names.
+        let got = reorder_columns(cols.clone(), &strs(&["underlying", "atfm-1M"]));
+        assert_eq!(got[0].id, "underlying");
+        assert_eq!(got[1].id, "atfm-1M-level");
+    }
+
+    #[test]
+    fn a_spark_and_a_single_column_are_units_of_their_own() {
+        let mut v = view_of("vol", Cells::Single, &["atfm 1W", "atfm 1M"]);
+        v.columns.push(VolColumn::Spark {
+            measure: Measure::atfm("3M"),
+            span: SPARK_30D,
+        });
+        let cols = columns(&v, &LensState::default(), false);
+        assert_eq!(
+            units(&cols).into_iter().map(|(s, _)| s).collect::<Vec<_>>(),
+            ["atfm-1W", "atfm-1M", "spark-atfm-3M"]
+        );
+        let got = reorder_columns(cols, &strs(&["spark-atfm-3M", "atfm-1W"]));
+        assert_eq!(
+            ids(&got),
+            [
+                "underlying",
+                "spark-atfm-3M",
+                "atfm-1W-single",
+                "atfm-1M-single"
+            ]
+        );
     }
 
     #[test]

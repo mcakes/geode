@@ -66,6 +66,7 @@ use crate::core::model::{BandModel, HeaderModel, Prepared, Row, sort_value};
 use crate::core::session::{self, State};
 use crate::core::views::{
     Ask, Column, ColumnKind, KIND, REALIZED, SURFACE, VARSWAP, columns, order_tenors,
+    reorder_columns, units,
 };
 
 /// The `g N` view actions, parallel to the first nine tabs.
@@ -93,6 +94,10 @@ const ESCAPE_ACTION: &str = "volwatch::escape";
 const COMMIT_ACTION: &str = "volwatch::commit";
 const PAINT_ACTION: &str = "volwatch::paint";
 const SORT_ACTION: &str = "volwatch::sort";
+const COL_LEFT_ACTION: &str = "volwatch::col_left";
+const COL_RIGHT_ACTION: &str = "volwatch::col_right";
+/// What `shift+h`/`shift+l` say when the unit is already at that end.
+const COLUMN_AT_END: &str = "that is as far as this column goes";
 const YANK_ACTION: &str = "volwatch::yank";
 const VISUAL_ACTION: &str = "volwatch::visual_rows";
 const INSPECT_ACTION: &str = "volwatch::inspect";
@@ -561,17 +566,24 @@ impl VolwatchTile {
         })
     }
 
-    /// The shown view's columns under the lens; none with no views. A
-    /// vega column only when the setting names a view and the query was
-    /// not refused. The strip's tabs, shown name and hints follow, since
-    /// each reads the document, the view's cell shape or the lens.
+    /// The shown view's columns under the lens, in the session's order
+    /// for that view (a `shift+h`/`shift+l` move; file order where none
+    /// was saved); none with no views. A vega column only when the
+    /// setting names a view and the query was not refused. The strip's
+    /// tabs, shown name and hints follow, since each reads the document,
+    /// the view's cell shape or the lens.
     fn rebuild_columns(&mut self) {
         let vega = self.vega_offered();
         let shown = self.shown_view();
         let columns = match &shown {
             Some(view) => {
                 self.cells = view.cells;
-                columns(view, &self.state.lens, vega)
+                let order = self
+                    .state
+                    .column_order
+                    .get(&view.name)
+                    .map_or(&[][..], Vec::as_slice);
+                reorder_columns(columns(view, &self.state.lens, vega), order)
             }
             None => Vec::new(),
         };
@@ -1110,6 +1122,8 @@ impl VolwatchTile {
                 cx.notify();
             }
             SORT_ACTION => self.sort_cursor_column(cx),
+            COL_LEFT_ACTION => self.move_column(-1, count, cx),
+            COL_RIGHT_ACTION => self.move_column(1, count, cx),
             YANK_ACTION => self.yank(cx),
             TOGGLE_ACTION => self.fold(Fold::Toggle, cx),
             EXPAND_ACTION => self.fold(Fold::Open, cx),
@@ -1245,6 +1259,43 @@ impl VolwatchTile {
         } else {
             self.cursor_col = motion::col(self.cursor_col, self.columns.len(), m).max(1);
         }
+        self.sync_table(cx);
+        cx.notify();
+    }
+
+    /// `shift+h`/`shift+l`: move the cursor's unit (a pair's level and
+    /// companion together, a sparkline or vega alone) `count` places in
+    /// `dir`, stopping at the ends; a unit already at that end refuses.
+    /// The whole order is saved for the shown view, as stems, so a stem
+    /// the tab no longer has drops here; the cursor follows its column.
+    /// Tile presentation only: `vol_views.toml` is never written.
+    fn move_column(&mut self, dir: i64, count: Option<u32>, cx: &mut Context<Self>) {
+        let units = units(&self.columns);
+        let Some(at) = units.iter().position(|(_, r)| r.contains(&self.cursor_col)) else {
+            return;
+        };
+        let Some(view) = self.shown_view() else {
+            return;
+        };
+        let by = i64::from(count.unwrap_or(1).max(1)) * dir;
+        let last = units.len() as i64 - 1;
+        let to = (at as i64).saturating_add(by).clamp(0, last) as usize;
+        if to == at {
+            self.notices.refused = Some(COLUMN_AT_END.into());
+            self.rebuild_chrome(cx);
+            cx.notify();
+            return;
+        }
+        let mut stems: Vec<String> = units.into_iter().map(|(s, _)| s).collect();
+        let moved = stems.remove(at);
+        stems.insert(to, moved);
+        let cursor_id = self.columns[self.cursor_col].id.clone();
+        self.state.column_order.insert(view.name, stems);
+        self.rebuild_columns();
+        if let Some(ix) = self.columns.iter().position(|c| c.id == cursor_id) {
+            self.cursor_col = ix;
+        }
+        self.prepare();
         self.sync_table(cx);
         cx.notify();
     }

@@ -95,6 +95,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("volwatch::lookback", "Vol: Cycle lookback"),
     ("volwatch::paint", "Vol: Toggle paint"),
     ("volwatch::sort", "Vol: Sort by column"),
+    ("volwatch::col_left", "Vol: Move column left"),
+    ("volwatch::col_right", "Vol: Move column right"),
     ("volwatch::inspect", "Vol: Inspect row"),
     ("volwatch::timeseries", "Vol: Open timeseries"),
     ("volwatch::yank", "Vol: Yank cell"),
@@ -130,8 +132,10 @@ pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
 /// count and the first nine tabs sit on `g 1` … `g 9`. `g` alone is
 /// unbound, so `g g`, `g w` and the tab chords stay reachable. `Space`
 /// toggles the cursor's group row and `z` is the fold chord prefix, as in
-/// the blotter. While a menu is up the tile publishes `tilelist`, so the
-/// shell's shared `j`/`k` step its rows.
+/// the blotter; `shift+h`/`shift+l` move the cursor's column (a pair as
+/// one) within the view, a count moving that many places. While a menu
+/// is up the tile publishes `tilelist`, so the shell's shared `j`/`k`
+/// step its rows.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "volwatch && mode == normal"
@@ -154,6 +158,8 @@ context = "volwatch && mode == normal"
 "d" = "volwatch::lookback"
 "p" = "volwatch::paint"
 "s" = "volwatch::sort"
+"shift+h" = "volwatch::col_left"
+"shift+l" = "volwatch::col_right"
 "enter" = "volwatch::inspect"
 "t" = "volwatch::timeseries"
 "y" = "volwatch::yank"
@@ -489,7 +495,7 @@ mod tests {
                 count += 1;
             }
         }
-        assert_eq!(count, 34 + 3 + 3, "normal, visual and menu");
+        assert_eq!(count, 36 + 3 + 3, "normal, visual and menu");
         let mut registry = ActionRegistry::default();
         geode_shell::defaults::register_builtin_actions(&mut registry);
         let (data, _rx) = DataHandle::for_tests();

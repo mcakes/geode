@@ -51,6 +51,8 @@ fn every_key_reaches_its_action(cx: &mut gpui::TestAppContext) {
         ("z a", "volwatch::toggle"),
         ("z shift-r", "volwatch::expand_all"),
         ("z shift-m", "volwatch::collapse_all"),
+        ("shift-l", "volwatch::col_right"),
+        ("shift-h", "volwatch::col_left"),
     ] {
         h.press(&mut vcx, keys);
         assert_eq!(
@@ -188,6 +190,206 @@ fn a_count_multiplies_a_row_motion_and_switches_no_tab(cx: &mut gpui::TestAppCon
     );
     h.press(&mut vcx, "3 l");
     assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor_col), 4);
+}
+
+/// The column ids in painted order.
+fn ids(h: &Harness, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    h.tile
+        .read_with(vcx, |t, _| t.columns.iter().map(|c| c.id.clone()).collect())
+}
+
+/// The saved order of `view` in the serialized record.
+fn saved_order(h: &Harness, vcx: &mut gpui::VisualTestContext, view: &str) -> Option<Vec<String>> {
+    let saved = vcx.update(|_, cx| h.content.serialize(cx));
+    let ids = saved
+        .get("column_order")?
+        .as_table()?
+        .get(view)?
+        .as_array()?;
+    Some(
+        ids.iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect(),
+    )
+}
+
+#[gpui::test]
+fn shift_l_moves_the_measure_and_its_companion_together_and_the_session_keeps_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = landed(cx);
+    let before = ids(&h, &vcx);
+    assert_eq!(
+        &before[..5],
+        [
+            "underlying",
+            "atfm-1W-level",
+            "atfm-1W-companion",
+            "atfm-1M-level",
+            "atfm-1M-companion"
+        ]
+    );
+    h.move_to_column(&mut vcx, "atfm-1W-level");
+    h.press(&mut vcx, "shift-l");
+    let after = ids(&h, &vcx);
+    assert_eq!(
+        &after[..5],
+        [
+            "underlying",
+            "atfm-1M-level",
+            "atfm-1M-companion",
+            "atfm-1W-level",
+            "atfm-1W-companion"
+        ]
+    );
+    assert_eq!(after[5..], before[5..], "the rest keep their place");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.cursor_col),
+        3,
+        "the cursor follows the moved column"
+    );
+    assert!(h.requests().is_empty(), "a reorder never requeries");
+    assert!(h.notices(&vcx).is_empty());
+    // The session holds the order as measure stems, one per unit.
+    let order = saved_order(&h, &mut vcx, "vol").expect("the order is saved");
+    assert_eq!(
+        order,
+        [
+            "atfm-1M",
+            "atfm-1W",
+            "atfm-3M",
+            "atfm-6M",
+            "atfm-1Y",
+            "atfm-2Y",
+            "atfm-3Y",
+            "atfm-5Y",
+            "spark-atfm-3M"
+        ]
+    );
+    // A restore applies it before the first paint.
+    let mut record = restored_on("vol");
+    let mut orders = toml::Table::new();
+    orders.insert(
+        "vol".into(),
+        toml::Value::Array(order.into_iter().map(toml::Value::String).collect()),
+    );
+    record.insert("column_order".into(), toml::Value::Table(orders));
+    let (h2, vcx2) = open_with(cx, one_list(), Some(record), VolwatchSettings::default());
+    assert_eq!(ids(&h2, &vcx2), after);
+}
+
+#[gpui::test]
+fn shift_h_at_underlying_refuses(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    let before = ids(&h, &vcx);
+    h.move_to_column(&mut vcx, "atfm-1W-companion");
+    h.press(&mut vcx, "shift-h");
+    assert_eq!(ids(&h, &vcx), before, "nothing moves past Underlying");
+    assert_eq!(h.notices(&vcx), ["that is as far as this column goes"]);
+    assert_eq!(
+        saved_order(&h, &mut vcx, "vol"),
+        None,
+        "a refusal saves nothing"
+    );
+    // The far end refuses the same way.
+    h.press(&mut vcx, "escape");
+    h.press(&mut vcx, "$");
+    h.press(&mut vcx, "shift-l");
+    assert_eq!(ids(&h, &vcx), before);
+    assert_eq!(h.notices(&vcx), ["that is as far as this column goes"]);
+}
+
+#[gpui::test]
+fn a_spark_unit_moves_alone_and_a_count_moves_that_many(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.move_to_column(&mut vcx, "spark-atfm-3M");
+    h.press(&mut vcx, "shift-h");
+    let got = ids(&h, &vcx);
+    let n = got.len();
+    assert_eq!(
+        &got[n - 3..],
+        ["spark-atfm-3M", "atfm-5Y-level", "atfm-5Y-companion"],
+        "the sparkline steps over the whole pair"
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.cursor_col),
+        n - 3,
+        "the cursor follows"
+    );
+    h.move_to_column(&mut vcx, "atfm-1W-level");
+    h.press(&mut vcx, "2 shift-l");
+    let got = ids(&h, &vcx);
+    assert_eq!(
+        &got[1..7],
+        [
+            "atfm-1M-level",
+            "atfm-1M-companion",
+            "atfm-3M-level",
+            "atfm-3M-companion",
+            "atfm-1W-level",
+            "atfm-1W-companion"
+        ],
+        "2 shift+l moves two places"
+    );
+    assert_eq!(h.view(&vcx), "vol", "the 2 is a count");
+    // A count past the end stops at the end; the next press refuses.
+    h.press(&mut vcx, "9 9 shift-l");
+    let got = ids(&h, &vcx);
+    assert_eq!(
+        &got[got.len() - 2..],
+        ["atfm-1W-level", "atfm-1W-companion"]
+    );
+    assert!(h.notices(&vcx).is_empty());
+    h.press(&mut vcx, "shift-l");
+    assert_eq!(h.notices(&vcx), ["that is as far as this column goes"]);
+}
+
+#[gpui::test]
+fn a_saved_id_the_tab_no_longer_has_is_ignored_and_dropped_on_the_next_save(
+    cx: &mut gpui::TestAppContext,
+) {
+    let mut record = restored_on("vol");
+    let mut orders = toml::Table::new();
+    orders.insert(
+        "vol".into(),
+        toml::Value::Array(vec![
+            toml::Value::String("nope".into()),
+            toml::Value::String("atfm-3M".into()),
+        ]),
+    );
+    record.insert("column_order".into(), toml::Value::Table(orders));
+    let (h, mut vcx) = landed_with_record(cx, record);
+    let got = ids(&h, &vcx);
+    assert_eq!(
+        &got[..5],
+        [
+            "underlying",
+            "atfm-3M-level",
+            "atfm-3M-companion",
+            "atfm-1W-level",
+            "atfm-1W-companion"
+        ]
+    );
+    assert_eq!(
+        saved_order(&h, &mut vcx, "vol").unwrap(),
+        ["nope", "atfm-3M"],
+        "untouched, the record is written back as read"
+    );
+    h.move_to_column(&mut vcx, "atfm-1W-level");
+    h.press(&mut vcx, "shift-l");
+    let order = saved_order(&h, &mut vcx, "vol").unwrap();
+    assert!(!order.iter().any(|s| s == "nope"), "{order:?}");
+    assert_eq!(order.len(), 9, "every unit, once");
+    // A board refresh keeps the order.
+    let before = ids(&h, &vcx);
+    h.press(&mut vcx, "shift-r");
+    let tag = h.tag_of(&vcx);
+    let asked = h.asked_of(&vcx);
+    h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
+    assert_eq!(ids(&h, &vcx), before);
+    // Another tab is untouched by vol's order.
+    h.press(&mut vcx, "g 2");
+    assert_eq!(ids(&h, &vcx)[1], "skew-1W-level");
 }
 
 #[gpui::test]

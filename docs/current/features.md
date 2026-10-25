@@ -3852,7 +3852,19 @@ that view; all persist in the session under `column_widths` as
 another tab's column of the same id, whose head may be wider. Column ids
 are the measure text with dashes and a suffix (`atfm-3M-level`,
 `atfm-3M-companion`, `atfm-3M-single`, `spark-atfm-3M`, `vega`), so a
-width survives a relabel. The motions are the shared grid motions (the
+width survives a relabel. `shift+h`/`shift+l` move the cursor's column
+within the view, a count moving that many places and a move past an end
+stopping there (a column already at that end refuses with `that is as
+far as this column goes`): the unit is the measure, so a pair's level and
+companion move together and a sparkline or the vega column alone, and
+nothing moves past the pinned Underlying. The cursor follows its column;
+widths, sort and the band key by column id, so they follow too. The
+order is tile presentation, saved in the session per view as
+`column_order` (the measure stems, `atfm-3M`, `spark-atfm-3M`, `vega`,
+one per unit); a reorder never writes `vol_views.toml`, never forks the
+tab, and never requeries. A unit the saved order does not name takes its
+file position after the named ones, and a saved stem the tab no longer
+has is ignored and dropped on the next move. The motions are the shared grid motions (the
 tile publishes `grid` with `counts`; see [motion](#motion)): `j k` move
 rows, `h l` columns, `g g`/`shift+g` the ends, `ctrl+d`/`ctrl+u` and
 `ctrl+f`/`ctrl+b` the half and full pages, `^`/`$` the first and last
@@ -3995,7 +4007,8 @@ keeps painting; the next answer restores it.
 **Keys.** Normal mode: `g 1`–`g 9`, `tab` and `shift+tab` tabs, `r` the lens,
 `d` the lookback (`1d → 1w → 1m`), `q` the metric, `w` the window
 (`6M → 1Y → 2Y`), `m` the shown number in a single view, `p` paint, `s`
-sort, `enter` the band, `t` the timeseries refusal (below), `y` yank,
+sort, `shift+h`/`shift+l` move the cursor's column (counted), `enter`
+the band, `t` the timeseries refusal (below), `y` yank,
 `shift+r` refresh now, `g w` the switcher, `e` the Vol views dialog on the
 shown tab, `.` the action menu,
 `space`/`z a` toggle the cursor's group, `z o`/`z c` open and close it,
@@ -4038,8 +4051,10 @@ measure's dataset (`SX5E · ATFM 3M 15.9 · Δ1d — · history starts
 by column id, the grouping pin (`pinned`, a list of dimensions, empty for
 `:group none`; or `pinned_slot`), the collapsed group paths (`collapsed`,
 written only while a group is folded), the cursor's name, whether the
-band is open and column widths per view (`column_widths`, keyed `<view name>:<column id>`; an
-entry without a view prefix is dropped). An unreadable key is dropped with
+band is open, column widths per view (`column_widths`, keyed `<view name>:<column id>`; an
+entry without a view prefix is dropped) and each reordered view's column
+order (`column_order`, a table of `<view name> = [<stem>, …]`, written
+only for a view a column move touched). An unreadable key is dropped with
 its own notice and the rest kept. A view name the document no longer
 declares (a record from before the configured tabs naming `changes`,
 `levels`, `richcheap` or `term`) opens the default with `view <name> is
@@ -4136,6 +4151,9 @@ Known limitations:
 - The chevron and the `.` menu's Toggle group row are the pointer routes
   to a single fold; `z o` and `z c` have none (expand-all and
   collapse-all are in the menu).
+- A column move has no pointer route (no header drag-to-reorder and no
+  `.` menu row); `shift+h`/`shift+l` are its keys. Two columns over the
+  same measure in one tab share a stem and move as one.
 
 See the [crate guide](../../crates/geode-volwatch/README.md) for the
 module map.

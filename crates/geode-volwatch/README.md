@@ -44,8 +44,11 @@ measured against). Behaviour and limits are in the features guide's
     one exists, each spark, and the band's measures while open;
     `Ask::tables` the datasets its open-form measures read),
     `needs_requery`, which asks again only for something the last ask
-    lacked, and `sortable`, the one test `s`, a head press and `:sort`
-    share.
+    lacked, `sortable`, the one test `s`, a head press and `:sort`
+    share, and the column units a `shift+h`/`shift+l` move works in
+    (`unit_stem`, `units`: a run of columns sharing a measure stem, a
+    spark or vega alone, Underlying in none; `reorder_columns` applies
+    a saved stem order, named units first and the rest in file order).
   - `lens.rs`: `LensState` (lens, lookback, metric, window, shown) with
     each key's cycle and session word, `z_score` (blank under
     `PCTL_MIN_COUNT` observations or a non-positive sd), `companion` (the
@@ -81,9 +84,10 @@ measured against). Behaviour and limits are in the features guide's
     chip and whether it is muted).
   - `session.rs`: the session table (list, view name, the lens keys as
     words, sort by column id, cursor, band, the pin as `pinned` or
-    `pinned_slot` and the collapsed group paths, each at least one label
-    long); an unreadable key drops alone with a notice, and a record
-    without the lens keys reads the default lens.
+    `pinned_slot`, the collapsed group paths, each at least one label
+    long, and `column_order`, a table of view name to unit stems written
+    by a column move); an unreadable key drops alone with a notice, and
+    a record without the lens keys reads the default lens.
   - `commands.rs`: the `:sort`, `:view`, `:group <dims> | slot N | none`
     and `:unpin` grammar and their completions (`group` completes the
     leaf, then the classifications over it in name order, then `none` and

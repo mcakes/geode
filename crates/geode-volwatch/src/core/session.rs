@@ -1,11 +1,11 @@
 //! The tile's session table: the watchlist shown, the view by name, the
 //! lens and its lookback, metric, window and shown number, the sort, the
-//! member under the cursor, whether the band is open, the grouping pin and
-//! the collapsed group rows. Bad input is
+//! member under the cursor, whether the band is open, the grouping pin,
+//! the collapsed group rows and each view's column order. Bad input is
 //! repaired, never refused: a value that cannot be read drops its key with
 //! a notice, so one stale field cannot cost the tile its others.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use geode_core::sort::SortOrder;
 use geode_core::volboard::Lookback;
@@ -34,6 +34,11 @@ pub struct State {
     /// Collapsed group rows by path (one label per level, the group's own
     /// last), kept across rebuilds and regroups within the chain's depth.
     pub collapsed: BTreeSet<Vec<String>>,
+    /// Each view's column order by name: the unit stems (`atfm-3M`,
+    /// `spark-atfm-3M`, `vega`) in painted order, written by a column
+    /// move. Tile presentation, never the document's order: a view the
+    /// map does not name paints in file order.
+    pub column_order: BTreeMap<String, Vec<String>>,
 }
 
 fn order_word(o: SortOrder) -> &'static str {
@@ -60,7 +65,9 @@ fn parse_order(w: &str) -> Option<SortOrder> {
 /// The lens keys are always written, as a word each. `sort` is
 /// `[column id, order word]`. The pin is `pinned` (a list of dimensions;
 /// empty for the flat pin) or `pinned_slot` (1–9); `collapsed` is a list
-/// of group paths, written only when a row is collapsed.
+/// of group paths, written only when a row is collapsed; `column_order`
+/// is a table of `<view name> = [stem, …]`, written only when a view has
+/// been reordered.
 pub fn to_table(s: &State) -> Table {
     let mut t = Table::new();
     t.insert("version".into(), Value::Integer(VERSION));
@@ -111,7 +118,31 @@ pub fn to_table(s: &State) -> Table {
             Value::Array(s.collapsed.iter().map(|p| strings(p)).collect()),
         );
     }
+    if !s.column_order.is_empty() {
+        t.insert(
+            "column_order".into(),
+            Value::Table(
+                s.column_order
+                    .iter()
+                    .map(|(view, ids)| (view.clone(), strings(ids)))
+                    .collect(),
+            ),
+        );
+    }
     t
+}
+
+/// A table of view name to a list of column id stems; anything else
+/// drops the whole key, since a half-read order would move columns the
+/// trader never moved.
+fn read_column_order(v: &Value) -> Result<BTreeMap<String, Vec<String>>, String> {
+    v.as_table()
+        .and_then(|t| {
+            t.iter()
+                .map(|(view, ids)| Some((view.clone(), read_strings(ids)?)))
+                .collect::<Option<BTreeMap<_, _>>>()
+        })
+        .ok_or_else(|| "not a table of column id lists".into())
 }
 
 fn strings(words: &[String]) -> Value {
@@ -241,6 +272,7 @@ pub fn from_table(t: &Table) -> (State, Vec<String>) {
         band: read(t, "band", &mut notices, read_band).unwrap_or(d.band),
         pin,
         collapsed: read(t, "collapsed", &mut notices, read_collapsed).unwrap_or_default(),
+        column_order: read(t, "column_order", &mut notices, read_column_order).unwrap_or_default(),
     };
     (state, notices)
 }
@@ -271,6 +303,7 @@ mod tests {
             band: true,
             pin: Pin::Slot(4),
             collapsed: paths(&[&["Core"]]),
+            column_order: order("vol", &["atfm-3M", "atfm-1W"]),
         };
         let (back, notices) = from_table(&to_table(&s));
         assert_eq!(back, s);
@@ -325,7 +358,7 @@ mod tests {
         assert_eq!(s, State::default());
         assert!(notices.is_empty());
         let t = to_table(&State::default());
-        for key in ["list", "view", "sort", "cursor"] {
+        for key in ["list", "view", "sort", "cursor", "column_order"] {
             assert!(!t.contains_key(key), "{key}");
         }
         for key in ["lookback", "lens", "metric", "window", "shown", "band"] {
@@ -503,6 +536,56 @@ mod tests {
             notices,
             ["session: dropped collapsed: not a list of group paths"]
         );
+    }
+
+    fn order(view: &str, ids: &[&str]) -> BTreeMap<String, Vec<String>> {
+        BTreeMap::from([(
+            view.to_string(),
+            ids.iter().map(|s| s.to_string()).collect(),
+        )])
+    }
+
+    #[test]
+    fn the_column_order_round_trips_per_view() {
+        let mut s = State {
+            column_order: order("vol", &["atfm-3M", "atfm-1W", "spark-atfm-3M"]),
+            ..State::default()
+        };
+        s.column_order.insert("skew".into(), vec!["skew-1M".into()]);
+        let t = to_table(&s);
+        let orders = t["column_order"].as_table().unwrap();
+        assert_eq!(orders.len(), 2);
+        assert_eq!(
+            orders["vol"].as_array().unwrap().len(),
+            3,
+            "one entry per unit, the measure stem"
+        );
+        let text = toml::to_string(&t).unwrap();
+        let (back, notices) = from_table(&text.parse().unwrap());
+        assert_eq!(back, s);
+        assert!(notices.is_empty(), "{notices:?}");
+        assert!(
+            !to_table(&State::default()).contains_key("column_order"),
+            "no order writes no key"
+        );
+    }
+
+    #[test]
+    fn a_bad_column_order_drops_the_key_alone() {
+        for text in [
+            "column_order = 3",
+            "column_order = [\"vol\"]",
+            "[column_order]\nvol = 3",
+            "[column_order]\nvol = [1, 2]",
+        ] {
+            let (s, notices) = from_table(&format!("{text}\nversion = 1").parse().unwrap());
+            assert_eq!(s, State::default(), "{text}");
+            assert_eq!(
+                notices,
+                ["session: dropped column_order: not a table of column id lists"],
+                "{text}"
+            );
+        }
     }
 
     #[test]
