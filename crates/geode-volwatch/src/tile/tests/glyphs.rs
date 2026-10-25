@@ -74,12 +74,9 @@ fn heat_bar_and_slider_paint_through_the_grid(cx: &mut gpui::TestAppContext) {
         h.column_width(&vcx, "atfm-3M-companion") >= widths::bar(4.0 * 7.0),
         "the companion column holds a bar beside `+1.1`"
     );
-    // A slider column is the rank under every lens: the gauge paints under
-    // moves, and still after r q (rich/cheap, pctl), its text beside it.
-    assert!(
-        vcx.debug_bounds("7-DAX-skew-1Y-companion-track").is_some(),
-        "the slider's track under the moves lens"
-    );
+    // Under moves the slider column shows a chip; after r q (rich/cheap,
+    // pctl) the rank gauge, its text still painted.
+    assert!(vcx.debug_bounds("7-DAX-skew-1Y-companion-track").is_none());
     h.press(&mut vcx, "r q");
     h.draw(&mut vcx);
     assert!(vcx.debug_bounds("7-DAX-skew-1Y-companion-text").is_some());

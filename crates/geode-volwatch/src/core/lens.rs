@@ -187,24 +187,23 @@ impl Shown {
     }
 }
 
-impl LensState {
-    /// This lens with the percentile rank as its companion: what a slider
-    /// column reads under any lens, the lookback, window and shown number
-    /// kept.
-    pub fn rank_lens(&self) -> LensState {
-        LensState {
-            lens: Lens::Rich,
-            metric: Metric::Pctl,
-            ..*self
-        }
-    }
+/// The percentile rank's companion head: the one `companion_head` a
+/// slider column can place.
+pub const RANK_HEAD: &str = "pctl";
 
+/// The change's companion head under the moves lens.
+pub const CHANGE_HEAD: &str = "\u{394}";
+
+/// The z's companion head under rich/cheap.
+pub const Z_HEAD: &str = "z";
+
+impl LensState {
     /// `Δ`, `z` or `pctl`: the companion's head and the readout's word.
     pub fn companion_head(&self) -> &'static str {
         match (self.lens, self.metric) {
-            (Lens::Moves, _) => "\u{394}",
-            (Lens::Rich, Metric::Z) => "z",
-            (Lens::Rich, Metric::Pctl) => "pctl",
+            (Lens::Moves, _) => CHANGE_HEAD,
+            (Lens::Rich, Metric::Z) => Z_HEAD,
+            (Lens::Rich, Metric::Pctl) => RANK_HEAD,
         }
     }
 

@@ -69,10 +69,9 @@ measured against). Behaviour and limits are in the features guide's
     muted flag, the column widths; the glyph is the column's resolved
     `LevelGlyph`/`CompanionGlyph`: a heat level over the column's range
     (`heat_range`, members and group means alike), a chip or zero bar
-    over the column's scale, a slider over the rank under every lens
-    (`cell_lens`: a slider column reads `LensState::rank_lens`, so `r`
-    and `q` leave it alone and its head says `pctl`); every glyph gets
-    the displayed sign and the companion at display precision; a single
+    over the column's scale, a slider under the percentile metric and a
+    chip otherwise, with the readout saying why; every glyph gets the
+    displayed sign and the companion at display precision; a single
     column's tint goes where a pair's chip would paint muted, and a muted
     slider is its number alone; a group row prepares as `label ·
     count` behind the tree lead (`tree_lead`), its mean cells under the

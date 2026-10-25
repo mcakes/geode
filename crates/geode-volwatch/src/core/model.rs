@@ -29,8 +29,8 @@ use gpui::SharedString;
 
 use super::grouping::{GroupCell, GroupInfo};
 use super::lens::{
-    Lens, LensState, Metric, PCTL_MIN_COUNT, Shown, Window, Z_CEILING, companion, pctl_side,
-    z_score,
+    Lens, LensState, Metric, PCTL_MIN_COUNT, RANK_HEAD, Shown, Window, Z_CEILING, companion,
+    pctl_side, z_score,
 };
 use super::views::{
     Ask, Column, ColumnKind, REALIZED, SURFACE, TITLE, VARSWAP, family_label, sortable,
@@ -353,29 +353,25 @@ fn level_glyph(kind: &ColumnKind) -> LevelGlyph {
     }
 }
 
-/// The lens a cell of `kind` reads its companion through: a slider
-/// places a rank and nothing else, so a slider column reads the
-/// percentile rank under every lens (`q` and `r` leave it alone); the
-/// other glyphs read the lens in force.
-fn cell_lens(kind: &ColumnKind, lens: &LensState) -> LensState {
-    match kind {
-        ColumnKind::Companion {
-            companion: CompanionGlyph::Slider,
-            ..
-        }
-        | ColumnKind::Single {
-            companion: CompanionGlyph::Slider,
-            ..
-        } => lens.rank_lens(),
-        _ => *lens,
-    }
+/// Whether the companion under `lens` is a rank: the one number a slider
+/// can place. A slider asked to show a Δ or a z falls back to a chip.
+fn shows_rank(lens: &LensState) -> bool {
+    lens.lens == Lens::Rich && lens.metric == Metric::Pctl
+}
+
+/// `column` asks for a slider where the lens shows a Δ or a z, so the
+/// cell shows a chip: the readout says why. The column names the
+/// companion it was built to show (`Column::companion_head`), so the
+/// readout needs no lens of its own.
+fn slider_wants_pctl(column: &Column) -> bool {
+    companion_glyph(&column.kind) == CompanionGlyph::Slider
+        && column.companion_head().is_some_and(|h| h != RANK_HEAD)
 }
 
 /// The number a cell shows, before formatting; `None` for a blank and for
 /// any row the surface lacks. A group row reads its stored means, so a
 /// lens flip picks another companion without rebuilding the tree.
 fn value(row: &Row, kind: &ColumnKind, asked: &Ask, lens: &LensState) -> Option<f64> {
-    let lens = &cell_lens(kind, lens);
     if let Some(g) = &row.group {
         return match kind {
             ColumnKind::Vega => row.vega.and_then(finite),
@@ -693,15 +689,13 @@ fn share_group_labels(columns: &[Column], col_px: &mut [f32], advance_px: f32) {
     }
 }
 
-/// Whether `lens` asks for a lookback or window other than the board's:
+/// Whether the lens asks for a lookback or window other than the board's:
 /// after `d` or `w`, until the new board lands (the header chip names the
-/// new one while the old board's numbers are still up). `lens` is the
-/// cell's own (a slider's is the rank lens, so a lookback change never
-/// mutes it and a window change always does).
-fn lens_mismatch(i: &Inputs<'_>, lens: &LensState) -> bool {
-    match lens.lens {
-        Lens::Moves => i.board_lookback != lens.lookback,
-        Lens::Rich => i.board_window != Some(lens.window.duration()),
+/// new one while the old board's numbers are still up).
+fn lens_mismatch(i: &Inputs<'_>) -> bool {
+    match i.lens.lens {
+        Lens::Moves => i.board_lookback != i.lens.lookback,
+        Lens::Rich => i.board_window != Some(i.lens.window.duration()),
     }
 }
 
@@ -710,9 +704,9 @@ fn lens_mismatch(i: &Inputs<'_>, lens: &LensState) -> bool {
 /// muted by its companion; a single column's tint is dropped instead. A
 /// group row's companion mutes on the mismatch alone: its members' short
 /// histories already blank the z they would contribute.
-fn companion_muted(i: &Inputs<'_>, c: &Cell, lens: &LensState) -> bool {
-    lens_mismatch(i, lens)
-        || (lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT))
+fn companion_muted(i: &Inputs<'_>, c: &Cell) -> bool {
+    lens_mismatch(i)
+        || (i.lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT))
 }
 
 /// One cell's text, sign, glyph and muted flag; the id and the
@@ -759,30 +753,31 @@ fn prepare_cell(
     let Some(v) = v else {
         return blank;
     };
-    // A slider column reads the rank whatever the lens shows: its text,
-    // tint, muting and gauge all follow the cell's own lens.
-    let lens = cell_lens(&column.kind, &i.lens);
-    let Formatted { text: t, sign } = text(&column.kind, v, &lens);
+    let Formatted { text: t, sign } = text(&column.kind, v, &i.lens);
     let board_cell = column_cell(row, &column.kind, i.asked);
-    let shows_companion = shows_companion(&column.kind, &lens);
+    let shows_companion = shows_companion(&column.kind, &i.lens);
     let muted = shows_companion
         && match &row.group {
-            Some(_) => lens_mismatch(i, &lens),
-            None => board_cell.is_some_and(|c| companion_muted(i, c, &lens)),
+            Some(_) => lens_mismatch(i),
+            None => board_cell.is_some_and(|c| companion_muted(i, c)),
         };
     let glyph = if !i.paint {
         Glyph::None
     } else if shows_companion {
-        let shown = displayed_companion(v, &lens);
+        let shown = displayed_companion(v, &i.lens);
         match companion_glyph(&column.kind) {
-            CompanionGlyph::Bar => Glyph::Bar(companion_bar(shown, sign, scale, &lens)),
+            CompanionGlyph::Bar => Glyph::Bar(companion_bar(shown, sign, scale, &i.lens)),
             // A rank over too short a history, or from another window, is
             // a position not worth marking: the number alone, muted. The
             // marker sits at the rank the text shows.
-            CompanionGlyph::Slider => {
+            CompanionGlyph::Slider if shows_rank(&i.lens) => {
                 Glyph::Slider((!muted).then(|| percent_slider::slider(shown)).flatten())
             }
-            CompanionGlyph::Chip => Glyph::Chip(companion_chip(shown, sign, scale, &lens)),
+            // A slider has nothing to say about a Δ or a z: the chip
+            // stands in and the readout says why.
+            CompanionGlyph::Slider | CompanionGlyph::Chip => {
+                Glyph::Chip(companion_chip(shown, sign, scale, &i.lens))
+            }
         }
     } else {
         match level_glyph(&column.kind) {
@@ -794,17 +789,17 @@ fn prepare_cell(
                 // short history) is a wrong color under a right number: it
                 // goes entirely, and the level keeps its text and tone.
                 let cv = match &row.group {
-                    Some(g) => (!lens_mismatch(i, &lens))
+                    Some(g) => (!lens_mismatch(i))
                         .then(|| group_cell(g, &column.kind, i.asked))
                         .flatten()
-                        .and_then(|c| group_companion(c, &lens)),
+                        .and_then(|c| group_companion(c, &i.lens)),
                     None => board_cell
-                        .filter(|c| !companion_muted(i, c, &lens))
-                        .and_then(|c| companion(c, &lens)),
+                        .filter(|c| !companion_muted(i, c))
+                        .and_then(|c| companion(c, &i.lens)),
                 };
                 Glyph::Tint(cv.and_then(|cv| {
-                    let f = companion_text(cv, &lens);
-                    companion_chip(displayed_companion(cv, &lens), f.sign, scale, &lens)
+                    let f = companion_text(cv, &i.lens);
+                    companion_chip(displayed_companion(cv, &i.lens), f.sign, scale, &i.lens)
                 }))
             }
             LevelGlyph::Plain => Glyph::None,
@@ -876,12 +871,22 @@ fn window_word(asked: &Ask) -> &'static str {
 /// knows: `SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01` (the
 /// board note for the measure's dataset). A group row reads its means:
 /// `Core · 2 members · ATFM 1M mean 15.5 (2 of 2) · Δ1d mean +0.8 · z 1Y
-/// mean +0.5 · pctl 1Y mean 70`.
+/// mean +0.5 · pctl 1Y mean 70`. A slider column whose lens shows a Δ or
+/// a z ends ` · slider needs the percentile metric`: the cell shows a
+/// chip, and the readout says why.
 pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock: &Clock) -> String {
-    readout_parts(row, column, asked, notes, clock).join(" \u{b7} ")
+    let mut parts = readout_parts(row, column, asked, notes, clock);
+    if row.present && slider_wants_pctl(column) {
+        parts.push(SLIDER_NOTE.into());
+    }
+    parts.join(" \u{b7} ")
 }
 
-/// The readout's parts.
+/// What a slider column's readout adds while the lens shows it a Δ or a
+/// z, and the cell a chip.
+pub const SLIDER_NOTE: &str = "slider needs the percentile metric";
+
+/// The readout's parts, before the glyph note.
 fn readout_parts(
     row: &Row,
     column: &Column,
@@ -3242,45 +3247,94 @@ mod tests {
             assert!((high.extent - 0.82).abs() < 1e-6, "rank 0.91: {high:?}");
         }
 
-        /// A slider places a rank and nothing else, so the column shows the
-        /// rank under every lens: the percentile metric, z and moves alike
-        /// read the cell's rank, and the head says `pctl`.
+        /// Only the percentile metric has a rank to place: under z and
+        /// under moves a slider column shows the chip, its head follows
+        /// the lens, and the readout says why.
         #[test]
-        fn a_slider_column_shows_the_rank_under_every_lens() {
+        fn a_slider_companion_is_a_rank_under_pctl_and_a_chip_under_z_with_a_readout_note() {
             let mut view = pair_view();
             set_companion_glyph(&mut view, 0, CompanionGlyph::Slider);
-            // A second measure with a chip, beside the slider.
-            view.columns.push(VolColumn::Measure {
-                measure: Measure::atfm("1M"),
-                label: None,
-                group: None,
-                level: None,
-                companion: None,
-            });
             let (rows, asked) = two_members_at(&view, 15.9, 20.0);
-            for lens in [pctl(), z(), LensState::default()] {
-                let cols = columns(&view, &lens, false);
-                assert_eq!(cols[2].head, "pctl", "{lens:?}");
-                assert_eq!(
-                    cols[4].head,
-                    lens.companion_head(),
-                    "a chip's head follows the lens"
-                );
-                let p = prepare(&inputs(&rows, &cols, &asked, lens));
-                let cell = &p.rows[0].cells[2];
-                let Glyph::Slider(Some(s)) = &cell.glyph else {
-                    panic!("{lens:?}: {:?}", cell.glyph);
-                };
-                assert!((s.position - 0.91).abs() < 1e-6 && s.warn, "{lens:?}");
-                assert_eq!(cell.text.as_ref(), "91", "{lens:?}");
-                assert!(!cell.muted);
-                assert_eq!(cell.value, Some(0.91), "the sort value is the rank");
-                let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc());
-                assert!(!text.contains("slider"), "{text}");
-                // The chip column beside it is blank: the fixture answers
-                // the 3M measure alone, so only the head says it follows.
-                assert!(matches!(p.rows[0].cells[4].glyph, Glyph::None));
-            }
+            let cols = columns(&view, &pctl(), false);
+            assert_eq!(cols[2].head, "pctl");
+            let p = prepare(&inputs(&rows, &cols, &asked, pctl()));
+            let Glyph::Slider(Some(s)) = &p.rows[0].cells[2].glyph else {
+                panic!("{:?}", p.rows[0].cells[2].glyph);
+            };
+            assert!((s.position - 0.91).abs() < 1e-6 && s.warn);
+            assert_eq!(p.rows[0].cells[2].text.as_ref(), "91");
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc());
+            assert!(!text.contains("slider"), "{text}");
+            let cols = columns(&view, &z(), false);
+            assert_eq!(cols[2].head, "z", "the head follows the lens");
+            let p = prepare(&inputs(&rows, &cols, &asked, z()));
+            assert!(
+                matches!(p.rows[0].cells[2].glyph, Glyph::Chip(_)),
+                "{:?}",
+                p.rows[0].cells[2].glyph
+            );
+            assert_ne!(
+                p.rows[0].cells[2].value,
+                Some(0.91),
+                "the sort value is the z"
+            );
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc());
+            assert!(
+                text.ends_with(" \u{b7} slider needs the percentile metric"),
+                "{text}"
+            );
+            // Under moves the companion is a change: a chip, with the note.
+            let moves = LensState::default();
+            let cols = columns(&view, &moves, false);
+            assert_eq!(cols[2].head, "\u{394}");
+            let p = prepare(&inputs(&rows, &cols, &asked, moves));
+            assert!(matches!(p.rows[0].cells[2].glyph, Glyph::Chip(_)));
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc());
+            assert!(
+                text.ends_with(" \u{b7} slider needs the percentile metric"),
+                "{text}"
+            );
+            // A chip companion's readout carries no note under any lens.
+            let chip = columns(&pair_view(), &z(), false);
+            let text = readout(&rows[0], &chip[2], &asked, &[], &clock_utc());
+            assert!(!text.contains("slider"), "{text}");
+        }
+
+        /// In a single view the note follows the shown number: after `m`
+        /// under z the chip stands where the slider would and the readout
+        /// says why; with the level shown no slider is asked for.
+        #[test]
+        fn a_single_slider_column_notes_the_metric_only_where_the_chip_stands_in() {
+            let mut view = single_view();
+            set_companion_glyph(&mut view, 0, CompanionGlyph::Slider);
+            let (rows, asked) = two_members_at(&view, 15.9, 20.0);
+            let shown = LensState {
+                shown: Shown::Companion,
+                ..z()
+            };
+            let cols = columns(&view, &shown, false);
+            assert_eq!(cols[1].companion_head(), Some("z"));
+            let p = prepare(&inputs(&rows, &cols, &asked, shown));
+            assert!(matches!(p.rows[0].cells[1].glyph, Glyph::Chip(_)));
+            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc());
+            assert!(
+                text.ends_with(" \u{b7} slider needs the percentile metric"),
+                "{text}"
+            );
+            let cols = columns(&view, &z(), false);
+            assert_eq!(cols[1].companion_head(), None);
+            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc());
+            assert!(!text.contains("slider"), "{text}");
+            let shown = LensState {
+                shown: Shown::Companion,
+                ..pctl()
+            };
+            let cols = columns(&view, &shown, false);
+            assert_eq!(cols[1].companion_head(), Some("pctl"));
+            let p = prepare(&inputs(&rows, &cols, &asked, shown));
+            assert!(matches!(p.rows[0].cells[1].glyph, Glyph::Slider(Some(_))));
+            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc());
+            assert!(!text.contains("slider"), "{text}");
         }
 
         #[test]

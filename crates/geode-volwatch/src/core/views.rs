@@ -17,7 +17,7 @@ use geode_core::volviews::{
     measure_text, resolve,
 };
 
-use super::lens::{LensState, Shown};
+use super::lens::{CHANGE_HEAD, LensState, RANK_HEAD, Shown, Z_HEAD};
 
 pub const KIND: &str = "volwatch";
 pub const TITLE: &str = "Vol";
@@ -200,6 +200,28 @@ pub struct Column {
     pub kind: ColumnKind,
 }
 
+impl Column {
+    /// The companion head this column was built to show (`Δ`, `z` or
+    /// `pctl`): a pair's companion column says it in its head, a single
+    /// column after `m` in its group's suffix; `None` where no companion
+    /// number shows. The inverse of `columns`, kept beside it.
+    pub fn companion_head(&self) -> Option<&str> {
+        match &self.kind {
+            ColumnKind::Companion { .. } => Some(&self.head),
+            ColumnKind::Single { .. } => self
+                .group
+                .as_deref()
+                .and_then(|g| g.rsplit_once(" \u{b7} "))
+                .map(|(_, h)| h)
+                .filter(|h| [CHANGE_HEAD, Z_HEAD, RANK_HEAD].contains(h)),
+            ColumnKind::Underlying
+            | ColumnKind::Level { .. }
+            | ColumnKind::Spark { .. }
+            | ColumnKind::Vega => None,
+        }
+    }
+}
+
 /// Whether a column of `kind` takes a sort: `s`, a header press and
 /// `:sort` all refuse the rest with `<head> is not sortable`.
 pub fn sortable(kind: &ColumnKind) -> bool {
@@ -302,12 +324,6 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
             } => {
                 let stem = measure_id(measure);
                 let companion = companion.unwrap_or(CompanionGlyph::Chip);
-                // A slider places a rank whatever the lens shows, so its
-                // head says so; the other glyphs follow the lens.
-                let companion_lens = match companion {
-                    CompanionGlyph::Slider => lens.rank_lens(),
-                    CompanionGlyph::Chip | CompanionGlyph::Bar => *lens,
-                };
                 match view.cells {
                     Cells::Pair => {
                         let g = group.clone().unwrap_or_else(|| family_label(measure));
@@ -323,7 +339,7 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                         cols.push(Column {
                             id: format!("{stem}-companion"),
                             group: Some(g),
-                            head: companion_lens.companion_head().into(),
+                            head: lens.companion_head().into(),
                             kind: ColumnKind::Companion {
                                 measure: measure.clone(),
                                 companion,
@@ -339,7 +355,7 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                         };
                         let mut g = group.clone().unwrap_or(g);
                         if lens.shown == Shown::Companion {
-                            g = format!("{g} \u{b7} {}", companion_lens.companion_head());
+                            g = format!("{g} \u{b7} {}", lens.companion_head());
                         }
                         cols.push(Column {
                             id: format!("{stem}-single"),

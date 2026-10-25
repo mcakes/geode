@@ -42187,13 +42187,13 @@ run_mutation "volwatch: a missing member keeps its row at the foot" \
 # not paint a bullish fill under a zero.
 run_mutation "volwatch: the chip takes the displayed sign" \
   crates/geode-volwatch/src/core/model.rs \
-  '            CompanionGlyph::Chip => Glyph::Chip(companion_chip(shown, sign, scale, &lens)),' \
-  '            CompanionGlyph::Chip => Glyph::Chip(companion_chip(
+  '                Glyph::Chip(companion_chip(shown, sign, scale, &i.lens))' \
+  '                Glyph::Chip(companion_chip(
                     shown,
                     if v > 0.0 { Sign::Positive } else if v < 0.0 { Sign::Negative } else { Sign::Zero },
                     scale,
-                    &lens,
-                )),' \
+                    &i.lens,
+                ))' \
   geode-volwatch \
   the_chip_takes_the_displayed_sign_and_the_columns_scale
 
@@ -42209,8 +42209,8 @@ run_mutation "volwatch: the percentile chip takes the rank at display precision"
 # A rank over fewer than PCTL_MIN_COUNT observations paints muted.
 run_mutation "volwatch: a short window paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '        || (lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT))' \
-  '        || (lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < 1))' \
+  '        || (i.lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT))' \
+  '        || (i.lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < 1))' \
   geode-volwatch \
   a_short_count_mutes_the_rank_and_blanks_the_z
 
@@ -42218,7 +42218,7 @@ run_mutation "volwatch: a short window paints muted" \
 # landed) paints muted.
 run_mutation "volwatch: a change from another lookback than the one shown paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '        Lens::Moves => i.board_lookback != lens.lookback,' \
+  '        Lens::Moves => i.board_lookback != i.lens.lookback,' \
   '        Lens::Moves => false,' \
   geode-volwatch \
   a_change_from_another_lookback_than_the_one_shown_paints_muted
@@ -42779,7 +42779,7 @@ run_mutation "volwatch: the demo ssr table is keyed by tenor" \
 # reads as a 2Y one.
 run_mutation "volwatch: a companion from another window paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '        Lens::Rich => i.board_window != Some(lens.window.duration()),' \
+  '        Lens::Rich => i.board_window != Some(i.lens.window.duration()),' \
   '        Lens::Rich => false,' \
   geode-volwatch \
   a_companion_from_another_window_than_the_one_shown_paints_muted
@@ -42935,15 +42935,14 @@ run_mutation "volviews: a fork keeps the merged order" \
   geode-shell \
   an_edit_on_a_later_tab_does_not_reorder_the_tabs
 
-# A slider places a rank and nothing else, so a slider column is the
-# rank under every lens; falling back to the chip would show a z or a
-# move in a column whose head says pctl.
-run_mutation "volwatch: a slider column shows the rank under z" \
+# A slider places a rank and nothing else: under z or moves the chip
+# stands in, and the readout says why.
+run_mutation "volwatch: a slider under z is a chip" \
   crates/geode-volwatch/src/core/model.rs \
-  $'            CompanionGlyph::Slider => {\n                Glyph::Slider((!muted).then(|| percent_slider::slider(shown)).flatten())\n            }\n            CompanionGlyph::Chip => Glyph::Chip(companion_chip(shown, sign, scale, &lens)),' \
-  $'            CompanionGlyph::Slider | CompanionGlyph::Chip => {\n                Glyph::Chip(companion_chip(shown, sign, scale, &lens))\n            }' \
+  '            CompanionGlyph::Slider if shows_rank(&i.lens) => {' \
+  '            CompanionGlyph::Slider => {' \
   geode-volwatch \
-  a_slider_column_shows_the_rank_under_every_lens
+  a_slider_companion_is_a_rank_under_pctl_and_a_chip_under_z_with_a_readout_note
 
 # Heat scales to the column's own displayed levels; a fixed range would
 # tint a 20-vol column as pale as a 2-vol one.
