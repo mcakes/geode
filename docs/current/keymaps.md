@@ -71,8 +71,8 @@ module that had it:
 
 | Retired id | Current id | Modules |
 |---|---|---|
-| `…::down`, `up`, `top`, `bottom` | the same `motion::*` name | blotter, marketdata, pricer, diagnostics |
-| `…::left`, `right` | the same `motion::*` name | blotter, marketdata, pricer |
+| `…::down`, `up`, `top`, `bottom` | the same `motion::*` name | blotter, marketdata, pricer, diagnostics, volwatch |
+| `…::left`, `right` | the same `motion::*` name | blotter, marketdata, pricer, volwatch |
 | `…::page_down`, `page_up` | `motion::half_page_down`, `half_page_up` | blotter, marketdata, pricer, diagnostics |
 | `…::page_down_full`, `page_up_full` | `motion::page_down`, `page_up` | blotter, marketdata, pricer, diagnostics |
 | `…::first_col`, `last_col` | `motion::line_start`, `line_end` | blotter, marketdata, pricer |

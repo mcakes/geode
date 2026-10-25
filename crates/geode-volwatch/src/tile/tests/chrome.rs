@@ -168,6 +168,16 @@ fn the_strip_lists_the_tabs_with_digits_the_lens_readout_and_the_hints(
     }
     assert!(vcx.debug_bounds("volwatch-view-lit-vol").is_some());
     assert!(vcx.debug_bounds("volwatch-view-lit-skew").is_none());
+    // Each tab carries its live chord as Kbd chips: `g 1`, `g 2`, …
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t
+            .strip_tabs
+            .iter()
+            .map(|(_, keys)| crate::tile::chrome::spell(keys))
+            .collect::<Vec<_>>()),
+        ["g 1", "g 2", "g 3", "g 4"]
+    );
+    assert!(vcx.debug_bounds("volwatch-view-key-skew-7").is_some());
     assert_eq!(
         h.tile.read_with(&vcx, |t, _| t.state.lens.readout(false)),
         "moves \u{b7} \u{394} 1d"
@@ -189,7 +199,7 @@ fn the_strip_lists_the_tabs_with_digits_the_lens_readout_and_the_hints(
     assert!(vcx.debug_bounds("volwatch-strip-hint-metric-7").is_some());
     assert!(vcx.debug_bounds("volwatch-strip-hint-window-7").is_some());
     assert!(vcx.debug_bounds("volwatch-strip-hint-lookback-7").is_none());
-    h.press(&mut vcx, "4");
+    h.press(&mut vcx, "g 4");
     h.draw(&mut vcx);
     assert!(vcx.debug_bounds("volwatch-view-lit-surface").is_some());
     assert!(
@@ -255,13 +265,17 @@ fn a_tenth_tab_paints_without_a_digit_and_a_press_still_switches(cx: &mut gpui::
         let tenth = rows.iter().find(|a| a.title().as_ref() == "extra10 view");
         assert!(
             matches!(ninth.unwrap().trailing(), Trailing::Keys(_)),
-            "the ninth tab carries its digit"
+            "the ninth tab carries its chord"
         );
         assert!(
             matches!(tenth.unwrap().trailing(), Trailing::None),
-            "the tenth has no digit"
+            "the tenth has no chord"
         );
         assert_eq!(tenth.unwrap().tick(), Some(true));
+        assert!(
+            t.strip_tabs[8].1.len() == 2 && t.strip_tabs[9].1.is_empty(),
+            "the strip paints the ninth tab's chord and nothing on the tenth"
+        );
     });
 }
 
@@ -285,7 +299,7 @@ fn a_reload_that_drops_the_shown_view_opens_the_default_with_a_notice(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = landed(cx);
-    h.press(&mut vcx, "3");
+    h.press(&mut vcx, "g 3");
     assert_eq!(h.view(&vcx), "varswap");
     h.press(&mut vcx, "enter");
     assert!(h.band_open(&vcx));
@@ -454,7 +468,7 @@ fn the_header_chips_follow_the_lens_and_a_press_sets_the_lookback_or_the_window(
 #[gpui::test]
 fn the_menu_lists_every_tab_with_its_digit_and_ticks_the_shown_one(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
-    h.press(&mut vcx, "2");
+    h.press(&mut vcx, "g 2");
     h.press(&mut vcx, ".");
     let titles = h.menu_titles(&vcx);
     for name in ["vol", "skew", "varswap", "surface"] {

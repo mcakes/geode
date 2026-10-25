@@ -6,7 +6,7 @@
 //! members not in the surface in the warning tone, one chip per failed
 //! dataset in the danger tone; in the cluster the mode, the in-flight `…`,
 //! the per-dataset source times, link chips, health, `⋯` and ×), the view
-//! strip (the tabs with their digits, the shown one lit; at the right the
+//! strip (the tabs behind their chords, the shown one lit; at the right the
 //! lens readout and the hints for the keys that matter from here), the
 //! grid or the empty state, and the footer (the first reported notice on
 //! the left, the cursor readout on the right).
@@ -15,7 +15,7 @@
 //! `readout`, `strip_tabs`, `strip_readout`, `strip_hints`); paint clones
 //! handles. A press takes the same door its key does: the switch control
 //! and the first nine tabs dispatch their actions, a later tab takes the
-//! view door its digit would, a lens chip sets its lookback or window as
+//! view door its chord would, a lens chip sets its lookback or window as
 //! `d` or `w` would.
 
 use std::rc::Rc;
@@ -415,67 +415,67 @@ fn render_header(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTi
     .debug_selector(move || format!("volwatch-header-{id}"))
 }
 
-/// The tabs with their digits, the shown one lit in the neutral chip
-/// tone; a press on one of the first nine dispatches its digit action, a
+/// The tabs behind their chords, the shown one lit in the neutral chip
+/// tone; a press on one of the first nine dispatches its view action, a
 /// later one takes the view door directly. At the right the lens readout,
 /// then one hint per key that matters from here.
 fn render_strip(tile: &VolwatchTile, theme: &Theme, cx: &mut Context<VolwatchTile>) -> Div {
     let id = tile.tile.0;
     let lit = chip_paint(theme, ChipTone::Neutral);
     let muted = theme.muted_foreground;
-    let views = tile
-        .strip_tabs
-        .iter()
-        .enumerate()
-        .map(|(i, (name, digit))| {
-            let active = tile.shown_name.as_ref() == Some(name);
-            let entity = cx.entity();
-            let selector = SharedString::from(format!("volwatch-view-{name}-{id}"));
-            let lit_selector = format!("volwatch-view-lit-{name}");
-            let (pointer, text) = if active {
-                (control::for_chip(theme, &lit, theme.background), lit.text)
-            } else {
-                (
-                    control::paint(theme, control::Rest::Bare, theme.background, muted),
-                    muted,
-                )
-            };
-            let action = VIEW_ACTIONS.get(i).copied();
-            let pressed = name.clone();
-            h_flex()
-                .id(ElementId::Name(selector.clone()))
-                .flex_none()
-                .gap_1()
-                .px_1()
-                .rounded(theme.radius_tokens().sm)
-                .text_color(text)
-                .when_some(lit.fill.filter(|_| active), |el, fill| el.bg(fill))
-                .debug_selector(move || selector.to_string())
-                .pointer_states(pointer)
-                .capture_any_mouse_down(move |event, window, cx| {
-                    if event.button == MouseButton::Left {
-                        entity.update(cx, |t, cx| match action {
-                            Some(action) => dispatch(t, action, window, cx),
-                            None => {
-                                t.user_acted(cx);
-                                let _ = t.set_view_by_name(&pressed, cx);
-                            }
-                        });
-                    }
-                })
-                .when_some(*digit, |el, digit| {
-                    el.child(
-                        div()
-                            .font_family(fonts::MONO)
-                            .child(SharedString::new_static(digit)),
-                    )
-                })
-                .child(
+    let views = tile.strip_tabs.iter().enumerate().map(|(i, (name, keys))| {
+        let active = tile.shown_name.as_ref() == Some(name);
+        let entity = cx.entity();
+        let selector = SharedString::from(format!("volwatch-view-{name}-{id}"));
+        let lit_selector = format!("volwatch-view-lit-{name}");
+        let (pointer, text) = if active {
+            (control::for_chip(theme, &lit, theme.background), lit.text)
+        } else {
+            (
+                control::paint(theme, control::Rest::Bare, theme.background, muted),
+                muted,
+            )
+        };
+        let action = VIEW_ACTIONS.get(i).copied();
+        let pressed = name.clone();
+        h_flex()
+            .id(ElementId::Name(selector.clone()))
+            .flex_none()
+            .gap_1()
+            .px_1()
+            .rounded(theme.radius_tokens().sm)
+            .text_color(text)
+            .when_some(lit.fill.filter(|_| active), |el, fill| el.bg(fill))
+            .debug_selector(move || selector.to_string())
+            .pointer_states(pointer)
+            .capture_any_mouse_down(move |event, window, cx| {
+                if event.button == MouseButton::Left {
+                    entity.update(cx, |t, cx| match action {
+                        Some(action) => dispatch(t, action, window, cx),
+                        None => {
+                            t.user_acted(cx);
+                            let _ = t.set_view_by_name(&pressed, cx);
+                        }
+                    });
+                }
+            })
+            // The tab's chord as Kbd chips, the one door a key reaches
+            // the screen through; a tab past the ninth has none.
+            .when(!keys.is_empty(), |el| {
+                let key_selector = format!("volwatch-view-key-{name}-{id}");
+                el.child(
                     div()
-                        .when(active, |el| el.debug_selector(move || lit_selector.clone()))
-                        .child(name.clone()),
+                        .flex_none()
+                        .debug_selector(move || key_selector.clone())
+                        .child(kbd::binding(keys)),
                 )
-        });
+            })
+            .child(
+                div()
+                    .when(active, |el| el.debug_selector(move || lit_selector.clone()))
+                    .child(name.clone()),
+            )
+    });
     let hints = tile.strip_hints.iter().map(|(action, keys, label)| {
         let suffix = action.strip_prefix("volwatch::").unwrap_or(action);
         div()

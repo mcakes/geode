@@ -68,7 +68,7 @@ use crate::core::views::{
     Ask, Column, ColumnKind, KIND, REALIZED, SURFACE, VARSWAP, columns, order_tenors,
 };
 
-/// The digit actions, parallel to the first nine tabs.
+/// The `g N` view actions, parallel to the first nine tabs.
 const VIEW_ACTIONS: [&str; 9] = [
     "volwatch::view_1",
     "volwatch::view_2",
@@ -80,9 +80,6 @@ const VIEW_ACTIONS: [&str; 9] = [
     "volwatch::view_8",
     "volwatch::view_9",
 ];
-/// The tab digits as static text, parallel to `VIEW_ACTIONS`; a tenth
-/// tab paints without one.
-const DIGITS: [&str; 9] = ["1", "2", "3", "4", "5", "6", "7", "8", "9"];
 const VIEW_NEXT_ACTION: &str = "volwatch::view_next";
 const VIEW_PREV_ACTION: &str = "volwatch::view_prev";
 const LOOKBACK_ACTION: &str = "volwatch::lookback";
@@ -116,16 +113,6 @@ enum Fold {
     OpenAll,
     CloseAll,
 }
-
-/// The tile's motion actions and the shared grid motions they name.
-const MOTIONS: [(&str, &str); 6] = [
-    ("volwatch::down", motion::DOWN),
-    ("volwatch::up", motion::UP),
-    ("volwatch::left", motion::LEFT),
-    ("volwatch::right", motion::RIGHT),
-    ("volwatch::top", motion::TOP),
-    ("volwatch::bottom", motion::BOTTOM),
-];
 
 /// The grid's empty states: no members, and a `/` keeping none.
 const NO_MEMBERS: &str = "no members";
@@ -253,10 +240,11 @@ pub struct VolwatchTile {
     /// time for the stale wake-ups.
     pub(crate) times: Vec<TimeRun>,
     times_at: Vec<Option<DateTime<Utc>>>,
-    /// The strip's tabs (name, digit for the first nine) and the shown
-    /// one's name, prepared with the columns: paint clones nothing but
-    /// handles.
-    strip_tabs: Vec<(SharedString, Option<&'static str>)>,
+    /// The strip's tabs (name, the live chord of its `view_N` action for
+    /// the first nine; empty past them or unbound) and the shown one's
+    /// name, prepared with the columns and re-resolved with the hints
+    /// when the chords change: paint clones nothing but handles.
+    pub(crate) strip_tabs: Vec<(SharedString, Vec<Keystroke>)>,
     shown_name: Option<SharedString>,
     /// The strip's lens readout (`moves · Δ 1d`), prepared with the hints.
     strip_readout: SharedString,
@@ -593,17 +581,25 @@ impl VolwatchTile {
         self.strip_tabs = self
             .tabs()
             .into_iter()
-            .zip(DIGITS.iter().map(Some).chain(std::iter::repeat(None)))
-            .map(|(name, digit)| (SharedString::from(name), digit.copied()))
+            .map(|name| (SharedString::from(name), Vec::new()))
             .collect();
         self.rebuild_strip_hints();
     }
 
-    /// The strip's readout and hints: the lens flip, then under moves the
-    /// lookback, under rich/cheap the metric and the window, then in a
-    /// single view the swap, then the step. A label names what the key
-    /// does from here (`rich/cheap`, `percentile`, `show level`).
+    /// The strip's tab chords, readout and hints. Each of the first nine
+    /// tabs carries the live chord of its `view_N` action (`g 1`); a
+    /// tenth tab, or an unbound one, carries none. The hints: the lens
+    /// flip, then under moves the lookback, under rich/cheap the metric
+    /// and the window, then in a single view the swap, then the step. A
+    /// label names what the key does from here (`rich/cheap`,
+    /// `percentile`, `show level`).
     fn rebuild_strip_hints(&mut self) {
+        for (i, (_, keys)) in self.strip_tabs.iter_mut().enumerate() {
+            *keys = VIEW_ACTIONS
+                .get(i)
+                .and_then(|a| tips::chord_for(&self.chords, a))
+                .unwrap_or_default();
+        }
         let single = self.cells == Cells::Single;
         let l = self.state.lens;
         self.strip_readout = SharedString::from(l.readout(single));
@@ -997,15 +993,19 @@ impl VolwatchTile {
         }
     }
 
-    /// `volwatch` with its mode. No `counts` flag: the digits pick tabs.
-    /// `tilelist` while a menu is up, so the shell's `j`/`k` step its rows.
+    /// `volwatch` with its mode, `grid` (the flag the shell's shared
+    /// motion bindings are written under: without it no motion key
+    /// reaches the tile) and `counts`, so a bare digit multiplies the
+    /// motion that follows; the tabs sit on `g N`. `tilelist` while a
+    /// menu is up, so the shell's `j`/`k` step its rows.
     pub(crate) fn key_context(&self) -> KeyContext {
-        let ctx = KeyContext::new(KIND).pair("mode", self.mode());
+        let ctx = KeyContext::new(KIND).grid().pair("mode", self.mode());
         if self.menu.is_some() {
             ctx.tilelist()
         } else {
             ctx
         }
+        .counts()
     }
 
     /// `true` for the actions this tile carries out.
@@ -1023,18 +1023,18 @@ impl VolwatchTile {
             self.user_acted(cx);
         }
         if let Some(i) = VIEW_ACTIONS.iter().position(|a| *a == id) {
-            // A digit past the last tab does nothing.
+            // A chord past the last tab does nothing.
             if let Some(name) = self.tabs().get(i).cloned() {
                 let _ = self.set_view_by_name(&name, cx);
             }
             return true;
         }
+        // The shell's shared motions, with their count; a menu takes the
+        // menu steps below instead.
         if self.menu.is_none()
-            && let Some((_, shared)) = MOTIONS.iter().find(|(a, _)| *a == id)
+            && let Some(m) = motion::parse(action, count)
         {
-            if let Some(m) = motion::parse(&ActionId((*shared).to_string()), count) {
-                self.motion(m, cx);
-            }
+            self.motion(m, cx);
             return true;
         }
         match id {
@@ -1387,7 +1387,7 @@ impl VolwatchTile {
         }
     }
 
-    /// Show the tab `name` (a digit, the strip, the menu, `:view`): its
+    /// Show the tab `name` (`g N`, the strip, the menu, `:view`): its
     /// columns are laid out and the board asked again only when its ask
     /// is not inside the last one. A name the document lacks refuses.
     fn set_view_by_name(&mut self, name: &str, cx: &mut Context<Self>) -> Result<(), String> {

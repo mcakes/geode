@@ -19,12 +19,12 @@ use crate::tile::table::sized_key;
 fn every_key_reaches_its_action(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
     for (keys, action) in [
-        ("j", "volwatch::down"),
-        ("k", "volwatch::up"),
-        ("l", "volwatch::right"),
-        ("h", "volwatch::left"),
-        ("2", "volwatch::view_2"),
-        ("4", "volwatch::view_4"),
+        ("j", "motion::down"),
+        ("k", "motion::up"),
+        ("l", "motion::right"),
+        ("h", "motion::left"),
+        ("g 2", "volwatch::view_2"),
+        ("g 4", "volwatch::view_4"),
         ("tab", "volwatch::view_next"),
         ("shift-tab", "volwatch::view_prev"),
         ("r", "volwatch::lens"),
@@ -87,25 +87,107 @@ fn digits_and_tab_walk_the_configured_tabs_and_requery_only_when_the_ask_grows(
 ) {
     let (h, mut vcx) = landed(cx);
     assert_eq!(h.view(&vcx), "vol");
-    h.press(&mut vcx, "2"); // skew reads other measures
+    h.press(&mut vcx, "g 2"); // skew reads other measures
     assert_eq!(h.view(&vcx), "skew");
     assert_eq!(Harness::boards(&h.requests()).len(), 1);
     let asked = h.asked_of(&vcx);
     let tag = h.tag_of(&vcx);
     h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
-    h.press(&mut vcx, "1"); // the vol spark and vega are not in skew's ask → requery
+    h.press(&mut vcx, "g 1"); // the vol spark and vega are not in skew's ask → requery
     assert_eq!(Harness::boards(&h.requests()).len(), 1);
     h.press(&mut vcx, "shift-tab");
     assert_eq!(h.view(&vcx), "surface", "wraps backwards");
     h.press(&mut vcx, "tab");
     assert_eq!(h.view(&vcx), "vol");
-    h.press(&mut vcx, "9");
+    h.press(&mut vcx, "g 9");
     assert_eq!(
         h.view(&vcx),
         "vol",
         "a digit past the last tab does nothing"
     );
     assert!(h.notices(&vcx).is_empty());
+}
+
+/// A bare digit is a count for the motion that follows, never a tab: the
+/// tabs moved to `g N` so the shell's count grammar could reach the grid.
+#[gpui::test]
+fn a_bare_digit_is_a_count_and_g_digit_picks_the_tab(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "2 j");
+    assert_eq!(h.view(&vcx), "vol", "a bare 2 switches no tab");
+    assert_eq!(h.cursor(&vcx), Some("NEW".into()), "2 j moves two rows");
+    assert!(h.dispatched(&vcx).iter().all(|a| a != "volwatch::view_2"));
+    h.press(&mut vcx, "g 2");
+    assert_eq!(h.view(&vcx), "skew");
+}
+
+/// Twelve rows: the four the surface holds first, the eight it lacks at
+/// the foot, so a page motion has room to move and clamp.
+fn twelve_rows(cx: &mut gpui::TestAppContext) -> (Harness, gpui::VisualTestContext) {
+    let names = [
+        "DAX", "SX5E", "UKX", "SPX", "A5", "A6", "A7", "A8", "A9", "A10", "A11", "A12",
+    ];
+    let (h, mut vcx) = open_with(
+        cx,
+        list_of(names),
+        Some(restored_on("vol")),
+        VolwatchSettings::default(),
+    );
+    let tag = Harness::boards(&h.requests())[0].tag;
+    let asked = h.asked_of(&vcx);
+    h.answer_board(&mut vcx, tag, board_for(&names, &asked));
+    h.requests();
+    assert_eq!(h.shown(&vcx).len(), 12);
+    (h, vcx)
+}
+
+/// The shared grid rules, as the keymaps guide states them: a count
+/// multiplies a step and clamps, the pages are 5 and 10 rows, a counted
+/// `shift+g` is that 1-based row, `^`/`$` reach the first and last column.
+#[gpui::test]
+fn a_count_multiplies_a_row_motion_and_switches_no_tab(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = twelve_rows(cx);
+    let shown = h.shown(&vcx);
+    let row = |h: &Harness, vcx: &gpui::VisualTestContext| {
+        let name = h.cursor(vcx).expect("a cursor");
+        shown.iter().position(|n| *n == name).expect("a shown row")
+    };
+    h.press(&mut vcx, "3 j");
+    assert_eq!(row(&h, &vcx), 3, "3 j moves three rows");
+    assert_eq!(h.view(&vcx), "vol", "the 3 is a count, not a tab");
+    h.press(&mut vcx, "ctrl-d");
+    assert_eq!(row(&h, &vcx), 8, "ctrl+d is five rows");
+    h.press(&mut vcx, "ctrl-f");
+    assert_eq!(row(&h, &vcx), 11, "ctrl+f is ten rows, clamped to the last");
+    h.press(&mut vcx, "1 j");
+    assert_eq!(row(&h, &vcx), 11, "a counted step clamps rather than wraps");
+    h.press(&mut vcx, "j");
+    assert_eq!(row(&h, &vcx), 0, "a bare step wraps");
+    h.press(&mut vcx, "5 shift-g");
+    assert_eq!(row(&h, &vcx), 4, "5 shift+g is row 5");
+    h.press(&mut vcx, "ctrl-u");
+    assert_eq!(
+        row(&h, &vcx),
+        0,
+        "ctrl+u is five rows, clamped to the first"
+    );
+    h.press(&mut vcx, "shift-g");
+    assert_eq!(row(&h, &vcx), 11);
+    h.press(&mut vcx, "g g");
+    assert_eq!(row(&h, &vcx), 0);
+    h.press(&mut vcx, "2 ctrl-d");
+    assert_eq!(row(&h, &vcx), 10, "a count multiplies a page");
+    let last = h.tile.read_with(&vcx, |t, _| t.columns.len() - 1);
+    h.press(&mut vcx, "$");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor_col), last);
+    h.press(&mut vcx, "^");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.cursor_col),
+        1,
+        "the first column after Underlying"
+    );
+    h.press(&mut vcx, "3 l");
+    assert_eq!(h.tile.read_with(&vcx, |t, _| t.cursor_col), 4);
 }
 
 #[gpui::test]
@@ -872,18 +954,18 @@ fn autosize_sizes_only_the_current_view_and_a_view_switch_keeps_it(cx: &mut gpui
     let sized = widths(&h, &vcx);
     assert!(sized.keys().all(|k| k.starts_with("vol:")), "{sized:?}");
     let w = sized[&sized_key("vol", "underlying")];
-    h.press(&mut vcx, "2");
+    h.press(&mut vcx, "g 2");
     assert_eq!(h.view(&vcx), "skew");
     // skew's underlying is unfitted: the prepared width, not vol's.
     assert_ne!(h.column_width(&vcx, "underlying"), w);
-    h.press(&mut vcx, "1");
+    h.press(&mut vcx, "g 1");
     assert_eq!(
         h.column_width(&vcx, "underlying"),
         w,
         "the fit survives a round trip"
     );
     // Reset clears only this view.
-    h.press(&mut vcx, "2");
+    h.press(&mut vcx, "g 2");
     assert_eq!(
         vcx.update(|window, cx| tile.autosize_columns(false, window, cx)),
         Ok(())
@@ -940,7 +1022,7 @@ fn a_single_view_paints_the_level_over_a_tint_and_m_swaps_the_number(
     cx: &mut gpui::TestAppContext,
 ) {
     let (h, mut vcx) = landed(cx);
-    h.press(&mut vcx, "4");
+    h.press(&mut vcx, "g 4");
     let asked = h.asked_of(&vcx);
     let tag = h.tag_of(&vcx);
     h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
@@ -983,7 +1065,7 @@ fn a_single_view_paints_the_level_over_a_tint_and_m_swaps_the_number(
 #[gpui::test]
 fn a_single_column_keeps_one_right_edge_with_and_without_a_tint(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
-    h.press(&mut vcx, "4");
+    h.press(&mut vcx, "g 4");
     let asked = h.asked_of(&vcx);
     let tag = h.tag_of(&vcx);
     let mut b = board_for(&["DAX", "SX5E", "NEW"], &asked);

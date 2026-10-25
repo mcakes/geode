@@ -109,33 +109,42 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("volwatch::visual_rows", "Vol: Select rows"),
     ("volwatch::escape", "Vol: Escape"),
     ("volwatch::commit", "Vol: Commit"),
-    ("volwatch::up", "Vol: Up"),
-    ("volwatch::down", "Vol: Down"),
-    ("volwatch::left", "Vol: Left"),
-    ("volwatch::right", "Vol: Right"),
-    ("volwatch::top", "Vol: Top"),
-    ("volwatch::bottom", "Vol: Bottom"),
 ];
 
-/// Bindings scoped to the factory's `volwatch` context. The context
-/// publishes no `counts` flag: the digits pick the first nine tabs. `g`
-/// alone is unbound, so `g g` and `g w` stay reachable. `Space` toggles
-/// the cursor's group row and `z` is the fold chord prefix, as in the
-/// blotter. While a menu is up the tile publishes `tilelist`, so the
+/// The tile's retired motion ids, each a rename of the shell's shared
+/// `motion::*` id, so a user override written against `volwatch::down`
+/// still binds (in its own context, with the warning naming both ids).
+pub const RENAMED_ACTIONS: &[(&str, &str)] = &[
+    ("volwatch::down", "motion::down"),
+    ("volwatch::up", "motion::up"),
+    ("volwatch::left", "motion::left"),
+    ("volwatch::right", "motion::right"),
+    ("volwatch::top", "motion::top"),
+    ("volwatch::bottom", "motion::bottom"),
+];
+
+/// Bindings scoped to the factory's `volwatch` context. The fragment
+/// binds no motion: `j`/`k`/`h`/`l`, the arrows, `g g`/`shift+g`, the
+/// pages and `^`/`$` are the shell's shared `motion::*` bindings under
+/// `grid`, which the tile publishes with `counts`, so a bare digit is a
+/// count and the first nine tabs sit on `g 1` … `g 9`. `g` alone is
+/// unbound, so `g g`, `g w` and the tab chords stay reachable. `Space`
+/// toggles the cursor's group row and `z` is the fold chord prefix, as in
+/// the blotter. While a menu is up the tile publishes `tilelist`, so the
 /// shell's shared `j`/`k` step its rows.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "volwatch && mode == normal"
 [bindings.keys]
-"1" = "volwatch::view_1"
-"2" = "volwatch::view_2"
-"3" = "volwatch::view_3"
-"4" = "volwatch::view_4"
-"5" = "volwatch::view_5"
-"6" = "volwatch::view_6"
-"7" = "volwatch::view_7"
-"8" = "volwatch::view_8"
-"9" = "volwatch::view_9"
+"g 1" = "volwatch::view_1"
+"g 2" = "volwatch::view_2"
+"g 3" = "volwatch::view_3"
+"g 4" = "volwatch::view_4"
+"g 5" = "volwatch::view_5"
+"g 6" = "volwatch::view_6"
+"g 7" = "volwatch::view_7"
+"g 8" = "volwatch::view_8"
+"g 9" = "volwatch::view_9"
 "tab" = "volwatch::view_next"
 "shift+tab" = "volwatch::view_prev"
 "r" = "volwatch::lens"
@@ -162,23 +171,11 @@ context = "volwatch && mode == normal"
 "z shift+m" = "volwatch::collapse_all"
 "v" = "volwatch::visual_rows"
 "shift+v" = "volwatch::visual_rows"
-"j" = "volwatch::down"
-"k" = "volwatch::up"
-"h" = "volwatch::left"
-"l" = "volwatch::right"
-"down" = "volwatch::down"
-"up" = "volwatch::up"
-"left" = "volwatch::left"
-"right" = "volwatch::right"
-"g g" = "volwatch::top"
-"shift+g" = "volwatch::bottom"
 "escape" = "volwatch::escape"
 
 [[bindings]]
 context = "volwatch && mode == visual"
 [bindings.keys]
-"j" = "volwatch::down"
-"k" = "volwatch::up"
 "y" = "volwatch::yank"
 "escape" = "volwatch::escape"
 "v" = "volwatch::escape"
@@ -394,6 +391,9 @@ impl ModuleFactory for VolwatchFactory {
                 category: TITLE.to_string(),
             });
         }
+        for (old, new) in RENAMED_ACTIONS {
+            let _ = registry.register_rename(old, new);
+        }
     }
 
     fn default_keymap(&self) -> Option<&'static str> {
@@ -459,10 +459,37 @@ mod tests {
                     ids.contains(&action) || action == "config::vol_views",
                     "{key} = {action} is not registered"
                 );
+                // The motions are the shell's, shipped once under `grid`:
+                // a motion key here would shadow the shared binding and
+                // take the count grammar with it.
+                assert!(
+                    !action.starts_with("motion::")
+                        && !RENAMED_ACTIONS.iter().any(|(old, _)| old == &action),
+                    "{key} = {action}: the fragment binds no motion"
+                );
+                assert!(
+                    !matches!(
+                        key.as_str(),
+                        "j" | "k"
+                            | "h"
+                            | "l"
+                            | "down"
+                            | "up"
+                            | "left"
+                            | "right"
+                            | "g g"
+                            | "shift+g"
+                    ),
+                    "{key} is a shared motion key"
+                );
+                assert!(
+                    key.len() != 1 || !key.chars().all(|c| c.is_ascii_digit()),
+                    "{key}: a bare digit is a count"
+                );
                 count += 1;
             }
         }
-        assert_eq!(count, 44 + 5 + 3, "normal, visual and menu");
+        assert_eq!(count, 34 + 3 + 3, "normal, visual and menu");
         let mut registry = ActionRegistry::default();
         geode_shell::defaults::register_builtin_actions(&mut registry);
         let (data, _rx) = DataHandle::for_tests();
@@ -473,6 +500,16 @@ mod tests {
             &registry,
         );
         assert!(diags.is_empty(), "{diags:?}");
+        // The retired motion ids are renames of the shell's, as every grid
+        // module's are, so an old user override still binds.
+        for (old, new) in RENAMED_ACTIONS {
+            assert_eq!(
+                registry.renamed(&ActionId((*old).to_string())),
+                Some(&ActionId((*new).to_string())),
+                "{old}"
+            );
+            assert!(!ids.contains(old), "{old} is retired, not registered");
+        }
     }
 
     #[test]

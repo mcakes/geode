@@ -220,8 +220,9 @@ The motion keys are one shared vocabulary: the shell's `motion::*` actions
 whose grid cursor takes motions publishes `grid`, and every grid motion is
 bound under the one context `grid && (mode == normal || mode == visual)`, so
 remapping a motion in the keybindings dialog changes it in every grid tile at
-once. The blotter, the market-data panel and the line pricer move on them, and
-so does the diagnostics page's cursor (rows only). The rules:
+once. The blotter, the market-data panel, the line pricer and the vol
+watchlist move on them, and so does the diagnostics page's cursor (rows
+only). The rules:
 
 - A bare `j`/`k` (`down`/`up`) wraps at the ends, except while a selection is
   live, where it clamps: wrapping past the anchor would invert the selection.
@@ -246,6 +247,8 @@ Each tile's own behaviour around the shared result:
 - Diagnostics: a bare `G` in the Log section resumes following the tail; any
   other row motion, a counted `G` included, stops following.
 - Blotter: the column motions move its column cursor.
+- Vol watchlist: the column motions move its column cursor, which never
+  rests on the pinned Underlying column (`^` lands on the first measure).
 - Timeseries has no grid cursor and never publishes `grid`, so its own `h`/`l`
   pan the view and `g`/`shift+g` jump it to the start and end.
 
@@ -3692,11 +3695,13 @@ the tile shows a member `not in surface`.
 
 **Tabs.** Tabs come from `vol_views.toml`
 ([configuration](configuration.md#vol-watchlist)): named column lists in
-document order, on `1`–`9`, `tab` and `shift+tab` stepping with wrap, and
+document order, on `g 1`–`g 9` (a bare digit is a motion count), `tab`
+and `shift+tab` stepping with wrap, and
 `:view <name>` with completion over the names (an unknown name refuses
-with `no view '<name>'`). The strip under the header names each tab with
-its digit, the shown one lit; a tenth and later tab has no digit and is
-reached by `tab`, a press, the `.` menu or `:view`. The builtin layer ships
+with `no view '<name>'`). The strip under the header names each tab
+behind its live chord as key chips, the shown one lit; a tenth and later
+tab has no chord and is reached by `tab`, a press, the `.` menu or
+`:view`. The builtin layer ships
 `vol` (ATFM at `1W 1M 3M 6M 1Y 2Y 3Y 5Y`, a 30-day ATFM 3M sparkline, book
 vega), `skew` (25Δ skew at the same tenors and the 3M 10Δ wing), `varswap`
 (strikes at the same tenors) and `surface` (the `0.05 0.25 0.5 0.75 0.95`
@@ -3722,7 +3727,7 @@ dialog on the shown tab (`Edit vol views…` in the palette,
 `config::vol_views`, opens it on the first tab when no vol tile is
 focused): the object dialog over `vol_views.toml`, described in
 [configuration dialogs](configuration-dialogs.md#the-vol-views-dialog).
-Its browse list is the tabs in document order — the order the digits pick
+Its browse list is the tabs in document order — the order `g N` picks
 — each summarised `pair · 10 columns`, with ` · default` on the opening
 tab. `shift+j` and `shift+k` move the selected tab and write the user layer
 in the new order; a move that crosses a shipped tab copies it into the
@@ -3847,8 +3852,12 @@ that view; all persist in the session under `column_widths` as
 another tab's column of the same id, whose head may be wider. Column ids
 are the measure text with dashes and a suffix (`atfm-3M-level`,
 `atfm-3M-companion`, `atfm-3M-single`, `spark-atfm-3M`, `vega`), so a
-width survives a relabel. `j k` move rows, `h l` columns, `g g`/`shift+g`
-the ends, `v`/`shift+v` start a row selection, `y` yanks the cursor cell
+width survives a relabel. The motions are the shared grid motions (the
+tile publishes `grid` with `counts`; see [motion](#motion)): `j k` move
+rows, `h l` columns, `g g`/`shift+g` the ends, `ctrl+d`/`ctrl+u` and
+`ctrl+f`/`ctrl+b` the half and full pages, `^`/`$` the first and last
+column, each times its count; the column cursor never rests on
+Underlying. `v`/`shift+v` start a row selection, `y` yanks the cursor cell
 (or the cursor column over a selection, one row per line). `/` narrows by
 name and reference, keeping order. Every column but Underlying and a
 sparkline sorts: `s` cycles the cursor column's sort ascending →
@@ -3983,7 +3992,7 @@ query that is refused, or a view that fails or lacks the column, drops the
 column with a standing warning `[volwatch] vega: <reason>` and the board
 keeps painting; the next answer restores it.
 
-**Keys.** Normal mode: `1`–`9`, `tab` and `shift+tab` tabs, `r` the lens,
+**Keys.** Normal mode: `g 1`–`g 9`, `tab` and `shift+tab` tabs, `r` the lens,
 `d` the lookback (`1d → 1w → 1m`), `q` the metric, `w` the window
 (`6M → 1Y → 2Y`), `m` the shown number in a single view, `p` paint, `s`
 sort, `enter` the band, `t` the timeseries refusal (below), `y` yank,
@@ -3991,10 +4000,11 @@ sort, `enter` the band, `t` the timeseries refusal (below), `y` yank,
 shown tab, `.` the action menu,
 `space`/`z a` toggle the cursor's group, `z o`/`z c` open and close it,
 `z shift+r`/`z shift+m` every group, `v`/`shift+v` a row selection,
-motions and `escape`. A right press on a
+the shared motions with their counts (a bare digit is a count, never a
+tab) and `escape`. A right press on a
 row moves the cursor there (unless inside a selection) and opens the
 action menu at the pointer; `⋯` opens it under the header. The menu lists
-the switcher, every tab with its digit and the shown one ticked, then the
+the switcher, every tab with its chord and the shown one ticked, then the
 lens, lookback, metric, window and swap verbs (the pointer's route to
 `r`, `d`, `q`, `w` and `m`; the swap is disabled in a pair view with the
 reason `a pair view shows both`), then paint, sort, the three fold verbs

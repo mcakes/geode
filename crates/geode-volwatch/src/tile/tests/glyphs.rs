@@ -104,7 +104,7 @@ fn an_empty_tab_paints_its_strip_and_no_grid(cx: &mut gpui::TestAppContext) {
     let asked = h.asked_of(&vcx);
     h.answer_board(&mut vcx, tag, board_for(&["DAX", "SX5E", "NEW"], &asked));
     h.requests();
-    h.press(&mut vcx, "2");
+    h.press(&mut vcx, "g 2");
     h.draw(&mut vcx);
     assert_eq!(h.view(&vcx), "blank");
     assert!(vcx.debug_bounds("volwatch-strip-7").is_some());
@@ -125,7 +125,7 @@ fn an_empty_tab_paints_its_strip_and_no_grid(cx: &mut gpui::TestAppContext) {
     assert!(h.requests().is_empty());
     assert!(h.notices(&vcx).is_empty());
     // Back on `vol` the grid returns.
-    h.press(&mut vcx, "1");
+    h.press(&mut vcx, "g 1");
     h.draw(&mut vcx);
     assert!(vcx.debug_bounds("7-DAX-underlying-text").is_some());
     assert!(h.tile.read_with(&vcx, |t, _| t.empty.is_none()));

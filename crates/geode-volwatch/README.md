@@ -21,10 +21,14 @@ measured against). Behaviour and limits are in the features guide's
   `with_dims`/`set_dims`/`dims` (the derived dimensions the grouping
   reads, pushed by the app at startup and on every dimensions reload),
   `config_object` (the shown tab as `vol_views.<name>`, so the Vol views
-  dialog opens on it), `ACTIONS` (the lens, motion and chrome verbs and
-  the five fold actions: toggle, expand, collapse, expand all, collapse
-  all) and the `DEFAULT_KEYMAP` fragment (`space` and the `z` fold chords
-  among them, and `e` bound to the shell's own `config::vol_views`).
+  dialog opens on it), `ACTIONS` (the lens and chrome verbs and the five
+  fold actions: toggle, expand, collapse, expand all, collapse all),
+  `RENAMED_ACTIONS` (the retired `volwatch::down` … `bottom`, renames of
+  the shell's `motion::*`) and the `DEFAULT_KEYMAP` fragment (the tabs on
+  `g 1` … `g 9`, `space` and the `z` fold chords among them, and `e`
+  bound to the shell's own `config::vol_views`; no motion key: the tile
+  publishes `grid` with `counts` and the shell's shared bindings reach
+  it, so a bare digit is a count).
 - `core/`: pure state, tested without gpui.
   - `views.rs`: the tabs from `VolViews` (`builtin()` resolves the shipped
     `BUILTIN_VOL_VIEWS` document: `vol`, `skew`, `varswap`, `surface`).
@@ -133,8 +137,8 @@ measured against). Behaviour and limits are in the features guide's
     column id is shared across views whose heads differ. `restored_widths`
     drops a session entry without a view prefix silently.
   - `header.rs`: the header (the switch control, the lens chips), the
-    view strip (the tabs with their digits, the lens readout and the key
-    hints), the band's slot and the footer.
+    view strip (the tabs behind their live `g N` chords as Kbd chips, the
+    lens readout and the key hints), the band's slot and the footer.
   - `band.rs`: the inspection band's paint, docked between the grid and
     the footer, at the grid's text size; the name takes the grid row's
     stale tone.

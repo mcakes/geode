@@ -34,8 +34,8 @@ pub(crate) enum MenuKind {
 pub(crate) enum Pick {
     /// Show this watchlist.
     Show(SharedString),
-    /// Show this tab, as its digit would; a tab past the ninth has no
-    /// digit and only this door.
+    /// Show this tab, as its `g N` chord would; a tab past the ninth has
+    /// no chord and only this door.
     View(SharedString),
     /// Run this action id through the tile's own door, as its key would.
     Verb(&'static str),
@@ -77,7 +77,7 @@ pub(crate) struct Notices {
 }
 
 /// A chord in the keymap's own spelling (`g w`, `shift+r`).
-fn spell(keystrokes: &[Keystroke]) -> String {
+pub(crate) fn spell(keystrokes: &[Keystroke]) -> String {
     keystrokes
         .iter()
         .map(|k| {
