@@ -29,8 +29,8 @@ use gpui::SharedString;
 
 use super::grouping::{GroupCell, GroupInfo};
 use super::lens::{
-    Lens, LensState, Metric, PCTL_MIN_COUNT, RANK_HEAD, Shown, Window, Z_CEILING, companion,
-    pctl_side, z_score,
+    Lens, LensState, Metric, PCTL_MIN_COUNT, Shown, Window, Z_CEILING, companion, pctl_side,
+    z_score,
 };
 use super::views::{
     Ask, Column, ColumnKind, REALIZED, SURFACE, TITLE, VARSWAP, family_label, sortable,
@@ -359,13 +359,13 @@ fn shows_rank(lens: &LensState) -> bool {
     lens.lens == Lens::Rich && lens.metric == Metric::Pctl
 }
 
-/// `column` asks for a slider where the lens shows a Δ or a z, so the
-/// cell shows a chip: the readout says why. The column names the
-/// companion it was built to show (`Column::companion_head`), so the
-/// readout needs no lens of its own.
-fn slider_wants_pctl(column: &Column) -> bool {
-    companion_glyph(&column.kind) == CompanionGlyph::Slider
-        && column.companion_head().is_some_and(|h| h != RANK_HEAD)
+/// `kind` asks for a slider where `lens` shows a Δ or a z, so a chip
+/// stands in: the readout says why. A single column with its level
+/// shown asks for no slider, so it gets no note.
+fn slider_wants_pctl(kind: &ColumnKind, lens: &LensState) -> bool {
+    companion_glyph(kind) == CompanionGlyph::Slider
+        && shows_companion(kind, lens)
+        && !shows_rank(lens)
 }
 
 /// The number a cell shows, before formatting; `None` for a blank and for
@@ -874,9 +874,16 @@ fn window_word(asked: &Ask) -> &'static str {
 /// mean +0.5 · pctl 1Y mean 70`. A slider column whose lens shows a Δ or
 /// a z ends ` · slider needs the percentile metric`: the cell shows a
 /// chip, and the readout says why.
-pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock: &Clock) -> String {
+pub fn readout(
+    row: &Row,
+    column: &Column,
+    asked: &Ask,
+    notes: &[String],
+    clock: &Clock,
+    lens: &LensState,
+) -> String {
     let mut parts = readout_parts(row, column, asked, notes, clock);
-    if row.present && slider_wants_pctl(column) {
+    if row.present && slider_wants_pctl(&column.kind, lens) {
         parts.push(SLIDER_NOTE.into());
     }
     parts.join(" \u{b7} ")
@@ -1987,6 +1994,7 @@ mod tests {
                 &asked,
                 &[],
                 &clock_utc(),
+                &LensState::default(),
             ),
             "SX5E · ATFM 3M 15.0 · Δ1d — · z 1Y — (12 of 60) · pctl 1Y 50 of 12 · mean 16.9 · sd 1.9"
         );
@@ -2316,6 +2324,7 @@ mod tests {
                 &ask(&vol, &lens, &tenors(), false),
                 &[],
                 &clock_utc(),
+                &lens,
             ),
             "SX5E · vega k -312"
         );
@@ -2331,12 +2340,26 @@ mod tests {
             &no_reference,
             None,
         );
-        let text = readout(&rows[0], &col("atfm-3M-level"), &asked, &[], &clock_utc());
+        let text = readout(
+            &rows[0],
+            &col("atfm-3M-level"),
+            &asked,
+            &[],
+            &clock_utc(),
+            &LensState::default(),
+        );
         assert_eq!(
             text, "SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · pctl 1Y 91 of 251",
             "no stats, no z and no mean"
         );
-        let text = readout(&rows[1], &col("atfm-3M-level"), &asked, &[], &clock_utc());
+        let text = readout(
+            &rows[1],
+            &col("atfm-3M-level"),
+            &asked,
+            &[],
+            &clock_utc(),
+            &LensState::default(),
+        );
         assert_eq!(text, "NEW · not in surface");
     }
 
@@ -2378,7 +2401,7 @@ mod tests {
             .find(|c| c.id == "atfm-3M-companion")
             .unwrap();
         assert_eq!(
-            readout(&row, &col, &asked, &[], &clock_utc()),
+            readout(&row, &col, &asked, &[], &clock_utc(), &lens),
             "SX5E \u{b7} ATFM 3M 19.6 \u{b7} \u{394}1d +0.8 from 18.8 on 2026-10-22 \u{b7} z 1Y +1.4 \u{b7} pctl 1Y 91 of 251 \u{b7} mean 16.9 \u{b7} sd 1.9"
         );
     }
@@ -2400,7 +2423,14 @@ mod tests {
         let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, None);
         for id in ["atfm-3M-level", "atfm-3M-companion"] {
             assert_eq!(
-                readout(&rows[0], &col(id), &asked, &board.notes, &clock_utc()),
+                readout(
+                    &rows[0],
+                    &col(id),
+                    &asked,
+                    &board.notes,
+                    &clock_utc(),
+                    &LensState::default()
+                ),
                 "SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01",
                 "{id}"
             );
@@ -2412,6 +2442,7 @@ mod tests {
                 &asked,
                 &[],
                 &clock_utc(),
+                &LensState::default(),
             ),
             "SX5E · ATFM 3M 15.9 · Δ1d —",
             "no note, no reason"
@@ -2894,6 +2925,7 @@ mod tests {
                 &asked,
                 &[],
                 &Clock::utc(),
+                &lens,
             );
             assert_eq!(
                 text,
@@ -2905,13 +2937,14 @@ mod tests {
                 &asked,
                 &[],
                 &Clock::utc(),
+                &lens,
             );
             assert!(
                 unmapped
                     .starts_with("\u{2014} \u{b7} 1 members \u{b7} ATFM 1M mean \u{2014} (0 of 1)"),
                 "{unmapped}"
             );
-            let name = readout(&rows[0], &cols[0], &asked, &[], &Clock::utc());
+            let name = readout(&rows[0], &cols[0], &asked, &[], &Clock::utc(), &lens);
             assert_eq!(name, "Core \u{b7} 2 members");
         }
 
@@ -3263,7 +3296,7 @@ mod tests {
             };
             assert!((s.position - 0.91).abs() < 1e-6 && s.warn);
             assert_eq!(p.rows[0].cells[2].text.as_ref(), "91");
-            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc());
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc(), &pctl());
             assert!(!text.contains("slider"), "{text}");
             let cols = columns(&view, &z(), false);
             assert_eq!(cols[2].head, "z", "the head follows the lens");
@@ -3278,7 +3311,7 @@ mod tests {
                 Some(0.91),
                 "the sort value is the z"
             );
-            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc());
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc(), &z());
             assert!(
                 text.ends_with(" \u{b7} slider needs the percentile metric"),
                 "{text}"
@@ -3289,14 +3322,14 @@ mod tests {
             assert_eq!(cols[2].head, "\u{394}");
             let p = prepare(&inputs(&rows, &cols, &asked, moves));
             assert!(matches!(p.rows[0].cells[2].glyph, Glyph::Chip(_)));
-            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc());
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc(), &moves);
             assert!(
                 text.ends_with(" \u{b7} slider needs the percentile metric"),
                 "{text}"
             );
             // A chip companion's readout carries no note under any lens.
             let chip = columns(&pair_view(), &z(), false);
-            let text = readout(&rows[0], &chip[2], &asked, &[], &clock_utc());
+            let text = readout(&rows[0], &chip[2], &asked, &[], &clock_utc(), &z());
             assert!(!text.contains("slider"), "{text}");
         }
 
@@ -3313,27 +3346,27 @@ mod tests {
                 ..z()
             };
             let cols = columns(&view, &shown, false);
-            assert_eq!(cols[1].companion_head(), Some("z"));
+            assert!(cols[1].group.as_deref().unwrap().ends_with(" \u{b7} z"));
             let p = prepare(&inputs(&rows, &cols, &asked, shown));
             assert!(matches!(p.rows[0].cells[1].glyph, Glyph::Chip(_)));
-            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc());
+            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc(), &shown);
             assert!(
                 text.ends_with(" \u{b7} slider needs the percentile metric"),
                 "{text}"
             );
             let cols = columns(&view, &z(), false);
-            assert_eq!(cols[1].companion_head(), None);
-            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc());
+            assert!(!cols[1].group.as_deref().unwrap().ends_with(" \u{b7} z"));
+            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc(), &z());
             assert!(!text.contains("slider"), "{text}");
             let shown = LensState {
                 shown: Shown::Companion,
                 ..pctl()
             };
             let cols = columns(&view, &shown, false);
-            assert_eq!(cols[1].companion_head(), Some("pctl"));
+            assert!(cols[1].group.as_deref().unwrap().ends_with(" \u{b7} pctl"));
             let p = prepare(&inputs(&rows, &cols, &asked, shown));
             assert!(matches!(p.rows[0].cells[1].glyph, Glyph::Slider(Some(_))));
-            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc());
+            let text = readout(&rows[0], &cols[1], &asked, &[], &clock_utc(), &shown);
             assert!(!text.contains("slider"), "{text}");
         }
 
