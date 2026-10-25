@@ -63,6 +63,8 @@ fn a_view_naming_a_table_dataset_lists_it_in_the_request(cx: &mut gpui::TestAppC
                 measure: geode_core::volviews::parse_measure("ssr 3M").unwrap(),
                 label: None,
                 group: None,
+                level: None,
+                companion: None,
             }],
         }],
         default: None,

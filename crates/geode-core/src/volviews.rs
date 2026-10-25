@@ -3,7 +3,8 @@
 //! keeps every column whose text reads; resolution (`resolve`) turns an
 //! open-form measure (`ssr 3M`) into a board `Measure::Table` against the
 //! history datasets the schema declares, and drops what it cannot. A view
-//! with no valid column is skipped, never shown empty.
+//! with no valid column is kept empty, with a warning: a table with only
+//! `cells` is a legal empty tab the dialog fills later.
 
 use std::time::Duration;
 
@@ -22,6 +23,74 @@ pub enum Cells {
     Single,
 }
 
+/// How a measure column's level cell paints. Absent in the file means the
+/// view's default: plain in a pair view, the companion's sign tint in a
+/// single view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LevelGlyph {
+    Plain,
+    Heat,
+    Tint,
+}
+
+impl LevelGlyph {
+    pub fn key(self) -> &'static str {
+        match self {
+            LevelGlyph::Plain => "plain",
+            LevelGlyph::Heat => "heat",
+            LevelGlyph::Tint => "tint",
+        }
+    }
+
+    /// Exact lower-case keys only: the file is written by the dialog or by
+    /// hand, and a near miss is reported, not guessed.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "plain" => Some(LevelGlyph::Plain),
+            "heat" => Some(LevelGlyph::Heat),
+            "tint" => Some(LevelGlyph::Tint),
+            _ => None,
+        }
+    }
+}
+
+/// How a measure column's companion cell paints (the pair's companion
+/// column, or a single column after `m`). Absent means a chip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompanionGlyph {
+    Chip,
+    Bar,
+    Slider,
+}
+
+impl CompanionGlyph {
+    pub fn key(self) -> &'static str {
+        match self {
+            CompanionGlyph::Chip => "chip",
+            CompanionGlyph::Bar => "bar",
+            CompanionGlyph::Slider => "slider",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "chip" => Some(CompanionGlyph::Chip),
+            "bar" => Some(CompanionGlyph::Bar),
+            "slider" => Some(CompanionGlyph::Slider),
+            _ => None,
+        }
+    }
+}
+
+/// The tenors a picker offers until a surface lists its own; the tile's
+/// `order_tenors` falls back to these. Mirrors `demo_hanweck::TENORS`.
+pub const ALL_TENORS: [&str; 10] = ["1W", "1M", "2M", "3M", "6M", "1Y", "18M", "2Y", "3Y", "5Y"];
+/// The call deltas a surface-point picker offers.
+pub const DELTAS: [f64; 5] = [0.10, 0.25, 0.50, 0.75, 0.90];
+/// The sparkline spans a picker offers; the reader accepts any duration.
+pub const SPANS: [&str; 4] = ["7d", "30d", "90d", "1y"];
+pub const SPARK_30D: Duration = Duration::from_secs(30 * 86_400);
+
 /// A measure as the document spells it, before the schema is consulted.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MeasureText {
@@ -38,6 +107,8 @@ pub enum VolColumnSpec {
         measure: MeasureText,
         label: Option<String>,
         group: Option<String>,
+        level: Option<LevelGlyph>,
+        companion: Option<CompanionGlyph>,
     },
     Spark {
         measure: MeasureText,
@@ -73,6 +144,8 @@ pub enum VolColumn {
         measure: Measure,
         label: Option<String>,
         group: Option<String>,
+        level: Option<LevelGlyph>,
+        companion: Option<CompanionGlyph>,
     },
     Spark {
         measure: Measure,
@@ -272,19 +345,50 @@ fn read_column(
                 diags.push(column("measure is a string".into()));
                 return None;
             };
-            match parse_measure(&measure) {
-                Ok(measure) => Some(VolColumnSpec::Measure {
-                    measure,
-                    label: text("label").filter(|s| !s.trim().is_empty()),
-                    group: text("group").filter(|s| !s.trim().is_empty()),
-                }),
+            let measure = match parse_measure(&measure) {
+                Ok(m) => m,
                 Err(e) => {
                     diags.push(column(e));
-                    None
+                    return None;
                 }
-            }
+            };
+            let level = match t.get("level") {
+                None => None,
+                Some(v) => match v.as_str().and_then(LevelGlyph::parse) {
+                    Some(g) => Some(g),
+                    None => {
+                        diags.push(column(format!("level = {v} is not plain, heat or tint")));
+                        return None;
+                    }
+                },
+            };
+            let companion = match t.get("companion") {
+                None => None,
+                Some(v) => match v.as_str().and_then(CompanionGlyph::parse) {
+                    Some(g) => Some(g),
+                    None => {
+                        diags.push(column(format!(
+                            "companion = {v} is not chip, bar or slider"
+                        )));
+                        return None;
+                    }
+                },
+            };
+            Some(VolColumnSpec::Measure {
+                measure,
+                label: text("label").filter(|s| !s.trim().is_empty()),
+                group: text("group").filter(|s| !s.trim().is_empty()),
+                level,
+                companion,
+            })
         }
         (false, true, false) => {
+            for key in ["level", "companion"] {
+                if set(key) {
+                    diags.push(column(format!("{key} applies to a measure column")));
+                    return None;
+                }
+            }
             let Some(measure) = text("spark") else {
                 diags.push(column("spark is a string".into()));
                 return None;
@@ -308,13 +412,21 @@ fn read_column(
             };
             Some(VolColumnSpec::Spark { measure, span })
         }
-        (false, false, true) => match text("kind").as_deref() {
-            Some("vega") => Some(VolColumnSpec::Vega),
-            _ => {
-                diags.push(column("kind is \"vega\"".into()));
-                None
+        (false, false, true) => {
+            for key in ["level", "companion"] {
+                if set(key) {
+                    diags.push(column(format!("{key} applies to a measure column")));
+                    return None;
+                }
             }
-        },
+            match text("kind").as_deref() {
+                Some("vega") => Some(VolColumnSpec::Vega),
+                _ => {
+                    diags.push(column("kind is \"vega\"".into()));
+                    None
+                }
+            }
+        }
         _ => {
             diags.push(column(
                 "a column is one of measure, spark or kind = \"vega\"".into(),
@@ -327,7 +439,10 @@ fn read_column(
 /// Views in document order, each a table with a `columns` array; a
 /// top-level string `default` names the opening view. Problems warn at
 /// their key; a column that does not read drops alone; a view with no
-/// valid column is skipped.
+/// valid column is kept empty, with a warning. A second view whose name
+/// matches an earlier one case-insensitively is skipped: the tile's
+/// `view <name>` lookup and the dialog's name prompt would otherwise hold
+/// two tabs a reader cannot tell apart.
 pub fn from_doc(doc: &MergedDoc) -> (VolViewsDoc, Vec<Diagnostic>) {
     let mut out = VolViewsDoc::default();
     let mut diags = Vec::new();
@@ -366,26 +481,25 @@ pub fn from_doc(doc: &MergedDoc) -> (VolViewsDoc, Vec<Diagnostic>) {
                 }
             },
         };
-        let Some(columns) = table.get("columns").and_then(|v| v.as_array()) else {
+        if out.views.iter().any(|v| v.name.eq_ignore_ascii_case(name)) {
             diags.push(warn(
                 path,
-                format!("vol_views: '{name}' has no columns; skipped"),
+                format!("vol_views: '{name}' is defined twice; the second is skipped"),
             ));
             continue;
+        }
+        let columns: Vec<VolColumnSpec> = match table.get("columns").and_then(|v| v.as_array()) {
+            None => Vec::new(),
+            Some(columns) => columns
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    read_column(v, &format!("{path}.columns.{i}"), name, i, &mut diags)
+                })
+                .collect(),
         };
-        let columns: Vec<VolColumnSpec> = columns
-            .iter()
-            .enumerate()
-            .filter_map(|(i, v)| {
-                read_column(v, &format!("{path}.columns.{i}"), name, i, &mut diags)
-            })
-            .collect();
         if columns.is_empty() {
-            diags.push(warn(
-                path,
-                format!("vol_views: '{name}' has no valid column; skipped"),
-            ));
-            continue;
+            diags.push(warn(path, format!("vol_views: '{name}' has no columns")));
         }
         out.views.push(VolViewSpec {
             name: name.clone(),
@@ -434,8 +548,8 @@ fn resolve_measure(
 }
 
 /// Resolve every open-form measure against `table`; a column that does
-/// not resolve drops with a diagnostic, a view left with none is skipped,
-/// and `default` falls to the first view when it names none.
+/// not resolve drops with a diagnostic, a view left with none stays as an
+/// empty tab, and `default` falls to the first view when it names none.
 pub fn resolve(
     doc: &VolViewsDoc,
     table: &dyn Fn(&str) -> Option<TableShape>,
@@ -452,10 +566,14 @@ pub fn resolve(
                     measure,
                     label,
                     group,
+                    level,
+                    companion,
                 } => resolve_measure(measure, table).map(|measure| VolColumn::Measure {
                     measure,
                     label: label.clone(),
                     group: group.clone(),
+                    level: *level,
+                    companion: *companion,
                 }),
                 VolColumnSpec::Spark { measure, span } => {
                     resolve_measure(measure, table).map(|measure| VolColumn::Spark {
@@ -472,13 +590,6 @@ pub fn resolve(
                     format!("vol_views: {} column {}: {e}; dropped", view.name, i + 1),
                 )),
             }
-        }
-        if columns.is_empty() {
-            diags.push(warn(
-                path,
-                format!("vol_views: '{}' has no valid column; skipped", view.name),
-            ));
-            continue;
         }
         views.push(VolView {
             name: view.name.clone(),
@@ -657,12 +768,14 @@ mod tests {
                 measure: MeasureText::Builtin(Measure::Skew { tenor: "3M".into() }),
                 label: Some("3M".into()),
                 group: Some("25Δ skew".into()),
+                level: None,
+                companion: None,
             }
         );
     }
 
     #[test]
-    fn a_bad_column_drops_alone_and_an_empty_view_is_refused() {
+    fn a_bad_column_drops_alone_and_an_empty_view_is_kept() {
         let (d, diags) = from_doc(&doc("config_version = 1\n\
              [vol]\n[[vol.columns]]\nmeasure = \"atfm 1M\"\n\
              [[vol.columns]]\nmeasure = \"nonsense here now four\"\n\
@@ -673,10 +786,12 @@ mod tests {
              [bad]\ncells = \"triple\"\n[[bad.columns]]\nmeasure = \"atfm 6M\"\n\
              [notatable]\n"));
         let names: Vec<&str> = d.views.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, ["vol", "bad"]);
+        assert_eq!(names, ["vol", "empty", "bad", "notatable"]);
         assert_eq!(d.views[0].columns.len(), 1, "the four bad columns dropped");
+        assert!(d.views[1].columns.is_empty(), "its one column dropped");
+        assert!(d.views[3].columns.is_empty(), "no columns key at all");
         assert_eq!(
-            d.views[1].cells,
+            d.views[2].cells,
             Cells::Pair,
             "an unknown cells reads as pair"
         );
@@ -690,9 +805,7 @@ mod tests {
             "{texts:?}"
         );
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("vol_views: 'empty' has no valid column; skipped")),
+            texts.contains(&"vol_views: 'empty' has no columns"),
             "{texts:?}"
         );
         assert!(
@@ -702,10 +815,17 @@ mod tests {
             "{texts:?}"
         );
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("vol_views: 'notatable' has no columns; skipped")),
+            texts.contains(&"vol_views: 'notatable' has no columns"),
             "{texts:?}"
+        );
+        assert_eq!(
+            diags
+                .iter()
+                .find(|d| d.message.ends_with("'notatable' has no columns"))
+                .unwrap()
+                .path
+                .as_deref(),
+            Some("vol_views.notatable")
         );
         assert_eq!(
             diags
@@ -735,7 +855,9 @@ mod tests {
                     suffix: vec!["3M".into()]
                 },
                 label: None,
-                group: None
+                group: None,
+                level: None,
+                companion: None,
             }
         );
         assert_eq!(
@@ -746,7 +868,9 @@ mod tests {
                     suffix: vec![]
                 },
                 label: None,
-                group: None
+                group: None,
+                level: None,
+                companion: None,
             }
         );
     }
@@ -758,18 +882,21 @@ mod tests {
              [[vol.columns]]\nmeasure = \"ssr 3M 0.5\"\n[[vol.columns]]\nmeasure = \"unknown 3M\"\n\
              [only_bad]\n[[only_bad.columns]]\nmeasure = \"unknown\"\n"));
         let (v, diags) = resolve(&d, &surface_only);
-        assert_eq!(v.views.len(), 1);
+        assert_eq!(
+            v.views.len(),
+            2,
+            "a view whose columns all drop stays, empty"
+        );
         assert_eq!(v.views[0].columns.len(), 1);
+        assert!(v.views[1].columns.is_empty());
         assert_eq!(v.default, 0, "an unknown default falls to the first view");
         let texts: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
         assert!(texts.iter().any(|t| t.contains("vol_views: vol column 2: 'two_values' has 2 value columns; a measure dataset has one; dropped")), "{texts:?}");
         assert!(texts.iter().any(|t| t.contains("vol_views: vol column 3: 'ssr' takes 1 key value after the underlying, not 2; dropped")), "{texts:?}");
         assert!(texts.iter().any(|t| t.contains("vol_views: vol column 4: 'unknown' is not a history dataset keyed by underlying_ref; dropped")), "{texts:?}");
         assert!(
-            texts
-                .iter()
-                .any(|t| t.contains("vol_views: 'only_bad' has no valid column; skipped")),
-            "{texts:?}"
+            !texts.iter().any(|t| t.contains("only_bad' has no")),
+            "resolve says nothing of an empty view beyond its dropped columns: {texts:?}"
         );
         assert!(
             texts
@@ -787,5 +914,117 @@ mod tests {
         assert!(v.is_empty());
         assert!(diags.is_empty());
         assert!(v.default_view().is_none());
+    }
+
+    #[test]
+    fn glyph_keys_read_on_a_measure_column_and_drop_elsewhere() {
+        let (d, diags) = from_doc(&doc(
+            "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\nlevel = \"heat\"\ncompanion = \"bar\"\n\
+             [[vol.columns]]\nmeasure = \"atfm 1Y\"\n\
+             [[vol.columns]]\nspark = \"atfm 3M\"\nlevel = \"heat\"\n\
+             [[vol.columns]]\nkind = \"vega\"\ncompanion = \"bar\"\n\
+             [[vol.columns]]\nmeasure = \"atfm 6M\"\nlevel = \"loud\"\n\
+             [[vol.columns]]\nmeasure = \"atfm 2Y\"\ncompanion = \"gauge\"\n",
+        ));
+        let v = &d.views[0];
+        assert_eq!(v.columns.len(), 2, "{:?}", v.columns);
+        assert_eq!(
+            v.columns[0],
+            VolColumnSpec::Measure {
+                measure: parse_measure("atfm 3M").unwrap(),
+                label: None,
+                group: None,
+                level: Some(LevelGlyph::Heat),
+                companion: Some(CompanionGlyph::Bar),
+            }
+        );
+        assert!(matches!(
+            &v.columns[1],
+            VolColumnSpec::Measure {
+                level: None,
+                companion: None,
+                ..
+            }
+        ));
+        let texts: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            texts.contains(&"vol_views: vol column 3: level applies to a measure column; dropped"),
+            "{texts:?}"
+        );
+        assert!(
+            texts.contains(
+                &"vol_views: vol column 4: companion applies to a measure column; dropped"
+            ),
+            "{texts:?}"
+        );
+        assert!(
+            texts.contains(
+                &"vol_views: vol column 5: level = \"loud\" is not plain, heat or tint; dropped"
+            ),
+            "{texts:?}"
+        );
+        assert!(texts.contains(&"vol_views: vol column 6: companion = \"gauge\" is not chip, bar or slider; dropped"), "{texts:?}");
+    }
+
+    #[test]
+    fn a_view_defined_twice_keeps_the_first_and_says_so() {
+        // `merge_docs` keeps TOML order; a second `[vol]` table in one layer is a
+        // parse error in TOML itself, so the duplicate arrives through two
+        // layers merged into one doc — model that with the merged doc's own
+        // `value` holding the name once per layer is impossible; instead the
+        // reader sees a duplicate only via the case-insensitive match below.
+        let (d, diags) = from_doc(&doc(
+            "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n\
+             [Vol]\n[[Vol.columns]]\nmeasure = \"atfm 1Y\"\n",
+        ));
+        assert_eq!(d.views.len(), 1);
+        assert_eq!(d.views[0].name, "vol");
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message == "vol_views: 'Vol' is defined twice; the second is skipped"),
+            "{diags:?}"
+        );
+    }
+
+    #[test]
+    fn an_empty_view_is_kept_with_a_warning() {
+        let (d, diags) = from_doc(&doc(
+            "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n\
+             [blank]\ncells = \"single\"\ncolumns = []\n[bare]\n",
+        ));
+        let names: Vec<&str> = d.views.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["vol", "blank", "bare"]);
+        assert!(d.views[1].columns.is_empty() && d.views[2].columns.is_empty());
+        assert_eq!(d.views[1].cells, Cells::Single);
+        let texts: Vec<&str> = diags.iter().map(|d| d.message.as_str()).collect();
+        assert!(
+            texts.contains(&"vol_views: 'blank' has no columns"),
+            "{texts:?}"
+        );
+        assert!(
+            texts.contains(&"vol_views: 'bare' has no columns"),
+            "{texts:?}"
+        );
+        let (views, _) = resolve(&d, &surface_only);
+        assert_eq!(views.views.len(), 3);
+        assert!(views.views[1].columns.is_empty());
+    }
+
+    #[test]
+    fn the_glyph_enums_round_trip_their_keys() {
+        for g in [LevelGlyph::Plain, LevelGlyph::Heat, LevelGlyph::Tint] {
+            assert_eq!(LevelGlyph::parse(g.key()), Some(g));
+        }
+        for g in [
+            CompanionGlyph::Chip,
+            CompanionGlyph::Bar,
+            CompanionGlyph::Slider,
+        ] {
+            assert_eq!(CompanionGlyph::parse(g.key()), Some(g));
+        }
+        assert_eq!(LevelGlyph::parse("HEAT"), None);
+        assert_eq!(SPANS, ["7d", "30d", "90d", "1y"]);
+        assert_eq!(ALL_TENORS[0], "1W");
     }
 }

@@ -10,6 +10,7 @@ use std::time::Duration;
 use geode_core::config::{LayerDoc, VOL_VIEWS_DOC, merge_docs};
 use geode_core::schema::axis::tenor_days;
 use geode_core::volboard::{Lookback, Measure, delta_text};
+pub use geode_core::volviews::{ALL_TENORS, DELTAS, SPARK_30D};
 use geode_core::volviews::{
     Cells, MeasureText, VolColumn, VolView, VolViews, from_doc, measure_text, resolve,
 };
@@ -21,12 +22,6 @@ pub const TITLE: &str = "Vol";
 pub const SURFACE: &str = "vol_surface";
 pub const REALIZED: &str = "realized_vol";
 pub const VARSWAP: &str = "varswap";
-
-/// The tenors assumed until the surface lists its own; mirrors
-/// `geode_compose::demo_hanweck::TENORS`.
-pub const ALL_TENORS: [&str; 10] = ["1W", "1M", "2M", "3M", "6M", "1Y", "18M", "2Y", "3Y", "5Y"];
-pub const DELTAS: [f64; 5] = [0.10, 0.25, 0.50, 0.75, 0.90];
-pub const SPARK_30D: Duration = Duration::from_secs(30 * 86_400);
 
 /// The shipped tabs. A desk or user `vol_views.toml` replaces a view by
 /// name or adds beside these.
@@ -294,6 +289,7 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                 measure,
                 label,
                 group,
+                ..
             } => {
                 let stem = measure_id(measure);
                 match view.cells {
@@ -515,6 +511,8 @@ mod tests {
                         measure: geode_core::volviews::parse_measure(m).unwrap(),
                         label: None,
                         group: None,
+                        level: None,
+                        companion: None,
                     })
                     .collect(),
             }],
@@ -637,6 +635,8 @@ mod tests {
                         measure: geode_core::volviews::parse_measure("atfm 3M").unwrap(),
                         label: Some("3m vol".into()),
                         group: Some("ATM".into()),
+                        level: None,
+                        companion: None,
                     },
                     VolColumnSpec::Spark {
                         measure: geode_core::volviews::parse_measure("atfm 3M").unwrap(),
