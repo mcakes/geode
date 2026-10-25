@@ -814,9 +814,28 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
-- A Vol views object dialog (browse, edit columns, measure completion from
-  the grammar and the schema's history datasets); until then
-  `vol_views.toml` is edited by file and hot-reloaded.
+- The `.` menu has no row for the Vol views dialog: the menu is the
+  tile's and the dialog is the shell's, so a row needs a tile-to-shell
+  hook (as `config_object` is the shell-to-tile one); `e` and the palette
+  are the routes.
+- A muted slider paints its number alone; the table's `slider_muted`
+  paint is never reached (paint the muted gauge, or drop the paint).
+- A tab of sparklines alone asks the board for nothing, under the same
+  guard as an empty tab, and says nothing about it: extend the empty hint
+  to it or narrow the guard to a tab with no columns.
+- `pin_field` still reaches the vol column door, so a label commit can
+  queue an unchanged write.
+- Toggling `Default` on and deleting the tab within one debounce leaves a
+  dangling `default`: `document_keys_naming_target` reads the live config,
+  not the pending view.
+- The column stage's family options come from two sources (the catalogue
+  at stage entry, the fold's own list later); `startup_datasets` is
+  computed on every domain's open, not only Vol views'; validation runs
+  twice on edit-stage entry (`Domain::draft` and `validate_against_startup`);
+  the dialog's validation parses the draft three times per keystroke.
+- Tenor sets and ladder generators (a tab over every listed tenor in one
+  pick); editing a desk-layer file from the dialog; a `Raw` column (text
+  the pickers cannot express) is kept, not editable.
 - A z of the move (how unusual today's Δ is) as a third rich/cheap metric.
 - Measures over two tables (an open-form arithmetic such as `a − b`).
 - Hiding the strip's key hints once learned, per tile or per settings.
@@ -837,8 +856,6 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   every refresh: an explicit error, never a wrong value. The document
   resolver refuses the shape today; a submission-time width check in
   `vol_board` is the fix for every caller.
-- Duplicate view names in `vol_views.toml` are not refused: the last
-  table wins the id and the earlier one is silently gone.
 - A blank single cell's dash paints flush at the cell's right while the
   numbers carry the chip inset; paint-off shifts a single column by the
   inset, column-wide.

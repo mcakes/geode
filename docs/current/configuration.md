@@ -32,13 +32,16 @@ Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
-In `vol_views` alone, a higher layer also sets the order of the top-level keys
-it defines: the positions those keys already hold are refilled in that layer's
-order, keys the layer does not define stay where they are, and new keys follow
-at the end. The tabs are picked by digit in document order, and the Vol views
-dialog reorders them by writing the user layer in the new order, which needs
-the merged order to follow it. Every other document keeps each key where the
-lowest defining layer put it.
+In `vol_views` alone, a higher layer also sets the order of the top-level
+tables it defines: the positions those tables already hold are refilled in
+that layer's order, tables the layer does not define stay where they are, and
+new tables follow at the end. Only tables trade slots; the top-level values
+(`config_version`, `default`) are not objects and take part in no order, so a
+`default` a user file adds is appended rather than taking a tab's slot and
+pushing that tab to the end. The tabs are picked by digit in document order,
+and the Vol views dialog reorders them by writing the user layer in the new
+order, which needs the merged order to follow it. Every other document keeps
+each key where the lowest defining layer put it.
 
 `value_colors` replaces whole at depth 2. A dimension's values merge per value,
 so a user entry for one value keeps the lower layers' other values. One value's
@@ -1131,13 +1134,22 @@ shorter history the dataset holds under the `2Y` label; the demo declares
 with a `columns` array, and a top-level string `default` naming the
 opening tab (without one the first view opens). Layers replace whole views
 by name, so a user view appends after the builtin four (`vol`, `skew`,
-`varswap`, `surface`) unless it replaces one of them. `cells = "pair"` (the
+`varswap`, `surface`) unless it replaces one of them, and a user file that
+lists shipped tabs in another order moves them (the merge rule above). The
+Vol views dialog (`e` on a vol tile) writes this file's user layer; its
+writer rewrites each column from its pickers, so a hand edit inside a
+`[[columns]]` table that the reader does not know, or a comment on one,
+does not survive the next save, while a comment on a tab's table and any
+other top-level key do. `cells = "pair"` (the
 default) lays each measure out as a level and a companion column under one
 group head; `cells = "single"` as one number per cell. A column is exactly
-one of `measure = "<text>"` (with an optional `label` for the sub-head and
-`group` for the group head), `spark = "<measure text>"` with `span` (a
-duration; default `30d`), or `kind = "vega"` (book vega, painted only with
-`[volwatch] vega` set). The measure text is one of the ten built-in forms
+one of `measure = "<text>"` (with an optional `label` for the sub-head,
+`group` for the group head, `level = "plain" | "heat" | "tint"` for the
+level cell's paint and `companion = "chip" | "bar" | "slider"` for the
+companion's; absent means the view's default), `spark = "<measure text>"`
+with `span` (a duration; default `30d`), or `kind = "vega"` (book vega,
+painted only with `[volwatch] vega` set). The measure text is one of the
+ten built-in forms
 (`point <tenor> <delta>`, `atfm <tenor>`, `forward <tenor>`, `skew
 <tenor>`, `wing skew <tenor>`, `slope <long>-<short>`, `realized <window>`,
 `iv-rv <tenor>/<window>`, `varswap <tenor>`, `vs spread <tenor>`) or the
@@ -1146,13 +1158,15 @@ by `underlying_ref` first with exactly one value column and supplies its
 remaining key values in key order (`ssr 3M`); the grammar and the
 resolver's rules are in [typed documents](typed-documents.md#vol-views).
 Every problem warns at its key (`vol_views.<view>.columns.<n>`): a column
-that does not read or resolve drops alone, a view with no valid column is
-skipped, a `default` naming no view falls to the first, and a document
-that leaves no valid view at all warns `vol_views: no valid view; the tile
-shows the builtin tabs` and the builtin document stands in. Resolution
-runs in the app against the schema the data service started with, as
-watchlist rules do, so a dataset added since launch needs a restart before
-a column may name it.
+that does not read or resolve drops alone, a view left with no column is
+kept as an empty tab with a warning, a second view named as an earlier
+one in any case is skipped, a `default` naming no view falls to the first,
+and a document that leaves no valid view at all warns `vol_views: no valid
+view; the tile shows the builtin tabs` and the builtin document stands in.
+Resolution runs in the app against the schema the data service started
+with, as watchlist rules do, so a dataset added since launch needs a
+restart before a column may paint; the dialog accepts such a column with
+the warning `<dataset> needs a restart to paint`.
 
 ```toml
 config_version = 1
@@ -1164,6 +1178,8 @@ measure = "ssr 3M"         # the demo's precomputed skew-stickiness ratio
 [[ssr.columns]]
 measure = "atfm 3M"
 label = "3m vol"
+level = "heat"             # tinted against the column's levels
+companion = "bar"          # a bar from zero in place of the chip
 [[ssr.columns]]
 spark = "atfm 3M"
 span = "30d"

@@ -406,6 +406,19 @@ its key words). `resolve` turns each open-form text into a board
 value-column count, derived from the schema by the caller) and answers the
 `VolViews` the tile shows, with `default` as an index.
 
+A column is one of `measure = "<text>"`, `spark = "<text>"` (with an
+optional `span`, a non-zero duration, `30d` by default) or `kind =
+"vega"`. A measure column may also carry `label` and `group` (the sub-head
+and the group head; blank reads as absent) and two glyph keys: `level`,
+one of `plain`, `heat` or `tint`, how the level cell paints, and
+`companion`, one of `chip`, `bar` or `slider`, how the companion cell
+paints. The keys are exact lower-case words: the file is written by the
+dialog or by hand, and a near miss is reported, not guessed. Absent means
+the view's default (a plain level and a chip in a pair view; a tinted
+level in a single view), which the tile resolves, so the reader carries
+`Option`s and a writer never spells a default. The glyphs belong to a
+measure column: on a spark or vega column either key drops that column.
+
 A measure text is one of:
 
 | Text | Measure |
@@ -438,16 +451,29 @@ Failure semantics, each a warning at its key (`vol_views.<view>`,
 `vol_views.<view>.columns.<n>`, `vol_views.default`), never an error, so
 a bad tab cannot cost a desk its others: a column with none or more than
 one of `measure`, `spark` and `kind`, a measure or spark text that does
-not parse, a `span` that is not a non-zero duration, or a `kind` other
-than `vega` drops that column alone (`vol_views: <view> column <n>: <why>;
-dropped`); `cells` other than `pair` or `single` warns and reads as
-`pair`; a view that is not a table, has no `columns` array, or is left
-with no valid column is skipped (`vol_views: '<view>' has no valid
-column; skipped`). At `resolve`, an open-form column whose dataset the
-lookup lacks, has more than one value column, or takes another number of
-key words than the text supplies drops alone, a view left with no column
-is skipped, and a `default` naming no resolved view warns and the first
-view opens (`default` is `0`, also with no view at all). Resolution runs
+not parse, a `span` that is not a non-zero duration, a `kind` other than
+`vega`, a `level` that is not `plain`, `heat` or `tint` (`level = "loud"
+is not plain, heat or tint`), a `companion` that is not `chip`, `bar` or
+`slider`, or either glyph key on a spark or vega column (`level applies
+to a measure column`) drops that column alone (`vol_views: <view> column
+<n>: <why>; dropped`); `cells` other than `pair` or `single` warns and
+reads as `pair`; a view that is not a table is skipped (`vol_views:
+'<view>' must be a table; skipped`). Two rules keep the document the
+dialog's: a view with no `columns` array, `columns = []`, or every column
+dropped is kept, empty, with `vol_views: '<view>' has no columns` — a
+table with only `cells` is a legal empty tab the dialog fills later, and
+skipping it would drop the tab the user is about to fill; and a second
+view whose name matches an earlier one case-insensitively is skipped with
+`vol_views: '<view>' is defined twice; the second is skipped`, since the
+tile's `view <name>` lookup and the dialog's name prompt could otherwise
+hold two tabs a reader cannot tell apart (one TOML layer cannot repeat a
+key, and the merge collapses a cross-layer repeat, so the case collision
+is the one duplicate that can arrive). At `resolve`, an open-form column
+whose dataset the lookup lacks, has more than one value column, or takes
+another number of key words than the text supplies drops alone, a view
+left with no column resolves to an empty view silently, and a `default`
+naming no resolved view warns and the first view opens (`default` is `0`,
+also with no view at all). Resolution runs
 in the app (`volwatch_settings_from_config`) against the schema the data
 service started with, as watchlist rules are, with a lookup that admits
 only a `history` dataset whose first key column is `underlying_ref`; a
@@ -455,6 +481,47 @@ document that resolves to no view warns `vol_views: no valid view; the
 tile shows the builtin tabs` and the builtin document stands in. The
 resolved `VolViews` travels inside `VolwatchSettings` and is pushed whole
 on every reload, so the tile never re-reads the document itself.
+
+The same module holds the pickers' model and the writer the Vol views
+dialog uses. `Family` is the grammar's forms plus the two non-measure
+columns and an open-form dataset (`Table(name)`), each saying which parts
+it takes (`takes_tenor`, `takes_delta`, `takes_span`, `takes_window`,
+`takes_slope`, `takes_glyphs`) and its catalogue label (`ATFM`, `25Δ
+skew`, `Surface point`, a dataset's upper-cased name). `ColumnChoice` is
+a column as the pickers hold it: the family, its parts, label, group and
+the two glyphs as `Option`s; `ColumnChoice::new` opens a family at its
+firsts (the first tenor, the first delta, a 30-day span, the 20-day
+window, `1Y-1M` for a slope), `from_spec` reads a parsed column back into
+a choice or answers `Raw { text }` for a column the pickers cannot hold (a
+dataset with two key words, a spark over anything but an ATFM point),
+`to_spec` writes it, `default_label` and `default_group` are what the
+tile shows when the column names none, and `head` is the list row's text
+(`ATFM 3M · heat · bar`, a named glyph appended, `plain` included). The
+picker lists are `ALL_TENORS`, `DELTAS`, `WINDOWS` and `SPANS`; the reader
+accepts any tenor, window or duration, so a hand-written value the lists
+lack is kept as the row's own option rather than read as the first one.
+
+`to_table(view, source)` renders one view over its source table when it
+has one, so a key inside the table the writer does not model and the
+table's comments survive: `cells` is written only for a single view, and
+`columns` is rebuilt from the specs, each column carrying only the keys it
+sets — a default label, group or glyph is never written, a `span` only
+when it is not 30 days, and a measure as `measure_text` spells it, so a
+hand-written `point 3M 0.5` reads back as `atfm 3M` on the first save and
+the builtin tabs round-trip parsed-equal (not byte-equal). A key inside a
+`[[columns]]` table that the reader does not know, and a comment on one,
+do not survive the rewrite. `span_text` writes a span at the coarsest
+unit of the duration grammar that spells it exactly (`7d`, `12h`, `90s`,
+`500ms`, `1y` for 365 days), never a rounded `0d` the reader would
+refuse. `to_document(doc, source)` writes the whole file: `config_version`,
+`default` when set, the views in the doc's order, each over its source
+table, then any top-level value the source held that the writer does not
+model; a source table the doc no longer lists is a deleted view and is not
+copied, and every table is renumbered so the doc's order reaches the
+file. `reorder(document, order)` moves the named view tables to the front
+in `order`, tables not named keeping their relative order after them and
+`config_version` and `default` first; tables are removed and re-inserted,
+so each keeps its comments.
 
 ## Colors and numeric formatting
 

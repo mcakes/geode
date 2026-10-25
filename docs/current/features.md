@@ -3707,7 +3707,67 @@ surface lacks keeps a blank column rather than shifting the grid. A reload
 that changes the document replaces the tabs, keeps the shown one by name,
 and otherwise opens the default with the standing notice `view <name> is
 gone`, which the next view pick clears. An empty or wholly refused document
-shows the builtin tabs with a configuration warning, never an empty tile.
+shows the builtin tabs with a configuration warning, never an empty tile. A
+tab with no columns (a tab the dialog has just made, or one whose every
+column was refused) is a tab all the same: it paints the strip and the
+empty state `<name> has no columns — e adds one` (naming the key bound to
+`config::vol_views`, else the palette entry `Edit vol views…`), asks the
+service for nothing — a board with no measure would only be refused — and
+shows no grid until a column arrives. A second tab whose name differs from
+an earlier one only in case is skipped by the reader, so the digits never
+hold two tabs `:view` cannot tell apart.
+
+**Tabs and the Vol views dialog.** `e` on a vol tile opens the Vol views
+dialog on the shown tab (`Edit vol views…` in the palette,
+`config::vol_views`, opens it on the first tab when no vol tile is
+focused): the object dialog over `vol_views.toml`, described in
+[configuration dialogs](configuration-dialogs.md#the-vol-views-dialog).
+Its browse list is the tabs in document order — the order the digits pick
+— each summarised `pair · 10 columns`, with ` · default` on the opening
+tab. `shift+j` and `shift+k` move the selected tab and write the user layer
+in the new order; a move that crosses a shipped tab copies it into the
+user's file first (one notice, `copied N tabs to your config — r restores
+each`; a move among the user's own tabs copies nothing). `n` names a new
+tab, which opens empty; a name another tab holds in any case is refused
+with `'<name>' already exists — open it instead`, and `default` and
+`config_version` are reserved. `d y` deletes a tab, clearing `default`
+when it named it. A tab's stage shows its name (display-only: a rename is
+a delete and a create), `Cells`, `Default` (the document's `default` key,
+written at the top of the file without copying the tab; turning it off on
+the builtin's own default changes nothing, since the shipped `default =
+"vol"` stands until another tab is made default) and its columns: the
+members in order over a catalogue of families — ATFM, Forward, 25Δ skew,
+Wing skew, Slope, Realized, IV − RV, Varswap, VS spread, Surface point,
+Sparkline, Book vega, then every `history` dataset keyed by
+`underlying_ref` with one value column, by its upper-cased name, the moment
+a reload declares it. `space` on a catalogue row copies it into the tab
+under its head (`ATFM 1W`; a second copy is `ATFM 1W ·2`), `x` drops a
+member, `shift+j`/`shift+k` reorder, and `enter` opens the column's stage:
+the family, then only the parts it takes (a tenor over `1W 1M 2M 3M 6M 1Y
+18M 2Y 3Y 5Y`, a slope's long and short, a realized window `5D 20D 60D`, a
+call delta `0.10 0.25 0.50 0.75 0.90`, a sparkline span `7d 30d 90d 1y`),
+then on a measure family the two glyphs (`Level`: default, plain, heat or
+tint; `Companion`: default, chip, bar or slider) and the label and group,
+prefilled with what the tile shows so the rows never read blank. A family
+change starts the column at the new family's firsts, keeping the tenor when
+the new family takes one and the glyphs unless it is a sparkline or book
+vega, and prefills the label and group again. The catalogue's names are
+the families' (`Forward`, `Wing skew`, `Realized`, `Varswap`, `VS
+spread`); a label or group left at its prefill is not written, so the tile
+keeps its own heads (`fwd`, `10Δ skew`, `rlz`, `vs`). A column the pickers
+cannot express (a dataset with two key words after the underlying, a
+sparkline over anything but ATFM) is kept as written, movable and
+deletable, not editable. Every edit writes the user layer after the
+dialog's quiet period, rewriting each column from the pickers: a default
+label or group is never written, `point <t> 0.5` is respelled `atfm <t>`
+on the first save, and a key inside a `[[columns]]` table the pickers do
+not know, or a comment on one, drops on the next write, while a comment on
+the tab's table and any other top-level key stay. A column over a dataset
+the schema gained since launch is accepted with the warning `<dataset>
+needs a restart to paint` — the schema is restart-required, so the column
+is right but early — and the warning survives a failed write's revert; a
+dataset the live schema lacks is refused by the resolver instead. The
+tile's `:` commands do not edit tabs.
 
 **Lens.** Every measure cell is a level and a companion. `r` flips the lens
 between moves (the Δ over the lookback; `d` cycles `1d 1w 1m`) and
@@ -3758,7 +3818,10 @@ leaves the conventional tenors `1W 1M 2M 3M 6M 1Y 18M 2Y 3Y 5Y`.
 
 **Grid.** Rows are the members in the list's order, members the board
 answered first and those it lacks at the foot, muted and blank (`not in
-surface` in the readout). The Underlying column is pinned left; the
+surface` in the readout). A measure column's level and companion cells
+paint as its `level` and `companion` keys say (plain, heat or tint; chip,
+bar or slider — see Glyphs below), the view's defaults where the file
+names none. The Underlying column is pinned left; the
 reference name is in the readout. Column heads group under a shared header
 row (`ATFM 3M` over `vol` and `Δ`; in a single surface view the tenor over
 `5Δ … 95Δ`) painted at the heads' text size, so a view with groups is no
@@ -3861,9 +3924,25 @@ a z against 2.0, and a percentile by its distance from the median (above
 or below it is the sign; a rank at the median takes no tint). In a single
 view the same tint sits behind the level, and after `m` behind the
 companion's own text. The chip tints what the eye reads: a change shown as
-`0.0` takes no fill, a rank shown as `90` tints as 90. The spark column is
-a 30-day sparkline with an end dot. Sign colors are the theme's bullish
-and bearish chart tokens. A companion from a board asked under another
+`0.0` takes no fill, a rank shown as `90` tints as 90. A column's
+`level` key chooses the level cell's paint: `plain` (a pair view's
+default), `heat` (one hue behind the number, alpha by the level's position
+in the column's range of displayed levels, members and group means alike,
+up to the band's ceiling of 0.40, so one scale serves the column and a
+flat column tints nothing; in a single view it replaces the sign tint) or
+`tint` (the companion's sign tint, a single view's default). Its
+`companion` key chooses the companion cell's: `chip` (the default), `bar`
+(a bar from a centre axis on the value's sign side, a Δ or a z against the
+column's largest displayed magnitude, a rank by its side of the median
+against the half-track, as the chip tints it) or `slider` (a track filled
+to the rank at display precision, with quartile ticks and a marker in
+the warning color at or beyond 0.10 and 0.90). Only the percentile
+metric has a rank to place, so under z or moves a slider column shows
+the chip and the readout
+ends ` · slider needs the percentile metric`; a slider that would paint
+muted (a short history, another window) is its number alone. The spark
+column is a 30-day sparkline with an end dot. Sign colors are the theme's
+bullish and bearish chart tokens. A companion from a board asked under another
 lookback or window than the one shown paints muted (after `d` or `w`,
 until the new board lands), as does a rank over fewer than 60
 observations, with its count in the readout; a single view drops the tint
@@ -3902,7 +3981,8 @@ keeps painting; the next answer restores it.
 `d` the lookback (`1d → 1w → 1m`), `q` the metric, `w` the window
 (`6M → 1Y → 2Y`), `m` the shown number in a single view, `p` paint, `s`
 sort, `enter` the band, `t` the timeseries refusal (below), `y` yank,
-`shift+r` refresh now, `g w` the switcher, `.` the action menu,
+`shift+r` refresh now, `g w` the switcher, `e` the Vol views dialog on the
+shown tab, `.` the action menu,
 `space`/`z a` toggle the cursor's group, `z o`/`z c` open and close it,
 `z shift+r`/`z shift+m` every group, `v`/`shift+v` a row selection,
 motions and `escape`. A right press on a
@@ -3978,16 +4058,25 @@ the rest paints.
 
 In `--demo` the Hanweck simulator serves the surface at `1W 1M 2M 3M 6M 1Y
 18M 2Y 3Y 5Y` and the call deltas `0.05 0.10 0.25 0.50 0.75 0.90 0.95`,
-and a precomputed `ssr` table keyed by underlying and tenor, so a user
-`vol_views.toml` naming `ssr 3M` paints in the demo without new code (see
-[real sources](real-sources.md)). A demo store written before those keys
+and precomputed `ssr` and `spotvol_cov` tables keyed by underlying and
+tenor, so a user `vol_views.toml` naming `ssr 3M` or `spotvol_cov 1Y` —
+or the dialog's `SSR` and `SPOTVOL_COV` catalogue rows — paints in the
+demo without new code (see [real sources](real-sources.md)). A demo store
+written before those keys
 existed needs no deletion: the adapter enumerates its keys and coverage
 fetches a new tuple on demand.
 
 Known limitations:
 
-- `vol_views.toml` has no object dialog yet: tabs are edited by file and
-  hot-reloaded.
+- A column the pickers cannot express (two key words after the
+  underlying, a sparkline over anything but ATFM) is edited by file; the
+  dialog keeps, moves and deletes it only.
+- A column over a dataset declared since launch paints only after a
+  restart; the dialog warns and writes it anyway.
+- A tab whose columns are all sparklines asks the board for nothing, as an
+  empty tab does, and says nothing about it: the sparklines stay blank.
+- The `.` menu has no row for the Vol views dialog; `e` and the palette
+  are its routes.
 - A measure over two tables (`a − b` between open-form datasets) is not
   expressible; the open form reads one tuple of one dataset.
 - The surface tab at the eight laddered tenors is wider than a screen, so

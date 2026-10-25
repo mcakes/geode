@@ -1,8 +1,8 @@
 # Configuration dialogs
 
-The object dialogs edit Views, Groupings, Sources and Colors, and inspect
-Schema. They share a pure draft model and a GPUI
-adapter. See
+The object dialogs edit Views, Groupings, Sources, Colors and Vol views (the
+vol watchlist's tabs), and inspect Schema. They share a pure draft model and
+a GPUI adapter. See
 [configuration](configuration.md) for layer merging, file writes, and reload
 acceptance; this guide describes what editing adds to those contracts.
 
@@ -35,7 +35,7 @@ repay a cache key and its refresh seams (see
 | Browse | Effective objects and provenance, filtered by visible name and summary |
 | Naming | New name; Enter validates and creates, Escape returns without creating |
 | Edit | One object's fields; Escape returns to browsing after clearing mode/query |
-| Column | Seven presentation fields projected over the same draft; returns to its object |
+| Column | Seven presentation fields (Views, Schema) or a vol column's own parts (Vol views) projected over the same draft; returns to its object |
 
 Normal mode leaves the input blurred so bare keys act as commands. In Browse,
 Edit, and Column, `/` or a click on the frozen filter row enters Filter
@@ -118,7 +118,8 @@ column the object no longer has stops on the object's Edit stage with a
 notice. Escape then walks the usual ladder: Edit, Browse, close.
 
 Rows carry no destination badge: every field of one stage writes the same
-place (the object's document, or a Column stage's one overlay), so the badge
+place (the object's document — a Vol views tab's `Default` writes that
+document's top-level key — or a Column stage's one overlay), so the badge
 would read the same on every row. Rows name a layer instead where one
 applies. A Column stage names the layer a value comes from (`desk`,
 `dataset`, or `view`; none for the kind default), and Schema names the layer
@@ -261,6 +262,95 @@ documents define it, and the write-failure status is shown. A save over an
 inherited slot therefore leaves the lane on that slot with the lower layer's
 chain; a slot that was empty disappears, and the lane returns to each view's
 own grouping.
+
+## The Vol views dialog
+
+`Domain::VolViews` edits `vol_views.toml` beside the five domains above
+(`config::vol_views`, `Edit vol views…`; `e` on a vol tile). Its objects are
+the watchlist's tabs, which the tile paints and the digits pick in document
+order, so three things differ from the other domains.
+
+The browse list keeps the merged document's order
+(`Domain::keeps_document_order`) rather than sorting by name, and `shift+j`/`shift+k` on it reorder
+(`Domain::reorderable`, Vol views alone): `ObjectDialogState::move_object`
+swaps the selected row with its neighbour in derived order — not the filtered
+list's, so a filter hiding the tab in between does not make a two-place move
+look like one — and `apply::commit_reorder` writes the order. The refusals
+(a read-only domain, no user directory, `that is as far as this tab goes`)
+are said before the swap, so the list never shows a move nothing can save.
+Only the user layer is written, so every shipped tab the move crosses (the
+inclusive range where the new and the current order disagree) is forked
+first through the ordinary fork path, sidecar entry included, with one notice
+(`copied N tabs to your config — r restores each`); a move among the user's
+own tabs forks nothing. The forks go through the keyed batch at zero delay
+and `geode_core::volviews::reorder` rewrites the user file under
+`config_write::try_edit` in the same writer job, after the keyed edits have
+landed, so the forks are in the file before the reorder reads it; memory
+takes the same order through the batch (`PendingConfigWrite::order`, one per
+document, the latest), so the browse rows show the new order on the promote
+and the watcher's later read finds equal documents. The merge honours the
+user layer's table order for `vol_views` alone (see
+[configuration](configuration.md#layers-and-provenance)); without that rule the
+rewritten file would change nothing the tile or the list can see.
+
+The document's `default` key is edited as the tab's `Default` field, a
+`Destination::TopLevel` field: its batch key is the field's key, not the
+object's name, so the existing keyed write path serves it; on it renders the
+tab's name as the key's value, off renders nothing, which the write path
+spells as removing the key. The field forks nothing — turning it on for a
+shipped tab copies no `[tab]` into the user file — and turning it off on the
+builtin's own default is a no-op, since the shipped `default = "vol"` stands
+until another tab is made default. `Domain::document_keys` names such keys;
+the browse list never lists them, and deleting the tab the user layer's
+`default` names removes the key with it (`document_keys_naming_target`),
+only when the tab leaves the configuration altogether — deleting the user's
+copy of an overridden tab reveals the lower copy, which the key still rightly
+names. The names `default` and `config_version` are reserved
+(`Domain::reserved_names`), and names collide case-insensitively
+(`Domain::names_collide`), as the document's reader decides duplicates, so
+the naming prompt refuses `Vol` beside `vol` with `'Vol' already exists —
+open it instead` and a dialog gate never writes a tab the tile would skip.
+
+Every field is `Destination::Doc`: a column's label, group and glyphs live
+in the tab's own table, so the domain has no presentation overlay and no
+layer badges. A column is a list item carrying its own `[[columns]]` table
+(`ListItem::source`), which is what makes the `columns` list copy-and-drop
+rather than move: the catalogue is a fixed list of families, so `space`
+clones the row into the tab under its column's head (de-duplicated ` ·2`),
+`x` drops a member outright and the catalogue keeps the family; `space` on a
+member refuses, since a vol column has no hidden state to tick. `enter` on a
+member opens the vol column stage (`ColumnDoor::VolColumn`): the family, the
+parts it takes, the two glyphs and the label and group, read from the item's
+table (`volviews::column_fields`). Each change folds back into that table
+(`fold_into_from`, which resolves a dataset family by its catalogue row, so a
+dataset keyed by the underlying alone carries no tenor) and renames the row
+by its head, and the stage's rows are re-derived from the folded item, so a
+family change shows the new family's parts at once and the painted stage is
+re-keyed to the new name at revalidation. A `Raw` column (text the pickers
+cannot express) has one display-only `measure` row. The tab's name row is
+display-only too: the scaffold has no rename path, and a typed name the
+writer could not honour would fork the inherited copy for nothing. An empty
+tab writes `columns = []`, which the reader accepts, so a new tab reaches the
+file as more than a bare header.
+
+A dialog can open on the tile's own object. `TileContent::config_object`
+answers the document and name a tile shows (`vol_views` and the shown tab);
+`render::open` asks the focused tile's occupant, keeps the answer only when
+it names the dialog's document, and selects that browse row. A tile naming
+another document, or no tile, leaves the first row selected. Validation adds
+one warning only the dialog can raise: a column over a dataset the live
+schema declares but the data engine's launch schema lacks warns `<dataset>
+needs a restart to paint` — the catalogue offers such a dataset the moment a
+reload brings it, the schema is restart-required, and the write is right,
+only early. The launch set is `ObjectDialogState::startup_datasets`, read at
+open from the shell's startup `datasets` layers (the baseline restart-required
+is measured against, not the builtin layer alone, which would warn falsely
+about a desk or user dataset present at launch), and travels on the draft
+(`Draft::startup_datasets`) through `validate_against_startup`, the one door
+every draft this dialog holds passes through — stage entry and the rebuild
+after a failed write's revert — so the warning does not vanish mid-edit. A
+dataset the live schema lacks too is the resolver's to refuse; a restart
+would not paint it.
 
 ## Validation and persistence
 

@@ -360,7 +360,11 @@ joined on the unique source value, if the idle figure stays over budget.
 - The vol watchlist prepares every row whole rather than through
   `WindowCache`: 25 members prepare in 115 µs, so a list of a few hundred
   stays in the low milliseconds. Past about 256 members the grid should
-  prepare only the rows in view.
+  prepare only the rows in view. A heat column's range (`heat_range`) is
+  one pass over the rows per heat column per prepare, beside the companion
+  scale's pass, computed once and handed to every cell; the bench's `vol`
+  tab has no heat column, and a column's pass costs what its scale does,
+  so no new budget.
 
 - The Diagnostics Log's fuzzy narrowing over a full tail exceeds the 8 ms UI
   budget for phrase queries (6 to 12 ms on the reference machine, loaded, and

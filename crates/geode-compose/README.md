@@ -74,7 +74,7 @@ Its `calendar` column is an exchange calendar code; no holiday dates are
 modelled. `fail_next` and the query delay exercise the degraded and slow
 paths in tests.
 
-`demo_hanweck` answers the four history datasets for the ten demo
+`demo_hanweck` answers the five history datasets for the ten demo
 underlyings, ten tenors (1W to 5Y), seven call deltas (0.05 to 0.95) and
 three realized windows (5D, 20D, 60D). Every value is a pure function of
 seed, key and day, so overlapping asks agree: each underlying's log vol level

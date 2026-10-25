@@ -5869,10 +5869,11 @@ mod tests {
         }
     }
 
-    /// The demo's four history declarations (the surface, realized,
-    /// varswap and the `ssr` table keyed `(underlying_ref, tenor)` with
-    /// the one value `ssr`), without history windows so a fake starting a
-    /// year ago is never swept.
+    /// Four of the demo's five history declarations (the surface,
+    /// realized, varswap and the `ssr` table keyed `(underlying_ref,
+    /// tenor)` with the one value `ssr`; `spotvol_cov` is left out),
+    /// without history windows so a fake starting a year ago is never
+    /// swept.
     fn board_schema() -> SchemaSpec {
         let text = std::fs::read_to_string(concat!(
             env!("CARGO_MANIFEST_DIR"),

@@ -20,15 +20,20 @@ measured against). Behaviour and limits are in the features guide's
   wildcard: `VolBoard`, `HistoryKeys` and the vega `Query`),
   `with_dims`/`set_dims`/`dims` (the derived dimensions the grouping
   reads, pushed by the app at startup and on every dimensions reload),
-  `ACTIONS` (the lens, motion and chrome verbs and the five fold actions:
-  toggle, expand, collapse, expand all, collapse all) and the
-  `DEFAULT_KEYMAP` fragment (`space` and the `z` fold chords among them).
+  `config_object` (the shown tab as `vol_views.<name>`, so the Vol views
+  dialog opens on it), `ACTIONS` (the lens, motion and chrome verbs and
+  the five fold actions: toggle, expand, collapse, expand all, collapse
+  all) and the `DEFAULT_KEYMAP` fragment (`space` and the `z` fold chords
+  among them, and `e` bound to the shell's own `config::vol_views`).
 - `core/`: pure state, tested without gpui.
   - `views.rs`: the tabs from `VolViews` (`builtin()` resolves the shipped
     `BUILTIN_VOL_VIEWS` document: `vol`, `skew`, `varswap`, `surface`).
     `columns` lays a view out under the lens (a pair view as a level and a
     companion column per measure; a single view as one column, headed by
-    tenor and delta when every column is a surface point), `measure_id`
+    tenor and delta when every column is a surface point; each
+    `ColumnKind` carries the column's `LevelGlyph` and `CompanionGlyph`,
+    the file's or the view's default: a plain level and a chip in a pair,
+    a tinted level in a single), `measure_id`
     (the width and sort key stem), `family_label` and `unit` (the heads
     and the readout), `order_tenors`, the board `Ask` a view implies
     (`ask`: the union of its measure columns, the window in force whenever
@@ -103,10 +108,12 @@ measured against). Behaviour and limits are in the features guide's
   - `data.rs`: the board's request lifecycle (tags, `deliver_board`,
     `deliver_keys`, the refresh and stale timers, the prepared model, the
     band (`rebuild_band`; empty on a group row), the header's dataset
-    times).
-  - `chrome.rs`: notices, the empty state, the switcher and the `.` action
-    menu (the tabs as rows, the shown one ticked; every lens verb as a
-    row, the swap disabled with its reason in a pair view; the three fold
+    times); `resubmit` asks nothing for an ask with no measure (an empty
+    tab), since the service would only refuse it.
+  - `chrome.rs`: notices, the empty state (a tab with no columns names the
+    key bound to `config::vol_views`, else `Edit vol views…`), the
+    switcher and the `.` action menu (the tabs as rows, the shown one
+    ticked; every lens verb as a row, the swap disabled with its reason in a pair view; the three fold
     verbs, enabled on a group row or while grouped; inspect disabled on a
     group row with its reason).
   - `table.rs`: the grid's `TableDelegate` and `Paints` (one per theme);
