@@ -444,7 +444,8 @@ pub struct Raw {
     pub text: String,
 }
 
-/// The realized windows a picker offers (the demo's windows).
+/// The realized windows a picker offers until a source lists its own; the
+/// reader accepts any window text.
 pub const WINDOWS: [&str; 3] = ["20D", "60D", "120D"];
 
 impl ColumnChoice {
