@@ -823,6 +823,12 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - A column move in the vol tile (`shift+h`/`shift+l`, saved per view as
   `column_order`) has no pointer route and no `.` menu row; two columns
   over one measure in a tab share a stem and move as one.
+- A `column_order` session entry for a tab the document no longer
+  declares is never pruned; it sits in the record until that tab name
+  returns.
+- `strip_tabs` is built with empty chords in `rebuild_columns` and the
+  chords filled in `rebuild_strip_hints`; one-place construction would
+  read better.
 - A `[[columns]]` entry that is not a table (`columns = ["x"]`) cannot be
   a list item and is dropped by the next save of its tab; the reader warns
   about it on every load.

@@ -3864,12 +3864,12 @@ order is tile presentation, saved in the session per view as
 one per unit); a reorder never writes `vol_views.toml`, never forks the
 tab, and never requeries. A unit the saved order does not name takes its
 file position after the named ones, and a saved stem the tab no longer
-has is ignored and dropped on the next move. The motions are the shared grid motions (the
-tile publishes `grid` with `counts`; see [motion](#motion)): `j k` move
-rows, `h l` columns, `g g`/`shift+g` the ends, `ctrl+d`/`ctrl+u` and
+has is ignored and dropped on the next move. The motions are the shared grid
+motions (the tile publishes `grid` with `counts`; see [motion](#motion)): `j
+k` move rows, `h l` columns, `g g`/`shift+g` the ends, `ctrl+d`/`ctrl+u` and
 `ctrl+f`/`ctrl+b` the half and full pages, `^`/`$` the first and last
-column, each times its count; the column cursor never rests on
-Underlying. `v`/`shift+v` start a row selection, `y` yanks the cursor cell
+column, each times its count; the column cursor never rests on Underlying.
+`v`/`shift+v` start a row selection, `y` yanks the cursor cell
 (or the cursor column over a selection, one row per line). `/` narrows by
 name and reference, keeping order. Every column but Underlying and a
 sparkline sorts: `s` cycles the cursor column's sort ascending →
@@ -3950,7 +3950,9 @@ filled pill. A Δ measures against the column's largest displayed magnitude,
 a z against 2.0, and a percentile by its distance from the median (above
 or below it is the sign; a rank at the median takes no tint). In a single
 view the same tint sits behind the level, and after `m` behind the
-companion's own text. The chip tints what the eye reads: a change shown as
+companion's own text; with a `slider` companion that tint is the rank's
+side of the median under every lens, including with the level shown,
+where no head says `pctl`. The chip tints what the eye reads: a change shown as
 `0.0` takes no fill, a rank shown as `90` tints as 90. A column's
 `level` key chooses the level cell's paint: `plain` (a pair view's
 default), `heat` (one hue behind the number, alpha by the level's position

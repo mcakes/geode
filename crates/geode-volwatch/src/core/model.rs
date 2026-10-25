@@ -877,14 +877,7 @@ fn window_word(asked: &Ask) -> &'static str {
 /// board note for the measure's dataset). A group row reads its means:
 /// `Core · 2 members · ATFM 1M mean 15.5 (2 of 2) · Δ1d mean +0.8 · z 1Y
 /// mean +0.5 · pctl 1Y mean 70`.
-pub fn readout(
-    row: &Row,
-    column: &Column,
-    asked: &Ask,
-    notes: &[String],
-    clock: &Clock,
-    _lens: &LensState,
-) -> String {
+pub fn readout(row: &Row, column: &Column, asked: &Ask, notes: &[String], clock: &Clock) -> String {
     readout_parts(row, column, asked, notes, clock).join(" \u{b7} ")
 }
 
@@ -1989,7 +1982,6 @@ mod tests {
                 &asked,
                 &[],
                 &clock_utc(),
-                &LensState::default()
             ),
             "SX5E · ATFM 3M 15.0 · Δ1d — · z 1Y — (12 of 60) · pctl 1Y 50 of 12 · mean 16.9 · sd 1.9"
         );
@@ -2319,7 +2311,6 @@ mod tests {
                 &ask(&vol, &lens, &tenors(), false),
                 &[],
                 &clock_utc(),
-                &lens
             ),
             "SX5E · vega k -312"
         );
@@ -2335,26 +2326,12 @@ mod tests {
             &no_reference,
             None,
         );
-        let text = readout(
-            &rows[0],
-            &col("atfm-3M-level"),
-            &asked,
-            &[],
-            &clock_utc(),
-            &LensState::default(),
-        );
+        let text = readout(&rows[0], &col("atfm-3M-level"), &asked, &[], &clock_utc());
         assert_eq!(
             text, "SX5E · ATFM 3M 15.9 · Δ1d +1.1 from 14.8 on 2026-10-09 · pctl 1Y 91 of 251",
             "no stats, no z and no mean"
         );
-        let text = readout(
-            &rows[1],
-            &col("atfm-3M-level"),
-            &asked,
-            &[],
-            &clock_utc(),
-            &LensState::default(),
-        );
+        let text = readout(&rows[1], &col("atfm-3M-level"), &asked, &[], &clock_utc());
         assert_eq!(text, "NEW · not in surface");
     }
 
@@ -2396,7 +2373,7 @@ mod tests {
             .find(|c| c.id == "atfm-3M-companion")
             .unwrap();
         assert_eq!(
-            readout(&row, &col, &asked, &[], &clock_utc(), &lens),
+            readout(&row, &col, &asked, &[], &clock_utc()),
             "SX5E \u{b7} ATFM 3M 19.6 \u{b7} \u{394}1d +0.8 from 18.8 on 2026-10-22 \u{b7} z 1Y +1.4 \u{b7} pctl 1Y 91 of 251 \u{b7} mean 16.9 \u{b7} sd 1.9"
         );
     }
@@ -2416,17 +2393,9 @@ mod tests {
             ..VolBoard::default()
         };
         let rows = rows(&members(["SX5E"]), Some(&board), &no_reference, None);
-        let lens = LensState::default();
         for id in ["atfm-3M-level", "atfm-3M-companion"] {
             assert_eq!(
-                readout(
-                    &rows[0],
-                    &col(id),
-                    &asked,
-                    &board.notes,
-                    &clock_utc(),
-                    &lens
-                ),
+                readout(&rows[0], &col(id), &asked, &board.notes, &clock_utc()),
                 "SX5E · ATFM 3M 15.9 · Δ1d — · history starts 2026-09-01",
                 "{id}"
             );
@@ -2438,7 +2407,6 @@ mod tests {
                 &asked,
                 &[],
                 &clock_utc(),
-                &lens
             ),
             "SX5E · ATFM 3M 15.9 · Δ1d —",
             "no note, no reason"
@@ -2921,7 +2889,6 @@ mod tests {
                 &asked,
                 &[],
                 &Clock::utc(),
-                &lens,
             );
             assert_eq!(
                 text,
@@ -2933,14 +2900,13 @@ mod tests {
                 &asked,
                 &[],
                 &Clock::utc(),
-                &lens,
             );
             assert!(
                 unmapped
                     .starts_with("\u{2014} \u{b7} 1 members \u{b7} ATFM 1M mean \u{2014} (0 of 1)"),
                 "{unmapped}"
             );
-            let name = readout(&rows[0], &cols[0], &asked, &[], &Clock::utc(), &lens);
+            let name = readout(&rows[0], &cols[0], &asked, &[], &Clock::utc());
             assert_eq!(name, "Core \u{b7} 2 members");
         }
 
@@ -3309,7 +3275,7 @@ mod tests {
                 assert_eq!(cell.text.as_ref(), "91", "{lens:?}");
                 assert!(!cell.muted);
                 assert_eq!(cell.value, Some(0.91), "the sort value is the rank");
-                let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc(), &lens);
+                let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc());
                 assert!(!text.contains("slider"), "{text}");
                 // The chip column beside it is blank: the fixture answers
                 // the 3M measure alone, so only the head says it follows.

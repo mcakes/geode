@@ -827,15 +827,9 @@ impl VolwatchTile {
             .as_deref()
             .map_or(&[][..], |b| b.notes.as_slice());
         self.readout = match (self.cursor_row(), column, self.board_ask.as_ref()) {
-            (Some(row), Some(column), Some(asked)) => crate::core::model::readout(
-                row,
-                column,
-                asked,
-                notes,
-                &self.clock,
-                &self.state.lens,
-            )
-            .into(),
+            (Some(row), Some(column), Some(asked)) => {
+                crate::core::model::readout(row, column, asked, notes, &self.clock).into()
+            }
             _ => SharedString::default(),
         };
     }
