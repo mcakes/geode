@@ -6205,12 +6205,13 @@ run_mutation "objectdialog: validation runs against the merged doc, not the draf
 # so equal eventual values cannot hide the wrong application path.
 run_mutation "objectdialog: an edit round-trips through disk instead of merging in memory" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    let mut docs = shell.services.config.all_docs();
-    for ((doc, object), value) in edits {
-        docs = docs_with_object(docs, user_dir, doc, object, value.clone());
-    }
-    let config = Config::from_docs(docs);' \
-  '    let _ = edits;
+  '    let config = Config::from_docs(docs_with_batch(
+        shell.services.config.all_docs(),
+        user_dir,
+        edits,
+        order,
+    ));' \
+  '    let _ = (edits, order);
     let config = Config::load(&geode_core::config::ConfigSources {
         builtin: shell.services.builtin.clone(),
         desk: None,
@@ -6257,9 +6258,12 @@ run_mutation "objectdialog: a stale write completion clears a newer edit's batch
 # with a broken file to expose that disagreement.
 run_mutation "objectdialog: an edit carries the previous config's diagnostics forward" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    let config = Config::from_docs(docs);
+  '        order,
+    ));
     shell.apply_reload(config, cx);' \
-  '    let mut config = Config::from_docs(docs);
+  '        order,
+    ));
+    let mut config = config;
     config.diagnostics = shell.services.config.diagnostics.clone();
     shell.apply_reload(config, cx);' \
   geode-shell \
@@ -9618,8 +9622,12 @@ run_mutation "objectdialog: membership compares the object's own names only" \
 # so that case cannot tell the two apart.
 run_mutation "objectdialog: an added item joins the end of the object's own list" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                items.push(entry);' \
-  '                items.insert(0, entry);' \
+  '                let mut entry = available.remove(item);
+                entry.included = true;
+                items.push(entry);' \
+  '                let mut entry = available.remove(item);
+                entry.included = true;
+                items.insert(0, entry);' \
   geode-shell \
   adding_a_later_available_column_still_joins_the_end_of_the_views_own_list
 
@@ -9903,7 +9911,9 @@ run_mutation "objectdialog: n refuses an existing name" \
 # refusing it afterwards, since the new view is user-only.
 run_mutation "objectdialog: a create ignores a name the presentation overlay holds" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        personalised_names(config, self.presentation_doc()).contains(name)' \
+  '        personalised_names(config, self.presentation_doc())
+            .iter()
+            .any(|p| self.names_collide(p, name))' \
   '        false' \
   geode-shell \
   a_presentation_only_name_is_taken_even_with_no_row_to_show_for_it
@@ -10403,8 +10413,10 @@ run_mutation "objectdialog: the chain field paints as the filter row" \
 run_mutation "objectdialog: the edit stage ignores the pending batch" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
   '    let folded = apply::config_with_pending(shell);
+    let config = folded.as_ref().unwrap_or(&shell.services.config);
     if let Some(state) = shell.object_dialog.as_mut() {' \
   '    let folded = apply::config_with_pending(shell).filter(|_| false);
+    let config = folded.as_ref().unwrap_or(&shell.services.config);
     if let Some(state) = shell.object_dialog.as_mut() {' \
   geode-shell \
   jumping_away_and_back_inside_the_debounce_keeps_the_queued_tick
@@ -10504,9 +10516,9 @@ run_mutation "objectdialog: an available row dropped onto the list is placed, no
 # Item → Available unticks on the way out, as `x` does.
 run_mutation "objectdialog: a row dropped into the catalogue is unticked" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '                let mut entry = items.remove(src_ix);
-                entry.included = false;' \
-  '                let mut entry = items.remove(src_ix);' \
+  '                    entry.included = false;
+                    available.push(entry);' \
+  '                    available.push(entry);' \
   geode-shell dropping_an_item_onto_the_catalogue_removes_it
 
 # Same row is inert: without the guard a self-drop is a remove+insert
@@ -13447,9 +13459,11 @@ run_mutation "view: an unknown key inside a dataset-presentation column table wa
 # window and gives promoted columns stale baselines.
 run_mutation "objectdialog: the refreshed catalogue reads the pending config" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '    let folded = apply::config_with_pending(shell);
+  '    // folded.
+    let folded = apply::config_with_pending(shell);
     let config = folded.as_ref().unwrap_or(&shell.services.config);' \
-  '    let folded: Option<geode_core::config::Config> = None;
+  '    // folded.
+    let folded: Option<geode_core::config::Config> = None;
     let config = folded.as_ref().unwrap_or(&shell.services.config);' \
   geode-shell \
   a_dataset_switch_inside_the_debounce_seeds_the_catalogue_from_the_pending_write
@@ -42182,18 +42196,13 @@ run_mutation "volwatch: a missing member keeps its row at the foot" \
 # not paint a bullish fill under a zero.
 run_mutation "volwatch: the chip takes the displayed sign" \
   crates/geode-volwatch/src/core/model.rs \
-  '        Glyph::Chip(companion_chip(
-            displayed_companion(v, &i.lens),
-            sign,
-            scale,
-            &i.lens,
-        ))' \
-  '        Glyph::Chip(companion_chip(
-            displayed_companion(v, &i.lens),
-            if v > 0.0 { Sign::Positive } else if v < 0.0 { Sign::Negative } else { Sign::Zero },
-            scale,
-            &i.lens,
-        ))' \
+  '                Glyph::Chip(companion_chip(shown, sign, scale, &i.lens))' \
+  '                Glyph::Chip(companion_chip(
+                    shown,
+                    if v > 0.0 { Sign::Positive } else if v < 0.0 { Sign::Negative } else { Sign::Zero },
+                    scale,
+                    &i.lens,
+                ))' \
   geode-volwatch \
   the_chip_takes_the_displayed_sign_and_the_columns_scale
 
@@ -42784,6 +42793,143 @@ run_mutation "volwatch: the menu offers the lens verbs" \
   $'            {\n                let _ = LENS_ACTION;\n                MenuRow::Action(self.verb(LOOKBACK_ACTION, "Cycle lookback"))\n            },' \
   geode-volwatch \
   the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches
+
+# ---- Vol views: the reader rules, the writer, the dialog and the glyphs ----
+#
+# `vol_views.toml` is the one document the shell writes whole: the reader
+# keeps the first of two views that differ only in case and keeps an empty
+# view; the writer keeps what it does not model and reorders by the dialog's
+# list; the merge follows the higher layer's table order; the dialog's
+# column stage folds its pickers into the column's own table. The glyph
+# entries live with the tile's model. Entry names start "volviews:" for the
+# document and the dialog, "volwatch:" for the tile's glyphs.
+
+# A second `Vol` beside `vol` is the one duplicate a TOML layer can hold;
+# reading both would give the tile two tabs the dialog cannot tell apart.
+run_mutation "volviews: a duplicate view keeps the first" \
+  crates/geode-core/src/volviews.rs \
+  '        if out.views.iter().any(|v| v.name.eq_ignore_ascii_case(name)) {' \
+  '        if out.views.iter().any(|v| false && v.name.eq_ignore_ascii_case(name)) {' \
+  geode-core \
+  a_view_defined_twice_keeps_the_first_and_says_so
+
+# An empty view is a tab the dialog has just made: skipping it would drop
+# the tab the user is about to fill, and the warning says what it lacks.
+run_mutation "volviews: an empty view is kept" \
+  crates/geode-core/src/volviews.rs \
+  $'            diags.push(warn(path, format!("vol_views: \'{name}\' has no columns")));' \
+  $'            diags.push(warn(path, format!("vol_views: \'{name}\' has no columns")));\n            continue;' \
+  geode-core \
+  an_empty_view_is_kept_with_a_warning
+
+# A top-level value the writer does not model (a user's note) survives a
+# write; dropping it would make every save a silent edit.
+run_mutation "volviews: the writer keeps an unknown key" \
+  crates/geode-core/src/volviews.rs \
+  '            out[key] = item.clone();' \
+  '            let _ = (key, item);' \
+  geode-core \
+  the_writer_keeps_unknown_keys_and_comments_and_round_trips_the_builtin_tabs
+
+# The named tables take the order given; unsorted they keep the file's,
+# and the browse list's shift+j would move nothing.
+run_mutation "volviews: reorder follows the given order" \
+  crates/geode-core/src/volviews.rs \
+  '    named.sort_by_key(|(k, _)| order.iter().position(|o| o == k));' \
+  '    named.sort_by_key(|(_k, _)| 0);' \
+  geode-core \
+  reorder_moves_the_named_tables_and_keeps_the_rest_after
+
+# The Default field off renders nothing, which the write path spells as
+# removing `default`; rendering the name regardless would make the field
+# a one-way switch.
+run_mutation "volviews: the default bool clears the key when off" \
+  crates/geode-shell/src/shell/objectdialog/volviews.rs \
+  $'        return if on {\n            toml_edit::Item::Value(draft.name.as_str().into())\n        } else {\n            toml_edit::Item::None\n        };' \
+  $'        let _ = on;\n        return toml_edit::Item::Value(draft.name.as_str().into());' \
+  geode-shell \
+  the_default_field_writes_the_top_level_key_and_clears_it_when_off
+
+# A family change starts the column from the new family's parts; keeping
+# the old choice would write an ATFM column under a skew head.
+run_mutation "volviews: a family change resets the parts" \
+  crates/geode-shell/src/shell/objectdialog/volviews.rs \
+  '    let mut c = if family == old.family {' \
+  '    let mut c = if true || family == old.family {' \
+  geode-shell \
+  folding_a_family_change_resets_the_parts_and_renames_the_item
+
+# The glyphs are the column's, not the family's: a family change carries
+# them over, and only a spark or vega column drops them.
+run_mutation "volviews: a family change keeps the glyphs" \
+  crates/geode-shell/src/shell/objectdialog/volviews.rs \
+  $'            fresh.level = old.level;\n            fresh.companion = old.companion;' \
+  '            let _ = (old.level, old.companion);' \
+  geode-shell \
+  default_glyphs_are_absent_and_a_family_change_keeps_them
+
+# The dialog's name gate agrees with the reader's case-insensitive
+# duplicate rule; an exact gate would write a `Vol` the tile never shows.
+run_mutation "volviews: names collide case-insensitively" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '            Domain::VolViews => a.eq_ignore_ascii_case(b),' \
+  '            Domain::VolViews => a == b,' \
+  geode-shell \
+  a_name_differing_only_in_case_is_taken_and_refused
+
+# Only tables trade slots in the merge: a `default` the user layer adds is
+# appended, not put in a tab's place pushing that tab to the end.
+run_mutation "volviews: the merge refills only table slots" \
+  crates/geode-core/src/config/merge.rs \
+  '    let is_table = |key: &str| src.get(key).is_some_and(Value::is_table);' \
+  '    let is_table = |key: &str| src.get(key).is_some();' \
+  geode-core \
+  vol_views_takes_a_higher_layers_order_for_the_keys_it_defines
+
+# A failed write's revert rebuilds the draft; without the launch set the
+# restart warning a saved column carries drops out of the edit.
+run_mutation "volviews: the revert keeps the startup set" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '    state.validate_against_startup(&mut rebuilt, config);' \
+  '    let _ = (&rebuilt, config);' \
+  geode-shell \
+  the_restart_warning_survives_a_failed_writes_revert
+
+# A slider places a rank and nothing else: under z or moves the chip
+# stands in, and the readout says why.
+run_mutation "volwatch: a slider under z is a chip" \
+  crates/geode-volwatch/src/core/model.rs \
+  '            CompanionGlyph::Slider if shows_rank(&i.lens) => {' \
+  '            CompanionGlyph::Slider => {' \
+  geode-volwatch \
+  a_slider_companion_is_a_rank_under_pctl_and_a_chip_under_z_with_a_readout_note
+
+# Heat scales to the column's own displayed levels; a fixed range would
+# tint a 20-vol column as pale as a 2-vol one.
+run_mutation "volwatch: heat is relative to the column" \
+  crates/geode-volwatch/src/core/model.rs \
+  $'    range(\n        i.rows\n            .iter()\n            .filter_map(|r| value(r, kind, i.asked, &i.lens)),\n    )' \
+  '    Some((0.0, 100.0))' \
+  geode-volwatch \
+  a_heat_level_tints_relative_to_the_column_and_the_larger_is_darker
+
+# Under the percentile metric a bar marks the rank's side of the median,
+# as the chip tints it; measured from zero every rank bars above it.
+run_mutation "volwatch: a bar under pctl bars the rank's side of the median" \
+  crates/geode-volwatch/src/core/model.rs \
+  $'            let side = pctl_side(v);\n            zero_bar::bar(side, side_sign(side), 1.0)' \
+  '            zero_bar::bar(v, sign, scale)' \
+  geode-volwatch \
+  a_bar_companion_scales_to_the_column_under_z_and_moves
+
+# A tab with no measure asks no board: the service refuses such an ask,
+# and a refusal the tab can never clear is not a notice worth standing.
+run_mutation "volwatch: an empty tab asks no board" \
+  crates/geode-volwatch/src/tile/data.rs \
+  $'        if next.measures.is_empty() {\n            return;\n        }' \
+  $'        if false && next.measures.is_empty() {\n            return;\n        }' \
+  geode-volwatch \
+  an_empty_tab_paints_its_strip_and_no_grid
 
 # ---- Vol watchlist: grouping ----
 #
