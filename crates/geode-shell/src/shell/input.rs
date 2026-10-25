@@ -375,6 +375,8 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Sources, window, cx);
         } else if action.0 == "config::colors" {
             objectdialog::render::open(self, objectdialog::Domain::Colors, window, cx);
+        } else if action.0 == "config::vol_views" {
+            objectdialog::render::open(self, objectdialog::Domain::VolViews, window, cx);
         } else if action.0 == "config::view_column" {
             // Pull the focused tile's columns now; the list keeps this copy.
             choicedialog::open_columns(self, objectdialog::Domain::Views, window, cx);

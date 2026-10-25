@@ -89,6 +89,7 @@ pub fn chain_fields(config: &Config, slot: Option<&str>, current: Vec<String>) -
             // `[[columns]]` entry, and a grouping slot's value is a bare
             // array, never a table with a `kind` key.
             kind: None,
+            source: None,
         })
         .collect();
     for column in crate::shell::groupable_columns(config) {
@@ -100,6 +101,7 @@ pub fn chain_fields(config: &Config, slot: Option<&str>, current: Vec<String>) -
             included: false,
             presentation: ColumnPresentation::default(),
             kind: None,
+            source: None,
         });
     }
 

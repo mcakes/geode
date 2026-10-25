@@ -20,6 +20,7 @@ pub mod render;
 mod schema;
 mod sources;
 mod views;
+pub mod volviews;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -50,6 +51,9 @@ pub enum Domain {
     /// The shared color vocabulary a column's `colour` field and a chart series can
     /// name — one object per named color, a hue (with its tone) or a theme token.
     Colors,
+    /// The vol watchlist's tabs: one object per view, each an ordered list of
+    /// measure columns chosen from a catalogue of families and datasets.
+    VolViews,
 }
 
 /// The current stage. Nested stages give Escape a previous stage to return to; mutable
@@ -169,16 +173,18 @@ impl Domain {
             Domain::Schema => schema::DOC,
             Domain::Sources => sources::DOC,
             Domain::Colors => colours::DOC,
+            Domain::VolViews => volviews::DOC,
         }
     }
 
     /// Every domain, for recognising [`Domain::already_open_notice`] strings.
-    pub const ALL: [Domain; 5] = [
+    pub const ALL: [Domain; 6] = [
         Domain::Views,
         Domain::Groupings,
         Domain::Schema,
         Domain::Sources,
         Domain::Colors,
+        Domain::VolViews,
     ];
 
     /// The status notice for a request refused because this domain's dialog is
@@ -190,6 +196,7 @@ impl Domain {
             Domain::Schema => "schema is already open underneath",
             Domain::Sources => "sources is already open underneath",
             Domain::Colors => "colors is already open underneath",
+            Domain::VolViews => "the Vol views dialog is already open",
         }
     }
 
@@ -201,6 +208,7 @@ impl Domain {
             Domain::Schema => "Schema",
             Domain::Sources => "Sources",
             Domain::Colors => "Colors",
+            Domain::VolViews => "Vol views",
         }
     }
 
@@ -247,21 +255,27 @@ impl Domain {
             Domain::Schema => "datasets",
             Domain::Sources => "sources",
             Domain::Colors => "colors",
+            Domain::VolViews => "tabs",
         }
     }
 
     /// How this domain describes one object on its browse row — the only
     /// genuinely domain-specific part of a row, and therefore the only
-    /// part an adapter gets to supply.
-    /// Only Sources reads the config: whether a source is a snapshot depends on its
-    /// dataset's family.
-    fn summary_fn(self) -> fn(&Config, &toml::Value) -> String {
+    /// part an adapter gets to supply. The object's name comes with its
+    /// value: a summary that depends on a document-level key naming the
+    /// object (Vol views' `default`) has no other way to know which row it
+    /// is describing.
+    /// Only Sources and Vol views read the config: whether a source is a
+    /// snapshot depends on its dataset's family, and whether a tab is the
+    /// default on the merged document's `default`.
+    fn summary_fn(self) -> fn(&Config, &str, &toml::Value) -> String {
         match self {
-            Domain::Views => |_, v| views::summary(v),
-            Domain::Groupings => |_, v| groupings::summary(v),
-            Domain::Schema => |_, v| schema::summary(v),
-            Domain::Sources => sources::summary,
-            Domain::Colors => |_, v| colours::summary(v),
+            Domain::Views => |_, _, v| views::summary(v),
+            Domain::Groupings => |_, _, v| groupings::summary(v),
+            Domain::Schema => |_, _, v| schema::summary(v),
+            Domain::Sources => |c, _, v| sources::summary(c, v),
+            Domain::Colors => |_, _, v| colours::summary(v),
+            Domain::VolViews => volviews::summary_in,
         }
     }
 
@@ -272,7 +286,11 @@ impl Domain {
         match self {
             Domain::Views => Some(views::PRESENTATION_DOC),
             // These domains have no view-presentation overlay.
-            Domain::Groupings | Domain::Schema | Domain::Sources | Domain::Colors => None,
+            Domain::Groupings
+            | Domain::Schema
+            | Domain::Sources
+            | Domain::Colors
+            | Domain::VolViews => None,
         }
     }
 
@@ -282,7 +300,11 @@ impl Domain {
     pub(super) fn roster(self) -> Option<&'static [&'static str]> {
         match self {
             Domain::Groupings => Some(&["1", "2", "3", "4", "5", "6", "7", "8", "9"]),
-            Domain::Views | Domain::Schema | Domain::Sources | Domain::Colors => None,
+            Domain::Views
+            | Domain::Schema
+            | Domain::Sources
+            | Domain::Colors
+            | Domain::VolViews => None,
         }
     }
 
@@ -301,8 +323,28 @@ impl Domain {
     fn prefix_fn(self) -> Option<fn(&toml::Value) -> Option<String>> {
         match self {
             Domain::Sources => Some(sources::prefix),
-            Domain::Views | Domain::Groupings | Domain::Schema | Domain::Colors => None,
+            Domain::Views
+            | Domain::Groupings
+            | Domain::Schema
+            | Domain::Colors
+            | Domain::VolViews => None,
         }
+    }
+
+    /// Top-level keys of the domain's document that are not objects. The
+    /// browse list never shows them; the adapter's fields edit them.
+    pub fn document_keys(self) -> &'static [&'static str] {
+        match self {
+            Domain::VolViews => &["default"],
+            _ => &[],
+        }
+    }
+
+    /// Whether the browse list keeps the merged document's order instead of
+    /// sorting by name. Vol views alone: its objects are the watchlist's
+    /// tabs, which the tile paints and the digits pick in that order.
+    pub fn keeps_document_order(self) -> bool {
+        matches!(self, Domain::VolViews)
     }
 
     /// Derive every domain's rows through the shared layer/override walk. Adapters
@@ -311,7 +353,7 @@ impl Domain {
     pub fn objects(self, config: &Config) -> Vec<ObjectRow> {
         derive_rows(
             config,
-            self.doc(),
+            self,
             self.presentation_doc(),
             self.roster(),
             self.summary_fn(),
@@ -320,11 +362,13 @@ impl Domain {
     }
 
     /// Names reserved by syntax outside the domain's own document. Colors excludes
-    /// `none` and `sign`, which already mean built-in formatting choices. Other
+    /// `none` and `sign`, which already mean built-in formatting choices. Vol views
+    /// excludes its document's own keys, which a view name would shadow. Other
     /// domains have no additional reserved names.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
             Domain::Colors => &geode_core::colour::RESERVED_NAMES,
+            Domain::VolViews => &["config_version", "default"],
             Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => &[],
         }
     }
@@ -541,17 +585,24 @@ fn drift_of(entry: Option<&(String, String)>, shadow: Option<&toml::Value>, name
 /// restore. Drift compares the recorded fork baseline with the current inherited
 /// definition, not with the user's edited copy.
 ///
-/// Rows sort by name, or by `(prefix, name)` for Sources so sources cluster by dataset.
+/// Rows sort by name, or by `(prefix, name)` for Sources so sources cluster by dataset,
+/// or in the merged document's order where the domain keeps it (Vol views' tabs).
 /// Presentation-only names affect override status but do not create browse rows without
 /// a definition.
+///
+/// `domain` supplies only the document's own facts — its name, the top-level
+/// keys that are not objects, and whether its order is kept; the rest arrives
+/// as explicit data so an adapter cannot reach past what it was asked for.
 fn derive_rows(
     config: &Config,
-    doc: &str,
+    domain: Domain,
     presentation_doc: Option<&str>,
     roster: Option<&'static [&'static str]>,
-    summary: fn(&Config, &toml::Value) -> String,
+    summary: fn(&Config, &str, &toml::Value) -> String,
     prefix: Option<fn(&toml::Value) -> Option<String>>,
 ) -> Vec<ObjectRow> {
+    let doc = domain.doc();
+    let document_keys = domain.document_keys();
     // Objects the user layer has personalised without overriding: a
     // `view_presentation.toml` table names the object and forks nothing.
     let personalised = personalised_names(config, presentation_doc);
@@ -596,6 +647,11 @@ fn derive_rows(
             if name == "config_version" {
                 continue;
             }
+            // A document-level key (Vol views' `default`) is not an object:
+            // listing it would offer a row nothing can open or edit.
+            if document_keys.contains(&name.as_str()) {
+                continue;
+            }
             let entry = rows.entry(name.clone()).or_insert_with(|| {
                 (
                     Vec::new(),
@@ -615,7 +671,7 @@ fn derive_rows(
             // winning layer and the summary describe the copy that
             // actually takes effect.
             entry.1.layer = Some(layered.layer);
-            entry.1.summary = summary(config, value);
+            entry.1.summary = summary(config, name, value);
             entry.1.prefix = prefix.and_then(|f| f(value));
             if layered.layer != Layer::User {
                 entry.2 = Some(value.clone());
@@ -641,6 +697,20 @@ fn derive_rows(
         .collect();
     if prefix.is_some() {
         out.sort_by(|a, b| (&a.prefix, &a.name).cmp(&(&b.prefix, &b.name)));
+    }
+    // The merged doc's key order is the tabs' order (TOML order is kept
+    // workspace-wide); a name no layer defines sorts after them all.
+    if domain.keeps_document_order()
+        && let Some(merged) = config.doc(doc)
+    {
+        let position = |name: &str| {
+            merged
+                .value
+                .keys()
+                .position(|k| k == name)
+                .unwrap_or(usize::MAX)
+        };
+        out.sort_by_key(|row| position(&row.name));
     }
     out
 }
@@ -700,6 +770,12 @@ impl Destination {
             (Destination::Presentation, Domain::Colors) => {
                 unreachable!("Colors has no Presentation-destined fields")
             }
+            // Vol views joins the same list: `volviews.rs`'s module doc has
+            // the reasoning (every field is `Destination::Doc`; a column's
+            // label, group and glyphs live in the view's own table).
+            (Destination::Presentation, Domain::VolViews) => {
+                unreachable!("Vol views has no Presentation-destined fields")
+            }
             (Destination::DatasetPresentation, Domain::Schema) => {
                 geode_core::view::DATASET_PRESENTATION_DOC
             }
@@ -740,6 +816,14 @@ pub struct ListItem {
     /// `[[columns]]` entry — a column already in `Draft::source` keeps
     /// its own table, `kind` included, untouched by this field entirely.
     pub kind: Option<String>,
+    /// A VolViews column's own `[[columns]]` table; `None` on every other domain.
+    ///
+    /// Also what makes the item one that is added by COPY and removed
+    /// outright: its catalogue is a fixed list of families, so `space`
+    /// clones the row into the view under its column's head and `x` drops
+    /// a member without returning it. An item without a table moves
+    /// between the two lists, as a view's column does.
+    pub source: Option<toml::Table>,
 }
 
 /// The supported field shapes. Adapters supply choices, bounds, and validation. Options
@@ -1768,6 +1852,14 @@ impl Draft {
         })
     }
 
+    /// The value of the `Text` field named `key`.
+    pub fn text(&self, key: &str) -> Option<&str> {
+        self.field_by_key(key).and_then(|f| match &f.kind {
+            FieldKind::Text(s) => Some(s.as_str()),
+            _ => None,
+        })
+    }
+
     /// The selected option of the `Choice` field named `key`.
     pub fn choice(&self, key: &str) -> Option<&str> {
         self.field_by_key(key).and_then(|f| match &f.kind {
@@ -2189,7 +2281,28 @@ impl Draft {
                     return Step::Inert;
                 }
                 // Adding: out of the catalogue, onto the END of the
-                // object's own list, shown.
+                // object's own list, shown. A row with its own table is
+                // copied, under its column's head, and the catalogue keeps
+                // the family (`ListItem::source`'s own doc).
+                if available[item].source.is_some() {
+                    let mut entry = available[item].clone();
+                    entry.name = volviews::added_name(&entry, items);
+                    entry.included = true;
+                    items.push(entry);
+                    // One more row sits ahead of the catalogue, so the row
+                    // under the cursor — the one just copied — is found
+                    // again by identity rather than by index.
+                    let target = EditRow::Available { field, item };
+                    let rows = self.rows();
+                    if let Some(ix) = self
+                        .visible_rows()
+                        .iter()
+                        .position(|m| rows.get(m.row) == Some(&target))
+                    {
+                        self.selected = ix;
+                    }
+                    return Step::Changed;
+                }
                 let mut entry = available.remove(item);
                 entry.included = true;
                 items.push(entry);
@@ -2219,6 +2332,15 @@ impl Draft {
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
                     return Step::Inert;
                 };
+                // An item carrying its own table (a Vol views column) is
+                // written whole whenever it is in the list: it has no
+                // hidden state for a tick to flip, so the flip would paint
+                // a `·` the file never reads. `x` is the one way out.
+                if items[item].source.is_some() {
+                    return Step::Refused(
+                        "a column is in the view or removed — x removes it".to_string(),
+                    );
+                }
                 if included
                     && dest == Destination::Doc
                     && items.iter().filter(|i| i.included).count() == 1
@@ -2321,7 +2443,15 @@ impl Draft {
                 let Some(available) = available.as_mut() else {
                     return Step::Inert;
                 };
-                let mut entry = available.remove(src_ix);
+                // Copied under its head, or moved — `space`'s own rule
+                // (`ListItem::source`'s doc).
+                let mut entry = if available[src_ix].source.is_some() {
+                    let mut entry = available[src_ix].clone();
+                    entry.name = volviews::added_name(&entry, items);
+                    entry
+                } else {
+                    available.remove(src_ix)
+                };
                 entry.included = true;
                 items.insert(dst_ix, entry);
                 EditRow::Item {
@@ -2334,11 +2464,20 @@ impl Draft {
                     return Step::Inert;
                 };
                 let mut entry = items.remove(src_ix);
-                entry.included = false;
-                available.push(entry);
-                EditRow::Available {
-                    field,
-                    item: available.len() - 1,
+                // Dropped outright, landing on the catalogue row it was
+                // dropped on; the catalogue never lost its family.
+                if entry.source.is_some() {
+                    EditRow::Available {
+                        field,
+                        item: dst_ix,
+                    }
+                } else {
+                    entry.included = false;
+                    available.push(entry);
+                    EditRow::Available {
+                        field,
+                        item: available.len() - 1,
+                    }
                 }
             }
             (false, false) => return Step::Inert,
@@ -2417,6 +2556,16 @@ impl Draft {
         };
         if item >= items.len() {
             return Step::Inert;
+        }
+        // A column with its own table is dropped outright: the catalogue
+        // never lost its family (`ListItem::source`'s own doc). The row
+        // that was next slides under the cursor; a removal of the last
+        // visible row steps back, as the move below does.
+        if items[item].source.is_some() {
+            items.remove(item);
+            let last = self.visible_rows().len().saturating_sub(1);
+            self.selected = self.selected.min(last);
+            return Step::Changed;
         }
         let mut entry = items.remove(item);
         entry.included = false;
@@ -2656,7 +2805,10 @@ impl Domain {
     /// an empty sentence while retaining the footer slot.
     pub fn help(self, stage: &Stage, key: &str) -> &'static str {
         if matches!(stage, Stage::Column { .. }) {
-            return views::column_help(key);
+            return match self {
+                Domain::VolViews => volviews::column_help(key),
+                _ => views::column_help(key),
+            };
         }
         match self {
             Domain::Views => views::help(key),
@@ -2664,6 +2816,7 @@ impl Domain {
             Domain::Groupings => groupings::help(key),
             Domain::Colors => colours::help(key),
             Domain::Schema => schema::help(key),
+            Domain::VolViews => volviews::help(key),
         }
     }
 
@@ -2679,6 +2832,7 @@ impl Domain {
             }
             Domain::Views | Domain::Schema => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
+            Domain::VolViews => volviews::text_editable(key),
         }
     }
 
@@ -2699,6 +2853,7 @@ impl Domain {
             // must have the same grammar through either door.
             Domain::Views | Domain::Schema => views::parse_text(key, text),
             Domain::Sources => sources::parse_text(key, text),
+            Domain::VolViews => volviews::parse_text(key, text),
         }
     }
 
@@ -2715,6 +2870,7 @@ impl Domain {
             Domain::Schema => schema::fields(config, object),
             Domain::Sources => sources::fields(config, object),
             Domain::Colors => colours::fields(config, object),
+            Domain::VolViews => volviews::fields(config, object),
         }
     }
 
@@ -2727,9 +2883,11 @@ impl Domain {
     pub fn fields_from_source(self, config: &Config, table: &toml::Table) -> Vec<Field> {
         match self {
             Domain::Colors => colours::fields_from_table(Some(table)),
-            Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => {
-                self.fields(config, None)
-            }
+            Domain::Views
+            | Domain::Groupings
+            | Domain::Schema
+            | Domain::Sources
+            | Domain::VolViews => self.fields(config, None),
         }
     }
 
@@ -2802,6 +2960,7 @@ impl Domain {
             Domain::Schema => schema::to_table(draft, dest),
             Domain::Sources => sources::to_table(draft, dest),
             Domain::Colors => colours::to_table(draft, dest),
+            Domain::VolViews => volviews::to_table(draft, dest),
         }
     }
 
@@ -2814,6 +2973,7 @@ impl Domain {
             Domain::Schema => schema::validate(draft, config),
             Domain::Sources => sources::validate(draft, config),
             Domain::Colors => colours::validate(draft, config),
+            Domain::VolViews => volviews::validate(draft, config),
         }
     }
 }
@@ -5120,6 +5280,7 @@ mod tests {
             included: false,
             presentation: ColumnPresentation::default(),
             kind: None,
+            source: None,
         }
     }
 
@@ -5742,12 +5903,14 @@ mod tests {
                                 included: true,
                                 presentation: ColumnPresentation::default(),
                                 kind: None,
+                                source: None,
                             },
                             ListItem {
                                 name: "delta".into(),
                                 included: true,
                                 presentation: ColumnPresentation::default(),
                                 kind: None,
+                                source: None,
                             },
                         ],
                         available: Some(vec![ListItem {
@@ -5755,6 +5918,7 @@ mod tests {
                             included: false,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            source: None,
                         }]),
                     },
                     dest: Destination::Doc,
@@ -5833,12 +5997,14 @@ mod tests {
                             included: true,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            source: None,
                         },
                         ListItem {
                             name: "npv".into(),
                             included: true,
                             presentation: ColumnPresentation::default(),
                             kind: None,
+                            source: None,
                         },
                     ],
                     available: None,

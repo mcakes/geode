@@ -218,6 +218,7 @@ pub(crate) fn opens_dialog(action: &crate::actions::ActionId) -> bool {
         "settings::open"
             | "keybindings::open"
             | "config::views"
+            | "config::vol_views"
             | "config::groupings"
             | "config::scopes"
             | "config::schema"

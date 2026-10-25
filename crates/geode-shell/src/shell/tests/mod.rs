@@ -692,3 +692,4 @@ mod session;
 mod stacks;
 mod tilepicker;
 mod tiling_keys;
+mod volviews_dialog;

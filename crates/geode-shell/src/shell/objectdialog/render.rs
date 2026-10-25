@@ -3914,7 +3914,7 @@ fn build_edit(shell: &ShellView, entity: &Entity<ShellView>, cx: &mut App) -> An
                 Hint::new(HintRow::Edit, &["shift+j", "shift+k"], "reorder")
                     .selector("objectdialog-hint-reorder"),
             );
-            if state.domain == Domain::Views {
+            if matches!(state.domain, Domain::Views | Domain::VolViews) {
                 hints.push(Hint::new(HintRow::Edit, &["x"], "remove"));
             }
         }
@@ -4048,6 +4048,13 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
             "members",
         ),
         (Domain::Views, false) => ("AVAILABLE — `space` adds", "available"),
+        // A Vol views column has no hidden state — it is in the view or
+        // removed — so `space` is not offered on a member row.
+        (Domain::VolViews, true) => (
+            "COLUMNS — `shift+j` / `shift+k` reorder · `x` removes",
+            "members",
+        ),
+        (Domain::VolViews, false) => ("AVAILABLE — `space` adds", "available"),
         (Domain::Groupings, _) => (
             "DIMENSIONS — `space` includes · `shift+j` / `shift+k` reorder",
             "members",
