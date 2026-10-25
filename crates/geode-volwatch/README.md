@@ -75,7 +75,11 @@ measured against). Behaviour and limits are in the features guide's
     column's tint goes where a pair's chip would paint muted, and a muted
     slider is its number alone; a group row prepares as `label ·
     count` behind the tree lead (`tree_lead`), its mean cells under the
-    lens (`group_companion`) and a blank spark), `readout` (the change,
+    lens (`group_companion`) and a blank spark), `gutter` (the
+    line-number gutter over the shown rows: one text per row through the
+    shell's `gutter_number`, group rows included, the cursor row absolute
+    under `rel`, and its width by the shell's `gutter_px`; empty and `0`
+    when off), `readout` (the change,
     the z, the rank and the statistics from the ask the board answered; a
     cell with no change names the board's note for its dataset; a group
     row its means and present count), `sort_value` (follows the lens),
@@ -111,8 +115,11 @@ measured against). Behaviour and limits are in the features guide's
     on a group row), the strip's hints, `t`'s refusal, yank (a group's
     member names one per line), emission (the group path, then the
     underlying on a member; a member under `—` posts its underlying alone
-    and the `—` group row refuses) and autosize (the shown view's columns only;
-    `reset` clears that view's).
+    and the `—` group row refuses), autosize (the shown view's columns only;
+    `reset` clears that view's) and `[ui] line_numbers` (mirrored from the
+    shell's `UiSettings` global at construction and on a change; every
+    `sync_table` hands the delegate the mode, the shown count and the
+    cursor row).
   - `data.rs`: the board's request lifecycle (tags, `deliver_board`,
     `deliver_keys`, the refresh and stale timers, the prepared model, the
     band (`rebuild_band`; empty on a group row), the header's dataset
@@ -126,7 +133,13 @@ measured against). Behaviour and limits are in the features guide's
     group row with its reason).
   - `table.rs`: the grid's `TableDelegate` and `Paints` (one per theme);
     it formats nothing. It adds the table's fixed chrome (cell padding and
-    the cursor border, `chrome_px`) to a prepared width, paints the tree
+    the cursor border, `chrome_px`) to a prepared width, paints the
+    line-number gutter ahead of the tree lead (`set_gutter` re-derives it
+    only when the mode, the shown count or, under `rel`, the cursor row
+    changed, and says when its width did so the tile refreshes the
+    table's cached widths; the Underlying column's width and minimum
+    carry it, and a drag is recorded net of it so sized widths stay the
+    cell's own), paints the tree
     lead and a group row's chevron (the press is recorded so the row
     ignores it and the shell's click-to-focus still sees it; the click
     emits `GridEvent::TogglePressed` and is stopped; a release anywhere

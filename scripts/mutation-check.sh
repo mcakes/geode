@@ -43154,6 +43154,18 @@ run_mutation "volwatch: group refuses a dimension named twice" \
   geode-volwatch \
   colon_group_parses_dimensions_slot_none_and_refuses_the_rest
 
+# The vol tile's gutter numbers through the shell's rule, so the cursor
+# row's branch lives there; its model test reads the numbers over its own
+# grouped, folded and narrowed grid, where a blank cursor row would read
+# as a row with no number. A different replacement from the shell's own
+# entry (which shows 0), so each is its own mutation.
+run_mutation "volwatch: relative line numbers keep the cursor row absolute" \
+  crates/geode-shell/src/linenumbers.rs \
+  '        LineNumbers::Relative if row == cursor => Some(row + 1),' \
+  '        LineNumbers::Relative if row == cursor => None,' \
+  geode-volwatch \
+  line_numbers_count_visible_rows_after_folds_and_narrowing
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi

@@ -3833,7 +3833,17 @@ surface` in the readout). A measure column's level and companion cells
 paint as its `level` and `companion` keys say (plain, heat or tint; chip,
 bar or slider — see Glyphs below), the view's defaults where the file
 names none. The Underlying column is pinned left; the
-reference name is in the readout. Column heads group under a shared header
+reference name is in the readout. `[ui] line_numbers` adds a gutter
+beside the Underlying cells, before the depth indent and the chevron, so
+numbers share one lane whatever the depth; the column widens by the
+gutter (a fitted or dragged width is the cell's own, so it survives the
+setting), and off paints nothing and widens nothing. Rows are numbered in
+painted order, members and group rows alike, after grouping, folds and
+`/` (a hidden member has no number) — the index `N shift+g` lands on.
+Relative mode shows the distance from the cursor row, which keeps its
+absolute number so `3j` and `3 shift+g` both read off the gutter, and
+numbers absolutely with no cursor row. Numbers are muted; the cursor
+row's takes the text color. Column heads group under a shared header
 row (`ATFM 3M` over `vol` and `Δ`; in a single surface view the tenor over
 `5Δ … 95Δ`) painted at the heads' text size, so a view with groups is no
 larger than one without. A column's width is its glyph's minimum plus the
@@ -3866,7 +3876,8 @@ tab, and never requeries. A unit the saved order does not name takes its
 file position after the named ones, and a saved stem the tab no longer
 has is ignored and dropped on the next move. The motions are the shared grid
 motions (the tile publishes `grid` with `counts`; see [motion](#motion)): `j
-k` move rows, `h l` columns, `g g`/`shift+g` the ends, `ctrl+d`/`ctrl+u` and
+k` move rows, `h l` columns, `g g`/`shift+g` the ends (`N shift+g` the
+row the gutter numbers N), `ctrl+d`/`ctrl+u` and
 `ctrl+f`/`ctrl+b` the half and full pages, `^`/`$` the first and last
 column, each times its count; the column cursor never rests on Underlying.
 `v`/`shift+v` start a row selection, `y` yanks the cursor cell
@@ -3965,9 +3976,10 @@ against the half-track, as the chip tints it) or `slider` (a track filled
 to the rank at display precision, with quartile ticks and a marker in
 the warning color at or beyond 0.10 and 0.90). Only the percentile
 metric has a rank to place, so under z or moves a slider column shows
-the chip and the readout
-ends ` · slider needs the percentile metric`; a slider that would paint
-muted (a short history, another window) is its number alone. The spark
+the chip and the readout ends ` · slider needs the percentile metric` (a
+single column with its level shown asks for no slider and gets no note);
+a slider that would paint muted (a short history, another window) is its
+number alone. The spark
 column is a 30-day sparkline with an end dot. Sign colors are the theme's
 bullish and bearish chart tokens. A companion from a board asked under another
 lookback or window than the one shown paints muted (after `d` or `w`,
