@@ -56,7 +56,10 @@ impl VolwatchTile {
     /// only when that ask is not inside the one that will answer (the one
     /// out, else the landed board's): a narrower ask never requeries.
     /// `force` (`shift+r`, the timer, new members) asks regardless, under a
-    /// new tag. Nothing is asked for an empty member list or with no view.
+    /// new tag. Nothing is asked for an empty member list, with no view, or
+    /// for an ask with no measure (a tab with no columns, or sparklines
+    /// alone): the service refuses such a board, and a refusal the tab can
+    /// never clear is not a notice worth standing.
     pub(crate) fn resubmit(&mut self, force: bool, cx: &mut Context<Self>) {
         if self.members.is_empty() {
             return;
@@ -70,6 +73,9 @@ impl VolwatchTile {
             &self.ordered_tenors(),
             self.state.band,
         );
+        if next.measures.is_empty() {
+            return;
+        }
         let base = if self.in_flight {
             self.asked.as_ref()
         } else {

@@ -140,6 +140,10 @@ impl MenuHost for VolwatchTile {
 
 /// The switcher's refusal while there is nothing to list.
 const NOTHING_TO_SWITCH: &str = "no watchlists to switch to";
+/// The configuration action that edits `vol_views.toml`, and its palette
+/// title, which the empty tab names when no key is bound to it.
+const VOL_VIEWS_ACTION: &str = "config::vol_views";
+const VOL_VIEWS_LABEL: &str = "Edit vol views\u{2026}";
 
 impl VolwatchTile {
     pub(super) fn settle_menu(&mut self, shown: bool, snapshot: &WatchlistSnapshot) {
@@ -372,8 +376,17 @@ impl VolwatchTile {
         let switch = tips::chord_for(&self.chords, SWITCH_ACTION)
             .map(|ks| spell(&ks))
             .unwrap_or_else(|| "Vol: Switch list".to_string());
+        let no_columns = self
+            .shown_view()
+            .filter(|v| v.columns.is_empty())
+            .map(|v| v.name);
         self.empty = match (list, state.is_some()) {
-            (_, true) => None,
+            (_, true) => no_columns.map(|name| {
+                let edit = tips::chord_for(&self.chords, VOL_VIEWS_ACTION)
+                    .map(|ks| spell(&ks))
+                    .unwrap_or_else(|| VOL_VIEWS_LABEL.to_string());
+                format!("{name} has no columns \u{2014} {edit} adds one").into()
+            }),
             (_, false) if none_defined => Some("no watchlists defined".into()),
             (Some(gone), false) => {
                 Some(format!("{gone} no longer exists \u{2014} {switch} switches").into())

@@ -53,10 +53,15 @@ measured against). Behaviour and limits are in the features guide's
     `group_name`).
   - `model.rs`: the prepared model. `rows` (members in list order, the
     board's missing at the foot), `Row.path`/`Row.group` make a row a tree
-    node (`GridRow::depth`), `prepare` (each cell's text, chip or tint, id
-    and muted flag, the column widths; a chip gets the displayed sign and
-    the companion at display precision; a single column's tint goes where
-    a pair's chip would paint muted; a group row prepares as `label ·
+    node (`GridRow::depth`), `prepare` (each cell's text, glyph, id and
+    muted flag, the column widths; the glyph is the column's resolved
+    `LevelGlyph`/`CompanionGlyph`: a heat level over the column's range
+    (`heat_range`, members and group means alike), a chip or zero bar
+    over the column's scale, a slider under the percentile metric and a
+    chip otherwise, with the readout saying why; every glyph gets the
+    displayed sign and the companion at display precision; a single
+    column's tint goes where a pair's chip would paint muted, and a muted
+    slider is its number alone; a group row prepares as `label ·
     count` behind the tree lead (`tree_lead`), its mean cells under the
     lens (`group_companion`) and a blank spark), `readout` (the change,
     the z, the rank and the statistics from the ask the board answered; a

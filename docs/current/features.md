@@ -1332,7 +1332,13 @@ nor barred; the host passes the slider's rank at display precision. Slider
 tracks and bar axes start at the cell's leading edge, so they line up down a
 column whatever the width of each number. The [vol watchlist](#vol-watchlist)
 tile paints its companion chips, the tint behind a single view's level and
-the band's heat range with them.
+the band's heat range with them, and a view's `level = "heat"`,
+`companion = "bar"` and `companion = "slider"` columns with the heat tint
+(over the column's present levels, group means included), the bar (a rank
+barred by its side of the median) and the slider (under the percentile
+metric; a chip under z or moves, with the readout noting `slider needs the
+percentile metric`). A tab with no columns paints its strip and an empty
+state and asks the board for nothing.
 
 ## Vol slice
 

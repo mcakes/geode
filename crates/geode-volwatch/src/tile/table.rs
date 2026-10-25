@@ -15,7 +15,9 @@ use geode_shell::fonts;
 use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::scale;
 use geode_widgets::cell::delta_chip::{self, ChipPaint};
-use geode_widgets::cell::heat::HeatPaint;
+use geode_widgets::cell::heat::{self, HeatPaint};
+use geode_widgets::cell::percent_slider::{self, SliderPaint};
+use geode_widgets::cell::zero_bar::{self, BarPaint};
 use geode_widgets::cell::{design, widths};
 use gpui::prelude::*;
 use gpui::{
@@ -55,9 +57,15 @@ pub(crate) struct Paints {
     /// A companion painted from a board asked over another lookback, or
     /// a rank over too short a history.
     pub(crate) chip_muted: ChipPaint,
-    /// The band's surface tint; the grid paints no heat.
+    /// The band's surface tint and a `heat` level column's.
     pub(crate) heat: HeatPaint,
     pub(crate) heat_muted: HeatPaint,
+    /// A `bar` companion's zero bar.
+    pub(crate) bar: BarPaint,
+    pub(crate) bar_muted: BarPaint,
+    /// A `slider` companion's rank gauge.
+    pub(crate) slider: SliderPaint,
+    pub(crate) slider_muted: SliderPaint,
     pub(crate) spark: SparkPaint,
     pub(crate) cursor_ring: Hsla,
     pub(crate) stripe_ring: Hsla,
@@ -67,6 +75,13 @@ pub(crate) struct Paints {
     /// hover and press read as a control's.
     pub(crate) chevron: control::ControlPaint,
 }
+
+/// A bar's fill over its sign color: solid enough to read as a length,
+/// under full so the axis hairline shows through where it crosses.
+const BAR_FILL_ALPHA: f32 = 0.75;
+/// A slider's filled track over the primary: a tint behind the marker,
+/// which carries the rank.
+const SLIDER_FILL_ALPHA: f32 = 0.35;
 
 /// A selected row's tint, under the table's own cursor-row highlight.
 fn selection_tint(t: &Theme) -> Hsla {
@@ -90,6 +105,24 @@ impl Paints {
             hue: t.primary,
             text: t.foreground,
         };
+        let bar = BarPaint {
+            positive: t.chart_bullish,
+            negative: t.chart_bearish,
+            zero: muted,
+            axis: t.border,
+            text: t.foreground,
+            fill_alpha: BAR_FILL_ALPHA,
+            radius,
+        };
+        let slider = SliderPaint {
+            track: t.border,
+            fill: t.primary.opacity(SLIDER_FILL_ALPHA),
+            tick: muted,
+            marker: t.foreground,
+            warning: t.warning,
+            text: t.foreground,
+            radius,
+        };
         // The table paints its ground over the tile's background; the
         // cursor row's highlight replaces a stripe, as the table does.
         let ground = t.background.blend(t.table);
@@ -110,6 +143,19 @@ impl Paints {
             heat_muted: HeatPaint {
                 text: muted,
                 ..heat
+            },
+            bar,
+            bar_muted: BarPaint {
+                positive: muted,
+                negative: muted,
+                text: muted,
+                ..bar
+            },
+            slider,
+            slider_muted: SliderPaint {
+                marker: muted,
+                text: muted,
+                ..slider
             },
             spark: SparkPaint {
                 line: muted,
@@ -841,6 +887,21 @@ impl TableDelegate for GridDelegate {
             Glyph::Chip(chip) => {
                 let paint = if muted { p.chip_muted } else { p.chip };
                 delta_chip::paint(text, *chip, paint, id).into_any_element()
+            }
+            // The painters below give the cell's text its `<id>-text`
+            // selector themselves, so a test finds it as it finds plain
+            // text.
+            Glyph::Heat(alpha) => {
+                let paint = if muted { p.heat_muted } else { p.heat };
+                heat::paint(text, *alpha, paint, id).into_any_element()
+            }
+            Glyph::Bar(bar) => {
+                let paint = if muted { p.bar_muted } else { p.bar };
+                zero_bar::paint(text, *bar, paint, id).into_any_element()
+            }
+            Glyph::Slider(slider) => {
+                let paint = if muted { p.slider_muted } else { p.slider };
+                percent_slider::paint(text, *slider, paint, id).into_any_element()
             }
             Glyph::Spark {
                 values,

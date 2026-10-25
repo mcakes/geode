@@ -12,7 +12,8 @@ use geode_core::schema::axis::tenor_days;
 use geode_core::volboard::{Lookback, Measure, delta_text};
 pub use geode_core::volviews::{ALL_TENORS, DELTAS, SPARK_30D};
 use geode_core::volviews::{
-    Cells, MeasureText, VolColumn, VolView, VolViews, from_doc, measure_text, resolve,
+    Cells, CompanionGlyph, LevelGlyph, MeasureText, VolColumn, VolView, VolViews, from_doc,
+    measure_text, resolve,
 };
 
 use super::lens::{LensState, Shown};
@@ -160,22 +161,28 @@ pub fn builtin() -> VolViews {
 }
 
 /// What a column paints. Every variant but `Underlying`, `Spark` and
-/// `Vega` names its board measure.
+/// `Vega` names its board measure; a measure column carries its glyphs
+/// resolved, so the model never asks what the file's default was.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ColumnKind {
     Underlying,
-    /// The level of a pair view.
+    /// The level of a pair view, plain unless the file says otherwise.
     Level {
         measure: Measure,
+        level: LevelGlyph,
     },
-    /// The pair view's companion chip: the Δ, z or rank the lens picks.
+    /// The pair view's companion: the Δ, z or rank the lens picks, as a
+    /// chip unless the file says otherwise.
     Companion {
         measure: Measure,
+        companion: CompanionGlyph,
     },
-    /// A single view's one number: the level over the companion's tint,
-    /// or the companion itself after `m`.
+    /// A single view's one number: the level (over the companion's sign
+    /// tint by default), or the companion itself after `m`.
     Single {
         measure: Measure,
+        level: LevelGlyph,
+        companion: CompanionGlyph,
     },
     Spark {
         measure: Measure,
@@ -289,9 +296,11 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                 measure,
                 label,
                 group,
-                ..
+                level,
+                companion,
             } => {
                 let stem = measure_id(measure);
+                let companion = companion.unwrap_or(CompanionGlyph::Chip);
                 match view.cells {
                     Cells::Pair => {
                         let g = group.clone().unwrap_or_else(|| family_label(measure));
@@ -301,6 +310,7 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                             head: label.clone().unwrap_or_else(|| unit(measure).into()),
                             kind: ColumnKind::Level {
                                 measure: measure.clone(),
+                                level: level.unwrap_or(LevelGlyph::Plain),
                             },
                         });
                         cols.push(Column {
@@ -309,6 +319,7 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                             head: lens.companion_head().into(),
                             kind: ColumnKind::Companion {
                                 measure: measure.clone(),
+                                companion,
                             },
                         });
                     }
@@ -329,6 +340,8 @@ pub fn columns(view: &VolView, lens: &LensState, vega: bool) -> Vec<Column> {
                             head: label.clone().unwrap_or(h),
                             kind: ColumnKind::Single {
                                 measure: measure.clone(),
+                                level: level.unwrap_or(LevelGlyph::Tint),
+                                companion,
                             },
                         });
                     }
@@ -656,6 +669,78 @@ mod tests {
         assert_eq!(cols[4].id, "vega");
         assert_eq!(cols[4].head, "vega k");
         assert!(!sortable(&cols[3].kind) && !sortable(&cols[0].kind) && sortable(&cols[4].kind));
+    }
+
+    #[test]
+    fn the_columns_carry_the_files_glyphs_or_the_views_defaults() {
+        use geode_core::volviews::{CompanionGlyph, LevelGlyph};
+        let glyphs =
+            |level: Option<LevelGlyph>, companion: Option<CompanionGlyph>| VolColumnSpec::Measure {
+                measure: geode_core::volviews::parse_measure("atfm 3M").unwrap(),
+                label: None,
+                group: None,
+                level,
+                companion,
+            };
+        let doc = |cells: Cells| VolViewsDoc {
+            views: vec![VolViewSpec {
+                name: "v".into(),
+                cells,
+                columns: vec![
+                    glyphs(None, None),
+                    glyphs(Some(LevelGlyph::Heat), Some(CompanionGlyph::Slider)),
+                ],
+            }],
+            default: None,
+        };
+        let (pair, _) = resolve(&doc(Cells::Pair), &|_| None);
+        let cols = columns(&pair.views[0], &LensState::default(), false);
+        assert!(matches!(
+            cols[1].kind,
+            ColumnKind::Level {
+                level: LevelGlyph::Plain,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cols[2].kind,
+            ColumnKind::Companion {
+                companion: CompanionGlyph::Chip,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cols[3].kind,
+            ColumnKind::Level {
+                level: LevelGlyph::Heat,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cols[4].kind,
+            ColumnKind::Companion {
+                companion: CompanionGlyph::Slider,
+                ..
+            }
+        ));
+        let (single, _) = resolve(&doc(Cells::Single), &|_| None);
+        let cols = columns(&single.views[0], &LensState::default(), false);
+        assert!(matches!(
+            cols[1].kind,
+            ColumnKind::Single {
+                level: LevelGlyph::Tint,
+                companion: CompanionGlyph::Chip,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cols[2].kind,
+            ColumnKind::Single {
+                level: LevelGlyph::Heat,
+                companion: CompanionGlyph::Slider,
+                ..
+            }
+        ));
     }
 
     #[test]

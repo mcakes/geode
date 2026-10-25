@@ -733,6 +733,22 @@ pub(super) fn queries(reqs: &[Request]) -> Vec<&geode_data::QueryParams> {
         .collect()
 }
 
+/// The default settings with the tabs `text` describes (a `vol_views.toml`
+/// body), resolved with no table datasets. The reader may warn (a tab
+/// with no columns does, by design); the resolver must not.
+pub(super) fn settings_with_views(text: &str) -> VolwatchSettings {
+    use geode_core::config::VOL_VIEWS_DOC;
+    use geode_core::volviews::{from_doc, resolve};
+    let layer = LayerDoc::builtin(VOL_VIEWS_DOC, text).expect("well-formed TOML");
+    let (doc, _) = from_doc(&merge_docs(VOL_VIEWS_DOC, &[layer]));
+    let (views, diags) = resolve(&doc, &|_| None);
+    assert!(diags.is_empty(), "{diags:?}");
+    VolwatchSettings {
+        views,
+        ..Default::default()
+    }
+}
+
 /// The settings that ask book vega from `wide`'s `vega01_usd`.
 pub(super) fn vega_settings() -> VolwatchSettings {
     VolwatchSettings {

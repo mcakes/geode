@@ -1271,9 +1271,9 @@ impl VolwatchTile {
             return;
         };
         let measure = match &c.kind {
-            ColumnKind::Level { measure }
-            | ColumnKind::Companion { measure }
-            | ColumnKind::Single { measure } => Some(measure),
+            ColumnKind::Level { measure, .. }
+            | ColumnKind::Companion { measure, .. }
+            | ColumnKind::Single { measure, .. } => Some(measure),
             ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Vega => None,
         };
         let name = self.cursor_row().map(|r| r.name.clone());

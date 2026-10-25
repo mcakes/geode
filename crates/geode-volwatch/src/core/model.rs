@@ -18,10 +18,12 @@ use geode_core::clock::Clock;
 use geode_core::format::{Formatted, Sign, format_number};
 use geode_core::view::{Colour, ColumnFormat, Negative, Scale};
 use geode_core::volboard::{Cell, Change, Lookback, Measure, Role, VolBoard, VolRow};
-use geode_core::volviews::Cells;
+use geode_core::volviews::{Cells, CompanionGlyph, LevelGlyph};
 use geode_tile::rows::GridRow;
 use geode_widgets::cell::delta_chip::{Chip, chip};
 use geode_widgets::cell::heat::{heat, range};
+use geode_widgets::cell::percent_slider::{self, Slider};
+use geode_widgets::cell::zero_bar::{self, Bar};
 use geode_widgets::cell::{DESIGN_REM, column_scale, widths};
 use gpui::SharedString;
 
@@ -38,9 +40,10 @@ use super::views::{
 /// of `Z_CEILING`, a rank at either end): a tint under a colored number;
 /// at 0.55 the chips read as filled pills and hid the grid's rhythm.
 pub const CHIP_CEILING: f32 = 0.25;
-/// Heat tint alpha at the top of the band's surface range. The band's
-/// own: the grid paints no heat.
-pub const BAND_HEAT_CEILING: f32 = 0.40;
+/// Heat tint alpha at the top of a heat range: the band's surface and a
+/// `heat` level column alike, so one scale of darkness reads across the
+/// tile.
+pub const HEAT_CEILING: f32 = 0.40;
 /// Design px a sortable head keeps clear beside its text for the table's
 /// sort mark: an `Icon::size_3` (0.75 rem) in `p(px(2.))`, right of the
 /// head. A head that forgot it loses its leading letters under the mark.
@@ -162,6 +165,14 @@ pub enum Glyph {
     /// A level over its companion's sign tint: a single column showing
     /// the level. `None` when the cell has no companion.
     Tint(Option<Chip>),
+    /// A level over the column's heat: `None` when the column has no
+    /// range (one value, or none).
+    Heat(Option<f32>),
+    /// A companion as a zero bar scaled to the column; `None` draws the
+    /// text alone.
+    Bar(Option<Bar>),
+    /// A companion as a percentile slider; `None` draws the text alone.
+    Slider(Option<Slider>),
     Spark {
         values: Arc<[f64]>,
         range: Option<(f64, f64)>,
@@ -273,9 +284,9 @@ fn column_cell<'r>(row: &'r Row, kind: &ColumnKind, asked: &Ask) -> Option<&'r C
         return None;
     }
     match kind {
-        ColumnKind::Level { measure }
-        | ColumnKind::Companion { measure }
-        | ColumnKind::Single { measure } => cell(row, measure, asked),
+        ColumnKind::Level { measure, .. }
+        | ColumnKind::Companion { measure, .. }
+        | ColumnKind::Single { measure, .. } => cell(row, measure, asked),
         ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Vega => None,
     }
 }
@@ -291,9 +302,9 @@ fn group_cell_of<'g>(g: &'g GroupInfo, measure: &Measure, asked: &Ask) -> Option
 /// A group row's aggregate for a measure column.
 fn group_cell<'g>(g: &'g GroupInfo, kind: &ColumnKind, asked: &Ask) -> Option<&'g GroupCell> {
     let measure = match kind {
-        ColumnKind::Level { measure }
-        | ColumnKind::Companion { measure }
-        | ColumnKind::Single { measure } => measure,
+        ColumnKind::Level { measure, .. }
+        | ColumnKind::Companion { measure, .. }
+        | ColumnKind::Single { measure, .. } => measure,
         ColumnKind::Underlying | ColumnKind::Spark { .. } | ColumnKind::Vega => return None,
     };
     group_cell_of(g, measure, asked)
@@ -315,6 +326,43 @@ pub fn group_companion(c: &GroupCell, lens: &LensState) -> Option<f64> {
 fn shows_companion(kind: &ColumnKind, lens: &LensState) -> bool {
     matches!(kind, ColumnKind::Companion { .. })
         || (matches!(kind, ColumnKind::Single { .. }) && lens.shown == Shown::Companion)
+}
+
+/// The companion glyph a column of `kind` paints; a chip where none
+/// applies.
+fn companion_glyph(kind: &ColumnKind) -> CompanionGlyph {
+    match kind {
+        ColumnKind::Companion { companion, .. } | ColumnKind::Single { companion, .. } => {
+            *companion
+        }
+        ColumnKind::Underlying
+        | ColumnKind::Level { .. }
+        | ColumnKind::Spark { .. }
+        | ColumnKind::Vega => CompanionGlyph::Chip,
+    }
+}
+
+/// The level glyph a column of `kind` paints; plain where none applies.
+fn level_glyph(kind: &ColumnKind) -> LevelGlyph {
+    match kind {
+        ColumnKind::Level { level, .. } | ColumnKind::Single { level, .. } => *level,
+        ColumnKind::Underlying
+        | ColumnKind::Companion { .. }
+        | ColumnKind::Spark { .. }
+        | ColumnKind::Vega => LevelGlyph::Plain,
+    }
+}
+
+/// Whether the companion under `lens` is a rank: the one number a slider
+/// can place. A slider asked to show a Δ or a z falls back to a chip.
+fn shows_rank(lens: &LensState) -> bool {
+    lens.lens == Lens::Rich && lens.metric == Metric::Pctl
+}
+
+/// `kind` asks for a slider the lens cannot serve: the readout says why
+/// the cell shows a chip.
+fn slider_wants_pctl(kind: &ColumnKind, lens: &LensState) -> bool {
+    companion_glyph(kind) == CompanionGlyph::Slider && !shows_rank(lens)
 }
 
 /// The number a cell shows, before formatting; `None` for a blank and for
@@ -404,6 +452,17 @@ fn displayed_companion(v: f64, lens: &LensState) -> f64 {
     }
 }
 
+/// The sign of a rank's side of the median.
+fn side_sign(side: f64) -> Sign {
+    if side > 0.0 {
+        Sign::Positive
+    } else if side < 0.0 {
+        Sign::Negative
+    } else {
+        Sign::Zero
+    }
+}
+
 /// The companion's chip: a Δ against the column's scale, a z against
 /// `Z_CEILING`, a rank by its side of the median. `v` is the displayed
 /// companion and `sign` its text's sign.
@@ -413,15 +472,22 @@ fn companion_chip(v: f64, sign: Sign, scale: f64, lens: &LensState) -> Option<Ch
         (Lens::Rich, Metric::Z) => chip(v, sign, Z_CEILING, CHIP_CEILING),
         (Lens::Rich, Metric::Pctl) => {
             let side = pctl_side(v);
-            let sign = if side > 0.0 {
-                Sign::Positive
-            } else if side < 0.0 {
-                Sign::Negative
-            } else {
-                Sign::Zero
-            };
-            chip(side, sign, 1.0, CHIP_CEILING)
+            chip(side, side_sign(side), 1.0, CHIP_CEILING)
         }
+    }
+}
+
+/// The companion's zero bar: a Δ or a z against the column's largest, a
+/// rank by its side of the median against the whole half-track, as the
+/// chip tints it. `v` is the displayed companion and `sign` its text's
+/// sign.
+fn companion_bar(v: f64, sign: Sign, scale: f64, lens: &LensState) -> Option<Bar> {
+    match (lens.lens, lens.metric) {
+        (Lens::Rich, Metric::Pctl) => {
+            let side = pctl_side(v);
+            zero_bar::bar(side, side_sign(side), 1.0)
+        }
+        _ => zero_bar::bar(v, sign, scale),
     }
 }
 
@@ -451,33 +517,70 @@ fn is_stale(row: &Row, now: DateTime<Utc>, stale_after: Duration) -> bool {
 }
 
 /// Text px → the narrowest cell a column of `kind` paints it in. A
-/// single column keeps the chip's room under either shown number, so `m`
-/// never resizes the grid.
+/// single column keeps room for both its glyphs under either shown
+/// number, so `m` never resizes the grid.
 pub(crate) fn glyph_width(kind: &ColumnKind, text_px: f32) -> f32 {
+    let companion = |glyph: CompanionGlyph| match glyph {
+        CompanionGlyph::Chip => widths::chip(text_px),
+        CompanionGlyph::Bar => widths::bar(text_px),
+        CompanionGlyph::Slider => widths::slider(text_px),
+    };
+    let level = |glyph: LevelGlyph| match glyph {
+        LevelGlyph::Plain | LevelGlyph::Tint => text_px,
+        LevelGlyph::Heat => widths::heat(text_px),
+    };
     match kind {
-        ColumnKind::Companion { .. } | ColumnKind::Single { .. } => widths::chip(text_px),
+        ColumnKind::Companion { companion: c, .. } => companion(*c),
+        ColumnKind::Level { level: l, .. } => level(*l),
+        ColumnKind::Single {
+            level: l,
+            companion: c,
+            ..
+        } => companion(*c).max(level(*l)),
         ColumnKind::Spark { .. } => text_px.max(sizes::WIDTH_30D),
-        ColumnKind::Level { .. } | ColumnKind::Underlying | ColumnKind::Vega => text_px,
+        ColumnKind::Underlying | ColumnKind::Vega => text_px,
     }
 }
 
-/// The scale a column's chips tint against: under moves, the largest
-/// displayed companion among the rows (so the column's largest move takes
-/// the ceiling itself); under rich/cheap the chip has its own ceiling and
-/// the column none.
+/// The scale a column's companions are measured against: the largest
+/// displayed companion among the rows, so the column's largest move takes
+/// the chip's ceiling or the bar's half-track itself, and under z a bar
+/// takes the column's largest |z| (a chip has `Z_CEILING` instead). A
+/// rank is measured by its side of the median and needs none. Group rows
+/// count: their means stand in the column too.
 fn companion_scale(i: &Inputs<'_>, kind: &ColumnKind) -> f64 {
     let (ColumnKind::Companion { .. } | ColumnKind::Single { .. }) = kind else {
         return 0.0;
     };
-    if i.lens.lens != Lens::Moves {
+    let bar_under_z = companion_glyph(kind) == CompanionGlyph::Bar
+        && i.lens.lens == Lens::Rich
+        && i.lens.metric == Metric::Z;
+    if i.lens.lens != Lens::Moves && !bar_under_z {
         return 0.0;
     }
+    let companion_lens = LensState {
+        shown: Shown::Companion,
+        ..i.lens
+    };
     column_scale(
         i.rows
             .iter()
-            .filter_map(|r| column_cell(r, kind, i.asked))
-            .filter_map(|c| companion(c, &i.lens))
+            .filter_map(|r| value(r, kind, i.asked, &companion_lens))
             .map(|v| displayed_companion(v, &i.lens)),
+    )
+}
+
+/// The finite range of a heat column's displayed levels over the rows,
+/// members and group means alike, so one scale serves the column; `None`
+/// for any other column.
+fn heat_range(i: &Inputs<'_>, kind: &ColumnKind) -> Option<(f64, f64)> {
+    if level_glyph(kind) != LevelGlyph::Heat || shows_companion(kind, &i.lens) {
+        return None;
+    }
+    range(
+        i.rows
+            .iter()
+            .filter_map(|r| value(r, kind, i.asked, &i.lens)),
     )
 }
 
@@ -488,6 +591,8 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
         .iter()
         .map(|c| companion_scale(i, &c.kind))
         .collect();
+    let ranges: Vec<Option<(f64, f64)>> =
+        i.columns.iter().map(|c| heat_range(i, &c.kind)).collect();
 
     let mut col_px: Vec<f32> = i
         .columns
@@ -513,7 +618,7 @@ pub fn prepare(i: &Inputs<'_>) -> Prepared {
                 .enumerate()
                 .map(|(ci, column)| {
                     let v = value(row, &column.kind, i.asked, &i.lens);
-                    let mut cell = prepare_cell(i, row, column, v, scales[ci]);
+                    let mut cell = prepare_cell(i, row, column, v, scales[ci], ranges[ci]);
                     if column.kind == ColumnKind::Underlying {
                         cell.text = match &row.group {
                             Some(g) => format!("{} \u{b7} {}", g.label, g.members.len()).into(),
@@ -609,6 +714,7 @@ fn prepare_cell(
     column: &Column,
     v: Option<f64>,
     scale: f64,
+    heat_range: Option<(f64, f64)>,
 ) -> PreparedCell {
     let blank = PreparedCell {
         id: SharedString::default(),
@@ -647,40 +753,55 @@ fn prepare_cell(
     let Formatted { text: t, sign } = text(&column.kind, v, &i.lens);
     let board_cell = column_cell(row, &column.kind, i.asked);
     let shows_companion = shows_companion(&column.kind, &i.lens);
-    let glyph = if !i.paint {
-        Glyph::None
-    } else if shows_companion {
-        Glyph::Chip(companion_chip(
-            displayed_companion(v, &i.lens),
-            sign,
-            scale,
-            &i.lens,
-        ))
-    } else if matches!(column.kind, ColumnKind::Single { .. }) {
-        // A tint the pair would paint muted (a stale lookback, a short
-        // history) is a wrong color under a right number: it goes
-        // entirely, and the level keeps its text and tone.
-        let cv = match &row.group {
-            Some(g) => (!lens_mismatch(i))
-                .then(|| group_cell(g, &column.kind, i.asked))
-                .flatten()
-                .and_then(|c| group_companion(c, &i.lens)),
-            None => board_cell
-                .filter(|c| !companion_muted(i, c))
-                .and_then(|c| companion(c, &i.lens)),
-        };
-        Glyph::Tint(cv.and_then(|cv| {
-            let f = companion_text(cv, &i.lens);
-            companion_chip(displayed_companion(cv, &i.lens), f.sign, scale, &i.lens)
-        }))
-    } else {
-        Glyph::None
-    };
     let muted = shows_companion
         && match &row.group {
             Some(_) => lens_mismatch(i),
             None => board_cell.is_some_and(|c| companion_muted(i, c)),
         };
+    let glyph = if !i.paint {
+        Glyph::None
+    } else if shows_companion {
+        let shown = displayed_companion(v, &i.lens);
+        match companion_glyph(&column.kind) {
+            CompanionGlyph::Bar => Glyph::Bar(companion_bar(shown, sign, scale, &i.lens)),
+            // A rank over too short a history, or from another window, is
+            // a position not worth marking: the number alone, muted. The
+            // marker sits at the rank the text shows.
+            CompanionGlyph::Slider if shows_rank(&i.lens) => {
+                Glyph::Slider((!muted).then(|| percent_slider::slider(shown)).flatten())
+            }
+            // A slider has nothing to say about a Δ or a z: the chip
+            // stands in and the readout says why.
+            CompanionGlyph::Slider | CompanionGlyph::Chip => {
+                Glyph::Chip(companion_chip(shown, sign, scale, &i.lens))
+            }
+        }
+    } else {
+        match level_glyph(&column.kind) {
+            LevelGlyph::Heat => {
+                Glyph::Heat(heat_range.and_then(|(lo, hi)| heat(v, lo, hi, HEAT_CEILING)))
+            }
+            LevelGlyph::Tint => {
+                // A tint the pair would paint muted (a stale lookback, a
+                // short history) is a wrong color under a right number: it
+                // goes entirely, and the level keeps its text and tone.
+                let cv = match &row.group {
+                    Some(g) => (!lens_mismatch(i))
+                        .then(|| group_cell(g, &column.kind, i.asked))
+                        .flatten()
+                        .and_then(|c| group_companion(c, &i.lens)),
+                    None => board_cell
+                        .filter(|c| !companion_muted(i, c))
+                        .and_then(|c| companion(c, &i.lens)),
+                };
+                Glyph::Tint(cv.and_then(|cv| {
+                    let f = companion_text(cv, &i.lens);
+                    companion_chip(displayed_companion(cv, &i.lens), f.sign, scale, &i.lens)
+                }))
+            }
+            LevelGlyph::Plain => Glyph::None,
+        }
+    };
     PreparedCell {
         text: t.into(),
         value: Some(v),
@@ -695,9 +816,9 @@ fn prepare_cell(
 /// its sparkline's measure.
 fn column_measure(column: &Column) -> Option<&Measure> {
     match &column.kind {
-        ColumnKind::Level { measure }
-        | ColumnKind::Companion { measure }
-        | ColumnKind::Single { measure }
+        ColumnKind::Level { measure, .. }
+        | ColumnKind::Companion { measure, .. }
+        | ColumnKind::Single { measure, .. }
         | ColumnKind::Spark { measure, .. } => Some(measure),
         ColumnKind::Underlying | ColumnKind::Vega => None,
     }
@@ -754,8 +875,27 @@ pub fn readout(
     asked: &Ask,
     notes: &[String],
     clock: &Clock,
-    _lens: &LensState,
+    lens: &LensState,
 ) -> String {
+    let mut parts = readout_parts(row, column, asked, notes, clock);
+    if row.present && slider_wants_pctl(&column.kind, lens) {
+        parts.push(SLIDER_NOTE.into());
+    }
+    parts.join(" \u{b7} ")
+}
+
+/// What a slider column's readout adds while the lens shows it a Δ or a
+/// z, and the cell a chip.
+pub const SLIDER_NOTE: &str = "slider needs the percentile metric";
+
+/// The readout's parts, before the glyph note.
+fn readout_parts(
+    row: &Row,
+    column: &Column,
+    asked: &Ask,
+    notes: &[String],
+    clock: &Clock,
+) -> Vec<String> {
     if let Some(g) = &row.group {
         let dash = || widths::DASH.to_string();
         let mut parts = vec![format!("{} \u{b7} {} members", g.label, g.members.len())];
@@ -796,10 +936,10 @@ pub fn readout(
                 }
             }
         }
-        return parts.join(" \u{b7} ");
+        return parts;
     }
     if !row.present {
-        return format!("{} \u{b7} not in surface", row.name);
+        return vec![format!("{} \u{b7} not in surface", row.name)];
     }
     let mut parts = vec![row.name.clone()];
     match column_measure(column) {
@@ -866,7 +1006,7 @@ pub fn readout(
             _ => {}
         },
     }
-    parts.join(" \u{b7} ")
+    parts
 }
 
 /// The band's surface columns as call deltas, in the desk's reading order
@@ -891,7 +1031,7 @@ fn band_sparks() -> [Measure; 3] {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BandCell {
     pub cell: PreparedCell,
-    /// Alpha in `0..=BAND_HEAT_CEILING`; `None` for a blank, the skew and
+    /// Alpha in `0..=HEAT_CEILING`; `None` for a blank, the skew and
     /// its Δ.
     pub heat: Option<f32>,
 }
@@ -1047,7 +1187,7 @@ pub fn prepare_band(i: &Inputs<'_>, row: &Row, tenors: &[String], clock: &Clock)
                                 muted: false,
                             },
                             heat: if i.paint {
-                                heat_range.and_then(|(lo, hi)| heat(*v, lo, hi, BAND_HEAT_CEILING))
+                                heat_range.and_then(|(lo, hi)| heat(*v, lo, hi, HEAT_CEILING))
                             } else {
                                 None
                             },
@@ -2458,7 +2598,7 @@ mod tests {
         // One heat range over the whole table: 1W 10c's 11.0 is its floor
         // and 5Y 10p's 28.0 its ceiling; the skew and its Δ take none.
         assert_eq!(b.surface[0].1[4].heat, Some(0.0));
-        assert!(matches!(b.surface[9].1[0].heat, Some(a) if (a - BAND_HEAT_CEILING).abs() < 1e-6));
+        assert!(matches!(b.surface[9].1[0].heat, Some(a) if (a - HEAT_CEILING).abs() < 1e-6));
         assert_eq!(three_m[5].heat, None);
         assert_eq!(three_m[6].heat, None);
         assert!(matches!(three_m[6].cell.glyph, Glyph::Chip(Some(_))));
@@ -2825,6 +2965,449 @@ mod tests {
             let d = HeaderModel::default();
             assert_eq!(d.grouping, "ungrouped");
             assert!(d.grouping_muted);
+        }
+    }
+
+    /// The heat, bar and slider glyphs: resolved by `columns()`, prepared
+    /// against the column, carried by group rows, ignored by the sort.
+    mod glyphs {
+        use super::*;
+        use crate::core::grouping::fixtures::{europe, leaf};
+        use crate::core::grouping::group_rows;
+        use crate::core::lens::{Lens, Metric};
+        use crate::core::views::columns;
+        use geode_core::volviews::{CompanionGlyph, LevelGlyph, VolColumn};
+
+        /// One measure column, `atfm 3M`, in a pair or a single view:
+        /// cells `[underlying, level, companion]` or `[underlying, single]`.
+        fn view(cells: Cells) -> VolView {
+            VolView {
+                name: "vol".into(),
+                cells,
+                columns: vec![VolColumn::Measure {
+                    measure: Measure::atfm("3M"),
+                    label: None,
+                    group: None,
+                    level: None,
+                    companion: None,
+                }],
+            }
+        }
+
+        fn pair_view() -> VolView {
+            view(Cells::Pair)
+        }
+
+        fn single_view() -> VolView {
+            view(Cells::Single)
+        }
+
+        fn set_level_glyph(view: &mut VolView, i: usize, glyph: LevelGlyph) {
+            let VolColumn::Measure { level, .. } = &mut view.columns[i] else {
+                panic!("a measure column");
+            };
+            *level = Some(glyph);
+        }
+
+        fn set_companion_glyph(view: &mut VolView, i: usize, glyph: CompanionGlyph) {
+            let VolColumn::Measure { companion, .. } = &mut view.columns[i] else {
+                panic!("a measure column");
+            };
+            *companion = Some(glyph);
+        }
+
+        fn inputs<'a>(
+            rows: &'a [Row],
+            columns: &'a [Column],
+            asked: &'a Ask,
+            lens: LensState,
+        ) -> Inputs<'a> {
+            Inputs {
+                tile: 7,
+                rows,
+                columns,
+                asked,
+                board_lookback: lens.lookback,
+                board_window: Some(lens.window.duration()),
+                lens,
+                cells: Cells::Pair,
+                paint: true,
+                stale_after: Duration::from_secs(3 * 86_400),
+                now: now(),
+                mono_advance_px: 7.0,
+            }
+        }
+
+        /// Two members `A` and `B` whose ATFM 3M cells come from `set`,
+        /// with the ask of `view`.
+        fn two_members(view: &VolView, set: &dyn Fn(usize) -> CellData) -> (Vec<Row>, Ask) {
+            let asked = ask(view, &LensState::default(), &tenors(), false);
+            let atfm3m = Measure::atfm("3M");
+            let board = VolBoard {
+                rows: ["A", "B"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, name)| {
+                        row_of(&asked, name, true, &|m| (*m == atfm3m).then(|| set(i)))
+                    })
+                    .collect(),
+                ..VolBoard::default()
+            };
+            let names = members(["A", "B"]);
+            (rows(&names, Some(&board), &no_reference, None), asked)
+        }
+
+        /// Levels `a` and `b`, each up 0.5 on the day and ranked 0.91 of
+        /// 251 over a mean of 14.5 and an sd of 2.0.
+        fn two_members_at(view: &VolView, a: f64, b: f64) -> (Vec<Row>, Ask) {
+            two_members(view, &|i| {
+                let level = [a, b][i];
+                (
+                    Some(level),
+                    Some(change(0.5, level - 0.5)),
+                    Some((0.91, 251)),
+                    Some(Stats {
+                        mean: 14.5,
+                        sd: 2.0,
+                        count: 251,
+                    }),
+                )
+            })
+        }
+
+        /// Levels of 15.0 moved by `a` and `b`.
+        fn two_members_with_changes(view: &VolView, a: f64, b: f64) -> (Vec<Row>, Ask) {
+            two_members(view, &|i| {
+                let v = [a, b][i];
+                (Some(15.0), Some(change(v, 15.0 - v)), None, None)
+            })
+        }
+
+        /// Ranks over twelve observations: too few for a rank to mean much.
+        fn two_members_short_history(view: &VolView) -> (Vec<Row>, Ask) {
+            two_members(view, &|_| (Some(15.0), None, Some((0.9, 12)), None))
+        }
+
+        /// SX5E and DAX at `a` and `b` under the `region` grouping (both
+        /// in `Core`), with the grouping fixtures' ask.
+        fn grouped_rows_with_levels(a: f64, b: f64) -> (Vec<Row>, Ask) {
+            let asked = crate::core::grouping::fixtures::asked();
+            let rows = group_rows(
+                vec![
+                    leaf("SX5E", Some(a), 1.0, 0.9, None),
+                    leaf("DAX", Some(b), -2.0, 0.5, None),
+                ],
+                &["region".into()],
+                &europe(),
+                &asked,
+            );
+            (rows, asked)
+        }
+
+        fn bar_companion_kind() -> ColumnKind {
+            ColumnKind::Companion {
+                measure: Measure::atfm("3M"),
+                companion: CompanionGlyph::Bar,
+            }
+        }
+
+        fn slider_companion_kind() -> ColumnKind {
+            ColumnKind::Companion {
+                measure: Measure::atfm("3M"),
+                companion: CompanionGlyph::Slider,
+            }
+        }
+
+        fn heat_level_kind() -> ColumnKind {
+            ColumnKind::Level {
+                measure: Measure::atfm("3M"),
+                level: LevelGlyph::Heat,
+            }
+        }
+
+        /// The rows' names sorted ascending by column `col`, blanks last.
+        fn sorted_names(rows: &[Row], columns: &[Column], asked: &Ask, col: usize) -> Vec<String> {
+            let lens = LensState::default();
+            let mut order: Vec<&Row> = rows.iter().collect();
+            order.sort_by(|a, b| {
+                let (va, vb) = (
+                    sort_value(a, &columns[col], asked, &lens),
+                    sort_value(b, &columns[col], asked, &lens),
+                );
+                va.is_none().cmp(&vb.is_none()).then_with(|| {
+                    va.unwrap_or(0.0)
+                        .partial_cmp(&vb.unwrap_or(0.0))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            });
+            order.iter().map(|r| r.name.clone()).collect()
+        }
+
+        fn pctl() -> LensState {
+            LensState {
+                lens: Lens::Rich,
+                metric: Metric::Pctl,
+                ..LensState::default()
+            }
+        }
+
+        fn z() -> LensState {
+            LensState {
+                lens: Lens::Rich,
+                metric: Metric::Z,
+                ..LensState::default()
+            }
+        }
+
+        #[test]
+        fn a_heat_level_tints_relative_to_the_column_and_the_larger_is_darker() {
+            let mut view = pair_view();
+            set_level_glyph(&mut view, 0, LevelGlyph::Heat);
+            let (rows, asked) = two_members_at(&view, 15.9, 20.0);
+            let cols = columns(&view, &LensState::default(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, LensState::default()));
+            let lo = &p.rows[0].cells[1];
+            let hi = &p.rows[1].cells[1];
+            let (Glyph::Heat(Some(a)), Glyph::Heat(Some(b))) = (&lo.glyph, &hi.glyph) else {
+                panic!("{:?} {:?}", lo.glyph, hi.glyph);
+            };
+            assert!(a < b, "{a} < {b}");
+            assert_eq!(*a, 0.0);
+            assert!(
+                (b - HEAT_CEILING).abs() < 1e-6,
+                "the column's top takes the ceiling"
+            );
+            // A plain level (the pair default) has no glyph.
+            let plain = columns(&pair_view(), &LensState::default(), false);
+            let p = prepare(&inputs(&rows, &plain, &asked, LensState::default()));
+            assert_eq!(p.rows[1].cells[1].glyph, Glyph::None);
+        }
+
+        #[test]
+        fn a_flat_heat_column_tints_nothing() {
+            let mut view = pair_view();
+            set_level_glyph(&mut view, 0, LevelGlyph::Heat);
+            let (rows, asked) = two_members_at(&view, 15.9, 15.9);
+            let cols = columns(&view, &LensState::default(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, LensState::default()));
+            assert_eq!(p.rows[0].cells[1].glyph, Glyph::Heat(None));
+        }
+
+        #[test]
+        fn a_heat_level_on_a_single_view_replaces_the_tint() {
+            let mut view = single_view();
+            set_level_glyph(&mut view, 0, LevelGlyph::Heat);
+            let (rows, asked) = two_members_at(&view, 15.9, 20.0);
+            let cols = columns(&view, &LensState::default(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, LensState::default()));
+            assert!(
+                matches!(p.rows[1].cells[1].glyph, Glyph::Heat(Some(_))),
+                "{:?}",
+                p.rows[1].cells[1].glyph
+            );
+            // The single default is the tint; `plain` drops both.
+            let tint = columns(&single_view(), &LensState::default(), false);
+            let p = prepare(&inputs(&rows, &tint, &asked, LensState::default()));
+            assert!(matches!(p.rows[1].cells[1].glyph, Glyph::Tint(_)));
+            let mut view = single_view();
+            set_level_glyph(&mut view, 0, LevelGlyph::Plain);
+            let plain = columns(&view, &LensState::default(), false);
+            let p = prepare(&inputs(&rows, &plain, &asked, LensState::default()));
+            assert_eq!(p.rows[1].cells[1].glyph, Glyph::None);
+        }
+
+        #[test]
+        fn a_bar_companion_scales_to_the_column_under_z_and_moves() {
+            let mut view = pair_view();
+            set_companion_glyph(&mut view, 0, CompanionGlyph::Bar);
+            let (rows, asked) = two_members_with_changes(&view, 1.1, -2.2);
+            let cols = columns(&view, &LensState::default(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, LensState::default()));
+            let Glyph::Bar(Some(small)) = &p.rows[0].cells[2].glyph else {
+                panic!("{:?}", p.rows[0].cells[2].glyph);
+            };
+            let Glyph::Bar(Some(big)) = &p.rows[1].cells[2].glyph else {
+                panic!("{:?}", p.rows[1].cells[2].glyph);
+            };
+            assert!(
+                small.extent < big.extent && big.extent == 1.0,
+                "{small:?} {big:?}"
+            );
+            assert_eq!(big.sign, Sign::Negative);
+            assert_eq!(small.sign, Sign::Positive);
+            // Under z the bar scales to the column's largest |z| as well.
+            let (rows, asked) = two_members(&view, &|i| {
+                (
+                    Some([16.5, 12.5][i]),
+                    None,
+                    Some((0.5, 251)),
+                    Some(Stats {
+                        mean: 14.5,
+                        sd: 2.0,
+                        count: 251,
+                    }),
+                )
+            });
+            let cols = columns(&view, &z(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, z()));
+            let Glyph::Bar(Some(a)) = &p.rows[0].cells[2].glyph else {
+                panic!("{:?}", p.rows[0].cells[2].glyph);
+            };
+            assert_eq!(a.sign, Sign::Positive);
+            assert_eq!(
+                a.extent, 1.0,
+                "z +1.0 against the column's largest |z| of 1.0"
+            );
+            // Under the percentile metric a rank bars its side of the
+            // median, as its chip tints it: 0.5 is the axis, 1.0 the edge.
+            let cols = columns(&view, &pctl(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, pctl()));
+            let Glyph::Bar(Some(mid)) = &p.rows[0].cells[2].glyph else {
+                panic!("{:?}", p.rows[0].cells[2].glyph);
+            };
+            assert_eq!(mid.sign, Sign::Zero);
+            assert_eq!(mid.extent, 0.0, "a median rank has no bar");
+            let (rows, asked) = two_members_at(&view, 15.9, 20.0);
+            let p = prepare(&inputs(&rows, &cols, &asked, pctl()));
+            let Glyph::Bar(Some(high)) = &p.rows[0].cells[2].glyph else {
+                panic!("{:?}", p.rows[0].cells[2].glyph);
+            };
+            assert_eq!(high.sign, Sign::Positive);
+            assert!((high.extent - 0.82).abs() < 1e-6, "rank 0.91: {high:?}");
+        }
+
+        #[test]
+        fn a_slider_companion_is_a_rank_under_pctl_and_a_chip_under_z_with_a_readout_note() {
+            let mut view = pair_view();
+            set_companion_glyph(&mut view, 0, CompanionGlyph::Slider);
+            let (rows, asked) = two_members_at(&view, 15.9, 20.0);
+            let cols = columns(&view, &pctl(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, pctl()));
+            let Glyph::Slider(Some(s)) = &p.rows[0].cells[2].glyph else {
+                panic!("{:?}", p.rows[0].cells[2].glyph);
+            };
+            assert!((s.position - 0.91).abs() < 1e-6 && s.warn);
+            assert_eq!(p.rows[0].cells[2].text.as_ref(), "91");
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc(), &pctl());
+            assert!(!text.contains("slider"), "{text}");
+            let cols = columns(&view, &z(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, z()));
+            assert!(
+                matches!(p.rows[0].cells[2].glyph, Glyph::Chip(_)),
+                "{:?}",
+                p.rows[0].cells[2].glyph
+            );
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc(), &z());
+            assert!(
+                text.ends_with(" \u{b7} slider needs the percentile metric"),
+                "{text}"
+            );
+            // Under moves the companion is a change: a chip, with the note.
+            let moves = LensState::default();
+            let cols = columns(&view, &moves, false);
+            let p = prepare(&inputs(&rows, &cols, &asked, moves));
+            assert!(matches!(p.rows[0].cells[2].glyph, Glyph::Chip(_)));
+            let text = readout(&rows[0], &cols[2], &asked, &[], &clock_utc(), &moves);
+            assert!(
+                text.ends_with(" \u{b7} slider needs the percentile metric"),
+                "{text}"
+            );
+            // A chip companion's readout carries no note under any lens.
+            let chip = columns(&pair_view(), &z(), false);
+            let text = readout(&rows[0], &chip[2], &asked, &[], &clock_utc(), &z());
+            assert!(!text.contains("slider"), "{text}");
+        }
+
+        #[test]
+        fn a_slider_over_a_short_history_mutes_as_a_chip() {
+            let mut view = pair_view();
+            set_companion_glyph(&mut view, 0, CompanionGlyph::Slider);
+            let (rows, asked) = two_members_short_history(&view);
+            let cols = columns(&view, &pctl(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, pctl()));
+            let cell = &p.rows[0].cells[2];
+            assert!(cell.muted);
+            assert_eq!(cell.text.as_ref(), "90");
+            assert!(
+                matches!(cell.glyph, Glyph::Slider(None) | Glyph::Chip(None)),
+                "{:?}",
+                cell.glyph
+            );
+        }
+
+        #[test]
+        fn a_group_row_carries_the_glyph_over_its_mean() {
+            let (rows, asked) = grouped_rows_with_levels(15.9, 20.0);
+            let mut view = pair_view();
+            set_level_glyph(&mut view, 0, LevelGlyph::Heat);
+            set_companion_glyph(&mut view, 0, CompanionGlyph::Bar);
+            let cols = columns(&view, &LensState::default(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, LensState::default()));
+            let group = p.rows.iter().find(|r| r.group.is_some()).unwrap();
+            // The mean 17.95 sits mid-column: tinted, neither end.
+            let Glyph::Heat(Some(a)) = &group.cells[1].glyph else {
+                panic!("{:?}", group.cells[1].glyph);
+            };
+            assert!(*a > 0.0 && *a < HEAT_CEILING, "{a}");
+            let Glyph::Bar(Some(b)) = &group.cells[2].glyph else {
+                panic!("{:?}", group.cells[2].glyph);
+            };
+            // Mean move −0.5 against the column's largest |Δ| of 2.0.
+            assert_eq!(b.sign, Sign::Negative);
+            assert!((b.extent - 0.25).abs() < 1e-6, "{b:?}");
+            set_companion_glyph(&mut view, 0, CompanionGlyph::Slider);
+            let cols = columns(&view, &pctl(), false);
+            let p = prepare(&inputs(&rows, &cols, &asked, pctl()));
+            let group = p.rows.iter().find(|r| r.group.is_some()).unwrap();
+            let Glyph::Slider(Some(s)) = &group.cells[2].glyph else {
+                panic!("{:?}", group.cells[2].glyph);
+            };
+            assert!((s.position - 0.7).abs() < 1e-6, "the mean rank: {s:?}");
+        }
+
+        #[test]
+        fn widths_make_room_for_a_bar_and_a_slider() {
+            assert!(glyph_width(&bar_companion_kind(), 28.0) >= widths::bar(28.0));
+            assert!(glyph_width(&slider_companion_kind(), 28.0) >= widths::slider(28.0));
+            assert!(glyph_width(&heat_level_kind(), 28.0) >= widths::heat(28.0));
+            // A single column takes the wider of its two glyphs.
+            let single = ColumnKind::Single {
+                measure: Measure::atfm("3M"),
+                level: LevelGlyph::Heat,
+                companion: CompanionGlyph::Bar,
+            };
+            assert_eq!(
+                glyph_width(&single, 28.0),
+                widths::bar(28.0).max(widths::heat(28.0))
+            );
+            let chip = ColumnKind::Single {
+                measure: Measure::atfm("3M"),
+                level: LevelGlyph::Tint,
+                companion: CompanionGlyph::Chip,
+            };
+            assert_eq!(glyph_width(&chip, 28.0), widths::chip(28.0));
+        }
+
+        #[test]
+        fn sort_ignores_the_glyph() {
+            let plain = pair_view();
+            let mut bar = pair_view();
+            set_companion_glyph(&mut bar, 0, CompanionGlyph::Bar);
+            let (rows, asked) = two_members_with_changes(&bar, 1.1, -2.2);
+            let a = sorted_names(
+                &rows,
+                &columns(&plain, &LensState::default(), false),
+                &asked,
+                2,
+            );
+            let b = sorted_names(
+                &rows,
+                &columns(&bar, &LensState::default(), false),
+                &asked,
+                2,
+            );
+            assert_eq!(a, b);
+            assert_eq!(a, ["B", "A"]);
         }
     }
 }
