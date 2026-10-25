@@ -42187,13 +42187,13 @@ run_mutation "volwatch: a missing member keeps its row at the foot" \
 # not paint a bullish fill under a zero.
 run_mutation "volwatch: the chip takes the displayed sign" \
   crates/geode-volwatch/src/core/model.rs \
-  '                Glyph::Chip(companion_chip(shown, sign, scale, &i.lens))' \
-  '                Glyph::Chip(companion_chip(
+  '            CompanionGlyph::Chip => Glyph::Chip(companion_chip(shown, sign, scale, &lens)),' \
+  '            CompanionGlyph::Chip => Glyph::Chip(companion_chip(
                     shown,
                     if v > 0.0 { Sign::Positive } else if v < 0.0 { Sign::Negative } else { Sign::Zero },
                     scale,
-                    &i.lens,
-                ))' \
+                    &lens,
+                )),' \
   geode-volwatch \
   the_chip_takes_the_displayed_sign_and_the_columns_scale
 
@@ -42209,8 +42209,8 @@ run_mutation "volwatch: the percentile chip takes the rank at display precision"
 # A rank over fewer than PCTL_MIN_COUNT observations paints muted.
 run_mutation "volwatch: a short window paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '        || (i.lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT))' \
-  '        || (i.lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < 1))' \
+  '        || (lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < PCTL_MIN_COUNT))' \
+  '        || (lens.lens == Lens::Rich && c.pctl.is_some_and(|(_, count)| count < 1))' \
   geode-volwatch \
   a_short_count_mutes_the_rank_and_blanks_the_z
 
@@ -42218,7 +42218,7 @@ run_mutation "volwatch: a short window paints muted" \
 # landed) paints muted.
 run_mutation "volwatch: a change from another lookback than the one shown paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '        Lens::Moves => i.board_lookback != i.lens.lookback,' \
+  '        Lens::Moves => i.board_lookback != lens.lookback,' \
   '        Lens::Moves => false,' \
   geode-volwatch \
   a_change_from_another_lookback_than_the_one_shown_paints_muted
@@ -42779,7 +42779,7 @@ run_mutation "volwatch: the demo ssr table is keyed by tenor" \
 # reads as a 2Y one.
 run_mutation "volwatch: a companion from another window paints muted" \
   crates/geode-volwatch/src/core/model.rs \
-  '        Lens::Rich => i.board_window != Some(i.lens.window.duration()),' \
+  '        Lens::Rich => i.board_window != Some(lens.window.duration()),' \
   '        Lens::Rich => false,' \
   geode-volwatch \
   a_companion_from_another_window_than_the_one_shown_paints_muted
