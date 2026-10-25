@@ -44,8 +44,8 @@ measured against). Behaviour and limits are in the features guide's
     one exists, each spark, and the band's measures while open;
     `Ask::tables` the datasets its open-form measures read),
     `needs_requery`, which asks again only for something the last ask
-    lacked, `sortable`, the one test `s`, a head press and `:sort`
-    share, and the column units a `shift+h`/`shift+l` move works in
+    lacked, `sortable`, the one test `s`, `shift+s`, a head press and
+    `:sort` share, and the column units a `shift+h`/`shift+l` move works in
     (`unit_stem`, `units`: a run of columns sharing a measure stem, a
     spark or vega alone, Underlying in none; `reorder_columns` applies
     a saved stem order, named units first and the rest in file order).

@@ -95,6 +95,7 @@ const ESCAPE_ACTION: &str = "volwatch::escape";
 const COMMIT_ACTION: &str = "volwatch::commit";
 const PAINT_ACTION: &str = "volwatch::paint";
 const SORT_ACTION: &str = "volwatch::sort";
+const SORT_ABS_ACTION: &str = "volwatch::sort_abs";
 const COL_LEFT_ACTION: &str = "volwatch::col_left";
 const COL_RIGHT_ACTION: &str = "volwatch::col_right";
 /// What `shift+h`/`shift+l` say when the unit is already at that end.
@@ -1139,7 +1140,8 @@ impl VolwatchTile {
                 self.sync_table(cx);
                 cx.notify();
             }
-            SORT_ACTION => self.sort_cursor_column(cx),
+            SORT_ACTION => self.sort_cursor_column(false, cx),
+            SORT_ABS_ACTION => self.sort_cursor_column(true, cx),
             COL_LEFT_ACTION => self.move_column(-1, count, cx),
             COL_RIGHT_ACTION => self.move_column(1, count, cx),
             YANK_ACTION => self.yank(cx),
@@ -1329,9 +1331,12 @@ impl VolwatchTile {
         cx.notify();
     }
 
-    /// `s`: asc → desc → member order on the cursor column, through the
-    /// shared cycle. A column with no number to order by refuses.
-    fn sort_cursor_column(&mut self, cx: &mut Context<Self>) {
+    /// `s`: asc → desc → member order on the cursor column; `shift+s`
+    /// (`absolute`): |desc| → |asc| → member order, as the blotter's. Both
+    /// through the shared cycle, so either key pressed over the other's
+    /// order starts its own afresh. A column with no number to order by
+    /// refuses.
+    fn sort_cursor_column(&mut self, absolute: bool, cx: &mut Context<Self>) {
         let Some(c) = self.columns.get(self.cursor_col) else {
             return;
         };
@@ -1342,7 +1347,7 @@ impl VolwatchTile {
             return;
         }
         let id = c.id.clone();
-        let next = SortOrder::cycle(self.sort_on(&id), false, true);
+        let next = SortOrder::cycle(self.sort_on(&id), absolute, true);
         self.set_sort(next.map(|o| (id, o)), cx);
     }
 

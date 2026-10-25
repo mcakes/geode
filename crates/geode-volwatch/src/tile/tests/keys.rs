@@ -53,6 +53,7 @@ fn every_key_reaches_its_action(cx: &mut gpui::TestAppContext) {
         ("z shift-m", "volwatch::collapse_all"),
         ("shift-l", "volwatch::col_right"),
         ("shift-h", "volwatch::col_left"),
+        ("shift-s", "volwatch::sort_abs"),
     ] {
         h.press(&mut vcx, keys);
         assert_eq!(
@@ -595,6 +596,63 @@ fn s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last(cx: &mut gpui::Te
     assert!(h.tile.read_with(&vcx, |t, _| t.header.sort.is_none()));
 }
 
+/// `shift+s` walks the absolute cycle on the cursor column, as the
+/// blotter's does: |desc| → |asc| → member order, and `s` over it starts
+/// the signed cycle afresh.
+#[gpui::test]
+fn shift_s_cycles_an_absolute_sort_on_the_cursor_column(cx: &mut gpui::TestAppContext) {
+    // SX5E moved −2.0 and DAX +1.0: by magnitude SX5E leads, signed DAX does.
+    let (h, mut vcx) = landed_board(cx, |board| {
+        for row in &mut board.rows {
+            let value = match row.underlying.as_str() {
+                "SX5E" => -2.0,
+                "DAX" => 1.0,
+                _ => continue,
+            };
+            for c in &mut row.cells {
+                if c.measure == Measure::atfm("3M")
+                    && let Some(Some(change)) = c.changes.first_mut()
+                {
+                    change.value = value;
+                }
+            }
+        }
+    });
+    h.move_to_column(&mut vcx, "atfm-3M-companion");
+    h.press(&mut vcx, "shift-s");
+    assert_eq!(
+        h.shown(&vcx),
+        ["SX5E", "DAX", "NEW"],
+        "|desc|: the larger move first"
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.header.sort.clone()),
+        Some("|Δ 3M| ↓".into()),
+        "the chip names the magnitude and the direction"
+    );
+    h.press(&mut vcx, "shift-s");
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E", "NEW"], "|asc|");
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.header.sort.clone()),
+        Some("|Δ 3M| ↑".into())
+    );
+    h.press(&mut vcx, "shift-s");
+    assert_eq!(h.shown(&vcx), ["DAX", "SX5E", "NEW"], "off: member order");
+    assert!(h.tile.read_with(&vcx, |t, _| t.state.sort.is_none()));
+    // `s` over an absolute order starts the signed cycle at asc.
+    h.press(&mut vcx, "shift-s");
+    h.press(&mut vcx, "s");
+    assert_eq!(
+        h.shown(&vcx),
+        ["SX5E", "DAX", "NEW"],
+        "asc: −2.0 before 1.0"
+    );
+    assert_eq!(
+        h.tile.read_with(&vcx, |t, _| t.header.sort.clone()),
+        Some("Δ 3M ↑".into())
+    );
+}
+
 #[gpui::test]
 fn a_spark_column_refuses_to_sort_with_a_notice(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = landed(cx);
@@ -802,6 +860,7 @@ fn the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches(cx: &mut gpu
             "Swap level / companion",
             "Paint",
             "Sort by column",
+            "Sort by |column|",
             "Toggle group",
             "Expand all groups",
             "Collapse all groups",

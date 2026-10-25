@@ -42416,6 +42416,16 @@ run_mutation "volwatch: the sort chip names its direction" \
   geode-volwatch \
   s_cycles_the_sort_on_the_cursor_column_and_blanks_sort_last
 
+# `shift+s` walks the absolute cycle, `s` the signed one, through the one
+# shared `SortOrder::cycle`. Mutated to ignore the key, `shift+s` sorts
+# signed and a large short move sinks to the foot.
+run_mutation "volwatch: shift+s sorts signed" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '        let next = SortOrder::cycle(self.sort_on(&id), absolute, true);' \
+  '        let next = SortOrder::cycle(self.sort_on(&id), false, true);' \
+  geode-volwatch \
+  shift_s_cycles_an_absolute_sort_on_the_cursor_column
+
 # `:sort` refuses a column `s` refuses: accepted, it sets a sort that
 # orders nothing and a chip that says it does.
 run_mutation "volwatch: :sort refuses an unsortable column" \

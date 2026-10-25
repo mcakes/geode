@@ -13,9 +13,9 @@ use gpui::{App, Context, SharedString, Window};
 use super::table::sortable;
 use super::{
     COLLAPSE_ALL_ACTION, EXPAND_ALL_ACTION, INSPECT_ACTION, LENS_ACTION, LOOKBACK_ACTION,
-    METRIC_ACTION, PAINT_ACTION, REFRESH_ACTION, SHOWN_ACTION, SORT_ACTION, SWITCH_ACTION,
-    TIMESERIES_ACTION, TOGGLE_ACTION, VIEW_ACTIONS, VolwatchTile, WINDOW_ACTION, YANK_ACTION,
-    snapshot,
+    METRIC_ACTION, PAINT_ACTION, REFRESH_ACTION, SHOWN_ACTION, SORT_ABS_ACTION, SORT_ACTION,
+    SWITCH_ACTION, TIMESERIES_ACTION, TOGGLE_ACTION, VIEW_ACTIONS, VolwatchTile, WINDOW_ACTION,
+    YANK_ACTION, snapshot,
 };
 use crate::core::grouping;
 use crate::core::model::header;
@@ -306,7 +306,11 @@ impl VolwatchTile {
                     .enabled(swap),
             ),
             MenuRow::Action(self.verb(PAINT_ACTION, "Paint").checked(self.paint)),
-            MenuRow::Action(self.verb(SORT_ACTION, "Sort by column").enabled(sort)),
+            MenuRow::Action(
+                self.verb(SORT_ACTION, "Sort by column")
+                    .enabled(sort.clone()),
+            ),
+            MenuRow::Action(self.verb(SORT_ABS_ACTION, "Sort by |column|").enabled(sort)),
             MenuRow::Action(self.verb(TOGGLE_ACTION, "Toggle group").enabled(on_group)),
             MenuRow::Action(
                 self.verb(EXPAND_ALL_ACTION, "Expand all groups")

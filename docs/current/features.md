@@ -3888,7 +3888,9 @@ column, each times its count; the column cursor never rests on Underlying.
 (or the cursor column over a selection, one row per line). `/` narrows by
 name and reference, keeping order. Every column but Underlying and a
 sparkline sorts: `s` cycles the cursor column's sort ascending →
-descending → member order, a head press walks the shared click cycle, and
+descending → member order, `shift+s` by magnitude, |descending| →
+|ascending| → member order, each key starting its own cycle afresh over
+the other's order as in the blotter, a head press walks the shared click cycle, and
 `:sort <column> [asc|desc|abs [asc|desc]]` names a column by id or
 one-word head, bare `:sort` clearing. A pair's level and companion sort
 separately; a single column sorts by the number it shows. Blanks sort last
