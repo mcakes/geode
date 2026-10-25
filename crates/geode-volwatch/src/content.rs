@@ -16,7 +16,8 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{
-    CloseHandle, Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+    CloseHandle, ConfigObject, Delivery, FindEvent, ModuleFactory, StackHandle, TileContent,
+    TileOccupant,
 };
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
@@ -148,6 +149,9 @@ context = "volwatch && mode == normal"
 "t" = "volwatch::timeseries"
 "y" = "volwatch::yank"
 "shift+r" = "volwatch::refresh"
+# A shell action: the shell resolves its own ids before the tile sees the
+# key, and `config_object` names the tab the dialog opens on.
+"e" = "config::vol_views"
 "g w" = "volwatch::switch"
 "." = "volwatch::menu"
 "space" = "volwatch::toggle"
@@ -223,6 +227,10 @@ impl TileContent for VolwatchContent {
 
     fn completions(&self, line: &str, cursor: usize, cx: &App) -> Vec<String> {
         self.tile.read(cx).completions(line, cursor)
+    }
+
+    fn config_object(&self, cx: &App) -> Option<ConfigObject> {
+        self.tile.read(cx).config_object()
     }
 
     fn find(&self, event: FindEvent, _window: &mut Window, cx: &mut App) {
@@ -444,11 +452,17 @@ mod tests {
         for b in bindings {
             for (key, action) in b["keys"].as_table().unwrap() {
                 let action = action.as_str().unwrap();
-                assert!(ids.contains(&action), "{key} = {action} is not registered");
+                // `config::vol_views` is the shell's own, bound here so `e`
+                // opens the editor on this tile's tab; the registry check
+                // below is what proves it is registered.
+                assert!(
+                    ids.contains(&action) || action == "config::vol_views",
+                    "{key} = {action} is not registered"
+                );
                 count += 1;
             }
         }
-        assert_eq!(count, 43 + 5 + 3);
+        assert_eq!(count, 44 + 5 + 3, "normal, visual and menu");
         let mut registry = ActionRegistry::default();
         geode_shell::defaults::register_builtin_actions(&mut registry);
         let (data, _rx) = DataHandle::for_tests();

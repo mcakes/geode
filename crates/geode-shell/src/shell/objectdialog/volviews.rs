@@ -28,8 +28,8 @@ use geode_core::schema::SchemaSpec;
 use geode_core::source_config::parse_duration;
 use geode_core::volboard::delta_text;
 use geode_core::volviews::{
-    self, ALL_TENORS, Cells, ColumnChoice, CompanionGlyph, DELTAS, Family, LevelGlyph, Raw, SPANS,
-    SPARK_30D, TableShape, VolColumnSpec, VolViewSpec, WINDOWS, span_text,
+    self, ALL_TENORS, Cells, ColumnChoice, CompanionGlyph, DELTAS, Family, LevelGlyph, MeasureText,
+    Raw, SPANS, SPARK_30D, TableShape, VolColumnSpec, VolViewSpec, WINDOWS, span_text,
 };
 
 use super::{Destination, Domain, Draft, Field, FieldKind, ListItem};
@@ -295,19 +295,10 @@ pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
         Some("single") => Cells::Single,
         _ => Cells::Pair,
     };
-    let columns: Vec<VolColumnSpec> = draft
-        .list_items("columns")
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|i| i.source.as_ref().and_then(spec_of))
-                .collect()
-        })
-        .unwrap_or_default();
     let view = VolViewSpec {
         name: draft.name.clone(),
         cells,
-        columns,
+        columns: column_specs(draft),
     };
     let source = super::toml_table_to_edit(&draft.source);
     let mut item = volviews::to_table(&view, Some(&source));
@@ -323,10 +314,50 @@ pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
     item
 }
 
+/// The view's columns as the writer renders them, in the order the reader
+/// numbers them: each member item's own table read as a column. An item
+/// whose table is not a column (none the dialog builds) is skipped, so a
+/// path index here is the written file's.
+fn column_specs(draft: &Draft) -> Vec<VolColumnSpec> {
+    draft
+        .list_items("columns")
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.source.as_ref().and_then(spec_of))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Everything the readers would say about the rendered view, against the
 /// schema's shapes, plus the one check they cannot make: a name another
-/// view already holds.
+/// view already holds. No restart warning: that needs the launch datasets,
+/// which only the dialog has ([`validate_with`]).
 pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
+    validate_against(draft, config, None)
+}
+
+/// [`validate`], plus the one warning only the dialog can raise: a column
+/// over a dataset the live schema declares but `startup` — the datasets
+/// the data engine was built over at launch — lacks. The catalogue offers
+/// such a dataset the moment a reload brings it, but the schema is
+/// restart-required, so the column cannot paint until then. A warning,
+/// not an error: the write is right, only early. A dataset the live schema
+/// lacks too is the resolver's to refuse; a restart would not paint it.
+pub fn validate_with(
+    draft: &Draft,
+    config: &Config,
+    startup: &BTreeSet<String>,
+) -> Vec<Diagnostic> {
+    validate_against(draft, config, Some(startup))
+}
+
+fn validate_against(
+    draft: &Draft,
+    config: &Config,
+    startup: Option<&BTreeSet<String>>,
+) -> Vec<Diagnostic> {
     let item = to_table(draft, Destination::Doc);
     let table: toml::Table = super::object_text(&draft.name, item)
         .parse()
@@ -372,6 +403,28 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
             message: format!("a view named {name} exists"),
             path: Some(format!("vol_views.{}.name", draft.name)),
         });
+    }
+    if let Some(startup) = startup {
+        for (i, spec) in column_specs(draft).iter().enumerate() {
+            let measure = match spec {
+                VolColumnSpec::Measure { measure, .. } | VolColumnSpec::Spark { measure, .. } => {
+                    measure
+                }
+                VolColumnSpec::Vega => continue,
+            };
+            if let MeasureText::Table { dataset, .. } = measure
+                && schema.dataset(dataset).is_some()
+                && !startup.contains(dataset)
+            {
+                diags.push(Diagnostic {
+                    severity: Severity::Warning,
+                    layer: None,
+                    file: None,
+                    message: format!("{dataset} needs a restart to paint"),
+                    path: Some(format!("vol_views.{}.columns.{i}", draft.name)),
+                });
+            }
+        }
     }
     diags
 }
@@ -867,6 +920,53 @@ mod tests {
             diags.iter().any(|d| d
                 .message
                 .contains("'ssr' takes 1 key value after the underlying, not 2")),
+            "{diags:?}"
+        );
+        // Without a startup set (a draft built outside the dialog) there is
+        // no restart warning; against a startup set that lacks `ssr` the
+        // column warns at its index, as a Warning; against one that has
+        // it, nothing.
+        let restart = |diags: &[Diagnostic]| {
+            diags
+                .iter()
+                .find(|d| d.message == "ssr needs a restart to paint")
+                .map(|d| (d.severity, d.path.clone()))
+        };
+        assert_eq!(restart(&diags), None);
+        let lacking: BTreeSet<String> = ["other".to_string()].into();
+        let with = validate_with(&draft, &config, &lacking);
+        assert_eq!(
+            restart(&with),
+            Some((Severity::Warning, Some("vol_views.vol.columns.2".into())))
+        );
+        let having: BTreeSet<String> = ["ssr".to_string()].into();
+        assert_eq!(restart(&validate_with(&draft, &config, &having)), None);
+        // `Domain::validate` reads the set the dialog hands the draft.
+        draft.startup_datasets = Some(lacking);
+        assert!(restart(&Domain::VolViews.validate(&draft, &config)).is_some());
+    }
+
+    /// A dataset neither the live schema nor startup knows is the
+    /// resolver's to refuse; the restart warning would promise what a
+    /// restart cannot deliver.
+    #[test]
+    fn an_unknown_dataset_gets_no_restart_warning() {
+        let config = config_with(TWO_TABS, SSR_DATASET);
+        let mut draft = Domain::VolViews.draft(&config, "vol");
+        let FieldKind::OrderedList { items, .. } = &mut draft.fields[3].kind else {
+            panic!()
+        };
+        items.push(ListItem {
+            name: "NOWHERE 3M".into(),
+            included: true,
+            presentation: Default::default(),
+            kind: None,
+            source: Some("measure = \"nowhere 3M\"".parse().unwrap()),
+        });
+        let diags = validate_with(&draft, &config, &BTreeSet::new());
+        assert!(!diags.is_empty(), "the resolver refuses it");
+        assert!(
+            !diags.iter().any(|d| d.message.contains("needs a restart")),
             "{diags:?}"
         );
     }

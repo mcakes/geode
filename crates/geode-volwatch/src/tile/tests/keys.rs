@@ -1018,3 +1018,20 @@ fn a_single_column_keeps_one_right_edge_with_and_without_a_tint(cx: &mut gpui::T
         "one right edge: {bare:?} vs {tinted:?}"
     );
 }
+
+/// `e` is a shell action in the tile's own fragment: the stand-in resolves
+/// and records `config::vol_views` with no tile code, and the tile names the
+/// tab the editor should open on.
+#[gpui::test]
+fn e_opens_the_vol_views_dialog_through_the_shells_action(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = landed(cx);
+    h.press(&mut vcx, "e");
+    assert_eq!(
+        h.dispatched(&vcx).last().map(String::as_str),
+        Some("config::vol_views")
+    );
+    let object = vcx
+        .update(|_, cx| h.content.config_object(cx))
+        .expect("a vol tile names the tab it shows");
+    assert_eq!((object.doc, object.name.as_str()), ("vol_views", "vol"));
+}

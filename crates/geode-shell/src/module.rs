@@ -291,6 +291,16 @@ impl std::fmt::Debug for CloseHandle {
     }
 }
 
+/// A configuration object a tile shows — the document it lives in
+/// (`geode_core::config::VOL_VIEWS_DOC` for a vol tile's tab) and its
+/// name there — so an editor opened from the tile can land on it. See
+/// [`TileContent::config_object`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigObject {
+    pub doc: &'static str,
+    pub name: String,
+}
+
 /// What the shell asks of a tile's occupant and tells it.
 ///
 /// Two rules bind every implementation.
@@ -420,6 +430,14 @@ pub trait TileContent {
     /// default) for a tile that shows no configured view; the shell then
     /// refuses with a status notice.
     fn tile_columns(&self, _cx: &App) -> Option<TileColumns> {
+        None
+    }
+    /// The configuration object this tile shows, so an editor opened from
+    /// the tile lands on it: pulled by `objectdialog::render::open`, which
+    /// selects that object's browse row when the dialog edits the document
+    /// named. `None` (the default) for a tile that shows no configured
+    /// object; the dialog then opens on its first row, as with no tile.
+    fn config_object(&self, _cx: &App) -> Option<ConfigObject> {
         None
     }
     /// Called once, deferred after the first render, for an occupant that
@@ -1228,6 +1246,9 @@ pub mod recording {
         /// What every occupant this factory creates answers from
         /// `tile_columns`; shared and mutable like `dimension_context`.
         pub tile_columns: Rc<RefCell<Option<TileColumns>>>,
+        /// What every occupant this factory creates answers from
+        /// `config_object`; shared and mutable like `tile_columns`.
+        pub config_object: Rc<RefCell<Option<ConfigObject>>>,
         /// When set, `launched` opens the insert-mode input exactly as
         /// `<kind>::edit` does — the stand-in for a panel that opens its own
         /// picker when launched, so a shell test can prove the input still
@@ -1328,6 +1349,7 @@ pub mod recording {
                 accepts: &[],
                 title: None,
                 tile_columns: Rc::new(RefCell::new(None)),
+                config_object: Rc::new(RefCell::new(None)),
                 edit_on_launch: false,
                 grid: false,
                 find_table: false,
@@ -1437,6 +1459,8 @@ pub mod recording {
         press_context: Rc<RefCell<Option<DimensionContext>>>,
         /// Shared with [`RecordingFactory::tile_columns`].
         tile_columns: Rc<RefCell<Option<TileColumns>>>,
+        /// Shared with [`RecordingFactory::config_object`].
+        config_object: Rc<RefCell<Option<ConfigObject>>>,
         /// Shared with [`RecordingFactory::edit_on_launch`]; see it for what
         /// `launched` does with it.
         edit_on_launch: bool,
@@ -1769,6 +1793,9 @@ pub mod recording {
         fn tile_columns(&self, _cx: &App) -> Option<TileColumns> {
             self.tile_columns.borrow().clone()
         }
+        fn config_object(&self, _cx: &App) -> Option<ConfigObject> {
+            self.config_object.borrow().clone()
+        }
         /// Recorded and accepted: the fixture stands in for a table
         /// module. The trait default's refusal is tested on the
         /// placeholder occupant, which does not override it.
@@ -1910,6 +1937,7 @@ pub mod recording {
                     dimension_context: self.dimension_context.clone(),
                     press_context: self.press_context.clone(),
                     tile_columns: self.tile_columns.clone(),
+                    config_object: self.config_object.clone(),
                     edit_on_launch: self.edit_on_launch,
                     grid: self.grid,
                     find_table: self.find_table,

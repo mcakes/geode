@@ -5,7 +5,11 @@
 
 use super::objectdialog::{dialog_state, edit_draft, flush_config_write};
 use super::*;
+use crate::defaults::AddPlacement;
+use crate::module::ConfigObject;
+use crate::module::recording::RecordingFactory;
 use crate::shell::objectdialog::Stage;
+use geode_core::config::Severity;
 
 /// Two tabs: `vol` (the default, two columns) and `skew` (single cells, one
 /// slider column) — the pure adapter tests' fixture, over an `ssr` dataset
@@ -493,4 +497,176 @@ fn deleting_the_default_tab_clears_the_default_key(cx: &mut gpui::TestAppContext
             .collect::<Vec<_>>()
     });
     assert_eq!(names, ["vol", "skew"]);
+}
+
+/// [`services_with_vol_views`] over a "rec" roster whose tile answers
+/// `config_object` with the `vol_views` tab `tab` — the stand-in for a vol
+/// tile showing that tab.
+fn services_with_vol_views_and_a_tile_showing(tab: &str) -> ShellServices {
+    let rec = RecordingFactory::new("rec");
+    *rec.config_object.borrow_mut() = Some(ConfigObject {
+        doc: "vol_views",
+        name: tab.to_string(),
+    });
+    let mut services = services_with_recorders(vec![rec]);
+    let vol = services_with_vol_views();
+    (services.config, services.builtin) = (vol.config, vol.builtin);
+    services
+}
+
+/// A shell over `services` with one focused "rec" tile, then `action`
+/// dispatched and a frame drawn — [`dialog_test_shell_with`] with a tile
+/// under the dialog, which that helper never has.
+fn dialog_test_shell_over_a_tile(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    action: &str,
+) -> (Entity<ShellView>, gpui::VisualTestContext) {
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    vcx.update(|window, cx| {
+        shell.update(cx, |s, cx| {
+            s.add_tile("rec", AddPlacement::Split(None), None, window, cx);
+        })
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx.run_until_parked();
+    vcx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.dispatch(&ActionId(action.to_string()), None, window, cx);
+        });
+    });
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    (shell, vcx)
+}
+
+/// Opening over a vol tile lands the browse selection on the tab the tile shows.
+#[gpui::test]
+fn opening_from_a_vol_tile_selects_its_tab(cx: &mut gpui::TestAppContext) {
+    let (shell, cx) = dialog_test_shell_over_a_tile(
+        cx,
+        services_with_vol_views_and_a_tile_showing("skew"),
+        "config::vol_views",
+    );
+    let selected = dialog_state(&shell, &cx, |s| {
+        s.rows.at(s.selected).map(|r| r.name.clone())
+    });
+    assert_eq!(selected.as_deref(), Some("skew"));
+}
+
+/// A tile naming a document this dialog does not edit changes nothing: the
+/// first row stays selected, as with no tile at all.
+#[gpui::test]
+fn a_tile_showing_another_documents_object_leaves_the_first_row_selected(
+    cx: &mut gpui::TestAppContext,
+) {
+    let rec = RecordingFactory::new("rec");
+    *rec.config_object.borrow_mut() = Some(ConfigObject {
+        doc: "views",
+        name: "skew".to_string(),
+    });
+    let mut services = services_with_recorders(vec![rec]);
+    let vol = services_with_vol_views();
+    (services.config, services.builtin) = (vol.config, vol.builtin);
+    let (shell, cx) = dialog_test_shell_over_a_tile(cx, services, "config::vol_views");
+    let selected = dialog_state(&shell, &cx, |s| {
+        s.rows.at(s.selected).map(|r| r.name.clone())
+    });
+    assert_eq!(selected.as_deref(), Some("vol"));
+}
+
+/// A history dataset keyed by underlying and tenor, as `SSR_DATASET` is,
+/// under the name `add_user_dataset` substitutes for `{name}`.
+const TWO_KEY_DATASET: &str = "[{name}]\nfamily = \"history\"\nkey = [\"underlying_ref\", \"tenor\"]\nhistory = \"800d\"\n[{name}.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n[{name}.columns.tenor]\ntype = \"utf8\"\nrole = \"dimension\"\n[{name}.columns.{name}]\ntype = \"f64\"\nrole = \"value\"\n";
+
+/// Add `name` to the live config as a reload would: a user-layer
+/// `datasets.toml` in the shell's user directory, loaded off the live
+/// `services.builtin` and applied — the two steps the watcher schedules
+/// (see `the_reload_an_edit_triggers…`). The startup baseline keeps the
+/// datasets the shell launched with.
+fn add_user_dataset(
+    shell: &Entity<ShellView>,
+    cx: &mut gpui::VisualTestContext,
+    name: &str,
+    template: &str,
+) {
+    let dir = shell
+        .read_with(cx, |shell, _| shell.user_dir.clone())
+        .expect("a user directory");
+    let text = format!("config_version = 1\n{}", template.replace("{name}", name));
+    std::fs::write(dir.join("datasets.toml"), text).unwrap();
+    let builtin = shell.read_with(cx, |shell, _| shell.services.builtin.clone());
+    let reloaded = crate::reload::load_config(builtin, None, Some(dir));
+    shell.update(cx, |shell, cx| shell.apply_reload(reloaded, cx));
+    cx.run_until_parked();
+}
+
+/// A dataset added since launch is offered and warned about.
+#[gpui::test]
+fn a_dataset_added_since_launch_warns_that_it_needs_a_restart(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    // Add a dataset to the live config as a reload would.
+    add_user_dataset(&shell, &mut cx, "spotvol_cov", TWO_KEY_DATASET);
+    cx.simulate_keystrokes("enter"); // vol
+    cx.run_until_parked();
+    // The catalogue's datasets sort by name: SPOTVOL_COV, then SSR last.
+    cx.simulate_keystrokes("shift-g k space");
+    cx.run_until_parked();
+    let (items, diags) = edit_draft(&shell, &cx, |d| {
+        (
+            d.list_items("columns")
+                .unwrap()
+                .iter()
+                .map(|i| i.name.clone())
+                .collect::<Vec<_>>(),
+            d.diagnostics
+                .iter()
+                .map(|d| (d.severity, d.message.clone(), d.path.clone()))
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(items, ["ATFM 3M", "Book vega", "SPOTVOL_COV 1W"]);
+    assert!(
+        diags.contains(&(
+            Severity::Warning,
+            "spotvol_cov needs a restart to paint".to_string(),
+            Some("vol_views.vol.columns.2".to_string()),
+        )),
+        "{diags:?}"
+    );
+    // The dataset the shell launched with warns of nothing.
+    cx.simulate_keystrokes("escape"); // back to browse, on vol
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j enter"); // skew
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-g space"); // SSR
+    cx.run_until_parked();
+    let (items, diags) = edit_draft(&shell, &cx, |d| {
+        (
+            d.list_items("columns")
+                .unwrap()
+                .iter()
+                .map(|i| i.name.clone())
+                .collect::<Vec<_>>(),
+            d.diagnostics
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(items, ["25Δ skew 1Y · slider", "SSR 1W"]);
+    assert!(
+        !diags.iter().any(|m| m.contains("needs a restart")),
+        "{diags:?}"
+    );
 }

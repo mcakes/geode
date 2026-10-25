@@ -19,9 +19,10 @@
 //! trail changes until the flush. Persistence outcomes and recovery are documented in
 //! `apply`.
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use geode_core::config::{Layer, Severity, check_object_name, load_views};
+use geode_core::config::{Layer, Severity, check_object_name, load_views, merge_docs};
 use geode_core::schema::SchemaSpec;
 use geode_core::view::{DatasetPresentationSpec, ViewSpec};
 use gpui::prelude::*;
@@ -76,6 +77,22 @@ const GROUPING_LEAD_WIDTH: f32 = 14.0;
 /// the two modals are the same object on screen.
 const WIDTH: f32 = 640.0;
 
+/// The datasets the data engine was built over at launch: the shell's
+/// startup `datasets` layers (`ShellView::datasets_baseline`, the baseline
+/// `apply_reload` measures restart-required against), merged and read as
+/// the schema is. Not the live config — a reload may have added a dataset
+/// the running schema does not have, and that difference is what
+/// `volviews::validate_with` warns about.
+fn startup_datasets(view: &ShellView) -> BTreeSet<String> {
+    let doc = merge_docs("datasets", &view.datasets_baseline);
+    SchemaSpec::from_doc(&doc)
+        .0
+        .datasets
+        .into_iter()
+        .map(|d| d.name)
+        .collect()
+}
+
 /// Open the object dialog on `domain` (`config::views`, palette-only —
 /// see `defaults::register_builtin_actions`). A no-op when this domain is
 /// already open (see `dialog::can_open_object`); over an object dialog of
@@ -94,7 +111,9 @@ pub fn open(
     dialog::park_object_dialog(view);
     // Fresh state every open — nothing survives a close/reopen, the same
     // contract `palette` and both list dialogs hold.
-    view.object_dialog = Some(ObjectDialogState::new(domain));
+    let mut state = ObjectDialogState::new(domain);
+    state.startup_datasets = startup_datasets(view);
+    view.object_dialog = Some(state);
     let entity = cx.entity();
     dialog::open_shell_dialog_with_key(
         view,
@@ -119,6 +138,25 @@ pub fn open(
             state.selected = ix;
             view.object_dialog_scroll.scroll_to_item(ix);
         }
+    }
+    // Opened from a tile showing one of this document's objects (a vol
+    // tile's tab): land on it. The tile is asked, not handed the shell, as
+    // `choicedialog::open_columns` asks for `tile_columns`. A tile naming
+    // another document, or no tile, leaves the first row selected.
+    let shown = view
+        .services
+        .workspaces
+        .active()
+        .focused_tile()
+        .and_then(|t| view.occupants.get(&t))
+        .and_then(|o| o.content.config_object(cx))
+        .filter(|object| object.doc == domain.doc());
+    if let Some(object) = shown
+        && let Some(state) = view.object_dialog.as_mut()
+        && let Some(ix) = state.rows.position(|row| row.name == object.name)
+    {
+        state.selected = ix;
+        view.object_dialog_scroll.scroll_to_item(ix);
     }
     // the crumb plus the pill, sharing the same title-row slot every Geode modal has —
     // see `crumb_text`'s own doc for what the crumb says in each stage.
@@ -888,13 +926,11 @@ pub(super) fn enter_edit_stage(
     // own doc has the trace). This is the one door, so the digit jump,
     // `enter` from browse and `escape`-then-`enter` are all covered.
     let folded = apply::config_with_pending(shell);
+    let config = folded.as_ref().unwrap_or(&shell.services.config);
     if let Some(state) = shell.object_dialog.as_mut() {
         match new {
-            Some(draft) => state.enter_edit_with(draft),
-            None => match folded.as_ref() {
-                Some(config) => state.enter_edit(config, name),
-                None => state.enter_edit(&shell.services.config, name),
-            },
+            Some(draft) => state.enter_edit_with(draft, config),
+            None => state.enter_edit(config, name),
         }
     }
     shell.object_dialog_scroll.scroll_to_item(0);

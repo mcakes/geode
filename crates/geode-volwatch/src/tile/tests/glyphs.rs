@@ -114,9 +114,11 @@ fn an_empty_tab_paints_its_strip_and_no_grid(cx: &mut gpui::TestAppContext) {
         h.requests().is_empty(),
         "a tab with no measure asks nothing of the board"
     );
+    // The hint names the key the fragment binds to `config::vol_views`;
+    // the palette label is its fallback for a keymap that unbinds it.
     assert_eq!(
         h.tile.read_with(&vcx, |t, _| t.empty.clone()).as_deref(),
-        Some("blank has no columns \u{2014} Edit vol views\u{2026} adds one")
+        Some("blank has no columns \u{2014} e adds one")
     );
     // shift+r on the empty tab asks nothing either, and says nothing.
     h.press(&mut vcx, "shift-r");

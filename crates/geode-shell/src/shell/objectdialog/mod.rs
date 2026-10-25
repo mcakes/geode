@@ -1172,6 +1172,14 @@ pub struct Draft {
     /// no displayed value is still a write.
     pub presentation_set: BTreeMap<String, views::PresentationKeys>,
     pub baseline_presentation_set: BTreeMap<String, views::PresentationKeys>,
+    /// The datasets the data engine was built over at launch
+    /// ([`ObjectDialogState::startup_datasets`]), handed to the draft as
+    /// the dialog takes it (`ObjectDialogState::enter_edit`,
+    /// `enter_edit_with`) so [`Domain::validate`] can warn of a column
+    /// the running schema cannot paint. `None` for a draft built outside
+    /// a dialog (`Domain::draft`, `new_draft`, the pure tests), which has
+    /// no launch to compare against and gets no such warning.
+    pub startup_datasets: Option<BTreeSet<String>>,
 }
 
 /// Which way `Draft::step_selected` moves the value under the cursor.
@@ -2762,6 +2770,7 @@ impl Draft {
             dataset_layer: BTreeMap::new(),
             presentation_set: BTreeMap::new(),
             baseline_presentation_set: BTreeMap::new(),
+            startup_datasets: None,
         }
     }
 
@@ -3023,6 +3032,7 @@ impl Domain {
             },
             baseline_presentation_set: presentation_set.clone(),
             presentation_set,
+            startup_datasets: None,
         };
         draft.diagnostics = self.validate(&draft, config);
         draft
@@ -3064,7 +3074,12 @@ impl Domain {
             Domain::Schema => schema::validate(draft, config),
             Domain::Sources => sources::validate(draft, config),
             Domain::Colors => colours::validate(draft, config),
-            Domain::VolViews => volviews::validate(draft, config),
+            // The dialog's draft carries the launch datasets; one built
+            // outside a dialog has none and skips the restart warning.
+            Domain::VolViews => match &draft.startup_datasets {
+                Some(startup) => volviews::validate_with(draft, config, startup),
+                None => volviews::validate(draft, config),
+            },
         }
     }
 }
@@ -3266,6 +3281,14 @@ pub struct ObjectDialogState {
     /// it. A parked state is refreshed when it is revealed. The edit stage's
     /// rows are the draft's and still derive in render.
     pub rows: crate::prepared::Prepared<(u64, u64), String, ObjectRow>,
+    /// The datasets the data engine was built over at launch — the
+    /// shell's startup `datasets` layers, not the live config, which a
+    /// reload may since have grown. Set by `render::open`; empty from
+    /// `new`. A Vol views column over a dataset the live config declares
+    /// but this set lacks is offered and warned about
+    /// (`volviews::validate_with`): the schema is restart-required, so
+    /// the column cannot paint until then.
+    pub startup_datasets: BTreeSet<String>,
 }
 
 impl ObjectDialogState {
@@ -3290,6 +3313,7 @@ impl ObjectDialogState {
             naming_seed: NameSeed::Empty,
             on_created: None,
             rows: crate::prepared::Prepared::new(),
+            startup_datasets: BTreeSet::new(),
         }
     }
 
@@ -3377,6 +3401,7 @@ impl ObjectDialogState {
     /// `dialog::sync_dialog_text` after the transition.
     pub(in crate::shell::objectdialog) fn enter_edit(&mut self, config: &Config, object: &str) {
         let mut draft = self.domain.draft(config, object);
+        self.validate_against_startup(&mut draft, config);
         draft.query.clear();
         // Skip display-only rows on entry, such as Groupings' slot number and list
         // header, when the draft contains a cursor stop.
@@ -3399,7 +3424,12 @@ impl ObjectDialogState {
     /// Enter editing with an already-built creation or copy draft. Its object may not
     /// yet be in active configuration, so deriving a fresh draft would discard its
     /// initial fields. Use the render stage-entry wrapper for scroll and repaint.
-    pub(in crate::shell::objectdialog) fn enter_edit_with(&mut self, mut draft: Draft) {
+    pub(in crate::shell::objectdialog) fn enter_edit_with(
+        &mut self,
+        mut draft: Draft,
+        config: &Config,
+    ) {
+        self.validate_against_startup(&mut draft, config);
         // Clear the inherited filter and apply the same cursor-stop rule as fresh stage
         // entry.
         draft.query.clear();
@@ -3414,6 +3444,17 @@ impl ObjectDialogState {
         self.notice = None;
         self.chain_from_list = false;
         self.disarm();
+    }
+
+    /// Hand the draft this dialog's launch datasets and validate it again
+    /// with them. `Domain::draft` and `new_draft` validate the drafts they
+    /// build without a dialog, so the one check that compares against
+    /// launch (`volviews::validate_with`) can only run once the draft is
+    /// this dialog's; for every other domain the second pass repeats the
+    /// first over the same config.
+    fn validate_against_startup(&self, draft: &mut Draft, config: &Config) {
+        draft.startup_datasets = Some(self.startup_datasets.clone());
+        draft.diagnostics = self.domain.validate(draft, config);
     }
 
     /// Return to browsing and drop the draft. The caller restores selection by object
@@ -4456,6 +4497,7 @@ mod tests {
             dataset_layer: BTreeMap::new(),
             presentation_set: BTreeMap::new(),
             baseline_presentation_set: BTreeMap::new(),
+            startup_datasets: None,
         }
     }
 

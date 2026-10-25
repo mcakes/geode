@@ -40,7 +40,7 @@ use geode_shell::colfit::{FitMetrics, NOTHING_TO_FIT, SESSION_KEY, widths_to_tom
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::{Binding, KeyContext, Keystroke};
-use geode_shell::module::{CloseHandle, FindEvent, StackHandle};
+use geode_shell::module::{CloseHandle, ConfigObject, FindEvent, StackHandle};
 use geode_shell::reference::ReferenceGlobal;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
@@ -561,6 +561,16 @@ impl VolwatchTile {
             .and_then(|n| settings.views.get(n))
             .or_else(|| settings.views.default_view())
             .cloned()
+    }
+
+    /// The shown tab as the shell's editor names it (`vol_views`, the
+    /// view's name), so `config::vol_views` opens on it; `None` with no
+    /// views at all.
+    pub(crate) fn config_object(&self) -> Option<ConfigObject> {
+        self.shown_view().map(|view| ConfigObject {
+            doc: geode_core::config::VOL_VIEWS_DOC,
+            name: view.name,
+        })
     }
 
     /// The shown view's columns under the lens; none with no views. A
