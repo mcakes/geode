@@ -42508,6 +42508,15 @@ run_mutation "volwatch: shift+tab steps back and wraps" \
   geode-volwatch \
   digits_and_tab_walk_the_configured_tabs_and_requery_only_when_the_ask_grows
 
+# The shell hands the tile each motion with its count; dropping the count
+# makes `3 j` one step and the bare digit a dead key.
+run_mutation "volwatch: a count multiplies a row motion" \
+  crates/geode-volwatch/src/tile/mod.rs \
+  '            && let Some(m) = motion::parse(action, count)' \
+  '            && let Some(m) = motion::parse(action, None)' \
+  geode-volwatch \
+  a_count_multiplies_a_row_motion_and_switches_no_tab
+
 # The band reads as part of the grid above it: at the chrome's smaller
 # size it reads as a footer instead.
 run_mutation "volwatch: the band paints at the grid's text size" \
@@ -42926,14 +42935,15 @@ run_mutation "volviews: a fork keeps the merged order" \
   geode-shell \
   an_edit_on_a_later_tab_does_not_reorder_the_tabs
 
-# A slider places a rank and nothing else: under z or moves the chip
-# stands in, and the readout says why.
-run_mutation "volwatch: a slider under z is a chip" \
+# A slider places a rank and nothing else, so a slider column is the
+# rank under every lens; falling back to the chip would show a z or a
+# move in a column whose head says pctl.
+run_mutation "volwatch: a slider column shows the rank under z" \
   crates/geode-volwatch/src/core/model.rs \
-  '            CompanionGlyph::Slider if shows_rank(&i.lens) => {' \
-  '            CompanionGlyph::Slider => {' \
+  $'            CompanionGlyph::Slider => {\n                Glyph::Slider((!muted).then(|| percent_slider::slider(shown)).flatten())\n            }\n            CompanionGlyph::Chip => Glyph::Chip(companion_chip(shown, sign, scale, &lens)),' \
+  $'            CompanionGlyph::Slider | CompanionGlyph::Chip => {\n                Glyph::Chip(companion_chip(shown, sign, scale, &lens))\n            }' \
   geode-volwatch \
-  a_slider_companion_is_a_rank_under_pctl_and_a_chip_under_z_with_a_readout_note
+  a_slider_column_shows_the_rank_under_every_lens
 
 # Heat scales to the column's own displayed levels; a fixed range would
 # tint a 20-vol column as pale as a 2-vol one.
@@ -43127,6 +43137,15 @@ run_mutation "volwatch: an empty collapsed path drops the key" \
   '' \
   geode-volwatch \
   an_empty_collapsed_path_drops_the_key
+
+# A column move is tile presentation saved per view: a record without
+# `column_order` restores the file order and the move is lost.
+run_mutation "volwatch: a column move is saved in the session" \
+  crates/geode-volwatch/src/core/session.rs \
+  '    if !s.column_order.is_empty() {' \
+  '    if false {' \
+  geode-volwatch \
+  the_column_order_round_trips_per_view
 
 # A chain naming a level twice would group by it once and say nothing.
 run_mutation "volwatch: group refuses a dimension named twice" \
