@@ -691,7 +691,7 @@ pub fn span_text(d: Duration) -> String {
 /// A column's table: only the keys the spec sets, so a default label,
 /// group or glyph is never written and the builtin tabs round-trip as
 /// they are.
-fn column_table(spec: &VolColumnSpec) -> toml_edit::Table {
+pub fn column_table(spec: &VolColumnSpec) -> toml_edit::Table {
     let mut t = toml_edit::Table::new();
     match spec {
         VolColumnSpec::Measure {
@@ -733,18 +733,31 @@ fn column_table(spec: &VolColumnSpec) -> toml_edit::Table {
 /// `cells` and `columns` replaced; a fresh table otherwise. `cells` is
 /// written only for a single view, since pair is the reader's default.
 pub fn to_table(view: &VolViewSpec, source: Option<&toml_edit::Table>) -> toml_edit::Item {
+    to_table_from(view.cells, view.columns.iter().map(column_table), source)
+}
+
+/// [`to_table`] with the columns given as tables, in order: each the
+/// writer's rendering of a spec ([`column_table`]) or a table copied as it
+/// was read — one the reader refused, which the dialog carries so that a
+/// save keeps it where the reader will go on warning about it rather than
+/// deleting what was written by hand.
+pub fn to_table_from(
+    cells: Cells,
+    columns: impl IntoIterator<Item = toml_edit::Table>,
+    source: Option<&toml_edit::Table>,
+) -> toml_edit::Item {
     let mut table = source.cloned().unwrap_or_default();
-    match view.cells {
+    match cells {
         Cells::Single => table["cells"] = toml_edit::value("single"),
         Cells::Pair => {
             table.remove("cells");
         }
     }
-    let mut columns = toml_edit::ArrayOfTables::new();
-    for c in &view.columns {
-        columns.push(column_table(c));
+    let mut array = toml_edit::ArrayOfTables::new();
+    for c in columns {
+        array.push(c);
     }
-    table["columns"] = toml_edit::Item::ArrayOfTables(columns);
+    table["columns"] = toml_edit::Item::ArrayOfTables(array);
     toml_edit::Item::Table(table)
 }
 

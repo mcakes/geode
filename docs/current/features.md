@@ -3758,13 +3758,15 @@ the families' (`Forward`, `Wing skew`, `Realized`, `Varswap`, `VS
 spread`); a label or group left at its prefill is not written, so the tile
 keeps its own heads (`fwd`, `10Δ skew`, `rlz`, `vs`). A column the pickers
 cannot express (a dataset with two key words after the underlying, a
-sparkline over anything but ATFM) is kept as written, movable and
-deletable, not editable. Every edit writes the user layer after the
-dialog's quiet period, rewriting each column from the pickers: a default
+sparkline over anything but ATFM), or one the reader refuses (listed under
+its measure or spark text, `column <n>` without one), is kept as written,
+movable and deletable, not editable. Every edit writes the user layer after
+the dialog's quiet period, rewriting each column from the pickers: a default
 label or group is never written, `point <t> 0.5` is respelled `atfm <t>`
 on the first save, and a key inside a `[[columns]]` table the pickers do
 not know, or a comment on one, drops on the next write, while a comment on
-the tab's table and any other top-level key stay. A column over a dataset
+the tab's table, a column the reader refuses and any other top-level key
+stay. A column over a dataset
 the schema gained since launch is accepted with the warning `<dataset>
 needs a restart to paint` — the schema is restart-required, so the column
 is right but early — and the warning survives a failed write's revert; a

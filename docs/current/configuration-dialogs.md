@@ -336,10 +336,17 @@ table (`volviews::column_fields`). Each change folds back into that table
 dataset keyed by the underlying alone carries no tenor) and renames the row
 by its head, and the stage's rows are re-derived from the folded item, so a
 family change shows the new family's parts at once and the painted stage is
-re-keyed to the new name at revalidation. A `Raw` column (text the pickers
-cannot express) has one display-only `measure` row. The tab's name row is
+re-keyed to the new name at revalidation. A `Raw` column — text the
+pickers cannot express, or a `[[columns]]` table the reader refuses,
+carried as it was read and named by its measure or spark text (`column
+<n>` without one) — has one display-only `measure` row, and the writer
+puts its table back in its place (`volviews::to_table_from`), so a save
+never deletes a hand-written column the reader only warned about; the
+reader's warning stands in the draft. The tab's name row is
 display-only too: the scaffold has no rename path, and a typed name the
-writer could not honour would fork the inherited copy for nothing. An empty
+writer could not honour would fork the inherited copy for nothing; a new
+tab's row shows the name the prompt committed (`volviews::new_fields`). An
+empty
 tab writes `columns = []`, which the reader accepts, so a new tab reaches the
 file as more than a bare header.
 

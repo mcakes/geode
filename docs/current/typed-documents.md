@@ -504,13 +504,17 @@ lack is kept as the row's own option rather than read as the first one.
 `to_table(view, source)` renders one view over its source table when it
 has one, so a key inside the table the writer does not model and the
 table's comments survive: `cells` is written only for a single view, and
-`columns` is rebuilt from the specs, each column carrying only the keys it
-sets — a default label, group or glyph is never written, a `span` only
-when it is not 30 days, and a measure as `measure_text` spells it, so a
-hand-written `point 3M 0.5` reads back as `atfm 3M` on the first save and
-the builtin tabs round-trip parsed-equal (not byte-equal). A key inside a
-`[[columns]]` table that the reader does not know, and a comment on one,
-do not survive the rewrite. `span_text` writes a span at the coarsest
+`columns` is rebuilt from the specs through `column_table`, each column
+carrying only the keys it sets — a default label, group or glyph is never
+written, a `span` only when it is not 30 days, and a measure as
+`measure_text` spells it, so a hand-written `point 3M 0.5` reads back as
+`atfm 3M` on the first save and the builtin tabs round-trip parsed-equal
+(not byte-equal). A key inside a `[[columns]]` table that the reader does
+not know, and a comment on one, do not survive the rewrite.
+`to_table_from(cells, columns, source)` is the same rendering with the
+columns given as tables, so a caller can put a table the reader refused
+back as it was read beside the ones the writer renders; the Vol views
+dialog writes through it. `span_text` writes a span at the coarsest
 unit of the duration grammar that spells it exactly (`7d`, `12h`, `90s`,
 `500ms`, `1y` for 365 days), never a rounded `0d` the reader would
 refuse. `to_document(doc, source)` writes the whole file: `config_version`,

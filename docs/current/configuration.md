@@ -1140,7 +1140,10 @@ Vol views dialog (`e` on a vol tile) writes this file's user layer; its
 writer rewrites each column from its pickers, so a hand edit inside a
 `[[columns]]` table that the reader does not know, or a comment on one,
 does not survive the next save, while a comment on a tab's table and any
-other top-level key do. `cells = "pair"` (the
+other top-level key do. A `[[columns]]` table the reader refuses is the
+exception: the dialog carries it as it was read and writes it back in its
+place, so a save never deletes a column the reader only warned about.
+`cells = "pair"` (the
 default) lays each measure out as a level and a companion column under one
 group head; `cells = "single"` as one number per cell. A column is exactly
 one of `measure = "<text>"` (with an optional `label` for the sub-head,

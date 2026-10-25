@@ -67,35 +67,65 @@ pub fn summary(value: &toml::Value, is_default: bool) -> String {
 /// The view's fields: `name`, `cells`, `default` and its ordered `columns`
 /// over the catalogue. A view the doc does not hold (one being created)
 /// opens with no columns and pair cells.
+///
+/// The columns are the view's `[[columns]]` tables as the merged document
+/// holds them, each read as the reader reads it: a column the pickers
+/// hold is re-rendered through the writer; one the reader refuses is a
+/// `Raw` item carrying the table as it was read, named by its measure or
+/// spark text (`column <n>` without one), so a save writes it back in its
+/// place rather than deleting what the reader only warned about.
 pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
+    fields_named(config, object, object.unwrap_or_default())
+}
+
+/// The fields a new view named `name` opens with: no columns, pair cells,
+/// and `name` in the Name row — the row is display-only, and would
+/// otherwise read blank until the tab was reopened.
+pub fn new_fields(config: &Config, name: &str) -> Vec<Field> {
+    fields_named(config, None, name)
+}
+
+fn fields_named(config: &Config, object: Option<&str>, name: &str) -> Vec<Field> {
     let (doc, _) = config.doc(DOC).map(volviews::from_doc).unwrap_or_default();
     let view = object.and_then(|name| doc.views.iter().find(|v| v.name == name));
-    let name = object.unwrap_or_default().to_string();
+    let name = name.to_string();
     let cells = match view.map(|v| v.cells) {
         Some(Cells::Single) => "single",
         _ => "pair",
     };
     let is_default = object.is_some() && doc.default.as_deref() == object;
-    let mut taken: Vec<String> = Vec::new();
-    let items: Vec<ListItem> = view
-        .map(|v| {
-            v.columns
-                .iter()
-                .map(|c| {
-                    let choice = ColumnChoice::from_spec(c);
-                    let name = item_name(choice.as_ref(), &taken);
-                    taken.push(name.clone());
-                    ListItem {
-                        name,
-                        included: true,
-                        presentation: Default::default(),
-                        kind: None,
-                        source: Some(column_source(c)),
-                    }
-                })
-                .collect()
-        })
+    let tables: Vec<&toml::Table> = object
+        .and_then(|name| config.doc(DOC)?.value.get(name)?.get("columns")?.as_array())
+        .map(|columns| columns.iter().filter_map(toml::Value::as_table).collect())
         .unwrap_or_default();
+    let mut taken: Vec<String> = Vec::new();
+    let items: Vec<ListItem> = tables
+        .into_iter()
+        .enumerate()
+        .map(|(i, table)| {
+            let (name, source) = match spec_of(table) {
+                Some(spec) => {
+                    let choice = ColumnChoice::from_spec(&spec);
+                    (item_name(choice.as_ref(), &taken), column_source(&spec))
+                }
+                // The reader refused this table; it stays as it was read.
+                None => {
+                    let raw = Raw {
+                        text: raw_text(table, i),
+                    };
+                    (item_name(Err(&raw), &taken), table.clone())
+                }
+            };
+            taken.push(name.clone());
+            ListItem {
+                name,
+                included: true,
+                presentation: Default::default(),
+                kind: None,
+                source: Some(source),
+            }
+        })
+        .collect();
     vec![
         super::views::text_row("name", "Name", name, Destination::Doc),
         super::views::choice_row(
@@ -125,6 +155,16 @@ pub fn fields(config: &Config, object: Option<&str>) -> Vec<Field> {
             layer: None,
         },
     ]
+}
+
+/// The row name of a `[[columns]]` table the reader refused: its measure
+/// or spark text, else `column <n>` with the reader's own 1-based count.
+fn raw_text(table: &toml::Table, index: usize) -> String {
+    ["measure", "spark"]
+        .iter()
+        .find_map(|key| table.get(*key).and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("column {}", index + 1))
 }
 
 /// One column's `[[columns]]` table as `toml::Table`, through the core writer.
@@ -295,18 +335,14 @@ pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
         Some("single") => Cells::Single,
         _ => Cells::Pair,
     };
-    let view = VolViewSpec {
-        name: draft.name.clone(),
-        cells,
-        columns: column_specs(draft),
-    };
+    let items = draft.list_items("columns").unwrap_or_default();
     let source = super::toml_table_to_edit(&draft.source);
-    let mut item = volviews::to_table(&view, Some(&source));
+    let mut item = volviews::to_table_from(cells, column_tables(items), Some(&source));
     // An empty array of tables prints as nothing, so a view with no
     // columns would reach the file as a bare `[name]` header. Spell the
     // empty list, which the reader accepts, so the written object says
     // what it is.
-    if view.columns.is_empty()
+    if items.is_empty()
         && let Some(table) = item.as_table_mut()
     {
         table["columns"] = toml_edit::value(toml_edit::Array::new());
@@ -314,20 +350,22 @@ pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
     item
 }
 
-/// The view's columns as the writer renders them, in the order the reader
-/// numbers them: each member item's own table read as a column. An item
-/// whose table is not a column (none the dialog builds) is skipped, so a
-/// path index here is the written file's.
-fn column_specs(draft: &Draft) -> Vec<VolColumnSpec> {
-    draft
-        .list_items("columns")
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|i| i.source.as_ref().and_then(spec_of))
-                .collect()
+/// The view's columns as the file is to hold them, in list order: a column
+/// the reader reads is rendered by the writer from its spec, so a default
+/// label or glyph is never written and `point <t> 0.5` is respelled `atfm
+/// <t>`; one the reader refused is copied as it was read, so the save
+/// keeps it — the reader goes on warning about it, which is what the file
+/// said before. An item without a table (none the dialog builds) is
+/// skipped.
+fn column_tables(items: &[ListItem]) -> Vec<toml_edit::Table> {
+    items
+        .iter()
+        .filter_map(|i| i.source.as_ref())
+        .map(|source| match spec_of(source) {
+            Some(spec) => volviews::column_table(&spec),
+            None => super::toml_table_to_edit(source),
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 /// Everything the readers would say about the rendered view, against the
@@ -405,8 +443,13 @@ fn validate_against(
         });
     }
     if let Some(startup) = startup {
-        for (i, spec) in column_specs(draft).iter().enumerate() {
-            let measure = match spec {
+        // Indexed by item, as the file is: a refused column keeps its place.
+        let items = draft.list_items("columns").unwrap_or_default();
+        for (i, item) in items.iter().enumerate() {
+            let Some(spec) = item.source.as_ref().and_then(spec_of) else {
+                continue;
+            };
+            let measure = match &spec {
                 VolColumnSpec::Measure { measure, .. } | VolColumnSpec::Spark { measure, .. } => {
                     measure
                 }
@@ -1308,6 +1351,48 @@ mod tests {
         assert_eq!(items[0].name, "smile_curv 3M 0.25");
         let text = object_text("vol", Domain::VolViews.to_table(&draft, Destination::Doc));
         assert!(text.contains("measure = \"smile_curv 3M 0.25\""), "{text}");
+    }
+
+    /// A `[[columns]]` table the reader refuses is carried as a `Raw` item —
+    /// named by its measure or spark text, `column <n>` without one, with
+    /// the one display-only row — and written back as it was read, in its
+    /// place, so a save never deletes a hand-written column the reader
+    /// only warns about.
+    #[test]
+    fn a_refused_column_is_carried_raw_and_written_in_place() {
+        let config = config_with(
+            "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3m x\"\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n[[vol.columns]]\nspark = \"atfm 3M\"\nspan = \"soon\"\n[[vol.columns]]\nkind = \"delta\"\nnote = 1\n",
+            SSR_DATASET,
+        );
+        let draft = Domain::VolViews.draft(&config, "vol");
+        let items = draft.list_items("columns").unwrap();
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["atfm 3m x", "ATFM 3M", "atfm 3M", "column 4"]);
+        let fields = column_fields(&items[0], &no_datasets());
+        assert_eq!(keys(&fields), ["measure"]);
+        assert_eq!(fields[0].kind, FieldKind::Text("atfm 3m x".into()));
+        let text = object_text("vol", Domain::VolViews.to_table(&draft, Destination::Doc));
+        let at = |needle: &str| {
+            text.find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {text}"))
+        };
+        assert!(
+            at("measure = \"atfm 3m x\"") < at("measure = \"atfm 3M\""),
+            "{text}"
+        );
+        assert!(
+            at("measure = \"atfm 3M\"") < at("span = \"soon\""),
+            "{text}"
+        );
+        assert!(at("span = \"soon\"") < at("kind = \"delta\""), "{text}");
+        assert!(text.contains("note = 1"), "{text}");
+        // The reader's own warnings stand in the draft: the tile drops them.
+        let dropped = draft
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning && d.message.contains("; dropped"))
+            .count();
+        assert_eq!(dropped, 3, "{:?}", draft.diagnostics);
     }
 
     #[test]
