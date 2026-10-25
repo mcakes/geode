@@ -9,7 +9,9 @@ fn fzf_tab_folds_a_branch_without_changing_input_or_committing(cx: &mut gpui::Te
     let (services, _) = services_with_recorder();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Fzf)
+    });
     cx.simulate_keystrokes("ctrl-v /");
     let results = shell.read_with(&cx, |s, _| s.fuzzy_find.clone().unwrap());
     results.update(&mut cx, |r, cx| {
@@ -56,7 +58,9 @@ fn fzf_ranks_picks_and_cancels_without_moving_the_tree(cx: &mut gpui::TestAppCon
     services.roster = roster;
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Fzf)
+    });
     cx.simulate_keystrokes("ctrl-v /");
     cx.simulate_input("split");
     cx.run_until_parked();
@@ -120,7 +124,9 @@ fn fzf_ranks_picks_and_cancels_without_moving_the_tree(cx: &mut gpui::TestAppCon
     cx.simulate_keystrokes("escape");
 
     // The setting takes effect on the next prompt; Vim still receives incremental events.
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Vim);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Vim)
+    });
     cx.simulate_keystrokes("/");
     cx.simulate_input("split");
     cx.run_until_parked();
@@ -142,7 +148,9 @@ fn fzf_scrolls_to_keyboard_selection_and_accepts_pointer_picks(cx: &mut gpui::Te
     services.roster = roster;
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Fzf)
+    });
     cx.simulate_keystrokes("ctrl-v / ctrl-f ctrl-f ctrl-f ctrl-f");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -256,9 +264,7 @@ fn colon_opens_the_command_line_and_enter_runs_the_line_on_the_occupant(
         "closed after a successful command"
     );
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert!(
         log.borrow()
             .contains(&crate::module::recording::Recorded::Command(
@@ -302,9 +308,7 @@ fn completions_rank_accept_on_tab_and_submit_on_a_unique_enter(cx: &mut gpui::Te
     assert_eq!(line, "sort gamma01");
 
     cx.simulate_keystrokes("enter");
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert!(
         log.borrow()
             .contains(&crate::module::recording::Recorded::Command(
@@ -432,9 +436,7 @@ fn slash_streams_find_events_and_escape_cancels(cx: &mut gpui::TestAppContext) {
     cx.simulate_keystrokes("/");
     cx.simulate_input("sp");
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     use crate::module::{FindEvent, recording::Recorded};
     assert!(
         log.borrow()
@@ -515,9 +517,7 @@ fn opening_a_shell_dialog_cancels_an_open_command_line(cx: &mut gpui::TestAppCon
         "line open before the dialog"
     );
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     cx.update(|window, cx| {
         shell.update(cx, |shell, cx| {
             shell.dispatch(&ActionId("settings::open".to_string()), None, window, cx);
@@ -554,9 +554,7 @@ fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::Test
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-v");
     let shell = shell_of(&window, &mut cx);
-    let opened_on = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let opened_on = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     cx.simulate_keystrokes(":");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -572,18 +570,12 @@ fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::Test
         let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
             (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
-        let rects = shell
-            .read(cx)
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .layout(Rect {
-                x: 0.0,
-                y: 0.0,
-                w: tile_width,
-                h: content_height,
-            });
+        let rects = shell.read(cx).workspace(cx).tree().layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: tile_width,
+            h: content_height,
+        });
         let (id, r) = rects
             .into_iter()
             .find(|(id, _)| Some(*id) != Some(opened_on))
@@ -605,9 +597,7 @@ fn a_mouse_down_on_another_tile_cancels_an_open_command_line(cx: &mut gpui::Test
         cx.debug_bounds("command-line").is_none(),
         "the click should have cancelled the open command line"
     );
-    let focused = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let focused = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(focused, target_id, "the click still moved focus");
     let shell_focus = shell.read_with(&cx, |s, _| s.focus_handle.clone());
     assert!(
@@ -636,9 +626,7 @@ fn a_mouse_down_on_a_tile_commits_an_open_find_line(cx: &mut gpui::TestAppContex
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-v");
     let shell = shell_of(&window, &mut cx);
-    let opened_on = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let opened_on = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     cx.simulate_keystrokes("/");
     cx.simulate_input("sp");
     cx.update(|window, cx| {
@@ -651,18 +639,12 @@ fn a_mouse_down_on_a_tile_commits_an_open_find_line(cx: &mut gpui::TestAppContex
         let tile_width = (f32::from(viewport.width) - sidebar::width(window)).max(0.0);
         let content_height =
             (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0);
-        let rects = shell
-            .read(cx)
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .layout(Rect {
-                x: 0.0,
-                y: 0.0,
-                w: tile_width,
-                h: content_height,
-            });
+        let rects = shell.read(cx).workspace(cx).tree().layout(Rect {
+            x: 0.0,
+            y: 0.0,
+            w: tile_width,
+            h: content_height,
+        });
         let (id, r) = rects
             .into_iter()
             .find(|(id, _)| Some(*id) != Some(opened_on))
@@ -700,9 +682,7 @@ fn a_mouse_down_on_a_tile_commits_an_open_find_line(cx: &mut gpui::TestAppContex
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let now_on = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let now_on = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     cx.simulate_mouse_down(click_point, MouseButton::Left, gpui::Modifiers::none());
     cx.simulate_mouse_up(click_point, MouseButton::Left, gpui::Modifiers::none());
     cx.update(|window, cx| {
@@ -762,7 +742,7 @@ fn switching_workspaces_cancels_an_open_command_line(cx: &mut gpui::TestAppConte
         "and the strip should not be painted either"
     );
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         2,
         "the switch itself still happened"
     );
@@ -866,7 +846,9 @@ fn fzf_table_reports_the_painted_rows_after_every_result_change(cx: &mut gpui::T
     services.roster = roster;
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
-    shell.update(&mut cx, |s, _| s.find_style = FindStyle::Fzf);
+    shell.update(&mut cx, |s, cx| {
+        s.with_app(cx, |a| a.find_style = FindStyle::Fzf)
+    });
     cx.simulate_keystrokes("ctrl-v /");
     cx.run_until_parked();
 

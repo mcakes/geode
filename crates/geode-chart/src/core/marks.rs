@@ -152,28 +152,25 @@ pub fn dash_polyline(points: &[Point], dash: f32, gap: f32, clip: Clip, out: &mu
     }
 }
 
-/// The stroke segments of a points slot, into `out` (cleared first): per
-/// point, a vertical bar and a diamond of half-diagonal `r` at `mid`. The
-/// bar runs from `lo` to `hi` when both are there. With one of them
-/// missing it runs from `mid` to the end that is there, a half bar: drawn
-/// as a diamond alone, a quote with one side missing would look like a
-/// quote with no spread. A bar of no length is not drawn, and an end with
-/// neither a mid nor the other end paints nothing.
+/// The bar segments of a points slot, into `out` (cleared first): per
+/// point, a vertical bar from `lo` to `hi` when both are there. With one
+/// of them missing it runs from `mid` to the end that is there, a half
+/// bar: drawn as a diamond alone, a quote with one side missing would look
+/// like a quote with no spread. A bar of no length is not drawn, and an
+/// end with neither a mid nor the other end paints nothing.
 ///
-/// All inputs are pixels; a non-finite x skips the point and a non-finite
-/// `mid` its diamond. Only the shared length of the four slices is read.
-/// Returns `(bars, markers)`.
-pub fn point_marks(
+/// All inputs are pixels; a non-finite x skips the point. Only the shared
+/// length of the four slices is read. Returns how many bars there are.
+pub fn point_bars(
     xs: &[f32],
     mid: &[f32],
     lo: &[f32],
     hi: &[f32],
-    r: f32,
     out: &mut Vec<Segment>,
-) -> (usize, usize) {
+) -> usize {
     out.clear();
     let n = xs.len().min(mid.len()).min(lo.len()).min(hi.len());
-    let (mut bars, mut markers) = (0, 0);
+    let mut bars = 0;
     for i in 0..n {
         let x = xs[i];
         if !x.is_finite() {
@@ -190,24 +187,62 @@ pub fn point_marks(
             out.push((Point::new(x, from), Point::new(x, to)));
             bars += 1;
         }
-        if m.is_finite() {
-            let tips = [
-                Point::new(x - r, m),
-                Point::new(x, m - r),
-                Point::new(x + r, m),
-                Point::new(x, m + r),
-            ];
-            for k in 0..4 {
-                out.push((tips[k], tips[(k + 1) % 4]));
-            }
-            markers += 1;
-        }
     }
-    (bars, markers)
+    bars
 }
 
-/// The most segments [`point_marks`] emits for one point: its bar and the
-/// four edges of its diamond.
+/// The four tips of the diamond of half-diagonal `r` at `(x, mid)`, from
+/// its left tip clockwise.
+fn diamond(x: f32, mid: f32, r: f32) -> [Point; 4] {
+    [
+        Point::new(x - r, mid),
+        Point::new(x, mid - r),
+        Point::new(x + r, mid),
+        Point::new(x, mid + r),
+    ]
+}
+
+/// The diamond edges of a points slot, into `out` (cleared first): four
+/// segments per point with a finite x and mid, starting at the left tip.
+/// Only the shared length of the two slices is read. Returns how many
+/// diamonds there are.
+pub fn point_diamonds(xs: &[f32], mid: &[f32], r: f32, out: &mut Vec<Segment>) -> usize {
+    out.clear();
+    let mut markers = 0;
+    for (&x, &m) in xs.iter().zip(mid) {
+        if !x.is_finite() || !m.is_finite() {
+            continue;
+        }
+        let tips = diamond(x, m, r);
+        for k in 0..4 {
+            out.push((tips[k], tips[(k + 1) % 4]));
+        }
+        markers += 1;
+    }
+    markers
+}
+
+/// The same diamonds as closed outlines for a fill, into `out` (cleared
+/// first), parted by [`Point::BREAK`]: the interior a hollow mark paints
+/// in the plot's ground under its edges, so the curve a quote sits on
+/// stops at the mark instead of running through it.
+pub fn diamond_outlines(xs: &[f32], mid: &[f32], r: f32, out: &mut Vec<Point>) {
+    out.clear();
+    for (&x, &m) in xs.iter().zip(mid) {
+        if !x.is_finite() || !m.is_finite() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push(Point::BREAK);
+        }
+        out.extend_from_slice(&diamond(x, m, r));
+    }
+}
+
+/// The most stroke segments one point of a points slot costs across its
+/// paths: its bar ([`point_bars`]) and the four edges of its diamond
+/// ([`point_diamonds`]). A stride that keeps this many per point under
+/// the cap keeps either path under it.
 pub const SEGMENTS_PER_MARK: usize = 5;
 
 /// The stride that thins `points` marks of `per_point` segments each to at
@@ -712,90 +747,127 @@ mod tests {
         }
     }
 
+    /// Both paths of a points slot from one set of columns: the bars,
+    /// then the diamond edges.
+    fn marks(
+        xs: &[f32],
+        mid: &[f32],
+        lo: &[f32],
+        hi: &[f32],
+        r: f32,
+    ) -> ((usize, Vec<Segment>), (usize, Vec<Segment>)) {
+        let (mut bars, mut edges) = (Vec::new(), Vec::new());
+        let b = point_bars(xs, mid, lo, hi, &mut bars);
+        let d = point_diamonds(xs, mid, r, &mut edges);
+        ((b, bars), (d, edges))
+    }
+
     #[test]
-    fn each_point_gets_a_bar_and_a_diamond() {
+    fn each_point_gets_a_bar_and_a_diamond_on_separate_paths() {
         let xs = [10.0, 20.0, 30.0];
         let mid = [50.0, 52.0, 54.0];
         let lo = [55.0, 57.0, 59.0];
         let hi = [45.0, 47.0, 49.0];
-        let mut out = Vec::new();
-        let (bars, markers) = point_marks(&xs, &mid, &lo, &hi, 3.0, &mut out);
+        let ((bars, bar_segments), (markers, edges)) = marks(&xs, &mid, &lo, &hi, 3.0);
         assert_eq!((bars, markers), (3, 3));
-        assert_eq!(out.len(), 3 + 3 * 4, "one bar and four diamond edges each");
+        assert_eq!(bar_segments.len(), 3, "one bar each");
+        assert_eq!(edges.len(), 3 * 4, "four diamond edges each");
         assert_eq!(
-            out[0],
+            bar_segments[0],
             (Point::new(10.0, 55.0), Point::new(10.0, 45.0)),
             "the bar"
         );
         assert_eq!(
-            out[1].0,
+            edges[0].0,
             Point::new(7.0, 50.0),
             "the diamond starts at its left tip"
         );
+        // The outlines close the same diamonds for the interior fill, one
+        // per point, parted by breaks.
+        let mut outlines = Vec::new();
+        diamond_outlines(&xs, &mid, 3.0, &mut outlines);
+        assert_eq!(outlines.len(), 3 * 4 + 2);
+        assert_eq!(outlines[0], Point::new(7.0, 50.0));
+        assert!(outlines[4].is_break());
+        assert_eq!(outlines[5], Point::new(17.0, 52.0));
     }
 
     #[test]
     fn a_point_with_no_range_is_a_diamond_alone() {
-        let mut out = Vec::new();
-        let (bars, markers) = point_marks(&[10.0], &[50.0], &[50.0], &[50.0], 3.0, &mut out);
+        let ((bars, bar_segments), (markers, edges)) =
+            marks(&[10.0], &[50.0], &[50.0], &[50.0], 3.0);
         assert_eq!((bars, markers), (0, 1));
-        assert_eq!(out.len(), 4);
+        assert!(bar_segments.is_empty());
+        assert_eq!(edges.len(), 4);
     }
 
     #[test]
     fn a_nan_or_short_array_skips_the_mark_not_the_slot() {
         let nan = f32::NAN;
-        let mut out = Vec::new();
         // Point 0: no mid, so a bar alone. Point 1: no x, so nothing.
         // Point 2: no lo and no hi, so a diamond alone. Point 3 has no hi
-        // entry at all.
-        let (bars, markers) = point_marks(
+        // entry at all, so its bar is not read; its diamond needs no hi.
+        let ((bars, bar_segments), (markers, edges)) = marks(
             &[10.0, nan, 30.0, 40.0],
             &[nan, 50.0, 50.0, 50.0],
             &[55.0, 55.0, nan, 55.0],
             &[45.0, 45.0, nan],
             3.0,
-            &mut out,
         );
-        assert_eq!((bars, markers), (1, 1));
-        assert_eq!(out.len(), 1 + 4);
-        assert!(finite(&out), "{out:?}");
+        assert_eq!((bars, markers), (1, 2));
+        assert_eq!(bar_segments.len(), 1);
+        assert_eq!(edges.len(), 2 * 4);
+        assert!(
+            finite(&bar_segments) && finite(&edges),
+            "{bar_segments:?} {edges:?}"
+        );
+        let mut outlines = Vec::new();
+        diamond_outlines(&[10.0, nan, 30.0], &[nan, 50.0, 50.0], 3.0, &mut outlines);
+        assert_eq!(outlines.len(), 4, "one diamond, no leading break");
     }
 
     #[test]
     fn a_one_sided_quote_is_a_half_bar_from_its_mid() {
         let nan = f32::NAN;
-        let mut out = Vec::new();
         // A mid and a low alone, then a mid and a high alone.
-        let (bars, markers) = point_marks(
+        let ((bars, bar_segments), (markers, edges)) = marks(
             &[10.0, 20.0],
             &[50.0, 50.0],
             &[55.0, nan],
             &[nan, 45.0],
             3.0,
-            &mut out,
         );
         assert_eq!((bars, markers), (2, 2));
-        assert_eq!(out.len(), 2 * 5, "five segments a point at most");
-        assert_eq!(out[0], (Point::new(10.0, 50.0), Point::new(10.0, 55.0)));
-        assert_eq!(out[5], (Point::new(20.0, 50.0), Point::new(20.0, 45.0)));
-        assert!(finite(&out), "{out:?}");
+        assert_eq!(
+            bar_segments.len() + edges.len(),
+            2 * SEGMENTS_PER_MARK,
+            "five segments a point at most"
+        );
+        assert_eq!(
+            bar_segments[0],
+            (Point::new(10.0, 50.0), Point::new(10.0, 55.0))
+        );
+        assert_eq!(
+            bar_segments[1],
+            (Point::new(20.0, 50.0), Point::new(20.0, 45.0))
+        );
+        assert!(finite(&bar_segments), "{bar_segments:?}");
     }
 
     #[test]
     fn a_lone_end_at_the_mid_or_without_a_mid_has_no_bar() {
         let nan = f32::NAN;
-        let mut out = Vec::new();
         // The one end on the mid's own pixel: a bar of no length.
-        let (bars, markers) = point_marks(&[10.0], &[50.0], &[50.0], &[nan], 3.0, &mut out);
+        let ((bars, _), (markers, edges)) = marks(&[10.0], &[50.0], &[50.0], &[nan], 3.0);
         assert_eq!((bars, markers), (0, 1));
-        assert_eq!(out.len(), 4);
+        assert_eq!(edges.len(), 4);
         // An end with neither a mid nor the other end has nothing to run
         // to: no mark at all.
         for (lo, hi) in [(55.0, nan), (nan, 45.0)] {
-            let (bars, markers) = point_marks(&[10.0], &[nan], &[lo], &[hi], 3.0, &mut out);
+            let ((bars, bar_segments), (markers, edges)) =
+                marks(&[10.0], &[nan], &[lo], &[hi], 3.0);
             assert_eq!((bars, markers), (0, 0), "{lo} {hi}");
-            assert!(out.is_empty(), "{out:?}");
+            assert!(bar_segments.is_empty() && edges.is_empty());
         }
     }
 

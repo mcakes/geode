@@ -12,9 +12,7 @@ fn a_pending_key_sequence_gates_the_divider_strips(cx: &mut gpui::TestAppContext
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
-                });
+                let view = view_for_test(test_services_with_gg_binding(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -72,8 +70,8 @@ fn ctrl_bracket_keystroke_toggles_the_left_dock_and_paints_its_hint(cx: &mut gpu
         let _ = window.draw(cx);
     });
 
-    let (visible, region) = shell.read_with(&cx, |shell, _| {
-        let ws = shell.services.workspaces.active();
+    let (visible, region) = shell.read_with(&cx, |shell, cx| {
+        let ws = shell.workspace(cx);
         (
             ws.docks().get(crate::tiling::DockSide::Left).visible(),
             ws.region(),
@@ -93,11 +91,9 @@ fn ctrl_bracket_keystroke_toggles_the_left_dock_and_paints_its_hint(cx: &mut gpu
     );
 
     cx.simulate_keystrokes("ctrl-[");
-    let visible = shell.read_with(&cx, |shell, _| {
+    let visible = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
-            .workspaces
-            .active()
+            .workspace(cx)
             .docks()
             .get(crate::tiling::DockSide::Left)
             .visible()
@@ -122,17 +118,19 @@ fn ctrl_brace_keystroke_moves_the_tile_to_the_left_dock_and_back(cx: &mut gpui::
     let (mut cx, shell) = dock_test_shell(cx);
 
     cx.simulate_keystrokes("ctrl-v");
-    let tile = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused().unwrap()
+    let tile = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().focused().unwrap()
     });
     // Clear the dirty flag left by the split so the assertion below
     // isolates the dock move's own dirtying.
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     cx.simulate_keystrokes("ctrl-{");
 
-    shell.read_with(&cx, |shell, _| {
-        let ws = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let ws = shell.workspace(cx);
         assert!(ws.tree().is_empty(), "the tile should have left the tree");
         let dock = ws.docks().get(crate::tiling::DockSide::Left);
         assert_eq!(dock.tree().tiles(), vec![tile]);
@@ -142,15 +140,15 @@ fn ctrl_brace_keystroke_moves_the_tile_to_the_left_dock_and_back(cx: &mut gpui::
             crate::tiling::FocusRegion::Dock(crate::tiling::DockSide::Left)
         );
         assert!(
-            shell.session_dirty,
+            shell.app().read(cx).session_dirty,
             "a handled dock action must mark the session dirty"
         );
     });
 
     cx.simulate_keystrokes("ctrl-{");
 
-    shell.read_with(&cx, |shell, _| {
-        let ws = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let ws = shell.workspace(cx);
         assert_eq!(ws.tree().tiles(), vec![tile], "the tile returned");
         assert_eq!(ws.tree().focused(), Some(tile));
         assert_eq!(ws.region(), crate::tiling::FocusRegion::Main);
@@ -169,11 +167,13 @@ fn adds_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
 
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-{"); // tile → left dock, dock focused
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     cx.simulate_keystrokes("ctrl-v"); // add inside the dock
-    shell.read_with(&cx, |shell, _| {
-        let ws = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let ws = shell.workspace(cx);
         let dock = ws.docks().get(crate::tiling::DockSide::Left);
         assert_eq!(
             dock.tree().tiles().len(),
@@ -186,14 +186,14 @@ fn adds_and_close_operate_inside_a_focused_dock(cx: &mut gpui::TestAppContext) {
         );
         assert!(ws.tree().is_empty(), "the main tree must stay untouched");
         assert!(
-            shell.session_dirty,
+            shell.app().read(cx).session_dirty,
             "a dock-tree split must mark the session dirty"
         );
     });
 
     cx.simulate_keystrokes("ctrl-w"); // close the focused dock tile
-    shell.read_with(&cx, |shell, _| {
-        let ws = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let ws = shell.workspace(cx);
         let dock = ws.docks().get(crate::tiling::DockSide::Left);
         assert_eq!(dock.tree().tiles().len(), 1);
         assert!(dock.visible(), "a still-occupied dock must not auto-hide");
@@ -216,8 +216,8 @@ fn a_literal_ctrl_shift_bracket_shape_does_not_move_the_tile(cx: &mut gpui::Test
     let (mut cx, shell) = dock_test_shell(cx);
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-shift-["); // key "[", shift=true: not a real platform shape
-    shell.read_with(&cx, |shell, _| {
-        let ws = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let ws = shell.workspace(cx);
         assert!(
             !ws.tree().is_empty(),
             "the unmatched keystroke must not have moved the tile"
@@ -242,8 +242,8 @@ fn empty_tree_hint_paints_whichever_region_holds_focus(cx: &mut gpui::TestAppCon
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.read_with(&cx, |shell, _| {
-        let ws = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let ws = shell.workspace(cx);
         assert!(ws.tree().is_empty(), "sanity: the tree emptied");
         assert_eq!(
             ws.region(),
@@ -300,7 +300,7 @@ fn a_visible_left_dock_carves_its_column_out_of_the_tree_area(cx: &mut gpui::Tes
             h: content_height,
         };
         let shell = shell.read(cx);
-        let ws = shell.services.workspaces.active();
+        let ws = shell.workspace(cx);
         let (tree_area, dock_rects) = crate::tiling::dock_layout(ws.docks(), area);
         assert_eq!(dock_rects.len(), 1);
         let (side, dock_rect) = dock_rects[0];

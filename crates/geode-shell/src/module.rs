@@ -27,6 +27,7 @@ use geode_core::vol::VolSliceOutcome;
 use geode_core::volboard::VolBoardOutcome;
 use gpui::{AnyView, App, Entity, SharedString, Window};
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Changes, commits, and cancellation from the tile's `/` find line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,10 +38,13 @@ pub enum FindEvent {
 }
 
 /// An asynchronous outcome routed by the shell. A keyed delivery goes to
-/// its tile; a keyless delivery goes to every visible tile. This is an enum
-/// so a new outcome forces every occupant to make an explicit compile-time
+/// its tile, in the window hosting the tile's workspace; a keyless
+/// delivery goes to every window and every visible tile in it
+/// (`ShellApp::deliver`), so it is `Clone`: the app copies it once per
+/// window, and a keyed one is moved, never copied. This is an enum so a
+/// new outcome forces every occupant to make an explicit compile-time
 /// decision. Matches must remain exhaustive and avoid wildcard arms.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Delivery {
     Query(QueryOutcome),
     Price(PriceOutcome),
@@ -77,7 +81,7 @@ pub enum Delivery {
 
 /// [`Delivery::Upload`]'s fields, mirroring `geode_data::egress::
 /// UploadOutcome` one for one.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UploadDelivery {
     pub key: QueryKey,
     /// The tile's upload counter, echoed back so a stale outcome (an
@@ -380,6 +384,12 @@ pub trait TileContent {
     /// still waiting on it, so a closed tile never holds the others to the
     /// deadline. The default does nothing.
     fn closed(&self, _cx: &mut App) {}
+    /// The shell is about to serialise this tile's record and drop the
+    /// occupant because its workspace is moving to another window or its
+    /// window is closing. Queue any unsaved work now, with this live
+    /// context; `closed` follows. Never called for a plain workspace
+    /// switch.
+    fn park(&self, _cx: &mut App) {}
     /// Set this tile's stack position, or `None` outside a stack.
     /// `ShellView::ensure_occupants` calls this after creation and whenever
     /// `(index, len)` changes. Modules paint the marker first in their header
@@ -649,7 +659,9 @@ impl<F: ModuleFactory + ?Sized> ModuleFactory for Rc<F> {
 /// [`placeholder`] with a recovery hint instead of selecting another module.
 #[derive(Default)]
 pub struct ModuleRoster {
-    factories: Vec<Box<dyn ModuleFactory>>,
+    /// Shared handles, so a caller can look a factory up, drop the roster
+    /// borrow and call `create` with the context free.
+    factories: Vec<Arc<dyn ModuleFactory>>,
     actions: Vec<Rc<dyn DimensionAction>>,
 }
 
@@ -659,7 +671,7 @@ impl ModuleRoster {
     }
 
     pub fn add(&mut self, factory: Box<dyn ModuleFactory>) {
-        self.factories.push(factory);
+        self.factories.push(Arc::from(factory));
     }
 
     /// Register a row menu action; the menu lists them in this order.
@@ -679,11 +691,8 @@ impl ModuleRoster {
         }
     }
 
-    pub fn factory(&self, kind: &str) -> Option<&dyn ModuleFactory> {
-        self.factories
-            .iter()
-            .find(|f| f.kind() == kind)
-            .map(|f| f.as_ref())
+    pub fn factory(&self, kind: &str) -> Option<Arc<dyn ModuleFactory>> {
+        self.factories.iter().find(|f| f.kind() == kind).cloned()
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {
@@ -893,7 +902,8 @@ pub struct PageEntry {
 /// [`PageRoster::add`] so [`PageRoster::entries`] never allocates: the
 /// sidebar paints from it on every render.
 struct RegisteredPage {
-    factory: Box<dyn PageFactory>,
+    /// Shared like `ModuleRoster`'s, for the same reason.
+    factory: Arc<dyn PageFactory>,
     toggle_action: &'static str,
     selector: &'static str,
     tip_selector: &'static str,
@@ -914,18 +924,18 @@ impl PageRoster {
         let kind = factory.kind();
         let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
         self.pages.push(RegisteredPage {
-            factory,
+            factory: Arc::from(factory),
             toggle_action: leak(format!("page::toggle_{kind}")),
             selector: leak(format!("sidebar-page-{kind}")),
             tip_selector: leak(format!("tip-sidebar-page-{kind}")),
         });
     }
 
-    pub fn factory(&self, kind: &str) -> Option<&dyn PageFactory> {
+    pub fn factory(&self, kind: &str) -> Option<Arc<dyn PageFactory>> {
         self.pages
             .iter()
             .find(|p| p.factory.kind() == kind)
-            .map(|p| p.factory.as_ref())
+            .map(|p| p.factory.clone())
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {
@@ -1164,6 +1174,10 @@ pub mod recording {
         Visible(TileId, bool),
         /// `closed` reached this tile: its occupant is being removed.
         Closed(TileId),
+        /// `park` reached this tile: its workspace is moving to another
+        /// window or its window is closing, and the occupant is about to
+        /// be serialised and dropped.
+        Park(TileId),
         Delivered(TileId, u64),
         Priced(TileId, u64),
         VolSliced(TileId, u64),
@@ -1708,6 +1722,9 @@ pub mod recording {
             self.followed_at_close
                 .borrow_mut()
                 .push((self.tile, self.frame.read(cx).following()));
+        }
+        fn park(&self, _: &mut App) {
+            self.log.borrow_mut().push(Recorded::Park(self.tile));
         }
         fn follows(&self) -> bool {
             self.follows

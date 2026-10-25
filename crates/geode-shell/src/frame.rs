@@ -153,6 +153,12 @@ struct FlipBarrier {
     /// identity.
     awaiting: HashMap<QueryKey, FrameVersions>,
     opened: Instant,
+    /// The frame generation this barrier was opened at. Every window
+    /// answering one change answers it under the same generation, so a
+    /// second window's answer joins this barrier ([`Frame::join_flip`])
+    /// rather than replacing it; a later edit advances the generation and
+    /// its answer replaces it.
+    generation: u64,
 }
 
 /// One coalesced scope-editing session. Its first actual edit pushes the
@@ -1044,7 +1050,35 @@ impl Frame {
         self.barrier = (!awaiting.is_empty()).then_some(FlipBarrier {
             awaiting,
             opened: now,
+            generation: self.generation,
         });
+    }
+
+    /// Answer a lane change with these keys: join the barrier open for this
+    /// same change, or open a new one. Two windows answering the same lane
+    /// change (two windows showing workspaces on one lane) each contribute
+    /// their visible tiles to one barrier and flip together; with a barrier
+    /// opened at this frame generation this behaves as [`extend_flip`],
+    /// otherwise as [`open_flip_each`]. A later edit advances the
+    /// generation, so its answer replaces the barrier, as today: whatever
+    /// that barrier awaited answered an older frame. The barrier is keyed
+    /// by generation, not per window, because the released `flip` counter
+    /// is frame-wide: a per-window barrier releasing early would promote
+    /// the other window's tiles before their answers arrived.
+    ///
+    /// [`extend_flip`]: Self::extend_flip
+    /// [`open_flip_each`]: Self::open_flip_each
+    pub(crate) fn join_flip(
+        &mut self,
+        keys: impl IntoIterator<Item = (QueryKey, FrameVersions)>,
+        now: Instant,
+    ) {
+        match self.barrier.as_mut() {
+            Some(barrier) if barrier.generation == self.generation => {
+                barrier.awaiting.extend(keys);
+            }
+            _ => self.open_flip_each(keys, now),
+        }
     }
 
     /// Add these keys to the flip in progress, each under its own identity.
@@ -3035,6 +3069,65 @@ mod tests {
         f.open_flip_each(std::iter::empty(), Instant::now());
         assert!(!f.barrier_open());
         assert_eq!(f.shared().versions().flip, flip);
+    }
+
+    /// Two windows answer one lane change, each with its own visible
+    /// tiles, under the same generation: the second joins the barrier the
+    /// first opened, so the first window's tiles stay awaited and both
+    /// windows flip together.
+    #[test]
+    fn join_flip_extends_a_barrier_opened_at_this_generation() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("A"));
+        let v = f.shared().versions();
+        let opened = Instant::now();
+        f.open_flip_each([(QueryKey(1), v)], opened);
+        f.join_flip(
+            [(QueryKey(2), v)],
+            opened + std::time::Duration::from_millis(50),
+        );
+        assert!(
+            f.barrier_wants(QueryKey(1), v),
+            "the first window's tile stays awaited"
+        );
+        assert!(
+            f.barrier_wants(QueryKey(2), v),
+            "the second window's tile joins"
+        );
+        assert!(
+            !f.arrived(QueryKey(1), v),
+            "one window's arrival does not release"
+        );
+        assert_eq!(f.shared().versions().flip, v.flip);
+        assert!(f.arrived(QueryKey(2), v), "the last arrival releases both");
+        assert_eq!(f.shared().versions().flip, v.flip + 1);
+        assert!(!f.barrier_open());
+    }
+
+    /// A barrier left from an earlier change is not joined: a later edit
+    /// advanced the generation, and whatever that barrier awaited answered
+    /// an older frame, as a replacing `open_flip_each` treats it today.
+    #[test]
+    fn join_flip_replaces_a_barrier_from_an_older_generation() {
+        let mut f = Frame::new(slots(), SavedScopes::new(), None);
+        f.shared_mut().set_scope(book_scope("A"));
+        let old = f.shared().versions();
+        f.open_flip_each([(QueryKey(1), old)], Instant::now());
+        f.shared_mut().set_scope(book_scope("B"));
+        let new = f.shared().versions();
+        assert_ne!(
+            old.scope, new.scope,
+            "fixture: the lane write advanced the generation"
+        );
+        f.join_flip([(QueryKey(2), new)], Instant::now());
+        assert!(
+            !f.barrier_wants(QueryKey(1), old),
+            "the older barrier's key is dropped, not carried"
+        );
+        assert!(f.barrier_wants(QueryKey(2), new));
+        assert!(f.arrived(QueryKey(2), new), "the new key releases alone");
+        assert_eq!(f.shared().versions().flip, new.flip + 1);
+        assert!(!f.barrier_open());
     }
 
     #[test]

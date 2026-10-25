@@ -431,8 +431,11 @@ dev-dependencies enable it; the crate's self dev-dependency keeps `-p` and
 - An empty sheet is never saved. A sheet whose load failed is never saved
   (`save_blocked`); a change not yet queued by the store (`dirty`), or whose
   queued save was reported failed (`save_failed`), is saved when the tile
-  closes, and at quit (`PricerFactory::flush_all`, called by the app before
-  it stops the data service; both routes go through `flush_save`). An
+  closes, when it is parked (`TileContent::park`: its workspace is moving
+  to another window or its window is closing, and the rebuilt tile reloads
+  the sheet from its record), and at quit (`PricerFactory::flush_all`,
+  called by the app before it stops the data service; all three routes go
+  through `flush_save`). An
   accepted save is only queued: `PricerFactory::save_answered` settles it by
   sheet name. The app delivers every outcome, in the writer's order, so the
   last to arrive is the latest queued save's. Only a confirmed

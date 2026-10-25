@@ -152,9 +152,7 @@ fn closing_a_watching_tile_unwatches_the_diagnostics_entity(cx: &mut gpui::TestA
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_watching");
     let diagnostics = shell.read_with(&cx, |s, _| s.diagnostics().clone());
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some(watching::WATCHING_KIND)
@@ -195,6 +193,7 @@ fn services_with_an_unknown_restored_kind() -> (
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     let ws1: toml::Table = r#"
         focused = 1
@@ -258,13 +257,7 @@ fn a_restored_tile_of_an_unknown_kind_paints_the_placeholder_and_its_record_surv
         "filling the placeholder in place drops the record it rode in on"
     );
     assert_eq!(
-        shell.read_with(&cx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()
-            .len()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles().len()),
         1
     );
 }
@@ -289,7 +282,7 @@ fn closing_an_unknown_kind_tile_drops_its_unplaced_record(cx: &mut gpui::TestApp
 
     assert!(
         shell
-            .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
+            .read_with(&cx, |s, cx| s.workspace(cx).tree().tiles())
             .is_empty(),
         "the tile is gone"
     );
@@ -315,6 +308,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     // Workspace 1 (the default active one) stays empty. Workspace 2
     // gets one tile, restored with the recorder's own kind — this is
@@ -336,7 +330,7 @@ fn an_occupant_created_outside_the_active_workspace_is_told_it_is_hidden(
     let restored = session::from_toml(&table).unwrap();
     assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
     assert_eq!(
-        restored.workspaces.active_index(),
+        restored.workspaces.initial_index(),
         1,
         "sanity: workspace 1, not 2, is active"
     );
@@ -377,9 +371,7 @@ fn an_add_creates_an_occupant_of_the_requested_kind_and_paints_it(cx: &mut gpui:
         let _ = window.draw(cx);
     });
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some("rec")
@@ -410,9 +402,7 @@ fn a_key_in_the_occupants_context_reaches_its_dispatch_with_the_count(
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("4 j");
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert!(
         log.borrow().iter().any(|r| matches!(
             r,
@@ -432,9 +422,7 @@ fn a_binding_from_a_modules_fragment_reaches_its_hosted_tile(cx: &mut gpui::Test
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("q");
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert!(
         log.borrow().iter().any(|r| matches!(
             r,
@@ -471,14 +459,10 @@ fn a_user_layer_binding_wins_over_a_modules_fragment(cx: &mut gpui::TestAppConte
     cx.simulate_keystrokes("ctrl-v");
     cx.simulate_keystrokes("ctrl-v");
     let shell = shell_of(&window, &mut cx);
-    let before = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().tree().tiles().len()
-    });
+    let before = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles().len());
     assert_eq!(before, 2, "fixture check: ctrl-v twice added a second tile");
     cx.simulate_keystrokes("q");
-    let after = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().tree().tiles().len()
-    });
+    let after = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles().len());
     assert_eq!(
         after, 1,
         "the user's binding must win over the module's fragment"
@@ -501,9 +485,7 @@ fn closing_a_tile_drops_its_occupant_and_switching_workspaces_toggles_visibility
     let (window, mut cx) = open_shell(cx, services);
     cx.simulate_keystrokes("ctrl-v");
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
 
     cx.simulate_keystrokes("alt-2");
     cx.update(|window, cx| {
@@ -552,9 +534,7 @@ fn closing_a_tile_tells_its_occupant_it_closed_and_a_workspace_switch_does_not(
     let (window, mut cx) = open_shell(cx, services);
     cx.simulate_keystrokes("ctrl-v");
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     cx.simulate_keystrokes("alt-2");
     cx.update(|window, cx| {
         let _ = window.draw(cx);
@@ -602,6 +582,41 @@ fn closing_a_tile_tells_its_occupant_it_closed_and_a_workspace_switch_does_not(
     );
 }
 
+/// `park` reaches an occupant through the trait object the shell holds,
+/// and is its own moment: the module queues unsaved work, and `closed`
+/// is a separate call that follows later. (The move and close paths
+/// prove their calling order; this proves the hook alone.)
+#[gpui::test]
+fn park_is_recorded_without_closing(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::Recorded;
+    let (services, log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    cx.simulate_keystrokes("ctrl-v");
+    let shell = shell_of(&window, &mut cx);
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    cx.update(|_, cx| {
+        shell.update(cx, |s, cx| {
+            s.occupants
+                .get(&tile)
+                .expect("the added tile has an occupant")
+                .content
+                .park(cx);
+        });
+    });
+    let log = log.borrow();
+    assert_eq!(
+        log.iter()
+            .filter(|r| matches!(r, Recorded::Park(t) if *t == tile))
+            .count(),
+        1,
+        "park reached the occupant once: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|r| matches!(r, Recorded::Closed(_))),
+        "park is not a close: {log:?}"
+    );
+}
+
 #[gpui::test]
 fn a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::TestAppContext) {
     // GPUI focuses tracked elements on mouse-down. The tile click handler arms
@@ -614,9 +629,7 @@ fn a_click_on_a_tile_leaves_the_shell_focused_on_the_next_frame(cx: &mut gpui::T
         let _ = window.draw(cx);
     });
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     // `debug_bounds` takes `&'static str`; leak the dynamic selector
     // (test-only, a few bytes).
     let selector: &'static str = Box::leak(format!("tile-content-{}", tile.0).into_boxed_str());
@@ -655,9 +668,7 @@ fn a_click_on_a_docked_tile_leaves_the_shell_focused_on_the_next_frame(
         let _ = window.draw(cx);
     });
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     // `debug_bounds` takes `&'static str`; leak the dynamic selector
     // (test-only, a few bytes).
     let selector: &'static str = Box::leak(format!("tile-content-{}", tile.0).into_boxed_str());
@@ -716,7 +727,7 @@ fn a_window_with_nothing_focused_gets_the_shell_root_back_on_the_next_frame(
     // … and the keyboard is alive again, through the real pipeline.
     cx.simulate_keystrokes("alt-2");
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         2,
         "keys reach the shell again once the net reclaimed focus"
     );
@@ -758,7 +769,7 @@ fn a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell(
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         2,
         "sanity: the switch itself happened"
     );
@@ -770,7 +781,7 @@ fn a_focused_tile_leaving_the_visible_set_hands_focus_back_to_the_shell(
     );
     cx.simulate_keystrokes("alt-1");
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         1,
         "and the keyboard still reaches the shell afterwards"
     );
@@ -808,7 +819,11 @@ fn a_tile_leaving_the_visible_set_without_a_dispatch_hands_focus_back(
     // reach — but not through `dispatch`, so nothing arms the restore.
     cx.update(|_window, cx| {
         shell.update(cx, |shell, cx| {
-            assert!(shell.services.workspaces.switch(2), "sanity: it switched");
+            assert_eq!(
+                shell.with_workspaces(cx, |w| w.switch(shell.key(), 2)),
+                crate::tiling::Switch::Shown,
+                "sanity: it switched"
+            );
             cx.notify();
         });
     });
@@ -829,7 +844,7 @@ fn a_tile_leaving_the_visible_set_without_a_dispatch_hands_focus_back(
     );
     cx.simulate_keystrokes("alt-1");
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active_index()),
+        shell.read_with(&cx, |s, cx| s.shown_ix(cx).get()),
         1,
         "and the keyboard still reaches the shell afterwards"
     );
@@ -936,9 +951,7 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let first_tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let first_tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(first_tile)),
         Some("probe")
@@ -951,9 +964,7 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let second_split_tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let second_split_tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(second_split_tile, first_tile);
 
     cx.update(|window, cx| {
@@ -964,16 +975,14 @@ fn open_module_twice_yields_one_tile_of_that_kind_focused(cx: &mut gpui::TestApp
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let refocused = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let refocused = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         refocused, first_tile,
         "the second open_module call must focus the existing probe \
          tile, not create another"
     );
     let probe_tiles: Vec<TileId> = shell
-        .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
+        .read_with(&cx, |s, cx| s.workspace(cx).tree().tiles())
         .into_iter()
         .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("probe"))
         .collect();
@@ -1016,7 +1025,7 @@ fn two_open_module_calls_for_the_same_kind_before_any_render_add_only_once(
         let _ = window.draw(cx);
     });
 
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(
         tiles.len(),
         1,
@@ -1059,9 +1068,7 @@ fn open_module_with_no_matching_factory_paints_a_placeholder_and_warns(
         });
     });
 
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND),
@@ -1097,8 +1104,8 @@ pub(super) fn dispatch_and_draw(
 }
 
 fn tile_rects(shell: &Entity<ShellView>, cx: &mut gpui::VisualTestContext) -> Vec<(TileId, Rect)> {
-    shell.read_with(cx, |s, _| {
-        s.services.workspaces.active().tree().layout(Rect {
+    shell.read_with(cx, |s, cx| {
+        s.workspace(cx).tree().layout(Rect {
             x: 0.0,
             y: 0.0,
             w: 1000.0,
@@ -1113,11 +1120,11 @@ fn add_on_an_empty_workspace_creates_the_root_tile_of_that_kind(cx: &mut gpui::T
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 1);
     let tile = tiles[0];
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile()),
         Some(tile)
     );
     assert_eq!(
@@ -1134,28 +1141,26 @@ fn add_on_an_empty_workspace_creates_the_root_tile_of_that_kind(cx: &mut gpui::T
 #[gpui::test]
 fn add_on_a_placeholder_tile_fills_it_in_place(cx: &mut gpui::TestAppContext) {
     // `test_services`'s default kind is "placeholder", so a tile created
-    // by a bare `split_active` — no pending request of its own — is one;
+    // by a bare `split_in` — no pending request of its own — is one;
     // the fixture's recorder is what "Rec: Split" fills it with.
     let (services, log) = test_services_with_log();
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     shell.update(&mut cx, |s, cx| {
-        s.services.workspaces.split_active(Orientation::Horizontal);
+        s.with_workspaces(cx, |w| w.split_in(s.key(), Orientation::Horizontal));
         cx.notify();
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(tile)),
         Some(crate::module::placeholder::PLACEHOLDER_KIND)
     );
 
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(
         tiles,
         vec![tile],
@@ -1178,14 +1183,10 @@ fn an_explicit_direction_beats_the_setting_and_lands_where_it_says(cx: &mut gpui
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let first = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let first = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
 
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec_vertical");
-    let below = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let below = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     let rects = tile_rects(&shell, &mut cx);
     let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
     assert!(
@@ -1194,9 +1195,7 @@ fn an_explicit_direction_beats_the_setting_and_lands_where_it_says(cx: &mut gpui
     );
 
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec_horizontal");
-    let right = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let right = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     let rects = tile_rects(&shell, &mut cx);
     let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
     assert!(
@@ -1226,25 +1225,17 @@ fn auto_splits_a_wide_tile_to_the_right_and_a_tall_one_below(cx: &mut gpui::Test
     let viewport = cx.update(|window, _| window.viewport_size());
     assert_eq!(viewport.width, px(1500.0), "sanity: the resize took");
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.add_direction),
+        shell.read_with(&cx, |s, cx| s.app().read(cx).add_direction()),
         crate::tileadd::AddDirection::Auto
     );
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let a = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let a = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let b = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let b = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let c = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let c = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let d = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let d = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     let rects = tile_rects(&shell, &mut cx);
     let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
     assert!(r(b).x > r(a).x, "second add: side by side, {rects:?}");
@@ -1263,9 +1254,7 @@ fn shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let original = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let original = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     // Give the recorder some state through its own `:` command.
     cx.simulate_keystrokes(":");
     cx.simulate_input("sort delta01"); // an exact completion word runs as typed
@@ -1275,9 +1264,7 @@ fn shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let copy = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let copy = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(copy, original);
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(copy)),
@@ -1308,9 +1295,7 @@ fn shift_d_duplicates_the_focused_tile_with_its_state_and_ctrl_shift_d_stacks_it
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let stacked = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let stacked = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     let rects = tile_rects(&shell, &mut cx);
     let r = |id| rects.iter().find(|(t, _)| *t == id).unwrap().1;
     assert!(r(stacked).y > r(copy).y, "ctrl+shift+d: below, {rects:?}");
@@ -1324,12 +1309,12 @@ fn duplicate_on_an_empty_workspace_or_a_placeholder_is_a_no_op(cx: &mut gpui::Te
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    assert!(shell.read_with(&cx, |s, _| s.services.workspaces.active().is_empty()));
-    // A placeholder — what a bare `split_active` leaves behind, since
+    assert!(shell.read_with(&cx, |s, cx| s.workspace(cx).is_empty()));
+    // A placeholder — what a bare `split_in` leaves behind, since
     // the fixture's default kind is "placeholder" — has nothing to
     // duplicate either.
     shell.update(&mut cx, |s, cx| {
-        s.services.workspaces.split_active(Orientation::Horizontal);
+        s.with_workspaces(cx, |w| w.split_in(s.key(), Orientation::Horizontal));
         cx.notify();
     });
     cx.update(|window, cx| {
@@ -1340,13 +1325,7 @@ fn duplicate_on_an_empty_workspace_or_a_placeholder_is_a_no_op(cx: &mut gpui::Te
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&cx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()
-            .len()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles().len()),
         1
     );
 }
@@ -1359,8 +1338,8 @@ fn add_into_a_focused_empty_dock_lands_in_the_dock(cx: &mut gpui::TestAppContext
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
     cx.simulate_keystrokes("ctrl-[");
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    shell.read_with(&cx, |s, _| {
-        let ws = s.services.workspaces.active();
+    shell.read_with(&cx, |s, cx| {
+        let ws = s.workspace(cx);
         assert_eq!(
             ws.region(),
             crate::tiling::FocusRegion::Dock(DockSide::Left)
@@ -1388,17 +1367,15 @@ fn a_pending_request_lands_on_exactly_the_tile_that_asked(cx: &mut gpui::TestApp
             // A plain split (no request of its own), then an
             // `open_module` that splits again: two tiles go
             // occupant-less in one render pass.
-            s.services.workspaces.split_active(Orientation::Horizontal);
+            s.with_workspaces(cx, |w| w.split_in(s.key(), Orientation::Horizontal));
             s.open_module("probe", window, cx);
         });
     });
-    let asked = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let asked = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 2);
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(asked)),
@@ -1428,9 +1405,7 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let kept = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let kept = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
 
     // Both inside ONE `cx.update` block, so no render happens between
     // them: `open_module` splits and records a request under the new
@@ -1439,14 +1414,14 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
             s.open_module("probe", window, cx);
-            s.services.workspaces.active_mut().close_tile();
+            s.with_workspace(cx, |ws| ws.close_tile());
         });
     });
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
 
-    let tiles = shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles, vec![kept], "only the original tile is left");
     assert_eq!(
         shell.read_with(&cx, |s, _| s.occupant_kind(kept)),
@@ -1468,7 +1443,7 @@ fn a_pending_request_for_a_closed_tile_is_dropped_and_does_not_latch_open_module
         let _ = window.draw(cx);
     });
     let probes: Vec<TileId> = shell
-        .read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles())
+        .read_with(&cx, |s, cx| s.workspace(cx).tree().tiles())
         .into_iter()
         .filter(|id| shell.read_with(&cx, |s, _| s.occupant_kind(*id)) == Some("probe"))
         .collect();
@@ -1491,13 +1466,9 @@ fn a_delivery_reaches_the_tile_addressed_by_its_key_and_no_other(cx: &mut gpui::
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let first = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let first = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let second = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let second = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(first, second, "sanity: two distinct tiles are live");
 
     cx.update(|window, cx| {
@@ -1545,13 +1516,9 @@ fn an_upload_delivery_reaches_its_tile_and_no_other(cx: &mut gpui::TestAppContex
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let first = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let first = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let second = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let second = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(first, second, "sanity: two distinct tiles are live");
 
     cx.update(|window, cx| {
@@ -1598,13 +1565,9 @@ fn a_distinct_outcome_reaches_only_its_tile(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let first = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let first = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let second = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let second = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(first, second, "sanity: two distinct tiles are live");
 
     cx.update(|window, cx| {
@@ -1652,13 +1615,9 @@ fn a_text_file_outcome_reaches_only_its_tile(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let first = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let first = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let second = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let second = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     assert_ne!(first, second, "sanity: two distinct tiles are live");
 
     cx.update(|window, cx| {
@@ -1723,9 +1682,7 @@ fn add_recording_tile_on_workspace_two(
 ) -> TileId {
     dispatch_and_draw(shell, cx, "workspace::switch_2");
     dispatch_and_draw(shell, cx, "tile::add_rec");
-    let hidden = shell.read_with(cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let hidden = shell.read_with(cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(shell, cx, "workspace::switch_1");
     hidden
 }
@@ -1742,9 +1699,9 @@ fn a_key_less_delivery_reaches_every_visible_occupant_and_no_hidden_one(
 
     let (shell, mut cx, log) = shell_with_recording_tiles(cx, 2);
     let hidden = add_recording_tile_on_workspace_two(&shell, &mut cx);
-    let visible: Vec<TileId> = shell.read_with(&cx, |s, _| {
+    let visible: Vec<TileId> = shell.read_with(&cx, |s, cx| {
         let mut keys = Vec::new();
-        s.visible_tile_keys(&mut keys);
+        s.visible_tile_keys(&mut keys, cx);
         keys.into_iter().map(|k| TileId(k.0)).collect()
     });
     assert_eq!(visible.len(), 2, "sanity: two tiles are on screen");
@@ -1805,8 +1762,7 @@ fn a_series_outcome_is_routed_to_its_key_alone(cx: &mut gpui::TestAppContext) {
     use std::time::Instant;
 
     let (shell, mut cx, log) = shell_with_recording_tiles(cx, 2);
-    let live: Vec<TileId> =
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let live: Vec<TileId> = shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(live.len(), 2, "sanity: two distinct tiles are live");
     let target = live[0];
 
@@ -1848,13 +1804,9 @@ fn a_price_delivery_is_routed_by_key_like_a_query(cx: &mut gpui::TestAppContext)
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let first = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let first = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let second = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let second = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
 
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
@@ -1895,13 +1847,9 @@ fn a_vol_slices_delivery_is_routed_to_its_tile_by_key(cx: &mut gpui::TestAppCont
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let first = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let first = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     dispatch_and_draw(&shell, &mut cx, "tile::add_rec");
-    let second = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let second = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
 
     cx.update(|window, cx| {
         shell.update(cx, |s, cx| {
@@ -1996,9 +1944,7 @@ fn a_shared_motion_key_reaches_a_grid_occupant_with_its_count(cx: &mut gpui::Tes
     cx.simulate_keystrokes("5 j");
     cx.simulate_keystrokes("down");
     let shell = shell_of(&window, &mut cx);
-    let tile = shell.read_with(&cx, |s, _| {
-        s.services.workspaces.active().focused_tile().unwrap()
-    });
+    let tile = shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile().unwrap());
     let got: Vec<(String, Option<u32>)> = log
         .borrow()
         .iter()
@@ -2051,6 +1997,7 @@ fn a_tile_restored_into_a_hidden_workspace_is_framed_by_it(cx: &mut gpui::TestAp
         &crate::session::PinnedRecords::new(),
         &crate::palette_usage::PaletteUsage::new(),
         &crate::session::PageRecords::new(),
+        &[],
     );
     let ws2: toml::Table = r#"
         focused = 1
@@ -2068,7 +2015,7 @@ fn a_tile_restored_into_a_hidden_workspace_is_framed_by_it(cx: &mut gpui::TestAp
     let restored = session::from_toml(&table).unwrap();
     assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
     assert_eq!(
-        restored.workspaces.active_index(),
+        restored.workspaces.initial_index(),
         1,
         "sanity: workspace 1, not 2, is active"
     );
@@ -2090,4 +2037,453 @@ fn a_tile_restored_into_a_hidden_workspace_is_framed_by_it(cx: &mut gpui::TestAp
         })
         .collect();
     assert_eq!(framed, vec![(TileId(1), 2)]);
+}
+
+// --- Workspaces moving between windows ------------------------------------
+
+/// The states every `Recorded::Created` for `tile` carried, in order: one
+/// entry per occupant built for it.
+fn created_states(
+    log: &std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    tile: TileId,
+) -> Vec<Option<toml::Table>> {
+    log.borrow()
+        .iter()
+        .filter_map(|r| match r {
+            crate::module::recording::Recorded::Created(t, state) if *t == tile => {
+                Some(state.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether the recorder saw `Park` for `tile` and then `Closed`, in that
+/// order; `Err` names what it saw instead.
+fn parked_then_closed(
+    log: &std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    tile: TileId,
+) -> Result<(), String> {
+    use crate::module::recording::Recorded;
+    let log = log.borrow();
+    let park = log
+        .iter()
+        .position(|r| matches!(r, Recorded::Park(t) if *t == tile));
+    let closed = log
+        .iter()
+        .position(|r| matches!(r, Recorded::Closed(t) if *t == tile));
+    match (park, closed) {
+        (Some(p), Some(c)) if p < c => Ok(()),
+        _ => Err(format!("park at {park:?}, closed at {closed:?}: {log:?}")),
+    }
+}
+
+/// A restored layout whose workspace 3 holds tile 1, a `rec` with state of
+/// its own that follows group a, beside the empty workspace 1 the first
+/// window opens on. The first window hosts 3 hidden and builds its
+/// occupant; the record is what a move must carry to another window.
+fn services_with_a_following_rec_in_workspace_3() -> (
+    ShellServices,
+    std::rc::Rc<std::cell::RefCell<Vec<crate::module::recording::Recorded>>>,
+    session::TileRecord,
+) {
+    let mut table = session::to_toml(
+        &Workspaces::new(),
+        &session::TileRecords::new(),
+        None,
+        &crate::session::PinnedRecords::new(),
+        &crate::palette_usage::PaletteUsage::new(),
+        &crate::session::PageRecords::new(),
+        &[],
+    );
+    let ws3: toml::Table = r#"
+        focused = 1
+        [node]
+        kind = "leaf"
+        id = 1
+        [tiles.1]
+        module = "rec"
+        follow = "a"
+        [tiles.1.state]
+        marker = "moved with its workspace"
+    "#
+    .parse()
+    .unwrap();
+    if let Some(toml::Value::Table(ws_table)) = table.get_mut("workspaces") {
+        ws_table.insert("3".to_string(), toml::Value::Table(ws3));
+    }
+    let restored = session::from_toml(&table).unwrap();
+    assert!(restored.warnings.is_empty(), "{:?}", restored.warnings);
+    assert_eq!(
+        restored.workspaces.initial_index(),
+        1,
+        "sanity: 1 is active"
+    );
+    let record = restored.tiles.get(&1).unwrap().clone();
+    assert_eq!(
+        record.link.follow,
+        Some(geode_core::link::Group::A),
+        "sanity: the record follows a"
+    );
+    let (mut services, log) = services_with_recorder();
+    services.workspaces = restored.workspaces;
+    services.restored_tiles = restored.tiles;
+    (services, log, record)
+}
+
+/// Switching away from a workspace and back within one window keeps its
+/// occupants: nothing is parked, nothing is closed, and the tile's view is
+/// the same entity afterwards. Park is for a workspace changing window.
+#[gpui::test]
+fn a_plain_switch_parks_nothing(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::Recorded;
+    let (services, log) = services_with_recorder();
+    let (window, mut vcx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut vcx);
+    dispatch_and_draw(&shell, &mut vcx, "tile::add_rec");
+    let tile = shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    let view_before = shell.read_with(&vcx, |s, _| s.occupants[&tile].view.entity_id());
+
+    dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
+    dispatch_and_draw(&shell, &mut vcx, "workspace::switch_1");
+
+    let log = log.borrow();
+    assert!(
+        !log.iter()
+            .any(|r| matches!(r, Recorded::Park(_) | Recorded::Closed(_))),
+        "a plain switch parked or closed: {log:?}"
+    );
+    assert_eq!(
+        shell.read_with(&vcx, |s, _| s.occupants[&tile].view.entity_id()),
+        view_before,
+        "the occupant is the same entity"
+    );
+}
+
+/// A workspace hidden in one window and switched to in another moves: the
+/// source parks each occupant (`park`, then `closed`) into a record on
+/// the app, and the destination's next draw rebuilds the occupant from
+/// that record, under the same tile id, with its state and its link
+/// membership (which never left the frame).
+#[gpui::test]
+fn a_move_parks_then_rebuilds_with_the_record_and_links(cx: &mut gpui::TestAppContext) {
+    let (services, log, record) = services_with_a_following_rec_in_workspace_3();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let tile = TileId(1);
+    let three = WorkspaceIx::new(3).unwrap();
+    assert!(
+        s1.read_with(&vcx1, |s, _| s.occupants.contains_key(&tile)),
+        "sanity: the first window hosts the restored workspace 3 and built its occupant"
+    );
+    assert_eq!(created_states(&log, tile).len(), 1);
+
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s2 = shell_of(&w2, &mut vcx2);
+    assert_eq!(
+        s2.read_with(&vcx2, |s, cx| s.shown_ix(cx)),
+        WorkspaceIx::new(2).unwrap(),
+        "sanity: the second window opened on 2"
+    );
+
+    dispatch_action(&s2, "workspace::switch_3", &mut vcx2);
+
+    parked_then_closed(&log, tile).unwrap();
+    assert!(
+        !s1.read_with(&vcx1, |s, _| s.occupants.contains_key(&tile)),
+        "the source dropped the occupant"
+    );
+    assert_eq!(
+        s2.read_with(&vcx2, |s, cx| s.workspaces(cx).host_of(three)),
+        Some(s2.read_with(&vcx2, |s, _| s.key())),
+        "the destination hosts 3"
+    );
+    vcx2.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        s2.read_with(&vcx2, |s, _| s.occupants.contains_key(&tile)),
+        "the destination rebuilt the occupant"
+    );
+    // The session union carries the tile once, as the destination's live
+    // record, equal to what was parked.
+    assert_eq!(
+        app.read_with(&vcx2, |a, cx| a.current_tiles(cx).get(&tile.0).cloned()),
+        Some(record.clone()),
+        "the moved tile is the destination's to write"
+    );
+    let states = created_states(&log, tile);
+    assert_eq!(states.len(), 2, "one occupant per window: {states:?}");
+    assert_eq!(
+        states[1].as_ref(),
+        Some(&record.state),
+        "the rebuilt occupant received the parked record's state"
+    );
+    assert_eq!(
+        s2.read_with(&vcx2, |s, cx| s.frame().read(cx).membership(tile).follow),
+        Some(geode_core::link::Group::A),
+        "the follow stayed on the frame"
+    );
+    assert!(
+        app.read_with(&vcx2, |a, _| a.parked_tiles.is_empty()),
+        "the record was taken"
+    );
+    // The source's next draw finds nothing of 3 to build or to close.
+    vcx1.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert_eq!(created_states(&log, tile).len(), 2);
+    assert!(!s1.read_with(&vcx1, |s, _| s.occupants.contains_key(&tile)));
+}
+
+/// A switch to an index another window shows changes nothing: the window
+/// keeps showing its own index, nothing is parked anywhere, and the other
+/// window keeps its occupant. The other window is asked to come forward.
+#[gpui::test]
+fn a_switch_to_a_shown_index_moves_nothing_and_asks_to_raise(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::Recorded;
+    let (services, log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let s2 = shell_of(&w2, &mut vcx2);
+    dispatch_and_draw(&s2, &mut vcx2, "tile::add_rec");
+    let tile = s2.read_with(&vcx2, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    // The first window is the active one when it asks for 2.
+    vcx1.update(|window, _| window.activate_window());
+    vcx1.run_until_parked();
+    assert_eq!(cx.update(|cx| w1.is_active(cx)), Some(true), "sanity");
+    assert_eq!(cx.update(|cx| w2.is_active(cx)), Some(false), "sanity");
+
+    dispatch_action(&s1, "workspace::switch_2", &mut vcx1);
+    vcx1.run_until_parked();
+    vcx1.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    vcx2.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+
+    assert_eq!(
+        cx.update(|cx| w2.is_active(cx)),
+        Some(true),
+        "the window showing 2 was brought forward"
+    );
+    assert_eq!(cx.update(|cx| w1.is_active(cx)), Some(false));
+    assert_eq!(
+        s1.read_with(&vcx1, |s, cx| s.shown_ix(cx)),
+        WorkspaceIx::new(1).unwrap(),
+        "the first window still shows 1"
+    );
+    assert_eq!(
+        s2.read_with(&vcx2, |s, cx| s.shown_ix(cx)),
+        WorkspaceIx::new(2).unwrap()
+    );
+    assert!(
+        !log.borrow()
+            .iter()
+            .any(|r| matches!(r, Recorded::Park(_) | Recorded::Closed(_))),
+        "a raise parked or closed: {:?}",
+        log.borrow()
+    );
+    assert!(
+        s2.read_with(&vcx2, |s, _| s.occupants.contains_key(&tile)),
+        "the showing window keeps its occupant"
+    );
+    assert!(!s1.read_with(&vcx1, |s, _| s.occupants.contains_key(&tile)));
+}
+
+/// A parked record reaches the window that hosts its tile's workspace, and
+/// only that window: another window's switch leaves it parked. A record
+/// whose tile is in no workspace goes to the oldest open window, which
+/// writes it back as its own unplaced record.
+#[gpui::test]
+fn parked_records_go_to_the_window_that_hosts_them(cx: &mut gpui::TestAppContext) {
+    use crate::module::recording::Recorded;
+    let (services, log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let s2 = shell_of(&w2, &mut vcx2);
+    // A tile in workspace 3's tree, which the second window hosts hidden
+    // and has not drawn since, so no occupant exists for it yet.
+    let hosted = vcx2.update(|_, cx| {
+        s2.update(cx, |s, cx| {
+            s.with_workspaces(cx, |w| {
+                w.switch(s.key(), 3);
+                let id = w.split_in(s.key(), Orientation::Horizontal);
+                w.switch(s.key(), 2);
+                id
+            })
+        })
+    });
+    let unplaced = 999u64;
+    let record = |marker: &str| {
+        let mut state = toml::Table::new();
+        state.insert("marker".into(), marker.into());
+        session::TileRecord {
+            kind: "rec".into(),
+            state,
+            link: geode_core::link::Membership::default(),
+        }
+    };
+    vcx1.update(|_, cx| {
+        app.update(cx, |a, _| {
+            a.parked_tiles
+                .insert(hosted.0, record("hosted by the second window"));
+            a.parked_tiles.insert(unplaced, record("in no workspace"));
+        })
+    });
+
+    // The first window switches to a free index and pulls what it may
+    // host: the unplaced record, never the second window's.
+    dispatch_action(&s1, "workspace::switch_4", &mut vcx1);
+    assert_eq!(
+        app.read_with(&vcx1, |a, _| a
+            .parked_tiles
+            .keys()
+            .copied()
+            .collect::<Vec<_>>()),
+        vec![hosted.0],
+        "the hosted record stays parked"
+    );
+    s1.read_with(&vcx1, |s, _| {
+        assert!(
+            s.restored_tiles.contains_key(&unplaced),
+            "the oldest window took the unplaced record"
+        );
+        assert!(!s.restored_tiles.contains_key(&hosted.0));
+    });
+    // A pulled record is its window's to write from the moment it is
+    // taken, built or not: it has left the parked set, and this one, in
+    // no tree, is never built. (The writer itself emits only tiles some
+    // tree holds.)
+    assert!(
+        app.read_with(&vcx1, |a, cx| a.current_tiles(cx).contains_key(&unplaced)),
+        "the session union lost a pulled record that is not yet built"
+    );
+
+    // The hosting window shows 3 again: the record is its, and its draw
+    // builds the occupant from it.
+    dispatch_action(&s2, "workspace::switch_3", &mut vcx2);
+    assert!(app.read_with(&vcx2, |a, _| a.parked_tiles.is_empty()));
+    vcx2.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let states = created_states(&log, hosted);
+    assert_eq!(states.len(), 1, "{:?}", log.borrow());
+    assert_eq!(
+        states[0]
+            .as_ref()
+            .and_then(|s| s.get("marker"))
+            .and_then(|v| v.as_str()),
+        Some("hosted by the second window")
+    );
+    assert!(
+        !log.borrow().iter().any(|r| matches!(r, Recorded::Park(_))),
+        "nothing moved, so nothing was parked"
+    );
+}
+
+/// A record whose tile is in no workspace waits for the oldest open
+/// window: a younger window's pull leaves it parked. Handed to whichever
+/// window pulls first, an unplaced record would be written back by a
+/// window that may close before the oldest, and the first window would
+/// no longer own what it always has.
+#[gpui::test]
+fn an_unplaced_record_waits_for_the_oldest_window(cx: &mut gpui::TestAppContext) {
+    let (services, _log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let s2 = shell_of(&w2, &mut vcx2);
+    let unplaced = 999u64;
+    vcx1.update(|_, cx| {
+        app.update(cx, |a, _| {
+            a.parked_tiles.insert(
+                unplaced,
+                session::TileRecord {
+                    kind: "rec".into(),
+                    state: toml::Table::new(),
+                    link: geode_core::link::Membership::default(),
+                },
+            );
+        })
+    });
+
+    // The younger window switches to a free index and pulls what it may
+    // host: not the unplaced record.
+    dispatch_action(&s2, "workspace::switch_5", &mut vcx2);
+    assert!(
+        app.read_with(&vcx2, |a, _| a.parked_tiles.contains_key(&unplaced)),
+        "a younger window took the unplaced record"
+    );
+    assert!(!s2.read_with(&vcx2, |s, _| s.restored_tiles.contains_key(&unplaced)));
+
+    // The oldest window's pull takes it.
+    dispatch_action(&s1, "workspace::switch_4", &mut vcx1);
+    assert!(app.read_with(&vcx1, |a, _| a.parked_tiles.is_empty()));
+    assert!(s1.read_with(&vcx1, |s, _| s.restored_tiles.contains_key(&unplaced)));
+}
+
+/// A window builds occupants only for the workspaces it hosts: a tile in
+/// another window's workspace has one occupant, in that window.
+#[gpui::test]
+fn a_window_builds_no_occupant_for_another_windows_workspace(cx: &mut gpui::TestAppContext) {
+    let (services, log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    let s2 = shell_of(&w2, &mut vcx2);
+    dispatch_and_draw(&s2, &mut vcx2, "tile::add_rec");
+    let tile = s2.read_with(&vcx2, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    vcx1.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(
+        !s1.read_with(&vcx1, |s, _| s.occupants.contains_key(&tile)),
+        "the first window built an occupant for the second window's tile"
+    );
+    assert!(s2.read_with(&vcx2, |s, _| s.occupants.contains_key(&tile)));
+    assert_eq!(created_states(&log, tile).len(), 1);
+}
+
+/// A new window opens on the lowest index nobody shows. When that index is
+/// hidden in another window, the workspace is taken out of it through the
+/// same park: the old window parks and closes its occupants, and the new
+/// window's first draw rebuilds them from the records.
+#[gpui::test]
+fn a_window_opening_on_a_hidden_workspace_takes_it_through_park(cx: &mut gpui::TestAppContext) {
+    let (services, log) = services_with_recorder();
+    let app = test_app(cx, services, None);
+    let (w1, mut vcx1) = open_shell_on(cx, app.clone());
+    let s1 = shell_of(&w1, &mut vcx1);
+    dispatch_and_draw(&s1, &mut vcx1, "workspace::switch_2");
+    dispatch_and_draw(&s1, &mut vcx1, "tile::add_rec");
+    let tile = s1.read_with(&vcx1, |s, cx| s.workspace(cx).focused_tile().unwrap());
+    dispatch_and_draw(&s1, &mut vcx1, "workspace::switch_1");
+    assert!(
+        s1.read_with(&vcx1, |s, _| s.occupants.contains_key(&tile)),
+        "sanity: the first window hosts 2 hidden with its occupant alive"
+    );
+
+    // The lowest index nobody shows is 2, hidden in the first window.
+    let (w2, mut vcx2) = open_shell_on(cx, app.clone());
+    let s2 = shell_of(&w2, &mut vcx2);
+    assert_eq!(
+        s2.read_with(&vcx2, |s, cx| s.shown_ix(cx)),
+        WorkspaceIx::new(2).unwrap()
+    );
+    parked_then_closed(&log, tile).unwrap();
+    assert!(!s1.read_with(&vcx1, |s, _| s.occupants.contains_key(&tile)));
+    assert!(
+        s2.read_with(&vcx2, |s, _| s.occupants.contains_key(&tile)),
+        "the new window rebuilt the occupant on its first draw"
+    );
+    assert_eq!(created_states(&log, tile).len(), 2);
 }

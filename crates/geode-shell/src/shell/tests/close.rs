@@ -26,8 +26,12 @@ fn draw(cx: &mut gpui::VisualTestContext) {
 /// Two placeholder tiles side by side, the second (`b`) focused.
 fn two_placeholders() -> (ShellServices, TileId, TileId) {
     let mut services = test_services();
-    let a = services.workspaces.split_active(Orientation::Horizontal);
-    let b = services.workspaces.split_active(Orientation::Horizontal);
+    let (a, b) = before_any_window(&mut services.workspaces, |w, k| {
+        (
+            w.split_in(k, Orientation::Horizontal),
+            w.split_in(k, Orientation::Horizontal),
+        )
+    });
     (services, a, b)
 }
 
@@ -35,9 +39,13 @@ fn two_placeholders() -> (ShellServices, TileId, TileId) {
 /// with focus moved to it first would land focus on `b`, its neighbour.
 fn three_placeholders() -> (ShellServices, TileId, TileId, TileId) {
     let mut services = test_services();
-    let a = services.workspaces.split_active(Orientation::Horizontal);
-    let b = services.workspaces.split_active(Orientation::Horizontal);
-    let c = services.workspaces.split_active(Orientation::Horizontal);
+    let (a, b, c) = before_any_window(&mut services.workspaces, |w, k| {
+        (
+            w.split_in(k, Orientation::Horizontal),
+            w.split_in(k, Orientation::Horizontal),
+            w.split_in(k, Orientation::Horizontal),
+        )
+    });
     (services, a, b, c)
 }
 
@@ -61,7 +69,7 @@ fn two_recorders(
     cx.simulate_keystrokes("ctrl-v");
     draw(cx);
     let shell = shell_of(window, cx);
-    let tiles = shell.read_with(cx, |s, _| s.services.workspaces.active().tree().tiles());
+    let tiles = shell.read_with(cx, |s, cx| s.workspace(cx).tree().tiles());
     assert_eq!(tiles.len(), 2, "{tiles:?}");
     (shell, tiles[0], tiles[1])
 }
@@ -74,17 +82,19 @@ fn the_close_button_closes_its_own_tile_and_keeps_focus(cx: &mut gpui::TestAppCo
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().focused_tile()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).focused_tile()),
         Some(c),
         "fixture: the split's new tile is focused"
     );
-    shell.update(&mut cx, |s, _| s.session_dirty = false);
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, _| a.session_dirty = false)
+    });
     press(&mut cx, sel(a));
-    shell.read_with(&cx, |s, _| {
-        let ws = s.services.workspaces.active();
+    shell.read_with(&cx, |s, cx| {
+        let ws = s.workspace(cx);
         assert!(!ws.tree().contains(a), "the pressed tile closed");
         assert_eq!(ws.focused_tile(), Some(c), "focus stayed");
-        assert!(s.session_dirty);
+        assert!(s.app().read(cx).session_dirty);
     });
 }
 
@@ -95,8 +105,8 @@ fn the_focused_tiles_close_button_matches_the_key(cx: &mut gpui::TestAppContext)
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     press(&mut cx, sel(b));
-    shell.read_with(&cx, |s, _| {
-        let ws = s.services.workspaces.active();
+    shell.read_with(&cx, |s, cx| {
+        let ws = s.workspace(cx);
         assert!(!ws.tree().contains(b));
         assert_eq!(ws.tree().tiles().len(), 1);
         assert_eq!(ws.focused_tile(), Some(ws.tree().tiles()[0]));
@@ -110,8 +120,13 @@ fn the_close_button_records_the_close_action(cx: &mut gpui::TestAppContext) {
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     press(&mut cx, sel(b));
-    let recent: Vec<u64> = shell.read_with(&cx, |s, _| {
-        s.services.action_tail.lock().unwrap().recent().collect()
+    let recent: Vec<u64> = shell.read_with(&cx, |s, cx| {
+        s.services(cx)
+            .action_tail
+            .lock()
+            .unwrap()
+            .recent()
+            .collect()
     });
     assert_eq!(
         recent.last(),
@@ -148,8 +163,8 @@ fn the_close_button_is_refused_over_a_page(cx: &mut gpui::TestAppContext) {
     let handle = handle_of(&shell, a, &cx);
     cx.update(|window, cx| handle.close(window, cx));
     draw(&mut cx);
-    shell.read_with(&cx, |s, _| {
-        assert!(s.services.workspaces.active().tree().contains(a));
+    shell.read_with(&cx, |s, cx| {
+        assert!(s.workspace(cx).tree().contains(a));
         assert_eq!(s.notice.as_deref(), Some(CLOSE_PAGE_FIRST));
     });
 }
@@ -166,9 +181,9 @@ fn the_close_button_leaves_an_open_command_line(cx: &mut gpui::TestAppContext) {
     assert!(shell.read_with(&cx, |s, _| s.command_line.is_some()));
     press(&mut cx, sel(a));
     draw(&mut cx);
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert!(s.command_line.is_none());
-        assert!(!s.services.workspaces.active().tree().contains(a));
+        assert!(!s.workspace(cx).tree().contains(a));
     });
 }
 
@@ -190,25 +205,13 @@ fn closing_a_tile_whose_input_holds_focus_keeps_keys_working(cx: &mut gpui::Test
     cx.update(|window, cx| handle.close(window, cx));
     draw(&mut cx);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()
-            .len()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles().len()),
         1
     );
     cx.simulate_keystrokes("ctrl-v");
     draw(&mut cx);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()
-            .len()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles().len()),
         2,
         "a workspace key still reaches the shell"
     );
@@ -224,9 +227,7 @@ fn a_stale_close_handle_closes_nothing(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| handle.close(window, cx));
     draw(&mut cx);
     let count = |cx: &gpui::VisualTestContext| {
-        shell.read_with(cx, |s, _| {
-            s.services.workspaces.active().tree().tiles().len()
-        })
+        shell.read_with(cx, |s, cx| s.workspace(cx).tree().tiles().len())
     };
     assert_eq!(count(&cx), 1);
     cx.update(|window, cx| handle.close(window, cx));
@@ -289,8 +290,8 @@ fn a_double_click_on_the_close_button_closes_one_tile(cx: &mut gpui::TestAppCont
     let at = cx.debug_bounds(sel(b)).expect("× painted").center();
     press_counted(&mut cx, at, 1);
     press_counted(&mut cx, at, 2);
-    shell.read_with(&cx, |s, _| {
-        let tree = s.services.workspaces.active().tree();
+    shell.read_with(&cx, |s, cx| {
+        let tree = s.workspace(cx).tree();
         assert_eq!(tree.tiles(), vec![a], "exactly one tile closed");
         assert_eq!(tree.fullscreen(), None, "the survivor is not fullscreen");
         assert!(!picker_open(s), "no tile picker opened");
@@ -310,14 +311,16 @@ fn picker_open(s: &ShellView) -> bool {
 #[gpui::test]
 fn a_double_click_on_the_last_tiles_close_button_opens_nothing(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
-    let a = services.workspaces.split_active(Orientation::Horizontal);
+    let a = before_any_window(&mut services.workspaces, |w, k| {
+        w.split_in(k, Orientation::Horizontal)
+    });
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     let at = cx.debug_bounds(sel(a)).expect("× painted").center();
     press_counted(&mut cx, at, 1);
     press_counted(&mut cx, at, 2);
-    shell.read_with(&cx, |s, _| {
-        assert!(s.services.workspaces.active().tree().tiles().is_empty());
+    shell.read_with(&cx, |s, cx| {
+        assert!(s.workspace(cx).tree().tiles().is_empty());
         assert!(!picker_open(s), "no tile picker opened");
     });
 }
@@ -333,8 +336,8 @@ fn a_double_click_on_the_left_close_button_reaches_no_neighbour(cx: &mut gpui::T
     let at = cx.debug_bounds(sel(a)).expect("× painted").center();
     press_counted(&mut cx, at, 1);
     press_counted(&mut cx, at, 2);
-    shell.read_with(&cx, |s, _| {
-        let tree = s.services.workspaces.active().tree();
+    shell.read_with(&cx, |s, cx| {
+        let tree = s.workspace(cx).tree();
         assert_eq!(tree.tiles(), vec![b], "exactly one tile closed");
         assert_eq!(tree.fullscreen(), None, "the survivor is not fullscreen");
         assert!(!picker_open(s), "no tile picker opened");
@@ -346,7 +349,9 @@ fn a_double_click_on_the_left_close_button_reaches_no_neighbour(cx: &mut gpui::T
 #[gpui::test]
 fn a_fresh_double_click_after_a_close_still_reaches_its_gesture(cx: &mut gpui::TestAppContext) {
     let mut services = test_services();
-    let a = services.workspaces.split_active(Orientation::Horizontal);
+    let a = before_any_window(&mut services.workspaces, |w, k| {
+        w.split_in(k, Orientation::Horizontal)
+    });
     let (window, mut cx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut cx);
     let at = cx.debug_bounds(sel(a)).expect("× painted").center();
@@ -370,8 +375,8 @@ fn a_mod_press_on_the_close_button_arms_a_drag(cx: &mut gpui::TestAppContext) {
         ..gpui::Modifiers::none()
     };
     cx.simulate_mouse_down(at, MouseButton::Left, alt);
-    shell.read_with(&cx, |s, _| {
-        assert_eq!(s.services.workspaces.active().tree().tiles(), vec![a, b]);
+    shell.read_with(&cx, |s, cx| {
+        assert_eq!(s.workspace(cx).tree().tiles(), vec![a, b]);
         assert_eq!(
             s.tile_drag.as_ref().map(|d| d.tile),
             Some(a),
@@ -381,7 +386,7 @@ fn a_mod_press_on_the_close_button_arms_a_drag(cx: &mut gpui::TestAppContext) {
     cx.simulate_mouse_up(at, MouseButton::Left, gpui::Modifiers::none());
     draw(&mut cx);
     assert_eq!(
-        shell.read_with(&cx, |s, _| s.services.workspaces.active().tree().tiles()),
+        shell.read_with(&cx, |s, cx| s.workspace(cx).tree().tiles()),
         vec![a, b],
         "the release closes nothing"
     );

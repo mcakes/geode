@@ -28,10 +28,10 @@ fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
         "the splitter strip should have painted between the two tiles"
     );
 
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
-    let focus_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().focused()
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
     });
+    let focus_before = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused());
 
     // Same chrome-offset math as `Render for ShellView` (and the
     // click-to-focus test above): the divider sits at 50% of the tile
@@ -51,19 +51,15 @@ fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
 
     cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().focused()
-        }),
+        shell.read_with(&cx, |shell, cx| { shell.workspace(cx).tree().focused() }),
         focus_before,
         "grabbing the splitter must not change tile focus"
     );
 
     cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
-    let widths: Vec<f32> = shell.read_with(&cx, |shell, _| {
+    let widths: Vec<f32> = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
-            .workspaces
-            .active()
+            .workspace(cx)
             .tree()
             .layout(Rect::UNIT)
             .iter()
@@ -75,13 +71,13 @@ fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
         "dropping the divider at 25% should relayout the pair 25/75, got {widths:?}"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "moves alone must not dirty the session — only the release does"
     );
 
     cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
     assert!(
-        shell.read_with(&cx, |shell, _| shell.session_dirty),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "releasing the drag should mark the session dirty (drag-resizes persist)"
     );
     assert!(
@@ -89,9 +85,7 @@ fn dragging_a_main_tree_splitter_resizes_the_pair_and_dirties_the_session(
         "the drag should be over after mouse-up"
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().focused()
-        }),
+        shell.read_with(&cx, |shell, cx| { shell.workspace(cx).tree().focused() }),
         focus_before,
         "a divider drag never changes tile focus"
     );
@@ -109,7 +103,9 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     let (sidebar_width, tile_width, mid_y) = cx.update(|window, _| {
         let viewport = window.viewport_size();
@@ -125,11 +121,9 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
         )
     });
     let dock_size = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
-        shell.read_with(cx, |shell, _| {
+        shell.read_with(cx, |shell, cx| {
             shell
-                .services
-                .workspaces
-                .active()
+                .workspace(cx)
                 .docks()
                 .get(crate::tiling::DockSide::Left)
                 .size()
@@ -173,7 +167,7 @@ fn dragging_the_left_dock_edge_resizes_the_dock_and_pins_at_the_clamp(
         gpui::Modifiers::none(),
     );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.session_dirty),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "a dock-edge drag should persist like any resize"
     );
     assert!(
@@ -257,8 +251,8 @@ fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
     // Switch to workspace 2 with the button still down, then keep
     // moving.
     cx.simulate_keystrokes("alt-2");
-    let ws2_before: Vec<_> = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let ws2_before: Vec<_> = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
     cx.simulate_mouse_move(drop_b, MouseButton::Left, gpui::Modifiers::none());
 
@@ -266,8 +260,8 @@ fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
         shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
         "the workspace switch should have cancelled the drag"
     );
-    let ws2_after: Vec<_> = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let ws2_after: Vec<_> = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
     assert_eq!(
         ws2_before, ws2_after,
@@ -276,11 +270,9 @@ fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
     // The original workspace retains and persists the resize already applied before the
     // switch. Canceling stops tracking; it does not undo completed moves.
     cx.simulate_keystrokes("alt-1");
-    let ws1_widths: Vec<f32> = shell.read_with(&cx, |shell, _| {
+    let ws1_widths: Vec<f32> = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
-            .workspaces
-            .active()
+            .workspace(cx)
             .tree()
             .layout(Rect::UNIT)
             .iter()
@@ -292,7 +284,7 @@ fn switching_workspaces_mid_drag_cancels_the_drag_without_retargeting(
         "workspace 1 keeps the applied resize, got {ws1_widths:?}"
     );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.session_dirty),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "a cancelled drag that had moved must still persist its resize"
     );
 }
@@ -309,7 +301,9 @@ fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     let (grab, drop) = cx.update(|window, _| {
         let viewport = window.viewport_size();
@@ -327,7 +321,7 @@ fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
     cx.simulate_mouse_down(grab, MouseButton::Left, gpui::Modifiers::none());
     cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "mid-drag, nothing is persisted yet"
     );
 
@@ -337,11 +331,9 @@ fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
         shell.read_with(&cx, |shell, _| shell.divider_drag.is_none()),
         "opening the palette should cancel the drag"
     );
-    let widths: Vec<f32> = shell.read_with(&cx, |shell, _| {
+    let widths: Vec<f32> = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
-            .workspaces
-            .active()
+            .workspace(cx)
             .tree()
             .layout(Rect::UNIT)
             .iter()
@@ -353,7 +345,7 @@ fn opening_the_palette_mid_drag_keeps_and_persists_the_applied_resize(
         "cancel keeps the applied resize (it is not an undo), got {widths:?}"
     );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.session_dirty),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "the applied resize must persist even though the drag was cancelled"
     );
 }
@@ -390,7 +382,7 @@ pub(super) fn main_tile_point(
             h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
         };
         let shell = shell.read(app);
-        let workspace = shell.services.workspaces.active();
+        let workspace = shell.workspace(app);
         let (tree_area, _) = crate::tiling::dock_layout(workspace.docks(), area);
         let r = workspace
             .tree()
@@ -425,7 +417,7 @@ fn dock_point(
             h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
         };
         let shell = shell.read(app);
-        let workspace = shell.services.workspaces.active();
+        let workspace = shell.workspace(app);
         let (_, dock_rects) = crate::tiling::dock_layout(workspace.docks(), area);
         let r = dock_rects
             .into_iter()
@@ -462,7 +454,7 @@ pub(super) fn dock_tile_point(
             h: (f32::from(viewport.height) - toolbar_height - status::height(window)).max(0.0),
         };
         let shell = shell.read(app);
-        let workspace = shell.services.workspaces.active();
+        let workspace = shell.workspace(app);
         let (_, dock_rects) = crate::tiling::dock_layout(workspace.docks(), area);
         let dock_rect = dock_rects
             .into_iter()
@@ -498,18 +490,13 @@ fn two_tile_drag_shell(
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
-    let tiles: Vec<TileId> = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles()
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
     });
+    let tiles: Vec<TileId> = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles());
     let (left, right) = (tiles[0], tiles[1]);
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(left),
         "sanity: focus starts on the left tile"
     );
@@ -534,12 +521,7 @@ fn mod_dragging_a_tile_onto_anothers_edge_moves_it_and_focus_follows(
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
     cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(left),
         "mod+down must not change focus at arm time"
     );
@@ -564,33 +546,23 @@ fn mod_dragging_a_tile_onto_anothers_edge_moves_it_and_focus_follows(
         "an active drag over a target paints the zone highlight"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "nothing is applied (or persisted) until the drop"
     );
 
     cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles()),
         vec![right, left],
         "an edge drop on the left band inserts the dragged tile before the target"
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(right),
         "focus follows the moved tile"
     );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.session_dirty),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "an applied drop dirties the session"
     );
     assert!(
@@ -606,8 +578,8 @@ fn mod_dragging_a_tile_onto_anothers_edge_moves_it_and_focus_follows(
 #[gpui::test]
 fn a_below_threshold_mod_click_changes_nothing_at_all(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
 
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
@@ -617,24 +589,19 @@ fn a_below_threshold_mod_click_changes_nothing_at_all(cx: &mut gpui::TestAppCont
     cx.simulate_mouse_up(wiggle, MouseButton::Left, alt_held());
 
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "a below-threshold mod+click must never rearrange"
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(left),
         "focus is untouched — the abandoned gesture leaves everything alone"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "nothing changed, so nothing is persisted"
     );
     assert!(
@@ -656,35 +623,21 @@ fn mod_dragging_onto_a_tiles_center_stacks_the_pair(cx: &mut gpui::TestAppContex
     cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
 
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles()),
         vec![right, left],
         "a center drop adds the dragged tile after the target"
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .stack_position(left)),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).stack_position(left)),
         Some((2, 2)),
         "the dragged tile lands as the stack's second member"
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(left),
         "focus follows the dragged tile into the stack"
     );
-    assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+    assert!(shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty));
     assert!(
         shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()),
         "the finished drag is cleared"
@@ -701,7 +654,9 @@ fn mod_dragging_onto_a_dock_background_inserts_into_the_dock(cx: &mut gpui::Test
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
     cx.simulate_mouse_down(grab, MouseButton::Left, alt_held());
@@ -709,8 +664,8 @@ fn mod_dragging_onto_a_dock_background_inserts_into_the_dock(cx: &mut gpui::Test
     cx.simulate_mouse_move(drop, MouseButton::Left, gpui::Modifiers::none());
     cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
 
-    shell.read_with(&cx, |shell, _| {
-        let workspace = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let workspace = shell.workspace(cx);
         assert_eq!(
             workspace.docks().get(DockSide::Left).tree().tiles(),
             vec![right],
@@ -726,7 +681,7 @@ fn mod_dragging_onto_a_dock_background_inserts_into_the_dock(cx: &mut gpui::Test
             "the tile left the main tree"
         );
     });
-    assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+    assert!(shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty));
 }
 
 /// End-to-end cancel guard: `mod+2` switching workspaces mid-drag
@@ -736,8 +691,8 @@ fn mod_dragging_onto_a_dock_background_inserts_into_the_dock(cx: &mut gpui::Test
 #[gpui::test]
 fn switching_workspaces_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
 
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
@@ -762,22 +717,24 @@ fn switching_workspaces_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui
     // isolated in `a_grab_leaves_the_shell_focused_on_the_next_frame`.
     cx.simulate_keystrokes("alt-1");
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell.services.workspaces.active_index()),
+        shell.read_with(&cx, |shell, cx| shell.shown_ix(cx).get()),
         1,
         "the keyboard survived the grab: `alt-1` still reaches the shell after \
          the workspace switch unmounted the focused occupant"
     );
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
     cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "nothing was applied by the cancelled drag"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "a cancelled tile drag persists nothing (cancel is truly free)"
     );
 }
@@ -789,8 +746,8 @@ fn switching_workspaces_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui
 #[gpui::test]
 fn opening_the_palette_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
 
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
@@ -809,14 +766,14 @@ fn opening_the_palette_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui:
 
     cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "the release after the cancel applies nothing"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "nothing persisted"
     );
     assert!(
@@ -831,9 +788,7 @@ fn opening_the_palette_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui:
 fn a_right_click_focuses_the_tile_and_never_arms_a_drag(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
     let focused = |cx: &gpui::VisualTestContext| {
-        shell.read_with(cx, |shell, _| {
-            shell.services.workspaces.active().tree().focused()
-        })
+        shell.read_with(cx, |shell, cx| shell.workspace(cx).tree().focused())
     };
     assert_eq!(focused(&cx), Some(left));
     let click = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
@@ -856,23 +811,13 @@ fn a_right_click_focuses_the_tile_and_never_arms_a_drag(cx: &mut gpui::TestAppCo
 fn a_plain_click_still_focuses_and_never_arms_a_drag(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(left)
     );
     let click = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
     cx.simulate_mouse_down(click, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(right),
         "plain click-to-focus is unchanged"
     );
@@ -942,26 +887,16 @@ fn a_keystroke_mid_drag_does_not_turn_a_stationary_release_into_a_cancel(
     // through the catcher's `on_mouse_up_out` gate.
     cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles()),
         vec![right, left],
         "the stationary release after a keystroke must still apply the edge drop"
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(right),
         "focus follows the moved tile"
     );
-    assert!(shell.read_with(&cx, |shell, _| shell.session_dirty));
+    assert!(shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty));
     assert!(shell.read_with(&cx, |shell, _| shell.tile_drag.is_none()));
 }
 
@@ -973,8 +908,8 @@ fn a_release_in_the_same_frame_as_the_palette_opening_applies_nothing(
     cx: &mut gpui::TestAppContext,
 ) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
 
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
@@ -1004,14 +939,14 @@ fn a_release_in_the_same_frame_as_the_palette_opening_applies_nothing(
         );
     });
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "the release must not apply the drop underneath the just-opened palette"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "nothing applied, nothing persisted"
     );
     assert!(
@@ -1031,8 +966,8 @@ fn a_release_in_the_same_frame_as_the_palette_opening_applies_nothing(
 #[gpui::test]
 fn a_mod_click_released_in_the_arm_frame_leaves_no_phantom_drag(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
 
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
@@ -1080,20 +1015,15 @@ fn a_mod_click_released_in_the_arm_frame_leaves_no_phantom_drag(cx: &mut gpui::T
     cx.simulate_mouse_move(far, MouseButton::Left, gpui::Modifiers::none());
     cx.simulate_mouse_up(far, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "an unmodified press-drag-release after the phantom window must not \
          rearrange the layout"
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(right),
         "the plain click focused the tile it landed on (click-to-focus intact)"
     );
@@ -1107,11 +1037,9 @@ fn a_strip_click_released_in_the_arm_frame_leaves_no_phantom_divider_drag(
     cx: &mut gpui::TestAppContext,
 ) {
     let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);
-    let widths_before: Vec<f32> = shell.read_with(&cx, |shell, _| {
+    let widths_before: Vec<f32> = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
-            .workspaces
-            .active()
+            .workspace(cx)
             .tree()
             .layout(Rect::UNIT)
             .into_iter()
@@ -1159,7 +1087,7 @@ fn a_strip_click_released_in_the_arm_frame_leaves_no_phantom_divider_drag(
          divider drag (no phantom survives to the catcher's first paint)"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "a phantom that moved nothing persists nothing"
     );
 
@@ -1179,11 +1107,9 @@ fn a_strip_click_released_in_the_arm_frame_leaves_no_phantom_divider_drag(
         gpui::Modifiers::none(),
     );
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
+        shell.read_with(&cx, |shell, cx| {
             shell
-                .services
-                .workspaces
-                .active()
+                .workspace(cx)
                 .tree()
                 .layout(Rect::UNIT)
                 .into_iter()
@@ -1201,8 +1127,8 @@ fn a_strip_click_released_in_the_arm_frame_leaves_no_phantom_divider_drag(
 #[gpui::test]
 fn escape_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
 
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
@@ -1225,14 +1151,14 @@ fn escape_mid_tile_drag_cancels_with_nothing_applied(cx: &mut gpui::TestAppConte
 
     cx.simulate_mouse_up(drop, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "the release after the Escape cancel applies nothing"
     );
     assert!(
-        !shell.read_with(&cx, |shell, _| shell.session_dirty),
+        !shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "a cancelled tile drag persists nothing"
     );
 }
@@ -1268,11 +1194,9 @@ fn escape_mid_divider_drag_finishes_it_keeping_applied_resizes(cx: &mut gpui::Te
     assert!(shell.read_with(&cx, |shell, _| shell.divider_drag.is_some()));
     let target = gpui::point(grab.x - px(100.0), grab.y);
     cx.simulate_mouse_move(target, MouseButton::Left, gpui::Modifiers::none());
-    let widths_after_move: Vec<f32> = shell.read_with(&cx, |shell, _| {
+    let widths_after_move: Vec<f32> = shell.read_with(&cx, |shell, cx| {
         shell
-            .services
-            .workspaces
-            .active()
+            .workspace(cx)
             .tree()
             .layout(Rect::UNIT)
             .into_iter()
@@ -1286,7 +1210,7 @@ fn escape_mid_divider_drag_finishes_it_keeping_applied_resizes(cx: &mut gpui::Te
         "Escape mid-divider-drag must end the drag"
     );
     assert!(
-        shell.read_with(&cx, |shell, _| shell.session_dirty),
+        shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty),
         "the applied resize persists (finish, not revert)"
     );
 
@@ -1295,11 +1219,9 @@ fn escape_mid_divider_drag_finishes_it_keeping_applied_resizes(cx: &mut gpui::Te
     let farther = gpui::point(grab.x - px(200.0), grab.y);
     cx.simulate_mouse_move(farther, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
+        shell.read_with(&cx, |shell, cx| {
             shell
-                .services
-                .workspaces
-                .active()
+                .workspace(cx)
                 .tree()
                 .layout(Rect::UNIT)
                 .into_iter()
@@ -1348,19 +1270,21 @@ fn closing_the_dragged_tile_mid_drag_cancels_the_drag(cx: &mut gpui::TestAppCont
         "no ghost may keep painting for a tile that no longer exists"
     );
 
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
     cx.simulate_mouse_up(over, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "the release after the cancel applies nothing"
     );
-    assert!(!shell.read_with(&cx, |shell, _| shell.session_dirty));
+    assert!(!shell.read_with(&cx, |shell, cx| shell.app().read(cx).session_dirty));
 }
 
 /// Moves attributed to a second mouse button are ignored without advancing or canceling
@@ -1452,8 +1376,8 @@ fn window_deactivation_mid_drag_ends_both_drag_kinds(cx: &mut gpui::TestAppConte
     cx.run_until_parked();
 
     // Tile drag: deactivation cancels with nothing applied.
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
     let over = main_tile_point(&mut cx, &shell, left, 0.05, 0.5);
@@ -1468,8 +1392,8 @@ fn window_deactivation_mid_drag_ends_both_drag_kinds(cx: &mut gpui::TestAppConte
     );
     cx.simulate_mouse_up(over, MouseButton::Left, gpui::Modifiers::none());
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "the release after re-activation applies nothing"
@@ -1505,8 +1429,8 @@ fn window_deactivation_mid_drag_ends_both_drag_kinds(cx: &mut gpui::TestAppConte
 #[gpui::test]
 fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
-    let layout_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().layout(Rect::UNIT)
+    let layout_before = shell.read_with(&cx, |shell, cx| {
+        shell.workspace(cx).tree().layout(Rect::UNIT)
     });
 
     let grab = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
@@ -1534,7 +1458,7 @@ fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAp
             );
         });
         assert_eq!(
-            shell.read(cx).services.workspaces.active_index(),
+            shell.read(cx).shown_ix(cx).get(),
             1,
             "sanity: back on the original workspace before the release"
         );
@@ -1554,8 +1478,8 @@ fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAp
         );
     });
     assert_eq!(
-        shell.read_with(&cx, |shell, _| {
-            shell.services.workspaces.active().tree().layout(Rect::UNIT)
+        shell.read_with(&cx, |shell, cx| {
+            shell.workspace(cx).tree().layout(Rect::UNIT)
         }),
         layout_before,
         "a release after an away-and-back switch inside one frame must \
@@ -1575,20 +1499,15 @@ fn switching_away_and_back_within_one_frame_voids_the_drop(cx: &mut gpui::TestAp
 fn mod_double_click_toggles_fullscreen_on_that_tile(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, left, right) = two_tile_drag_shell(cx);
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .focused()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().focused()),
         Some(left),
         "sanity: focus starts on the left tile"
     );
 
     let at = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
     double_click(&mut cx, at, alt_held());
-    shell.read_with(&cx, |shell, _| {
-        let tree = shell.services.workspaces.active().tree();
+    shell.read_with(&cx, |shell, cx| {
+        let tree = shell.workspace(cx).tree();
         assert_eq!(
             tree.fullscreen(),
             Some(right),
@@ -1601,17 +1520,19 @@ fn mod_double_click_toggles_fullscreen_on_that_tile(cx: &mut gpui::TestAppContex
         );
         assert!(shell.tile_drag.is_none(), "no drag is left armed");
         assert!(
-            shell.session_dirty,
+            shell.app().read(cx).session_dirty,
             "a fullscreen toggle persists like mod+f"
         );
     });
 
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
     // While fullscreen the tile fills the tree area, so the same point
     // is on it.
     double_click(&mut cx, at, alt_held());
-    shell.read_with(&cx, |shell, _| {
-        let tree = shell.services.workspaces.active().tree();
+    shell.read_with(&cx, |shell, cx| {
+        let tree = shell.workspace(cx).tree();
         assert_eq!(
             tree.fullscreen(),
             None,
@@ -1619,7 +1540,7 @@ fn mod_double_click_toggles_fullscreen_on_that_tile(cx: &mut gpui::TestAppContex
         );
         assert_eq!(tree.focused(), Some(right));
         assert!(shell.tile_drag.is_none());
-        assert!(shell.session_dirty);
+        assert!(shell.app().read(cx).session_dirty);
     });
 }
 
@@ -1630,8 +1551,8 @@ fn a_plain_double_click_does_not_fullscreen(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell, _left, right) = two_tile_drag_shell(cx);
     let at = main_tile_point(&mut cx, &shell, right, 0.5, 0.5);
     double_click(&mut cx, at, gpui::Modifiers::none());
-    shell.read_with(&cx, |shell, _| {
-        let tree = shell.services.workspaces.active().tree();
+    shell.read_with(&cx, |shell, cx| {
+        let tree = shell.workspace(cx).tree();
         assert_eq!(tree.fullscreen(), None, "no mod, no fullscreen");
         assert_eq!(tree.focused(), Some(right), "click-to-focus still ran");
     });
@@ -1648,8 +1569,8 @@ fn mod_double_click_on_a_docked_tile_changes_nothing(cx: &mut gpui::TestAppConte
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    shell.read_with(&cx, |shell, _| {
-        let workspace = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let workspace = shell.workspace(cx);
         assert_eq!(
             workspace.docks().get(DockSide::Left).tree().tiles(),
             vec![left]
@@ -1657,12 +1578,14 @@ fn mod_double_click_on_a_docked_tile_changes_nothing(cx: &mut gpui::TestAppConte
         assert_eq!(workspace.region(), crate::tiling::FocusRegion::Main);
         assert_eq!(workspace.tree().focused(), Some(right));
     });
-    shell.update(&mut cx, |shell, _| shell.session_dirty = false);
+    shell.update(&mut cx, |shell, cx| {
+        shell.app().update(cx, |a, _| a.session_dirty = false)
+    });
 
     let at = dock_point(&mut cx, &shell, DockSide::Left, 0.5, 0.5);
     double_click(&mut cx, at, alt_held());
-    shell.read_with(&cx, |shell, _| {
-        let workspace = shell.services.workspaces.active();
+    shell.read_with(&cx, |shell, cx| {
+        let workspace = shell.workspace(cx);
         assert_eq!(
             workspace.tree().fullscreen(),
             None,
@@ -1678,6 +1601,9 @@ fn mod_double_click_on_a_docked_tile_changes_nothing(cx: &mut gpui::TestAppConte
             "a mod+down changes no focus, and the door refuses on a dock"
         );
         assert!(shell.tile_drag.is_none());
-        assert!(!shell.session_dirty, "nothing changed, nothing persisted");
+        assert!(
+            !shell.app().read(cx).session_dirty,
+            "nothing changed, nothing persisted"
+        );
     });
 }

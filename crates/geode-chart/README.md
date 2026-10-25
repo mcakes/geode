@@ -16,7 +16,7 @@ xy element's in the vol slice viewer:
 | Module | Holds |
 |---|---|
 | `core` | Window-free geometry and labels: y scales and 1-2-5 ticks, axes and panes, layout and the plot under a point, the view window, the time x scale with its ticks and crosshair, the linear x scale with its formats, ticks and zoom and pan orientation (`linear`), dash and point-mark stroke geometry and the outline under a filled line (`marks`), hit testing, decimation, and theme-derived palette values. |
-| `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid and y axes), the x-axis painter, stroke builders, the fill builder, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
+| `paint` | What elements share once they have a window: rebuild counters, a pane side's resolved y axis, the pane frame (grid, the zero rule when an element asks for it, and y axes), the x-axis painter, stroke builders, the fill builder, and `MAX_STROKE_SEGMENTS`, the ceiling on a path of separate segments. |
 | `timeseries` | `ChartModel` and `ChartSlot`, the immutable prepared input, and `ChartElement`: polylines over a session or continuous time axis, with percentile rules and density bars. |
 | `spark` | `Spark`, the grid-cell glyph: a sparkline or term glyph laid out by `core::spark` (values evenly spaced by index; the series' own or a column's shared y-range, a value outside it clamped inside the cell; decimated to the width; the last finite value as the end point and an optional marked point) and painted with the kit's stroke builder, a ringed end dot and a mark dot, clipped to its cell. `spark::sizes` exports the cell height and the 30-day, term and one-year widths. No axes, grid, labels, tooltip or keyed state; the host supplies every color in `SparkPaint`. |
 | `xy` | `XyModel` and `XySlot`, the immutable prepared input, and `XyElement`: lines, solid or dashed and optionally shaded down to zero, and point marks with a range bar, over a linear x axis that can run reversed. Re-exports the axis's `XFormat` and `LinearX`. |
@@ -191,28 +191,43 @@ need readback or a fork of gpui; none is used.
   of fewer than two knots is empty: the line paints nothing and adds nothing
   to its axis's domain.
 - A line with `fill` also shades the region between it and its axis's zero,
-  under its stroke, in the slot's color at `FILL_OPACITY` (0.3) of the slot's
-  own alpha, every fill in a pane before any stroke, so a fill never tints
-  another slot's line. Each finite run is its own outline, so a gap breaks the fill as
+  under its stroke, in the slot's color at `FILL_OPACITY` (0.12) of the
+  slot's own alpha, a tint rather than a shading, every fill in a pane
+  before any stroke, so a fill never tints another slot's line. Each finite run is its own outline, so a gap breaks the fill as
   it breaks the line. A value below zero shades up to zero from beneath, so a
   negative lobe is as visible as a positive one. A zero above or below the
   plot shades to the plot's nearer edge. The outline follows the decimated
   polyline, so a fill costs what its stroke does, and the view's clip holds
   it to the pane as it does the line. A filled line is otherwise a line: its
   window, axis domain, readout and crosshair are a line's.
-- A point paints a diamond at its mid when the mid is finite, and a vertical
-  bar over its range when the range's two ends are finite and apart. With a
-  finite mid and one end missing, the bar runs from the mid to the end that
-  is there: a quote with one side missing must not look like a quote with no
+- A point paints a hollow diamond at its mid when the mid is finite (its
+  interior in the plot's ground, its edges `MARK_WIDTH` wide in the slot's
+  color, so a curve the point sits on stops at the mark; the interiors are
+  painted only while the marks in view could sit side by side across the
+  plot's width, since denser marks merge into a band whose overlapping
+  fill can exceed what one path holds, and the edges alone paint), and a vertical bar
+  over its range when the range's two ends are finite and apart. The bars
+  are painted in the under-layer with the fills, `BAR_WIDTH` wide at
+  `BAR_OPACITY` of the slot's color, so a spread reads as a faint tail
+  behind the mark and never crosses a later slot's stroke. With a finite
+  mid and one end missing, the bar runs from the mid to the end that is
+  there: a quote with one side missing must not look like a quote with no
   spread. A point with no mid and fewer than two ends, or two ends that
   meet, paints nothing; a lone end's value still reaches its axis's domain.
   A points slot's window is the points inside the view, edges included.
-- Each visible slot the view shows something of is one cached stroke path,
-  and a filled line a second, cached fill path beside it under the same key.
-  The path key holds the model version, slot number, pane, view, plot
-  geometry and the rem, which sizes dashes and markers; a fill's zero is the
-  side scale's, which those inputs determine. Data is clipped to its pane's
-  plot.
+- A pane whose grid side's domain crosses zero (strictly inside, not on an
+  edge: a difference, not a density) rules zero as a solid hairline in the
+  label ink, over the dashed grid and under every slot, so the sign of
+  what it shows reads at a glance. The xy element asks the shared pane
+  frame for the rule; the timeseries element does not, so a series pane
+  is unchanged.
+- Each visible line is one cached stroke path, and a filled line a second,
+  cached fill path beside it; a points slot is three (its bars, its
+  diamond interiors, its edges), each at its own cache index under the
+  same key. The path key holds the model version, slot number, pane, view,
+  plot geometry and the rem, which sizes dashes and markers; a fill's zero
+  is the side scale's, which those inputs determine. Data is clipped to its
+  pane's plot.
 - A slot too large for one path of separate segments degrades instead of
   vanishing. A points slot with more than `MAX_STROKE_SEGMENTS / 5` points in
   view paints an even stride of them and the last: every point counts as

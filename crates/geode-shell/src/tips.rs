@@ -17,7 +17,7 @@ use std::sync::Arc;
 use gpui::SharedString;
 
 use crate::actions::ActionId;
-use crate::keymap::{Binding, Keystroke, effective_binding};
+use crate::keymap::{Binding, Keystroke, effective_binding, live_binding_on};
 
 /// The keymap's bindings as a module-visible snapshot. `Arc` so a
 /// reload swaps one pointer; readers clone the `Arc`, never the `Vec`.
@@ -36,6 +36,24 @@ pub fn chord_for(bindings: &[Binding], action: &str) -> Option<Vec<Keystroke>> {
     // inside a hover closure, never per frame.
     let id = ActionId(action.to_string());
     effective_binding(bindings, &id).map(|b| b.keystrokes.clone())
+}
+
+/// [`chord_for`], except that `preferred` is the chord shown whenever it
+/// still reaches `action` unshadowed. An action with several shipped keys
+/// (`j` and `down`) is hinted by the one its hint row was written for, so a
+/// `j`/`k` pair never reads `j` / `↑` because one arrow was shadowed by a
+/// later context-free binding and the other was not. A rebind that takes
+/// the preferred key away shows the live chord as before.
+pub fn chord_for_preferring(
+    bindings: &[Binding],
+    action: &str,
+    preferred: &[Keystroke],
+) -> Option<Vec<Keystroke>> {
+    let id = ActionId(action.to_string());
+    match live_binding_on(bindings, &id, preferred) {
+        Some(b) => Some(b.keystrokes.clone()),
+        None => effective_binding(bindings, &id).map(|b| b.keystrokes.clone()),
+    }
 }
 
 /// What one tooltip says. Built inside the hover closure, never per
@@ -237,6 +255,44 @@ mod tests {
         let bindings = vec![binding("ctrl+k", "palette::toggle", Layer::Builtin, 0)];
         let chord = chord_for(&bindings, "palette::toggle").expect("bound");
         assert_eq!(chord, parse_binding("ctrl+k", Modifiers::NONE).unwrap());
+    }
+
+    /// `j` and `down` both step the strip; a later context-free `down`
+    /// shadows the arrow. The plain resolution then reads `j` for one
+    /// verb and `up` for its pair; preferring the shipped letter reads
+    /// `j` and `k`, and still follows a rebind that takes the letter away.
+    #[test]
+    fn chord_for_preferring_shows_the_shipped_key_while_it_is_live() {
+        let keys = |s: &str| parse_binding(s, Modifiers::NONE).unwrap();
+        let bindings = vec![
+            binding("j", "strip::down", Layer::Builtin, 0),
+            binding("down", "strip::down", Layer::Builtin, 1),
+            binding("k", "strip::up", Layer::Builtin, 2),
+            binding("up", "strip::up", Layer::Builtin, 3),
+            binding("down", "list::down", Layer::Builtin, 4),
+        ];
+        assert_eq!(chord_for(&bindings, "strip::down"), Some(keys("j")));
+        assert_eq!(
+            chord_for(&bindings, "strip::up"),
+            Some(keys("up")),
+            "the plain resolution takes the last live binding"
+        );
+        assert_eq!(
+            chord_for_preferring(&bindings, "strip::up", &keys("k")),
+            Some(keys("k"))
+        );
+        assert_eq!(
+            chord_for_preferring(&bindings, "strip::down", &keys("j")),
+            Some(keys("j"))
+        );
+        // The letter rebound away: a user `none` on `k` shadows it, and
+        // the hint falls back to the arrow that still reaches the verb.
+        let mut rebound = bindings.clone();
+        rebound.push(binding("k", "none", Layer::User, 5));
+        assert_eq!(
+            chord_for_preferring(&rebound, "strip::up", &keys("k")),
+            Some(keys("up"))
+        );
     }
 
     #[test]

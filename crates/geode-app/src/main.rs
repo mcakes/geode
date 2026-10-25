@@ -9,6 +9,8 @@ mod crash;
 #[cfg(test)]
 mod demo_tests;
 mod events;
+mod placement;
+mod startup;
 mod watchlists;
 
 use std::path::{Path, PathBuf};
@@ -29,13 +31,13 @@ use geode_shell::keymap::build_keymap;
 use geode_shell::keymap::fragments;
 use geode_shell::module::{ModuleRoster, PageRoster};
 use geode_shell::session;
-use geode_shell::shell::{LogServices, ShellServices, ShellView, pickable_columns, saved_scopes};
+use geode_shell::shell::{LogServices, ShellApp, ShellServices, pickable_columns, saved_scopes};
 use geode_shell::theme;
 use geode_shell::tiling::Workspaces;
 use geode_shell::vimfind::FindStyle;
 use gpui::App;
 use gpui::prelude::*;
-use gpui_component::{Root, TitleBar};
+use gpui_component::TitleBar;
 
 fn main() {
     // Installer callbacks must exit before logging, argument parsing or opening
@@ -182,21 +184,25 @@ fn main() {
             // state.
             restore_session(&mut services);
 
+            // The app-level owner of the services: built once, before any
+            // window, and read by every window's `ShellView` through its key.
+            // It is also the session's owner and its one writer.
+            let app = cx.new(|cx| ShellApp::new(services, desk, user, cx));
+
             // Save current session state synchronously at quit, including changes
             // since the last periodic snapshot. This is best-effort and does not
             // join any in-flight periodic session write; their renames may race.
-            // A window close has already removed the window by the time this
-            // runs, so `bridge::save_on_close` saves for that route.
-            cx.on_app_quit(|cx| {
-                for window in cx.windows() {
-                    if let Some(handle) = window.downcast::<Root>() {
-                        let _ = handle.update(cx, |root, _window, cx| {
-                            if let Ok(shell) = root.view().clone().downcast::<ShellView>() {
-                                shell.read(cx).save_session(cx);
-                            }
-                        });
-                    }
-                }
+            // One save, from the app, over every registered window's records
+            // and the parked ones; no walk of the windows. On an explicit quit
+            // (Dock Quit, logout) every window is still registered and this
+            // is the one save. After the last window's close its own hook
+            // (`bridge::attach_window`) has saved and deregistered it, so
+            // this finds the registry empty and writes nothing
+            // (`ShellApp::save_session`). The hook runs in no window's
+            // update, so no window is `current`.
+            let quit_app = app.clone();
+            cx.on_app_quit(move |cx| {
+                ShellApp::save_session(&quit_app, None, cx);
                 async {}
             })
             .detach();
@@ -204,8 +210,15 @@ fn main() {
             // Unsaved sheets are saved, then the data service stops off the
             // UI thread (`bridge::stop_at_quit`), never as a side effect of a
             // `DataHandle` simply dropping on `main`'s own thread at quit.
+            // The bridge attaches to the app, ahead of any window: service
+            // outcomes are routed to whichever window hosts their tile when
+            // they arrive, and configuration changes are forwarded, for the
+            // life of the app. The bridge is shared with the opener below,
+            // which installs each window's hooks from it.
+            let bridge = bridge.map(Rc::new);
             if let Some(bridge) = &bridge {
                 bridge::stop_at_quit(bridge, cx);
+                bridge::attach(bridge, &app, cx);
             }
 
             // Stop the demo producer on a background executor so joining its thread
@@ -224,38 +237,38 @@ fn main() {
                 .detach();
             }
 
+            // How every window opens, the first included: the app reserves a
+            // key and a workspace (`ShellApp::open_window`), the opener
+            // (`bridge::window_opener`) places and builds the platform
+            // window over a `ShellView` for the key and installs the
+            // window's own hooks (`bridge::attach_window`: the should-close
+            // hook that parks a non-last window and saves at the last; the
+            // quit hooks above cover an explicit application quit), and the
+            // app confirms the registration. The title-bar options are the
+            // shell toolbar's: it owns the title-bar controls and drag
+            // gestures, so AppKit must not treat the bar as a system move
+            // region.
+            let opener =
+                bridge::window_opener(app.clone(), bridge.clone(), TitleBar::window_options);
+            app.update(cx, |app, _| app.set_window_opener(opener));
+
             cx.spawn(async move |cx| {
-                // The shell toolbar owns title-bar controls and drag gestures. Use the
-                // matching window options when creating its native window.
-                let window = cx
-                    .open_window(TitleBar::window_options(), |window, cx| {
-                        let view = cx.new(|cx| ShellView::new(services, desk, user, window, cx));
-                        cx.new(|cx| Root::new(view, window, cx))
-                    })
-                    .expect("failed to open window");
-
-                // Route service outcomes into the shell and forward configuration
-                // changes once the window exists.
-                if let Some(bridge) = &bridge {
-                    cx.update(|cx| bridge::attach(bridge, window, cx));
-                }
-
-                // Save the session and unsaved sheets when the window closes,
-                // while it still exists; the quit hooks above cover an
-                // explicit application quit (Dock Quit, logout).
-                cx.update(|cx| bridge::save_on_close(window, bridge.as_ref(), cx));
+                // The startup windows: one per restored record, where each
+                // was; else one on the session's initial workspace (the one
+                // the oldest window showed when the session was last saved;
+                // 1 without a session) where the platform puts it. Without
+                // a window there is nothing to run.
+                cx.update(|cx| {
+                    startup::open_startup_windows(&app, cx);
+                });
 
                 // Refresh diagnostic configuration independently of the data bridge.
                 // The frame's config counter changes on every applied reload, including
                 // log, theme, and keymap edits that do not emit ConfigReloaded. Other
                 // frame changes must not clone configuration or trigger this refresh.
+                // The config is read from the app, the one owner every window shares.
                 cx.update(|cx| {
-                    let shell = window
-                        .read(cx)
-                        .ok()
-                        .and_then(|root| root.view().clone().downcast::<ShellView>().ok())
-                        .expect("the window's root view is the shell");
-                    let frame = shell.read(cx).frame().clone();
+                    let frame = app.read(cx).frame().clone();
                     let last_config_version =
                         std::rc::Rc::new(std::cell::Cell::new(frame.read(cx).config_version()));
                     // Register this observer before the diagnostics page registers its
@@ -266,7 +279,7 @@ fn main() {
                         let now = frame.read(cx).config_version();
                         if now != last_config_version.get() {
                             last_config_version.set(now);
-                            diagnostics_factory.set_config(shell.read(cx).config().clone());
+                            diagnostics_factory.set_config(app.read(cx).config().clone());
                         }
                     })
                     .detach();
@@ -591,12 +604,14 @@ fn build_shell_services(
         composition_diagnostics,
         pages,
         restored_pages: std::collections::BTreeMap::new(),
+        restored_windows: Vec::new(),
     };
     (services, desk, user, bridge, diagnostics_factory)
 }
 
 /// Load layout, module records, frame state, link group scopes, palette
-/// usage and page state from the session file before the shell is constructed. Recovery warnings are
+/// usage, page state and window records from the session file before the
+/// shell is constructed. Recovery warnings are
 /// logged; a missing or unreadable session starts fresh.
 fn restore_session(services: &mut ShellServices) {
     let Some(path) = &services.session_path else {
@@ -613,6 +628,7 @@ fn restore_session(services: &mut ShellServices) {
     services.restored_links = restored.links;
     services.restored_palette_usage = restored.palette_usage;
     services.restored_pages = restored.pages;
+    services.restored_windows = restored.windows;
 }
 
 /// Log a configuration or keymap diagnostic at `geode::config`, using its
@@ -629,6 +645,8 @@ mod tests {
     use super::*;
     use geode_core::config::Config;
     use geode_shell::module::ModuleFactory as _;
+    use geode_shell::shell::ShellView;
+    use gpui_component::Root;
     use std::time::Duration;
 
     /// A second CVI panel over the same dataset: another title and forward
@@ -1492,7 +1510,9 @@ label = "skew"
             desk: None,
             user: Some(user.path().to_path_buf()),
         });
-        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        shell
+            .read_with(&vcx, |s, _| s.app().clone())
+            .update(&mut vcx, |a, cx| a.apply_reload_for_test(candidate, cx));
         vcx.run_until_parked();
         let restart = shell.read_with(&vcx, |s, cx| {
             s.diagnostics().read(cx).restart_required.clone()
@@ -1505,10 +1525,11 @@ label = "skew"
             shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
             Some("vega_kt")
         );
-        let (kinds, add_row) = shell.read_with(&vcx, |s, _| {
+        let (kinds, add_row) = shell.read_with(&vcx, |s, cx| {
+            let services = s.app().read(cx).services();
             (
-                s.services().roster.kinds(),
-                s.services()
+                services.roster.kinds(),
+                services
                     .registry
                     .get(&ActionId("tile::add_vega_new".into()))
                     .is_some(),
@@ -1904,6 +1925,7 @@ label = "skew"
             &session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = format!(
             "focused = 1\n[node]\nkind = \"leaf\"\nid = 1\n[tiles.1]\nmodule = \"{kind}\"\n"
@@ -1931,7 +1953,11 @@ label = "skew"
         let window = cx
             .update(|cx| {
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    let view = {
+                        let app = cx.new(|cx| ShellApp::new(services, None, None, cx));
+                        let key = app.update(cx, |a, cx| a.add_window(None, cx));
+                        cx.new(|cx| ShellView::new(app, key, window, cx))
+                    };
                     cx.new(|cx| Root::new(view, window, cx))
                 })
             })
@@ -1983,7 +2009,8 @@ label = "skew"
             Some("guide")
         );
         vcx.simulate_keystrokes("]");
-        shell.read_with(&vcx, |s, cx| s.save_session(cx));
+        let shell_app = shell.read_with(&vcx, |s, _| s.app().clone());
+        cx.update(|cx| ShellApp::save_session(&shell_app, None, cx));
         let saved: toml::Table = std::fs::read_to_string(user.path().join("session.toml"))
             .unwrap()
             .parse()
@@ -2200,7 +2227,8 @@ label = "skew"
             shell.read_with(&vcx, |s, _| s.occupant_kind(TileId(1))),
             Some(geode_shell::module::placeholder::PLACEHOLDER_KIND)
         );
-        shell.read_with(&vcx, |s, cx| s.save_session(cx));
+        let shell_app = shell.read_with(&vcx, |s, _| s.app().clone());
+        cx.update(|cx| ShellApp::save_session(&shell_app, None, cx));
         assert_eq!(
             session::load(&path).tiles.get(&1).map(|r| r.kind.as_str()),
             Some("cvi"),
@@ -2255,7 +2283,9 @@ label = "skew"
             desk: None,
             user: Some(user.path().to_path_buf()),
         });
-        shell.update(&mut vcx, |s, cx| s.apply_reload_for_test(candidate, cx));
+        shell
+            .read_with(&vcx, |s, _| s.app().clone())
+            .update(&mut vcx, |a, cx| a.apply_reload_for_test(candidate, cx));
         vcx.run_until_parked();
         let restart = shell.read_with(&vcx, |s, cx| {
             s.diagnostics().read(cx).restart_required.clone()
@@ -2273,10 +2303,11 @@ label = "skew"
             Some("CVI (wide)"),
             "the open panel keeps its title, not the edited one"
         );
-        let (kinds, add_row, startup_row) = shell.read_with(&vcx, |s, _| {
-            let registry = &s.services().registry;
+        let (kinds, add_row, startup_row) = shell.read_with(&vcx, |s, cx| {
+            let services = s.app().read(cx).services();
+            let registry = &services.registry;
             (
-                s.services().roster.kinds(),
+                services.roster.kinds(),
                 registry
                     .get(&ActionId("tile::add_cvi_new".into()))
                     .is_some(),

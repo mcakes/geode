@@ -94,8 +94,9 @@ impl ActionCx<'_, '_> {
         exclude: Option<String>,
         empty: &'static str,
     ) {
-        self.shell.next_picker_tag += 1;
-        let tag = self.shell.next_picker_tag;
+        // The app's one tag counter (a menu action runs on a dispatch
+        // path, so the app may be updated here).
+        let tag = self.shell.with_app(self.cx, |app| app.next_tag());
         let opened = choicedialog::open_action_values(
             self.shell,
             self.action,
@@ -109,14 +110,18 @@ impl ActionCx<'_, '_> {
             self.cx,
         );
         if opened {
-            self.cx.emit(ShellEvent::DistinctRequested(DistinctParams {
+            // The app emits for the bridge; this window only asks.
+            let params = DistinctParams {
                 key: ACTION_KEY,
                 tag,
                 column: column.to_string(),
                 scope: Scope::default(),
                 as_of: AsOf::Live,
                 dataset: None,
-            }));
+            };
+            self.shell.app.update(self.cx, |_, cx| {
+                cx.emit(ShellEvent::DistinctRequested(params))
+            });
         }
     }
 
@@ -231,7 +236,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(chosen) = self.services.roster.actions().get(action).cloned() else {
+        let Some(chosen) = self.services(cx).roster.actions().get(action).cloned() else {
             return;
         };
         let mut acx = ActionCx {
@@ -260,7 +265,7 @@ impl ShellView {
         if self.modal_open() {
             return;
         }
-        let rows = menu_rows(&context, &self.services.roster, &self.text_dims);
+        let rows = menu_rows(&context, &self.services(cx).roster, &self.text_dims);
         if rows.is_empty() {
             self.notice = Some(NO_ROW_ACTIONS.into());
             cx.notify();
@@ -274,7 +279,7 @@ impl ShellView {
         // it, so this is the only record of whether the field did.
         let return_to_filter = !by_pointer && self.filter_field_focused(window, cx);
         self.row_menu = Some(RowMenu {
-            menu: Menu::new(rows, self.services.keymap.bindings()),
+            menu: Menu::new(rows, self.services(cx).keymap.bindings()),
             context,
             at,
             return_to_filter,
@@ -406,14 +411,14 @@ impl MenuHost for ShellView {
         match pick {
             RowPick::Open { kind } => {
                 let state = self
-                    .services
+                    .services(cx)
                     .roster
                     .factory(kind)
                     .and_then(|f| f.launch_state(&open.context));
                 self.add_tile(kind, AddPlacement::Split(None), state, window, cx);
             }
             RowPick::Action { index } => {
-                let Some(action) = self.services.roster.actions().get(index).cloned() else {
+                let Some(action) = self.services(cx).roster.actions().get(index).cloned() else {
                     return;
                 };
                 let mut acx = ActionCx {

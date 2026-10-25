@@ -53,6 +53,7 @@ fn test_services_with_ctrl_alias() -> ShellServices {
         composition_diagnostics: Vec::new(),
         pages: crate::module::PageRoster::new(),
         restored_pages: std::collections::BTreeMap::new(),
+        restored_windows: Vec::new(),
     }
 }
 
@@ -389,6 +390,7 @@ pub(super) fn services_with_builtin_docs(docs: Vec<LayerDoc>) -> ShellServices {
         composition_diagnostics: Vec::new(),
         pages: crate::module::PageRoster::new(),
         restored_pages: std::collections::BTreeMap::new(),
+        restored_windows: Vec::new(),
     }
 }
 
@@ -438,14 +440,12 @@ fn a_chord_typed_into_the_focused_field_dispatches_and_a_shifted_letter_types(
         let _ = window.draw(cx);
     });
 
-    let tiles_before = shell.read_with(&vcx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tiles_before = shell.read_with(&vcx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(tiles_before, 1);
     vcx.simulate_keystrokes("shift-d");
     assert_eq!(
-        shell.read_with(&vcx, |shell, _| {
-            shell.services.workspaces.active().tree().tiles().len()
+        shell.read_with(&vcx, |shell, cx| {
+            shell.workspace(cx).tree().tiles().len()
         }),
         tiles_before,
         "shift+d in the field is typing, not duplicate_horizontal"

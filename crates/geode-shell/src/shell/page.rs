@@ -21,7 +21,10 @@ impl ShellView {
         self.page.as_ref().is_some_and(|p| p.open)
     }
 
-    pub(crate) fn open_page_kind(&self) -> Option<&'static str> {
+    /// The kind of the page this window has open, or `None` while none
+    /// is. Public for the app bridge, which reads the diagnostics lanes'
+    /// as-of from the window whose diagnostics page is asking.
+    pub fn open_page_kind(&self) -> Option<&'static str> {
         self.page
             .as_ref()
             .filter(|p| p.open)
@@ -67,22 +70,27 @@ impl ShellView {
             && page.occupant.kind != kind
         {
             // One page at a time: a different kind replaces the retained one.
-            // Its last state goes back to the restored map, so the next flush
-            // still writes `[pages.<old kind>]` and a later reopen restores
-            // it; dropping the page alone would lose it from the file.
-            self.services.restored_pages.insert(
-                page.occupant.kind.to_string(),
-                page.occupant.content.serialize(cx),
-            );
+            // Its last state goes back to the app's parked pages, so the next
+            // flush still writes `[pages.<old kind>]` and a later reopen, in
+            // any window, restores it; dropping the page alone would lose it
+            // from the file.
+            let old_kind = page.occupant.kind;
+            let state = page.occupant.content.serialize(cx);
+            self.app.update(cx, |app, _| app.park_page(old_kind, state));
             page.occupant.content.set_visible(false, cx);
             self.page = None;
         }
         if self.page.is_none() {
-            let Some(factory) = self.services.pages.factory(kind) else {
+            // The roster's own handle, cloned out of a read, so `create`
+            // runs with the context free.
+            let Some(factory) = self.services(cx).pages.factory(kind) else {
                 tracing::warn!(target: "geode::shell", "no page registered as '{kind}'");
                 return;
             };
-            let restored = self.services.restored_pages.remove(kind);
+            // The kind's parked record, taken from the app on this dispatch
+            // path (never from render): the restored session's table, or
+            // the state a page of this kind was replaced or closed with.
+            let restored = self.app.update(cx, |app, _| app.take_parked_page(kind));
             let actions = self.shell_actions(cx);
             // The page's frame handle is bound to the workspace it is first
             // opened over, as a tile's is to its own. Every unpinned
@@ -91,7 +99,7 @@ impl ShellView {
             // workspace's lane.
             let occupant = factory.create(
                 restored.as_ref(),
-                self.frame_at(self.active_ix()),
+                self.frame_at(self.shown_ix(cx)),
                 self.diagnostics.clone(),
                 actions,
                 window,
@@ -114,7 +122,7 @@ impl ShellView {
         // for a keyboard open (the flag is per event and only mouse handling
         // reads it).
         window.prevent_default();
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         cx.notify();
     }
 
@@ -128,8 +136,24 @@ impl ShellView {
         page.open = false;
         page.occupant.content.set_visible(false, cx);
         self.focus_handle.focus(window, cx);
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         cx.notify();
+    }
+
+    /// This window is closing (`ShellEvent::WindowClosing`): the page it
+    /// holds, open or not, is serialized back into the app's parked pages,
+    /// as its tiles are parked by the `Park` events that follow, so the
+    /// next save, from whichever window remains, still writes its
+    /// `[pages.<kind>]` and the next open of the kind restores it. The
+    /// page itself stays with the view for the window's last moments; it
+    /// leaves the writer's view with the registry entry.
+    pub(super) fn park_page(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = &self.page else {
+            return;
+        };
+        let kind = page.occupant.kind;
+        let state = page.occupant.content.serialize(cx);
+        self.app.update(cx, |app, _| app.park_page(kind, state));
     }
 
     pub(super) fn toggle_page(&mut self, kind: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -155,7 +179,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.begin_action(&format!("page::toggle_{kind}"));
+        self.begin_action(&format!("page::toggle_{kind}"), cx);
         if self.modal_open() {
             self.notice = Some(super::input::CLOSE_DIALOG_FIRST.into());
             cx.notify();

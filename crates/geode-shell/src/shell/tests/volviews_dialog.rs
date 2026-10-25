@@ -885,13 +885,17 @@ fn add_user_dataset(
     template: &str,
 ) {
     let dir = shell
-        .read_with(cx, |shell, _| shell.user_dir.clone())
+        .read_with(cx, |shell, cx| shell.user_dir(cx))
         .expect("a user directory");
     let text = format!("config_version = 1\n{}", template.replace("{name}", name));
     std::fs::write(dir.join("datasets.toml"), text).unwrap();
-    let builtin = shell.read_with(cx, |shell, _| shell.services.builtin.clone());
+    let builtin = shell.read_with(cx, |shell, cx| shell.services(cx).builtin.clone());
     let reloaded = crate::reload::load_config(builtin, None, Some(dir));
-    shell.update(cx, |shell, cx| shell.apply_reload(reloaded, cx));
+    shell.update(cx, |shell, cx| {
+        shell
+            .app()
+            .update(cx, |app, cx| app.apply_reload(reloaded, cx))
+    });
     cx.run_until_parked();
 }
 

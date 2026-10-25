@@ -7,6 +7,7 @@ use crate::core::build::{DIFF_AXIS, restyled};
 use crate::core::menu::{FIX_DIFF_Y, NO_DIFF_DOMAIN};
 use geode_chart::core::scale::nice_outward;
 use geode_shell::actions::ActionId;
+use geode_tile::menu::MenuPick as _;
 
 /// A loaded tile showing `cvi − chain` in the lower pane at 2026-11-20,
 /// an expiry the chain quotes, focused, its batch answered and painted.
@@ -57,8 +58,10 @@ impl Harness {
     fn highlighted_id(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
         let (ids, at) = self.menu(vcx)?;
         // `menu_open` lists action rows only; map the row index back.
-        let rows = self.tile.read_with(vcx, |t, cx| t.menu_rows(cx));
-        let row = rows.get(at?)?.action()?.pick().0.clone();
+        let rows = self.tile.read_with(vcx, |t, cx| {
+            t.menu_rows(crate::tile::picker::MenuKind::Actions, cx)
+        });
+        let row = rows.get(at?)?.action()?.pick().element_name().to_string();
         assert!(ids.contains(&row));
         Some(row)
     }
@@ -190,11 +193,13 @@ fn fixing_with_no_differences_refuses(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = loaded(cx);
     h.focus(&mut vcx);
     vcx.simulate_keystrokes(".");
-    let rows = h.tile.read_with(&vcx, |t, cx| t.menu_rows(cx));
+    let rows = h.tile.read_with(&vcx, |t, cx| {
+        t.menu_rows(crate::tile::picker::MenuKind::Actions, cx)
+    });
     let fix = rows
         .iter()
         .filter_map(|r| r.action())
-        .find(|a| a.pick().0 == FIX_DIFF_Y)
+        .find(|a| a.pick().element_name().as_ref() == FIX_DIFF_Y)
         .unwrap();
     assert_eq!(fix.reason().map(|r| r.as_ref()), Some(NO_DIFF_DOMAIN));
     vcx.simulate_keystrokes("escape");
@@ -233,10 +238,15 @@ fn a_disabled_row_picked_by_key_or_click_says_why(cx: &mut gpui::TestAppContext)
     h.focus(&mut vcx);
     vcx.simulate_keystrokes(".");
     h.draw(&mut vcx);
-    let rows = h.tile.read_with(&vcx, |t, cx| t.menu_rows(cx));
+    let rows = h.tile.read_with(&vcx, |t, cx| {
+        t.menu_rows(crate::tile::picker::MenuKind::Actions, cx)
+    });
     let fix = rows
         .iter()
-        .position(|r| r.action().is_some_and(|a| a.pick().0 == FIX_DIFF_Y))
+        .position(|r| {
+            r.action()
+                .is_some_and(|a| a.pick().element_name().as_ref() == FIX_DIFF_Y)
+        })
         .unwrap();
     let row = format!("volslice-menu-row-{TILE}-{fix}");
     let at = bounds(&mut vcx, &row).center();
@@ -310,10 +320,15 @@ fn the_menu_opens_from_dot_the_button_and_a_chart_right_press(cx: &mut gpui::Tes
     // A row click picks: `Difference…` opens the chooser.
     vcx.simulate_keystrokes(".");
     h.draw(&mut vcx);
-    let rows = h.tile.read_with(&vcx, |t, cx| t.menu_rows(cx));
+    let rows = h.tile.read_with(&vcx, |t, cx| {
+        t.menu_rows(crate::tile::picker::MenuKind::Actions, cx)
+    });
     let diff = rows
         .iter()
-        .position(|r| r.action().is_some_and(|a| a.pick().0 == "volslice::diff"))
+        .position(|r| {
+            r.action()
+                .is_some_and(|a| a.pick().element_name().as_ref() == "volslice::diff")
+        })
         .unwrap();
     click(
         &mut vcx,

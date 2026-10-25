@@ -12,7 +12,7 @@ use gpui_component::WindowExt as _;
 use crate::actions::ActionId;
 use crate::commandline::Prompt;
 use crate::keymap::{Binding, KeyContext, MatchResult, UNBOUND_ACTION};
-use crate::tiling::{Direction, Orientation, apply_workspace_action};
+use crate::tiling::{Direction, Orientation, Switch, apply_workspace_action};
 use crate::vimfind;
 use crate::{fontsize, theme};
 use geode_core::query::AsOf;
@@ -83,11 +83,57 @@ fn refused_over_a_page(id: &str) -> bool {
                 | "tile::context_menu"
                 | "tile::autosize_columns"
                 | "tile::link_group"
+                | "window::tear_out"
+                | "window::open"
         )
         || crate::defaults::parse_add_action(id).is_some()
 }
 
+/// The notice when a window verb finds every index shown by some window.
+pub(crate) const ALL_WORKSPACES_SHOWN: &str = "all nine workspaces are on screen";
+
+/// The notice when a window verb's opener opened nothing, or none is
+/// installed. The cause is logged; the trader sees only that it failed.
+pub(crate) const COULD_NOT_OPEN_WINDOW: &str = "could not open a window";
+
 impl ShellView {
+    /// What this window does once the index it shows has changed, on the
+    /// dispatch path that changed it: a `Shown` or `Moved` switch, or a
+    /// tear-out, which switches this window inside the app. Pull the
+    /// parked records it now hosts (a closed window's, or ones a move
+    /// parked before), mark the session, follow the new lane (flip
+    /// baseline and scope field, `on_workspace_switched`), reconcile
+    /// focus, and rename the window after the index. One method, so the
+    /// two paths cannot drift.
+    pub(super) fn after_shown_changed(
+        &mut self,
+        before: crate::tiling::WorkspaceIx,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pull_parked_records(cx);
+        self.mark_session_dirty(cx);
+        // Another workspace's lane: the flip baseline and the scope field
+        // must follow it before anything reads them.
+        self.on_workspace_switched(before, window, cx);
+        self.note_keyboard_focus_move(window, cx);
+        self.sync_title(window, cx);
+    }
+
+    /// A window verb was refused: say so in the notice. A full house is
+    /// the trader's situation and is named; a missing or failing opener
+    /// is the composition root's and is logged.
+    fn refuse_window_open(&mut self, verb: &str, refusal: super::app::OpenRefusal) {
+        use super::app::OpenRefusal;
+        self.notice = Some(match refusal {
+            OpenRefusal::NoFreeWorkspace => ALL_WORKSPACES_SHOWN.into(),
+            OpenRefusal::NoOpener | OpenRefusal::OpenerFailed => {
+                tracing::warn!(target: "geode::shell", "could not {verb} a window: {refusal:?}");
+                COULD_NOT_OPEN_WINDOW.into()
+            }
+        });
+    }
+
     /// Active contexts, outermost first: workspace, then tile and occupant when
     /// an occupant is focused, then palette while open. While a page is open
     /// it is `page`, then the page's own context, then palette: no workspace,
@@ -107,7 +153,7 @@ impl ShellView {
             return stack;
         }
         let mut stack = vec![KeyContext::new("workspace")];
-        if let Some(tile) = self.services.workspaces.active().focused_tile()
+        if let Some(tile) = self.workspace(cx).focused_tile()
             && let Some(o) = self.occupants.get(&tile)
         {
             // The shared tile context binds `/` and `:`. The occupant adds its
@@ -127,7 +173,7 @@ impl ShellView {
     /// shadow the builtin toggle just as they do in ordinary matching.
     fn is_palette_toggle(&self, keystroke: &crate::keymap::Keystroke, cx: &App) -> bool {
         let stack = self.context_stack(cx);
-        self.single_keystroke_binding(keystroke, &stack)
+        self.single_keystroke_binding(keystroke, &stack, cx)
             .is_some_and(|binding| binding.action.0 == "palette::toggle")
     }
 
@@ -135,12 +181,13 @@ impl ShellView {
     /// leaves matcher sequences and counts untouched while a text surface owns
     /// the keyboard. An explicit unbind is returned as a winning binding; callers
     /// decide whether to consume it or leave the key to their text input.
-    fn single_keystroke_binding(
+    fn single_keystroke_binding<'a>(
         &self,
         keystroke: &crate::keymap::Keystroke,
         stack: &[KeyContext],
-    ) -> Option<&Binding> {
-        self.services.keymap.bindings().iter().rfind(|binding| {
+        cx: &'a App,
+    ) -> Option<&'a Binding> {
+        self.services(cx).keymap.bindings().iter().rfind(|binding| {
             binding.keystrokes.len() == 1
                 && binding.keystrokes[0] == *keystroke
                 && binding.predicate.as_ref().is_none_or(|p| p.eval(stack))
@@ -153,10 +200,10 @@ impl ShellView {
     /// and expire the notice, the stack list, the add-filter menu and the row
     /// menu. A route that skipped this would leave the last refusal showing
     /// over the page it opened and drop the action from the crash tail.
-    pub(super) fn begin_action(&mut self, id: &str) {
+    pub(super) fn begin_action(&mut self, id: &str, cx: &App) {
         // Record every action before routing so the crash report includes ones
         // that no handler recognizes. The tail stores hashes without allocating per key.
-        self.services
+        self.services(cx)
             .action_tail
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -177,6 +224,8 @@ impl ShellView {
         // their keyboard route. Refuse workspace switches and the pin toggle
         // too: they would move the active lane under a dialog that commits
         // to the lane it opened in, and the toolbar would then mix the two.
+        // The window verbs likewise: a tear-out switches this window, and
+        // either opens a window over a dialog bound to this one's lane.
         // Other palette actions may run behind the stack.
         if self.modal_open()
             && (matches!(
@@ -186,6 +235,8 @@ impl ShellView {
                     | "stack::pick"
                     | "tile::context_menu"
                     | "frame::pin_workspace"
+                    | "window::tear_out"
+                    | "window::open"
             ) || id.starts_with("workspace::switch_"))
         {
             return Some(CLOSE_DIALOG_FIRST);
@@ -200,9 +251,11 @@ impl ShellView {
         None
     }
 
-    /// Dispatch a resolved action from either the keymap or palette. Workspace
-    /// actions go through `apply_workspace_action`; shell actions are handled
-    /// here, and remaining ids reach the focused occupant with their count.
+    /// Dispatch a resolved action from either the keymap or palette. A
+    /// workspace switch goes through `ShellApp::switch`, whose outcome
+    /// decides what else happens; other workspace actions go through
+    /// `apply_workspace_action`; shell actions are handled here, and
+    /// remaining ids reach the focused occupant with their count.
     ///
     /// Recognized workspace actions, including no-ops, mark the session dirty
     /// and reconcile focus. Persistence runs later on the background save path
@@ -214,7 +267,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.begin_action(&action.0);
+        self.begin_action(&action.0, cx);
         // The one line every dispatched action leaves in the daily log
         // (`[log] shell = "debug"`): which action, with what count. The
         // branch that resolved it says so on its own line just before.
@@ -265,8 +318,8 @@ impl ShellView {
             // Stack cycling consumes the count before the count-free workspace router.
             let n = i64::from(count.unwrap_or(1).max(1));
             let delta = if action.0 == "stack::next" { n } else { -n };
-            if self.services.workspaces.active_mut().stack_step(delta) {
-                self.session_dirty = true;
+            if self.with_workspace(cx, |ws| ws.stack_step(delta)) {
+                self.mark_session_dirty(cx);
                 self.note_keyboard_focus_move(window, cx);
             } else {
                 self.notice = Some(NOT_IN_A_STACK.into());
@@ -277,18 +330,11 @@ impl ShellView {
             // The split is shaped like `stack::unstack`'s: the configured add
             // direction resolved against the focused slot.
             let rect = self
-                .services
-                .workspaces
-                .active()
+                .workspace(cx)
                 .focused_tile_rect(super::render::content_area(window));
-            let orientation = self.add_direction.resolve(None, rect);
-            if self
-                .services
-                .workspaces
-                .active_mut()
-                .split_stack(orientation)
-            {
-                self.session_dirty = true;
+            let orientation = self.app.read(cx).add_direction().resolve(None, rect);
+            if self.with_workspace(cx, |ws| ws.split_stack(orientation)) {
+                self.mark_session_dirty(cx);
                 self.note_keyboard_focus_move(window, cx);
             } else {
                 self.notice = Some(NOT_IN_A_STACK.into());
@@ -298,8 +344,8 @@ impl ShellView {
         if let Some(dir) = pull_direction(&action.0) {
             // Focus stays on its tile; the pulled one is hidden, and the
             // occupant sync delivers both tiles' new stack positions.
-            if self.services.workspaces.active_mut().pull(dir) {
-                self.session_dirty = true;
+            if self.with_workspace(cx, |ws| ws.pull(dir)) {
+                self.mark_session_dirty(cx);
             } else {
                 self.notice = Some(NO_TILE_THAT_WAY.into());
             }
@@ -307,18 +353,11 @@ impl ShellView {
         }
         if action.0 == "stack::unstack" {
             let rect = self
-                .services
-                .workspaces
-                .active()
+                .workspace(cx)
                 .focused_tile_rect(super::render::content_area(window));
-            let orientation = self.add_direction.resolve(None, rect);
-            if self
-                .services
-                .workspaces
-                .active_mut()
-                .unstack_focused(orientation)
-            {
-                self.session_dirty = true;
+            let orientation = self.app.read(cx).add_direction().resolve(None, rect);
+            if self.with_workspace(cx, |ws| ws.unstack_focused(orientation)) {
+                self.mark_session_dirty(cx);
                 self.note_keyboard_focus_move(window, cx);
             } else {
                 self.notice = Some(NOT_IN_A_STACK.into());
@@ -326,23 +365,80 @@ impl ShellView {
             return;
         }
         if action.0 == "stack::pick" {
-            match self.services.workspaces.active().focused_tile() {
+            match self.workspace(cx).focused_tile() {
                 Some(tile) => self.open_stack_list(tile, window, cx),
                 None => self.notice = Some(NOT_IN_A_STACK.into()),
             }
             return;
         }
 
-        // The workspace router ignores counts; the module fallback receives them.
-        let before = self.active_ix();
-        let handled = apply_workspace_action(&mut self.services.workspaces, action);
-        if handled {
-            self.session_dirty = true;
-            // A switch shows another workspace's lane: the flip baseline and
-            // the scope field must follow it before anything reads them.
-            if self.active_ix() != before {
-                self.on_workspace_switched(before, window, cx);
+        // A workspace switch is the shell's, not the layout router's: its
+        // outcome says whether another window must park (`Moved`), should
+        // come forward (`Raise`), or nothing happened (`Invalid`). `Shown`
+        // and `Moved` also pull the parked records this window now hosts
+        // (a closed window's, or ones a move parked before this switch), so
+        // the next draw rebuilds them. A move's own records arrive later,
+        // through `Park` and `Parked` (see `on_app_event`).
+        if let Some(n) = action
+            .0
+            .strip_prefix("workspace::switch_")
+            .and_then(|s| s.parse::<u8>().ok())
+        {
+            let before = self.shown_ix(cx);
+            let key = self.key;
+            match self.app.update(cx, |app, cx| app.switch(key, n, cx)) {
+                Switch::Shown | Switch::Moved { .. } => {
+                    self.after_shown_changed(before, window, cx);
+                }
+                // Re-selecting the shown index changes nothing, but it is
+                // still a recognized workspace action: the session is
+                // marked and focus reconciled as for any other.
+                Switch::Unchanged => {
+                    self.mark_session_dirty(cx);
+                    self.note_keyboard_focus_move(window, cx);
+                }
+                Switch::Raise(other) => {
+                    self.app
+                        .update(cx, |app, cx| app.activate_window(other, cx));
+                }
+                Switch::Invalid => {}
             }
+            return;
+        }
+
+        // The window verbs. Both open a window beside this one, so they
+        // carry its frame and display (`Spawner::of`), read here from the
+        // `Window` in hand: the opener cannot read this window through its
+        // handle while it is under update. A tear-out switches this window
+        // to the lowest free index inside the app (`ShellApp::tear_out`),
+        // so on success this window runs the same post-switch work a
+        // `Shown` switch does; the new window's occupants arrive through
+        // `Park` and `Parked`. `window::open` changes nothing here but the
+        // title, which `WindowsChanged` sets. A refusal leaves a notice and
+        // nothing else: the app changed nothing.
+        if action.0 == "window::tear_out" {
+            let before = self.shown_ix(cx);
+            let spawner = Some(super::app::Spawner::of(window, cx));
+            match super::app::ShellApp::tear_out(&self.app, self.key, spawner, cx) {
+                Ok(_) => self.after_shown_changed(before, window, cx),
+                Err(refusal) => self.refuse_window_open("tear out", refusal),
+            }
+            return;
+        }
+        if action.0 == "window::open" {
+            let spawner = Some(super::app::Spawner::of(window, cx));
+            if let Err(refusal) = super::app::ShellApp::open_fresh(&self.app, self.key, spawner, cx)
+            {
+                self.refuse_window_open("open", refusal);
+            }
+            return;
+        }
+
+        // The workspace router ignores counts; the module fallback receives them.
+        let key = self.key;
+        let handled = self.with_workspaces(cx, |w| apply_workspace_action(w, key, action));
+        if handled {
+            self.mark_session_dirty(cx);
             // Reconcile focus after every recognized workspace action, including no-ops
             // and geometry-only changes. A separate list of focus-moving action ids
             // would have to track the workspace router exactly.
@@ -386,16 +482,18 @@ impl ShellView {
             // Clamped steps (ctrl+= / ctrl+-); render applies the rem size
             // on the notify, persistence mirrors the settings control's
             // set_font_size path.
-            self.font_size = self.font_size.larger();
+            let larger = self.app.read(cx).font_size().larger();
+            self.with_app(cx, |app| app.font_size = larger);
             self.persist_font_size(cx);
         } else if action.0 == "fontsize::decrease" {
-            self.font_size = self.font_size.smaller();
+            let smaller = self.app.read(cx).font_size().smaller();
+            self.with_app(cx, |app| app.font_size = smaller);
             self.persist_font_size(cx);
         } else if action.0 == "config::open_directory" {
             self.open_config_directory(cx);
         } else if action.0 == "ui::line_numbers_cycle" {
             // Cycle off → on → relative → off through the same setter as Settings.
-            self.set_line_numbers(self.line_numbers.next(), cx);
+            self.set_line_numbers(self.app.read(cx).line_numbers().next(), cx);
         } else if action.0 == "perf::toggle_overlay" {
             // Toggle the readout only; frame-time recording continues while hidden.
             let next = !self.perf_overlay;
@@ -429,7 +527,7 @@ impl ShellView {
         {
             // Activate a configured grouping slot. Empty slots leave the frame and
             // following tiles unchanged and do not notify.
-            self.target_frame().update(cx, |f, cx| {
+            self.target_frame(cx).update(cx, |f, cx| {
                 if f.set_active_slot(Some(n)) {
                     cx.notify();
                 }
@@ -437,7 +535,7 @@ impl ShellView {
         } else if action.0 == "frame::slot_clear" {
             // ctrl+0: return every following tile to its view's own
             // grouping.
-            self.target_frame().update(cx, |f, cx| {
+            self.target_frame(cx).update(cx, |f, cx| {
                 if f.set_active_slot(None) {
                     cx.notify();
                 }
@@ -445,7 +543,7 @@ impl ShellView {
         } else if action.0 == "frame::grouping_adhoc" {
             // Return to the lane's stored ad hoc chain. With none stored the
             // action says so: a palette row that does nothing reads as broken.
-            let frame = self.target_frame();
+            let frame = self.target_frame(cx);
             if frame.read(cx).ad_hoc().is_some() {
                 frame.update(cx, |f, cx| {
                     if f.activate_ad_hoc() {
@@ -458,7 +556,7 @@ impl ShellView {
             }
         } else if action.0 == "frame::scope_undo" {
             // Walk the bounded scope undo stack.
-            self.target_frame().update(cx, |f, cx| {
+            self.target_frame(cx).update(cx, |f, cx| {
                 if f.undo_scope() {
                     cx.notify();
                 }
@@ -466,7 +564,7 @@ impl ShellView {
         } else if action.0 == "frame::scope_redo" {
             // mod+shift+z: walk the redo stack; cleared by the next
             // `set_scope`/`set_scope_in_session`.
-            self.target_frame().update(cx, |f, cx| {
+            self.target_frame(cx).update(cx, |f, cx| {
                 if f.redo_scope() {
                     cx.notify();
                 }
@@ -476,7 +574,7 @@ impl ShellView {
             // muscle memory): clear the whole scope, itself undoable.
             // Clearing an empty scope still forgets its provenance, which
             // observers keyed on the generation have to hear.
-            self.target_frame().update(cx, |f, cx| {
+            self.target_frame(cx).update(cx, |f, cx| {
                 let before = f.generation();
                 f.clear_scope();
                 if f.generation() != before {
@@ -522,7 +620,7 @@ impl ShellView {
             scope_expr_view::open(self, scope_expr_view::Mode::Add, window, cx);
         } else if action.0 == "frame::clear_expression" {
             // Drop the whole expression layer through the undoable set_scope path.
-            self.target_frame().update(cx, |f, cx| {
+            self.target_frame(cx).update(cx, |f, cx| {
                 if f.clear_expression() {
                     cx.notify();
                 }
@@ -543,25 +641,23 @@ impl ShellView {
             // picker; one holding a registered column that no kind accepts
             // shows the notice.
             let context = self
-                .services
-                .workspaces
-                .active()
+                .workspace(cx)
                 .focused_tile()
                 .and_then(|t| self.occupants.get(&t))
                 .and_then(|o| o.content.dimension_context(cx))
                 .unwrap_or_default();
-            let registered = self.services.roster.context_columns();
+            let registered = self.services(cx).roster.context_columns();
             let registered: Vec<&str> = registered.iter().map(String::as_str).collect();
             if !context.offers(&registered) {
                 choicedialog::open_tile_kinds(self, window, cx);
             } else {
                 let kinds: Vec<&'static str> = self
-                    .services
+                    .services(cx)
                     .roster
                     .kinds()
                     .into_iter()
                     .filter(|k| {
-                        self.services
+                        self.services(cx)
                             .roster
                             .factory(k)
                             .is_some_and(|f| context.offers(f.accepts()))
@@ -573,7 +669,7 @@ impl ShellView {
                 } else {
                     let accepted: Vec<&str> = kinds
                         .iter()
-                        .filter_map(|k| self.services.roster.factory(k))
+                        .filter_map(|k| self.services(cx).roster.factory(k))
                         .flat_map(|f| f.accepts().iter().copied())
                         .collect();
                     let subject = context.subject(&accepted).map(str::to_string);
@@ -584,9 +680,7 @@ impl ShellView {
             // The focused tile's cursor row, hung at its recorded anchor (or
             // the tile's top-left when it records none).
             let context = self
-                .services
-                .workspaces
-                .active()
+                .workspace(cx)
                 .focused_tile()
                 .and_then(|t| self.occupants.get(&t))
                 .and_then(|o| o.content.dimension_context(cx))
@@ -599,9 +693,7 @@ impl ShellView {
             // The focused tile's occupant fits its own table; any other
             // tile is untouched. A refusal (no tile, no table) is a notice.
             let result = match self
-                .services
-                .workspaces
-                .active()
+                .workspace(cx)
                 .focused_tile()
                 .and_then(|t| self.occupants.get(&t))
             {
@@ -617,7 +709,7 @@ impl ShellView {
             choicedialog::open_log_level(self, window, cx);
         } else if action.0 == "frame::live" {
             // Return to live and retain the previous as-of for `frame::as_of_undo`.
-            self.target_frame().update(cx, |f, cx| {
+            self.target_frame(cx).update(cx, |f, cx| {
                 if f.set_as_of(AsOf::Live) {
                     cx.notify();
                 }
@@ -625,7 +717,7 @@ impl ShellView {
         } else if action.0 == "frame::as_of_undo" {
             // Palette-only: swap back to the previous as-of — a toggle,
             // not a stack (see `FrameViewMut::undo_as_of`).
-            self.target_frame().update(cx, |f, cx| {
+            self.target_frame(cx).update(cx, |f, cx| {
                 if f.undo_as_of() {
                     cx.notify();
                 }
@@ -654,7 +746,7 @@ impl ShellView {
             // occupant. Unhandled ids have no effect.
             if let Some(page) = self.page.as_ref().filter(|p| p.open) {
                 page.occupant.content.dispatch(action, count, window, cx);
-            } else if let Some(tile) = self.services.workspaces.active().focused_tile()
+            } else if let Some(tile) = self.workspace(cx).focused_tile()
                 && let Some(o) = self.occupants.get(&tile)
             {
                 o.content.dispatch(action, count, window, cx);
@@ -670,10 +762,10 @@ impl ShellView {
     /// are logged as `geode::theme` warnings and do not roll back the live theme.
     /// No filesystem work runs on the UI thread.
     pub(super) fn persist_theme(&self, cx: &mut Context<Self>) {
-        let Some(dir) = self.user_dir.clone() else {
+        let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let name = self.services.theme.active_name().to_string();
+        let name = self.services(cx).theme.active_name().to_string();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = theme::persist_to_user_config(&dir, &name) {
                 tracing::warn!(target: "geode::theme", "{e}");
@@ -687,10 +779,10 @@ impl ShellView {
     /// persist_theme`] just above (missing `user_dir` = silently skipped;
     /// failures are a `geode::config` warning; writes run in submission order).
     pub(super) fn persist_font_size(&self, cx: &mut Context<Self>) {
-        let Some(dir) = self.user_dir.clone() else {
+        let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let size = self.font_size;
+        let size = self.app.read(cx).font_size();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = fontsize::persist_to_user_config(&dir, size) {
                 // Include the setting in the warning: font size and find style share
@@ -711,7 +803,7 @@ impl ShellView {
     /// blocks the render thread; the open itself needs `App` and runs
     /// back on the foreground once the directory exists.
     fn open_config_directory(&self, cx: &mut Context<Self>) {
-        let Some(dir) = self.user_dir.clone() else {
+        let Some(dir) = self.user_dir(cx) else {
             tracing::warn!(
                 target: "geode::config",
                 "config directory not opened: no user config directory (HOME/APPDATA unset)"
@@ -744,10 +836,10 @@ impl ShellView {
     /// persist_font_size`] just above (missing `user_dir` = silently
     /// skipped; failures are a `geode::config` warning; writes run in submission order).
     pub(super) fn persist_find_style(&self, cx: &mut Context<Self>) {
-        let Some(dir) = self.user_dir.clone() else {
+        let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let style = self.find_style;
+        let style = self.app.read(cx).find_style();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = vimfind::persist_to_user_config(&dir, style) {
                 // Identify the setting so a shared `app.toml` parse error is actionable.
@@ -768,7 +860,7 @@ impl ShellView {
         mode: crate::linenumbers::LineNumbers,
         cx: &mut Context<Self>,
     ) {
-        self.line_numbers = mode;
+        self.with_app(cx, |app| app.line_numbers = mode);
         cx.set_global(crate::linenumbers::UiSettings { line_numbers: mode });
         self.persist_line_numbers(cx);
         cx.notify();
@@ -777,10 +869,10 @@ impl ShellView {
     /// Persist `[ui] line_numbers`, off the UI thread — the exact
     /// contract of [`Self::persist_find_style`] above.
     pub(super) fn persist_line_numbers(&self, cx: &mut Context<Self>) {
-        let Some(dir) = self.user_dir.clone() else {
+        let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let mode = self.line_numbers;
+        let mode = self.app.read(cx).line_numbers();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = crate::linenumbers::persist_to_user_config(&dir, mode) {
                 tracing::warn!(target: "geode::config", "line numbers not saved: {e}");
@@ -794,8 +886,8 @@ impl ShellView {
     /// the field and re-pulls itself, since it must not persist what it
     /// just read.
     pub(crate) fn set_link_filter(&mut self, on: bool, cx: &mut Context<Self>) {
-        self.link_include_tile_filter = on;
-        if let Some(dir) = self.user_dir.clone() {
+        self.with_app(cx, |app| app.link_include_tile_filter = on);
+        if let Some(dir) = self.user_dir(cx) {
             crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
                 if let Err(e) = crate::linkfilter::persist_to_user_config(&dir, on) {
                     tracing::warn!(target: "geode::config", "link filter setting not saved: {e}");
@@ -814,8 +906,8 @@ impl ShellView {
     /// one setter; a hot reload writes the field and the global itself,
     /// since it must not persist what it just read.
     pub(crate) fn set_default_source(&mut self, source: Option<String>, cx: &mut Context<Self>) {
-        self.default_source = source.clone();
-        let mut series = crate::series::SeriesSettings::from_config(&self.services.config);
+        self.with_app(cx, |app| app.default_source = source.clone());
+        let mut series = crate::series::SeriesSettings::from_config(&self.services(cx).config);
         series.default_source = source;
         cx.set_global(series);
         self.persist_default_source(cx);
@@ -826,10 +918,10 @@ impl ShellView {
     /// exact contract of [`Self::persist_find_style`] above; `(none)` is
     /// `None`, which REMOVES the key.
     pub(super) fn persist_default_source(&self, cx: &mut Context<Self>) {
-        let Some(dir) = self.user_dir.clone() else {
+        let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let source = self.default_source.clone();
+        let source = self.app.read(cx).default_source().map(str::to_string);
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = crate::series::persist_to_user_config(&dir, source.as_deref()) {
                 tracing::warn!(target: "geode::config", "default source not saved: {e}");
@@ -841,10 +933,10 @@ impl ShellView {
     /// Persist `[tiles] add`, off the UI thread — the exact contract of
     /// [`Self::persist_find_style`] just above.
     pub(super) fn persist_add_direction(&self, cx: &mut Context<Self>) {
-        let Some(dir) = self.user_dir.clone() else {
+        let Some(dir) = self.user_dir(cx) else {
             return;
         };
-        let direction = self.add_direction;
+        let direction = self.app.read(cx).add_direction();
         crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
             if let Err(e) = crate::tileadd::persist_to_user_config(&dir, direction) {
                 tracing::warn!(target: "geode::config", "add direction not saved: {e}");
@@ -880,7 +972,7 @@ impl ShellView {
         }
         // The scope field is the active workspace's, as its subscription is.
         let frame_text = self
-            .active_frame()
+            .active_frame(cx)
             .read(cx)
             .scope()
             .text
@@ -956,7 +1048,7 @@ impl ShellView {
                     }
                     let stack = [KeyContext::new("workspace")];
                     let action = self
-                        .single_keystroke_binding(&ks, &stack)
+                        .single_keystroke_binding(&ks, &stack, cx)
                         .map(|binding| binding.action.clone());
                     if let Some(action) = action
                         && dialog::opens_dialog(&action)
@@ -1022,7 +1114,7 @@ impl ShellView {
             {
                 let stack = [KeyContext::new("workspace")];
                 let action = self
-                    .single_keystroke_binding(&ks, &stack)
+                    .single_keystroke_binding(&ks, &stack, cx)
                     .map(|binding| binding.action.clone());
                 tracing::debug!(
                     target: "geode::shell",
@@ -1050,7 +1142,7 @@ impl ShellView {
                     });
                     // The session opened on the active lane (the field's
                     // `Focus` subscription); the revert ends it there.
-                    self.active_frame().update(cx, |f, cx| {
+                    self.active_frame(cx).update(cx, |f, cx| {
                         let mut reverted = f.scope().clone();
                         reverted.text = (!base.trim().is_empty()).then_some(base);
                         let changed = f.set_scope_in_session(reverted);
@@ -1082,7 +1174,7 @@ impl ShellView {
         if let Some(stack) = self.occupant_insert_stack(window, cx) {
             let ks = convert_keystroke(&event.keystroke);
             let resolved = ks.as_ref().and_then(|ks| {
-                self.single_keystroke_binding(ks, &insert_contexts(&stack, ks))
+                self.single_keystroke_binding(ks, &insert_contexts(&stack, ks), cx)
                     .map(|binding| binding.action.clone())
             });
             // Debug-level, never formatted unless `geode::shell` is at
@@ -1189,7 +1281,9 @@ impl ShellView {
             && (self.tile_drag.is_some() || self.divider_drag.is_some())
         {
             self.cancel_tile_drag();
-            self.cancel_divider_drag();
+            if self.cancel_divider_drag() {
+                self.mark_session_dirty(cx);
+            }
             cx.notify();
             return;
         }
@@ -1200,7 +1294,7 @@ impl ShellView {
         let stack = self.context_stack(cx);
         let result = self
             .matcher
-            .press(&self.services.keymap, keystroke.clone(), &stack);
+            .press(&self.services(cx).keymap, keystroke.clone(), &stack);
         // The matcher's answer beside the stack it was asked against —
         // the context names and their `mode` pairs are what decide a
         // binding, so a surprising resolution reads straight off this line.

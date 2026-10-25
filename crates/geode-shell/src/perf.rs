@@ -112,6 +112,19 @@ impl FrameHistogram {
         }
     }
 
+    /// Add every count of `other` to this histogram: the sum of two
+    /// windows' frame intervals, so one diagnostics copy covers every
+    /// window. Saturating like the record path; the maximum is the larger.
+    pub fn merge(&mut self, other: &FrameHistogram) {
+        for (mine, theirs) in self.buckets.iter_mut().zip(&other.buckets) {
+            *mine = mine.saturating_add(*theirs);
+        }
+        self.overflow = self.overflow.saturating_add(other.overflow);
+        self.count = self.count.saturating_add(other.count);
+        self.max_micros = self.max_micros.max(other.max_micros);
+        self.discarded_idle = self.discarded_idle.saturating_add(other.discarded_idle);
+    }
+
     /// Count (without recording) an interval the caller classified as an
     /// idle gap (>= [`IDLE_CUTOFF`]).
     #[inline]

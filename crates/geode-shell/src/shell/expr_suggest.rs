@@ -54,7 +54,7 @@ pub(crate) fn completion_mut(view: &mut ShellView) -> Option<&mut ExprCompletion
 fn values_scope(view: &ShellView, cx: &App) -> Option<Scope> {
     match view.top_kind() {
         Some(DialogKind::ScopeExpr) => {
-            let current = view.target_frame().read(cx).scope();
+            let current = view.target_frame(cx).read(cx).scope();
             let state = view.scope_expr_dialog.as_ref()?;
             Some(scope_expr_view::request_scope(
                 &state.mode,
@@ -117,9 +117,10 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
     let Some(scope) = values_scope(view, cx) else {
         return;
     };
-    let as_of = view.target_frame().read(cx).as_of().clone();
-    view.next_picker_tag += 1;
-    let tag = view.next_picker_tag;
+    let as_of = view.target_frame(cx).read(cx).as_of().clone();
+    // The app's one tag counter, so no window's reply matches another's;
+    // an input event or dispatch path, never render.
+    let tag = view.with_app(cx, |app| app.next_tag());
     let vocab = view.expr_vocab.clone();
     let resolved = scope.resolve(view.frame.read(cx).named_expressions());
     let Some(c) = completion_mut(view) else {
@@ -135,14 +136,17 @@ fn request_values(view: &mut ShellView, column: String, cx: &mut Context<ShellVi
             return;
         }
     };
-    cx.emit(ShellEvent::DistinctRequested(DistinctParams {
+    // The app emits for the bridge; this window only asks.
+    let params = DistinctParams {
         key: EXPR_KEY,
         tag,
         column,
         scope,
         as_of,
         dataset: None,
-    }));
+    };
+    view.app
+        .update(cx, |_, cx| cx.emit(ShellEvent::DistinctRequested(params)));
 }
 
 /// An `EXPR_KEY` reply. A covered dialog's field still owns its outstanding

@@ -6,8 +6,18 @@ use geode_shell::actions::ActionRegistry;
 use geode_shell::defaults;
 use geode_shell::keymap::{KeyContext, MatchResult, Matcher, build_keymap, parse_keystroke};
 use geode_shell::tiling::{
-    DockSide, FocusRegion, Orientation, Rect, Workspaces, apply_workspace_action,
+    DockSide, FocusRegion, Orientation, Rect, Switch, WindowKey, Workspaces, apply_workspace_action,
 };
+
+/// The one window these keyboard pipelines drive.
+const W: WindowKey = WindowKey(1);
+
+/// A collection with `W` open on workspace 1, as the shell's first window is.
+fn one_window() -> Workspaces {
+    let mut ws = Workspaces::new();
+    ws.add_window(W, 1);
+    ws
+}
 
 #[test]
 fn keystrokes_drive_the_tiling_tree() {
@@ -20,7 +30,7 @@ fn keystrokes_drive_the_tiling_tree() {
 
     let stack = vec![KeyContext::new("workspace")];
     let mut matcher = Matcher::default();
-    let mut ws = Workspaces::new();
+    let mut ws = one_window();
     // Presses a single (non-sequence) keystroke and expects it to resolve
     // to a matched action immediately.
     let press = |matcher: &mut Matcher, ws: &mut Workspaces, key: &str| {
@@ -28,7 +38,7 @@ fn keystrokes_drive_the_tiling_tree() {
         match matcher.press(&keymap, ks, &stack) {
             MatchResult::Matched { action, .. } => {
                 assert!(
-                    apply_workspace_action(ws, &action),
+                    apply_workspace_action(ws, W, &action),
                     "unhandled action {action}"
                 );
             }
@@ -38,35 +48,52 @@ fn keystrokes_drive_the_tiling_tree() {
 
     // Create two tiles side by side directly. The shell's add path uses the same tree
     // operation; the keyboard pipeline below exercises their layout.
-    ws.split_active(Orientation::Horizontal);
-    ws.split_active(Orientation::Horizontal);
-    assert_eq!(ws.active().tree().tiles().len(), 2);
+    ws.split_in(W, Orientation::Horizontal);
+    ws.split_in(W, Orientation::Horizontal);
+    assert_eq!(ws.workspace(W).tree().tiles().len(), 2);
 
     // mod+h: focus left tile (direct binding); then stack a third tile
     // under it.
     press(&mut matcher, &mut ws, "mod+h");
-    ws.split_active(Orientation::Vertical);
-    assert_eq!(ws.active().tree().tiles().len(), 3);
-    let rects = ws.active().tree().layout(Rect::UNIT);
+    ws.split_in(W, Orientation::Vertical);
+    assert_eq!(ws.workspace(W).tree().tiles().len(), 3);
+    let rects = ws.workspace(W).tree().layout(Rect::UNIT);
     assert_eq!(rects.len(), 3);
 
     // mod+f: fullscreen the focused tile — only one visible.
     press(&mut matcher, &mut ws, "mod+f");
-    assert_eq!(ws.active().tree().layout(Rect::UNIT).len(), 1);
+    assert_eq!(ws.workspace(W).tree().layout(Rect::UNIT).len(), 1);
     press(&mut matcher, &mut ws, "mod+f");
 
     // mod+2: switch to an empty workspace; mod+1: back with tiles intact.
-    press(&mut matcher, &mut ws, "mod+2");
-    assert!(ws.active().is_empty());
-    press(&mut matcher, &mut ws, "mod+1");
-    assert_eq!(ws.active().tree().tiles().len(), 3);
+    // A switch resolves through the keymap like any other action, but the
+    // shell applies it itself (`Workspaces::switch`) rather than through
+    // the router, since the outcome decides whether another window acts.
+    let switch = |matcher: &mut Matcher, ws: &mut Workspaces, key: &str, n: u8| {
+        let ks = parse_keystroke(key, mod_alias).unwrap();
+        match matcher.press(&keymap, ks, &stack) {
+            MatchResult::Matched { action, .. } => {
+                assert_eq!(action.0, format!("workspace::switch_{n}"));
+                assert!(
+                    !apply_workspace_action(ws, W, &action),
+                    "a switch is the shell's, not the router's"
+                );
+                assert_ne!(ws.switch(W, n), Switch::Invalid);
+            }
+            other => panic!("expected a match for {key}, got {other:?}"),
+        }
+    };
+    switch(&mut matcher, &mut ws, "mod+2", 2);
+    assert!(ws.workspace(W).is_empty());
+    switch(&mut matcher, &mut ws, "mod+1", 1);
+    assert_eq!(ws.workspace(W).tree().tiles().len(), 3);
 
     // Directional focus works through the same pipeline (mod+l).
-    let before = ws.active().tree().focused();
+    let before = ws.workspace(W).tree().focused();
     press(&mut matcher, &mut ws, "mod+l");
-    assert_ne!(ws.active().tree().focused(), before);
+    assert_ne!(ws.workspace(W).tree().focused(), before);
     assert!(
-        ws.active()
+        ws.workspace(W)
             .tree()
             .neighbor(geode_shell::tiling::Direction::Left)
             .is_some()
@@ -76,17 +103,17 @@ fn keystrokes_drive_the_tiling_tree() {
     // (ctrl+alt+left = workspace::move_left), same pipeline. (The builtin
     // keymap has no sequence bindings anymore; sequence matching itself is
     // covered by keymap_integration's desk-layer "g g" binding.)
-    let layout_before = ws.active().tree().layout(Rect::UNIT);
+    let layout_before = ws.workspace(W).tree().layout(Rect::UNIT);
     press(&mut matcher, &mut ws, "ctrl+alt+left");
-    assert_ne!(ws.active().tree().layout(Rect::UNIT), layout_before);
+    assert_ne!(ws.workspace(W).tree().layout(Rect::UNIT), layout_before);
 
     // mod+e: toggle the focused tile's parent split orientation — geometry
     // changes, tile count doesn't.
-    let layout_before = ws.active().tree().layout(Rect::UNIT);
+    let layout_before = ws.workspace(W).tree().layout(Rect::UNIT);
     press(&mut matcher, &mut ws, "mod+e");
-    assert_ne!(ws.active().tree().layout(Rect::UNIT), layout_before);
+    assert_ne!(ws.workspace(W).tree().layout(Rect::UNIT), layout_before);
     assert_eq!(
-        ws.active().tree().layout(Rect::UNIT).len(),
+        ws.workspace(W).tree().layout(Rect::UNIT).len(),
         layout_before.len()
     );
 
@@ -98,7 +125,7 @@ fn keystrokes_drive_the_tiling_tree() {
         MatchResult::Matched { action, .. } => {
             assert_eq!(action.0, "workspace::duplicate_horizontal");
             assert!(
-                !apply_workspace_action(&mut ws, &action),
+                !apply_workspace_action(&mut ws, W, &action),
                 "duplicate is the shell's verb, not the tiling router's"
             );
         }
@@ -120,13 +147,13 @@ fn keystrokes_drive_the_docks() {
 
     let stack = vec![KeyContext::new("workspace")];
     let mut matcher = Matcher::default();
-    let mut ws = Workspaces::new();
+    let mut ws = one_window();
     let press = |matcher: &mut Matcher, ws: &mut Workspaces, key: &str| {
         let ks = parse_keystroke(key, mod_alias).unwrap();
         match matcher.press(&keymap, ks, &stack) {
             MatchResult::Matched { action, .. } => {
                 assert!(
-                    apply_workspace_action(ws, &action),
+                    apply_workspace_action(ws, W, &action),
                     "unhandled action {action}"
                 );
             }
@@ -135,51 +162,82 @@ fn keystrokes_drive_the_docks() {
     };
 
     // Two tiles; ctrl+{ parks the focused one in the left dock.
-    ws.split_active(Orientation::Horizontal);
-    ws.split_active(Orientation::Horizontal);
+    ws.split_in(W, Orientation::Horizontal);
+    ws.split_in(W, Orientation::Horizontal);
     press(&mut matcher, &mut ws, "ctrl+{");
-    assert!(!ws.active().docks().get(DockSide::Left).tree().is_empty());
-    assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
-    assert_eq!(ws.active().tree().tiles().len(), 1);
+    assert!(
+        !ws.workspace(W)
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .is_empty()
+    );
+    assert_eq!(ws.workspace(W).region(), FocusRegion::Dock(DockSide::Left));
+    assert_eq!(ws.workspace(W).tree().tiles().len(), 1);
 
     // Splitting inside the focused dock adds a second tile to its tree.
-    ws.split_active(Orientation::Vertical);
+    ws.split_in(W, Orientation::Vertical);
     assert_eq!(
-        ws.active().docks().get(DockSide::Left).tree().tiles().len(),
+        ws.workspace(W)
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .tiles()
+            .len(),
         2
     );
-    assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Left));
+    assert_eq!(ws.workspace(W).region(), FocusRegion::Dock(DockSide::Left));
 
     // ctrl+? relocates the dock's focused tile dock-to-dock (left →
     // bottom); the other tile stays in the still-visible left dock.
     press(&mut matcher, &mut ws, "ctrl+?");
     assert_eq!(
-        ws.active().docks().get(DockSide::Left).tree().tiles().len(),
+        ws.workspace(W)
+            .docks()
+            .get(DockSide::Left)
+            .tree()
+            .tiles()
+            .len(),
         1
     );
-    assert!(ws.active().docks().get(DockSide::Left).visible());
-    assert!(!ws.active().docks().get(DockSide::Bottom).tree().is_empty());
-    assert_eq!(ws.active().region(), FocusRegion::Dock(DockSide::Bottom));
+    assert!(ws.workspace(W).docks().get(DockSide::Left).visible());
+    assert!(
+        !ws.workspace(W)
+            .docks()
+            .get(DockSide::Bottom)
+            .tree()
+            .is_empty()
+    );
+    assert_eq!(
+        ws.workspace(W).region(),
+        FocusRegion::Dock(DockSide::Bottom)
+    );
 
     // shift+up grows the focused bottom dock (lone tile inside: no
     // divider to move, so the press falls through to the frame).
-    let before = ws.active().docks().get(DockSide::Bottom).size();
+    let before = ws.workspace(W).docks().get(DockSide::Bottom).size();
     press(&mut matcher, &mut ws, "shift+up");
-    assert!(ws.active().docks().get(DockSide::Bottom).size() > before);
+    assert!(ws.workspace(W).docks().get(DockSide::Bottom).size() > before);
 
     // ctrl+/ hides it (tree kept; focus falls back to Main — the main
     // tree is non-empty, the only end-to-end pin of the hide-fallback
     // path); ctrl+/ shows it again.
     press(&mut matcher, &mut ws, "ctrl+/");
-    assert!(!ws.active().docks().get(DockSide::Bottom).visible());
-    assert!(!ws.active().docks().get(DockSide::Bottom).tree().is_empty());
-    assert_eq!(ws.active().region(), FocusRegion::Main);
+    assert!(!ws.workspace(W).docks().get(DockSide::Bottom).visible());
+    assert!(
+        !ws.workspace(W)
+            .docks()
+            .get(DockSide::Bottom)
+            .tree()
+            .is_empty()
+    );
+    assert_eq!(ws.workspace(W).region(), FocusRegion::Main);
     press(&mut matcher, &mut ws, "ctrl+/");
-    assert!(ws.active().docks().get(DockSide::Bottom).visible());
+    assert!(ws.workspace(W).docks().get(DockSide::Bottom).visible());
 
     // ctrl+] shows the (empty) right dock; ctrl+] hides it again.
     press(&mut matcher, &mut ws, "ctrl+]");
-    assert!(ws.active().docks().get(DockSide::Right).visible());
+    assert!(ws.workspace(W).docks().get(DockSide::Right).visible());
     press(&mut matcher, &mut ws, "ctrl+]");
-    assert!(!ws.active().docks().get(DockSide::Right).visible());
+    assert!(!ws.workspace(W).docks().get(DockSide::Right).visible());
 }

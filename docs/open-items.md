@@ -128,6 +128,22 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Control affordance minors: the sidebar's `w_full` click target is wider than its
   24 px hover disc; `value_chip` copies its selector into a `SharedString` per
   render; the pressed-vs-hover distinctness (1.05) is not sweep-calibrated.
+- Multi-window catalog as-of: an explicit catalog request from a window that is
+  not the oldest, with no diagnostics page open anywhere, is submitted at the
+  oldest window's lane as-of, because `Diagnostics`' single catalog bit carries
+  no requester and the app bridge reads the as-of from the diagnostics-page
+  window, else the oldest. Fix: a requester (window key) on the catalog request.
+  Check: pin a different as-of in a second window and request the catalog there.
+- Multi-window catalog: two windows with diagnostics pages on different as-ofs
+  share one catalog, the pre-existing single-catalog limit, now reachable; the
+  later request's as-of wins for both pages.
+- Window placement limits: `Placement::Beside` cascades from the spawner's
+  restore frame (`WindowBounds::get_bounds`), so a maximized spawner's new window
+  lands at its pre-maximize frame plus 28 px, not beside the maximized window;
+  and the clamp is against the display's bounds, not its visible frame, so macOS
+  nudges a window clamped to the top edge off the menu bar (a dock or taskbar
+  can cover a bottom-clamped one). Check: tear out from a maximized window, and
+  from a window in a display's far corner.
 
 ### Display checks
 
@@ -201,6 +217,13 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Selection outline at gpui-component 0.6.2 (upstream #3108 dropped it): the
   market-data cursor cell and the blotter selected row.
 - `config::open_directory` opens the config directory in Finder.
+- Windows across displays (owner-run, two displays): tear a workspace out
+  (`window::tear_out` from the palette), drag the new window to the second
+  display, quit, relaunch: both windows return to their displays and sizes; a
+  window maximized at quit reopens maximized; closing a non-last window keeps the
+  first open, and `session.toml` on disk still lists the closed window's tiles
+  under their workspace; a second window opened on one display (`window::open`)
+  cascades 28 px from its spawner and stays inside the display.
 
 ## Keymaps and input
 
@@ -577,11 +600,24 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   emitter had when it last posted; a lane scope edit or a pin/unpin since then
   is not reflected. Only the emitter's header warns. Consider a follower-side
   stale cue.
-- Decision: rulings not yet confirmed by the owner: density fill opacity 0.3, the
-  demo's switch to a Hart double-precision normal CDF, the floor kink in the wide
-  call wing. Expiry hues 21 positions apart sit about 8° apart.
+- Decision: rulings not yet confirmed by the owner: the demo's switch to a Hart
+  double-precision normal CDF, the floor kink in the wide call wing. Expiry hues
+  21 positions apart sit about 8° apart. (The density fill opacity is 0.12, chosen
+  with the owner in the 2026-10-16 polish.)
+- The density axis is named only by the header's `density` chip; the right axis
+  column itself carries no title. Consider axis titles in the chart kit if a
+  second right-axis quantity arrives.
 
 ### Display checks
+
+- The 2026-10-16 polish: hollow chain diamonds over half-alpha bars at the
+  default view and zoomed in, on light and dark themes; the solid zero rule in
+  the difference pane; the density tint at 0.12; the underlying and coordinate
+  triggers and their popups (the picker under the underlying, the coordinate
+  menu under its trigger, the `⋯` menu still at the right); `+ diff` and the
+  `density` chip; the strip's third lane visible on every row; the cursor on the
+  first active row after a restart; the `Underlying…` button in the empty state;
+  `j / k` in the footer hints.
 
 - Link chooser rows; solid group chips including on Alduin and Solarized Light,
   letter polarity differing between chips on 15 themes; the `following A · SPX.Z`
@@ -1172,7 +1208,9 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   browse click that opened a stage does not also open a field" (needs a real
   ancestor mouse-down focus GPUI test); "mdtable: a click while editing cancels the
   editor" (re-anchor to `pointer()`'s close); "mdedit: a commit whose cell moved
-  under it is refused"; "service: a forget to a non-local
+  under it is refused" (its caller's own cell-gone arm returns before the mutated
+  inner guard, so the named test cannot reach the site; a reordered-with-same-row-count
+  route or the choice/option-cycle paths would); "service: a forget to a non-local
   dataset is queued"; "volslice: a refused read under unmoved versions is retried
   by a scope change"; "objectdialog: the tick's click does not stop propagation"
   reports `caught*`; plus the pricer entry above.

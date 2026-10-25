@@ -198,6 +198,25 @@ pub fn effective_binding<'a>(bindings: &'a [Binding], action: &ActionId) -> Opti
         .map(|(_, b)| b)
 }
 
+/// The live binding of `action` on exactly `keystrokes`, if the keymap has
+/// one that nothing later shadows: a caller that would rather show one of
+/// an action's several keys (the `j` of a `j`/`down` pair) asks whether
+/// that key still reaches it before falling back to [`effective_binding`].
+/// Shadowing uses the same source-string approximation.
+pub fn live_binding_on<'a>(
+    bindings: &'a [Binding],
+    action: &ActionId,
+    keystrokes: &[Keystroke],
+) -> Option<&'a Binding> {
+    bindings
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, b)| b.action == *action && b.keystrokes == keystrokes)
+        .find(|(i, b)| !is_shadowed(bindings, *i, b))
+        .map(|(_, b)| b)
+}
+
 /// The effective binding for `action` among the builtin and desk layers alone:
 /// what the action falls back to once every user override is gone. Shadowing
 /// uses [`effective_binding`]'s source-string approximation.

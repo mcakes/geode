@@ -7,9 +7,11 @@ use crate::defaults::{
     BUILTIN_KEYMAP, default_mod, register_builtin_actions, register_pick_actions,
     register_scope_actions,
 };
+use crate::fontsize::FontSize;
 use crate::keymap::build_keymap;
 use crate::module::recording::RecordingPageFactory;
 use crate::tiling::{DockSide, Rect};
+use crate::vimfind::FindStyle;
 use geode_core::config::{ConfigSources, Layer, LayerDoc};
 use gpui::{MouseButton, MouseDownEvent, MouseUpEvent, div, px};
 use gpui_component::{Root, TITLE_BAR_HEIGHT};
@@ -249,6 +251,7 @@ pub(super) fn services_with_recorders(
         composition_diagnostics: Vec::new(),
         pages: crate::module::PageRoster::new(),
         restored_pages: std::collections::BTreeMap::new(),
+        restored_windows: Vec::new(),
     }
 }
 
@@ -374,11 +377,125 @@ fn services_with_recorder_focus_inner() -> (
     (services, log, focus)
 }
 
+/// The app-level owner every test window reads its services from — the
+/// production `main` builds the same entity once before `open_window`.
+pub(super) fn test_app(
+    cx: &mut gpui::TestAppContext,
+    services: ShellServices,
+    user_dir: Option<PathBuf>,
+) -> Entity<ShellApp> {
+    cx.update(|cx| cx.new(|cx| ShellApp::new(services, None, user_dir, cx)))
+}
+
+/// The shared workspaces behind `shell`, read through its app entity.
+pub(super) fn ws<'a>(shell: &Entity<ShellView>, cx: &'a App) -> &'a Workspaces {
+    shell.read(cx).workspaces(cx)
+}
+
+/// Build into `ws` before any window exists, as a restored session's
+/// tiles are: a scratch window opens on the initial index, `f` builds
+/// through it, and it closes again, leaving the workspaces materialised
+/// and unhosted for the shell's first window to take. `ShellApp` issues
+/// keys from 1, so the scratch key never collides with a real window's.
+pub(super) fn before_any_window<R>(
+    ws: &mut Workspaces,
+    f: impl FnOnce(&mut Workspaces, WindowKey) -> R,
+) -> R {
+    const SCRATCH: WindowKey = WindowKey(0);
+    let n = ws.initial_index();
+    ws.add_window(SCRATCH, n);
+    let out = f(ws, SCRATCH);
+    ws.remove_window(SCRATCH);
+    out
+}
+
+/// A `ShellView` over a fresh `ShellApp` for one window — the shape of
+/// `main`'s `open_window` closure, for the fixtures here that open their
+/// window themselves rather than through [`open_shell`].
+pub(super) fn view_for_test(
+    services: ShellServices,
+    user_dir: Option<PathBuf>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<ShellView> {
+    let app = cx.new(|cx| ShellApp::new(services, None, user_dir, cx));
+    let key = app.update(cx, |a, cx| a.add_window(None, cx));
+    cx.new(|cx| ShellView::new(app, key, window, cx))
+}
+
 pub(super) fn open_shell(
     cx: &mut gpui::TestAppContext,
     services: ShellServices,
 ) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
     open_shell_inner(cx, services, None)
+}
+
+/// Open a window over an existing app entity — what a test of two windows
+/// sharing one `ShellApp` needs; [`open_shell`] builds the app itself.
+/// Every window here opens through the production route: the test opener
+/// is installed on the app and `ShellApp::open_window` reserves, opens
+/// and confirms, the first window on the session's initial index and
+/// each later one on `lowest_free`, as `add_window(None)` chose.
+pub(super) fn open_shell_on(
+    cx: &mut gpui::TestAppContext,
+    app: Entity<ShellApp>,
+) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
+    cx.update(gpui_component::init);
+    cx.update(crate::shell::dialog::init_reclaimed_keybindings);
+    let window = open_window_on(cx, app);
+    let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+    vcx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    (window, vcx)
+}
+
+/// The harness's `WindowOpener`: a `Root` over a `ShellView` for the
+/// reserved key, in a default test window. The closure captures the app
+/// entity; it runs with no lease on it, as the production opener does.
+pub(super) fn test_opener(app: Entity<ShellApp>) -> crate::shell::WindowOpener {
+    std::rc::Rc::new(move |key, _spec, cx: &mut App| {
+        let app = app.clone();
+        cx.open_window(gpui::WindowOptions::default(), |window, cx| {
+            let view = cx.new(|cx| ShellView::new(app, key, window, cx));
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .ok()
+        .map(Into::into)
+    })
+}
+
+/// Install the test opener on `app` (again is harmless: the closure is
+/// the same) and open a window through `ShellApp::open_window`; the one
+/// window-opening route every fixture here takes. The typed handle comes
+/// back from the registry, which the opened view's constructor filled.
+fn open_window_on(
+    cx: &mut gpui::TestAppContext,
+    app: Entity<ShellApp>,
+) -> gpui::WindowHandle<Root> {
+    cx.update(|cx| {
+        app.update(cx, |a, _| a.set_window_opener(test_opener(app.clone())));
+        let workspace = {
+            let workspaces = &app.read(cx).services().workspaces;
+            if workspaces.windows().next().is_none() {
+                WorkspaceIx::new(workspaces.initial_index()).expect("1–9")
+            } else {
+                workspaces
+                    .lowest_free()
+                    .expect("nine windows already show every workspace")
+            }
+        };
+        let spec = crate::shell::WindowSpec {
+            workspace,
+            placement: crate::shell::Placement::Default,
+        };
+        let key = ShellApp::open_window(&app, spec, cx).expect("the test opener opens");
+        app.read(cx)
+            .handle(key)
+            .expect("the opened window registered")
+            .downcast::<Root>()
+            .expect("a Root over the ShellView")
+    })
 }
 
 /// [`open_shell`] with a real, writable user config directory — the one
@@ -401,21 +518,8 @@ fn open_shell_inner(
     services: ShellServices,
     user_dir: Option<PathBuf>,
 ) -> (gpui::WindowHandle<Root>, gpui::VisualTestContext) {
-    cx.update(gpui_component::init);
-    cx.update(crate::shell::dialog::init_reclaimed_keybindings);
-    let window = cx
-        .update(|cx| {
-            cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, user_dir, window, cx));
-                cx.new(|cx| Root::new(view, window, cx))
-            })
-        })
-        .unwrap();
-    let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
-    vcx.update(|window, cx| {
-        let _ = window.draw(cx);
-    });
-    (window, vcx)
+    let app = test_app(cx, services, user_dir);
+    open_shell_on(cx, app)
 }
 
 pub(super) fn shell_of(
@@ -425,6 +529,27 @@ pub(super) fn shell_of(
     window.root(cx).unwrap().read_with(cx, |root, _| {
         root.view().clone().downcast::<ShellView>().unwrap()
     })
+}
+
+/// The watcher tick's snapshot step, taken directly on the app behind a
+/// shell — the session's owner and its one writer. Through the app
+/// entity, never from inside the shell's own `update`: the app reads
+/// every registered view's records, that shell's included.
+pub(super) trait SessionWriteExt {
+    fn take_dirty_session_write(
+        &self,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<(PathBuf, String)>;
+}
+
+impl SessionWriteExt for Entity<ShellView> {
+    fn take_dirty_session_write(
+        &self,
+        cx: &mut gpui::VisualTestContext,
+    ) -> Option<(PathBuf, String)> {
+        let app = self.read_with(cx, |s, _| s.app().clone());
+        app.update(cx, |app, cx| app.take_dirty_session_write(cx))
+    }
 }
 
 /// Dispatch an action through `ShellView::dispatch`, the common path for keymap,
@@ -451,7 +576,7 @@ pub(super) fn dock_test_shell(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -522,7 +647,7 @@ fn dialog_test_shell_in(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, user_dir, window, cx));
+                let view = view_for_test(services, user_dir, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -693,3 +818,4 @@ mod stacks;
 mod tilepicker;
 mod tiling_keys;
 mod volviews_dialog;
+mod windows;

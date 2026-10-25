@@ -106,7 +106,7 @@ fn switching_and_pinning_are_refused_behind_a_dialog(cx: &mut gpui::TestAppConte
             "{id} must be refused with the notice"
         );
         assert_eq!(
-            shell.read_with(&vcx, |s, _| s.active_ix()),
+            shell.read_with(&vcx, |s, cx| s.shown_ix(cx)),
             WorkspaceIx::FIRST,
             "{id} must not switch the workspace"
         );
@@ -435,7 +435,7 @@ fn a_switch_between_unpinned_workspaces_keeps_the_field_session(cx: &mut gpui::T
         let _ = window.draw(cx);
     });
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.active_ix()),
+        shell.read_with(&vcx, |s, cx| s.shown_ix(cx)),
         ws(3),
         "the chord switched workspaces, so the kept session is not vacuous"
     );
@@ -581,7 +581,7 @@ fn a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it(cx: &mut gpui
     });
     vcx.run_until_parked();
     // Baseline: whatever startup left dirty is written first.
-    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+    let _ = shell.take_dirty_session_write(&mut vcx);
 
     dispatch_and_draw(&shell, &mut vcx, "workspace::switch_2");
     dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
@@ -594,7 +594,7 @@ fn a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it(cx: &mut gpui
     });
 
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("a pin and a pinned-lane edit dirty the session");
     let restored = crate::session::from_toml(&text.parse().unwrap()).unwrap();
     let record = restored
@@ -610,13 +610,14 @@ fn a_pinned_lane_reaches_both_session_writes_and_an_unpin_drops_it(cx: &mut gpui
         "the pinned lane's scope is not the shared record's"
     );
 
-    shell.read_with(&vcx, |s, cx| s.save_session(cx));
+    let shell_app = shell.read_with(&vcx, |s, _| s.app().clone());
+    cx.update(|cx| ShellApp::save_session(&shell_app, None, cx));
     let saved = crate::session::load(&session_path);
     assert_eq!(saved.pinned.get(&ws(2)), Some(record), "the quit save too");
 
     dispatch_and_draw(&shell, &mut vcx, "frame::pin_workspace");
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("an unpin dirties the session");
     let restored = crate::session::from_toml(&text.parse().unwrap()).unwrap();
     assert!(

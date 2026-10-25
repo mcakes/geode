@@ -16754,7 +16754,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
         use geode_shell::defaults::{
             BUILTIN_KEYMAP, default_mod, register_add_actions, register_builtin_actions,
         };
-        use geode_shell::shell::{ShellServices, ShellView};
+        use geode_shell::shell::{ShellApp, ShellServices, ShellView};
 
         cx.update(gpui_component::init);
         cx.update(geode_shell::shell::dialog::init_reclaimed_keybindings);
@@ -16794,6 +16794,7 @@ cells = {{ ex = {{ type = "date", value = "2027-06-18" }}, amount = 0.75, status
             &geode_shell::session::PinnedRecords::new(),
             &geode_shell::palette_usage::PaletteUsage::new(),
             &geode_shell::session::PageRecords::new(),
+            &[],
         );
         let ws1: toml::Table = format!(
             r#"
@@ -16844,13 +16845,18 @@ edits = [["2026-11-20", "-1", 9.5]]
             composition_diagnostics: Vec::new(),
             pages: geode_shell::module::PageRoster::new(),
             restored_pages: std::collections::BTreeMap::new(),
+            restored_windows: Vec::new(),
         };
         let shell_slot = Rc::new(RefCell::new(None));
         let window = cx
             .update(|cx| {
                 let shell_slot = shell_slot.clone();
                 cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                    let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                    let view = {
+                        let app = cx.new(|cx| ShellApp::new(services, None, None, cx));
+                        let key = app.update(cx, |a, cx| a.add_window(None, cx));
+                        cx.new(|cx| ShellView::new(app, key, window, cx))
+                    };
                     *shell_slot.borrow_mut() = Some(view.clone());
                     cx.new(|cx| gpui_component::Root::new(view, window, cx))
                 })

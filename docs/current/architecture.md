@@ -119,8 +119,23 @@ calculator into the process does not let a module call it directly.
 
 The UI thread owns GPUI entities, rendering, input dispatch, and prepared
 presentation. It reads immutable or retained values and never performs data
-I/O. The main window contains one `ShellView`, wrapped by gpui-component's
-`Root` for window-level component facilities.
+I/O. One `ShellApp` entity is the retained owner for the process: the
+`ShellServices` (config, registry, keymap, theme, rosters and `Workspaces`),
+the config directories, the shared `Frame` and `Diagnostics` entities, the
+session (its dirty flag, baselines, palette usage and parked tile records)
+and its one writer, the app-wide settings and reload state, the six GPUI
+globals, and the one 500 ms watcher loop. Each window contains one
+`ShellView` over that one `ShellApp`, wrapped by gpui-component's `Root` for
+window-level component facilities; the view is one window's transient state,
+reads the owner through `&App` accessors under its own `WindowKey`, and reacts
+to the owner's `ShellEvent`s (a reload, a day change). The app bridge
+(`geode-app`) holds the `ShellApp` too, never a window: a data answer is
+routed by the app when it arrives, a keyed one to the window hosting its
+tile's workspace, a keyless or shell-keyed one to every window, one for a
+parked tile dropped, and the bridge's lanes run while the app's window
+registry says anything is open. See
+[state ownership](shell.md#state-ownership) and
+[routing into the windows](request-delivery.md#routing-into-the-windows).
 
 `DataService` runs on its own thread and accepts bounded, nonblocking requests
 through `DataHandle`. One ingest runner owns the DuckDB writer. A read pool
@@ -213,8 +228,11 @@ atomic write path. A module never writes configuration itself: it queues
 whole-object edits through its frame handle (`FrameRef::queue_config_edits`), and the
 shell folds them into the same debounced, user-layer batch the configuration
 dialogs use (see [the config door](shell.md#the-config-door)). The session
-file holds layout, occupants, frame state, and palette usage, with separate
-save ordering and recovery rules. See
+file holds layout, occupants, frame state, palette usage, and one record per
+open window (the workspace it shows, its display and its frame in logical
+pixels); startup reopens one window per record where it was, else one window
+on the active workspace. The file has separate save ordering and recovery
+rules. See
 [configuration](configuration.md) and [session persistence](shell.md#session-format)
 for those boundaries.
 

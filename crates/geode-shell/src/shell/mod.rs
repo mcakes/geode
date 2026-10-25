@@ -5,6 +5,7 @@
 
 mod add_tile;
 pub mod aggregates;
+pub mod app;
 pub mod asof_rows;
 pub mod asof_view;
 pub mod chip;
@@ -47,15 +48,17 @@ pub mod toolbar;
 mod value_color;
 pub mod whichkey;
 
+pub use crate::tiling::WindowKey;
+pub use app::{OpenRefusal, Placement, Route, ShellApp, Spawner, WindowOpener, WindowSpec};
 pub use keys::convert_keystroke;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 use gpui::prelude::*;
 use gpui::{
-    Context, Entity, EventEmitter, FocusHandle, Focusable as _, ScrollHandle, SharedString,
+    App, Context, Entity, FocusHandle, Focusable as _, ScrollHandle, SharedString,
     UniformListScrollHandle, Window,
 };
 use gpui_component::input::{InputEvent, InputState};
@@ -63,18 +66,14 @@ use gpui_component::input::{InputEvent, InputState};
 use crate::actions::ActionRegistry;
 use crate::commandline::CommandLine;
 use crate::diagnostics::{ActionTail, Diagnostics};
-use crate::fontsize::FontSize;
 use crate::frame::{Frame, FrameRef, FrameVersions};
 use crate::keymap::{Keymap, Matcher, Modifiers};
 use crate::log_persist;
 use crate::module::{ModuleRoster, PageRoster, TileOccupant};
 use crate::palette::PaletteState;
 use crate::perf::FrameHistogram;
-use crate::reload;
-use crate::session;
 use crate::theme::ThemeService;
-use crate::tiling::{TileId, WorkspaceIx, Workspaces};
-use crate::vimfind::FindStyle;
+use crate::tiling::{TileId, Workspace, WorkspaceIx, Workspaces};
 use geode_core::config::{Config, ConfigSources, Diagnostic, LayerDoc};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::log::{LevelControl, LogLevels, Ring};
@@ -84,8 +83,8 @@ use std::sync::{Arc, Mutex};
 
 /// Everything the shell needs to run a window, assembled once by the app
 /// from loaded config, the action registry, the compiled keymap, and the
-/// initial workspace state. `ShellView` owns this for the
-/// life of the window.
+/// initial workspace state. [`ShellApp`] owns this for the life of the
+/// process; every window's `ShellView` reads it through its app entity.
 pub struct ShellServices {
     pub config: Config,
     /// The compiled-in builtin layer used to load `config`. Hot reload reads
@@ -103,23 +102,25 @@ pub struct ShellServices {
     /// The modules the app compiled in; the shell creates tile
     /// occupants through it and never names a module crate.
     pub roster: ModuleRoster,
-    /// Module names and state from `session.toml`, consumed as the shell
-    /// creates occupants. Unavailable kinds retain their records separately.
+    /// Module names and state from `session.toml`. `ShellApp::new` parks
+    /// them; a window drains the ones it hosts at construction
+    /// (`ShellApp::take_parked_records`) and consumes each as it creates
+    /// the occupant. Unavailable kinds retain their records separately.
     pub restored_tiles: crate::session::TileRecords,
     /// Optional scope, grouping slot, and as-of from `[frame]`.
-    /// `ShellView::new` applies them and clears scope undo/redo history.
+    /// `ShellApp::new` applies them and clears scope undo/redo history.
     pub restored_frame: Option<crate::session::FrameRecord>,
     /// Pinned workspace lanes from `session.toml`'s `workspaces.N.frame`;
-    /// `ShellView::new` pins each workspace and fills its lane with clean
+    /// `ShellApp::new` pins each workspace and fills its lane with clean
     /// scope history.
     pub restored_pinned: crate::session::PinnedRecords,
     /// Link group scopes from `session.toml`'s `[links.<letter>]`, in
-    /// `Group::ALL` order; `ShellView::new` sets each non-empty one on its
+    /// `Group::ALL` order; `ShellApp::new` sets each non-empty one on its
     /// group before any tile is linked or created.
     pub restored_links: crate::session::GroupScopes,
     /// The palette's usage history from `session.toml`'s `[palette.usage]`
     /// table — empty for a fresh session and in every test setup that
-    /// doesn't opt in. `ShellView::new` takes it as the live history.
+    /// doesn't opt in. `ShellApp::new` takes it as the live history.
     pub restored_palette_usage: crate::palette_usage::PaletteUsage,
     /// Optional logging services: the diagnostics ring, runtime level control,
     /// and startup levels. The palette updates levels through this control.
@@ -162,6 +163,11 @@ pub struct ShellServices {
     /// `[pages.<kind>]` tables from the loaded session, consumed by the
     /// page's first open. Unmatched tables are carried to the next save.
     pub restored_pages: std::collections::BTreeMap<String, toml::Table>,
+    /// The last run's window records from `session.toml`'s `[windows.K]`,
+    /// in K order; empty for a fresh session and in every test setup that
+    /// doesn't opt in. `ShellApp::new` takes them for the startup that
+    /// opens a window per record (`ShellApp::take_restored_windows`).
+    pub restored_windows: Vec<crate::session::WindowRecord>,
 }
 
 /// Runtime logging services: the diagnostics ring, the palette's level
@@ -183,14 +189,62 @@ impl ShellServices {
     }
 }
 
-/// Events for the app bridge: configuration changes and distinct-value
-/// requests. The bridge submits data requests and delivers their outcomes;
-/// the shell does not depend on `geode-data`.
+/// Events [`ShellApp`] emits: configuration changes and distinct-value
+/// requests for the app bridge, and what every window reacts to in its
+/// `on_app_event` (`Reloaded`, `DayChanged`, `Park`). The bridge submits
+/// data requests and delivers their outcomes; the shell does not depend on
+/// `geode-data`.
 ///
 /// `PartialEq` follows `DistinctParams`: its scope can contain floating-point
 /// literals and therefore does not implement `Eq`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ShellEvent {
+    /// An accepted reload was applied by the app: `revision` is the new
+    /// config revision, and each flag names a per-window rebuild the
+    /// reload needs (the dimension pickers' columns, the palette's
+    /// snapshot, the link groups' composition rule, the named
+    /// expressions an open expression dialog offers). Queued after
+    /// `ConfigReloaded` and `AppSettingsReloaded`, before the frame's
+    /// notifications, so a window sees the revision only after the
+    /// bridge refreshed its views.
+    Reloaded {
+        revision: u64,
+        pickable_changed: bool,
+        palette_snapshot_changed: bool,
+        link_filter_changed: bool,
+        named_changed: bool,
+    },
+    /// The configured clock's date moved since the watcher's last tick;
+    /// every window repaints its scope bar from `ShellApp::today`.
+    DayChanged,
+    /// `workspace` has left window `window` for another (a switch that
+    /// `Moved` it, or a new window opening on it): `window` parks the
+    /// occupants it built for it (`ShellView::park_workspace`), then
+    /// answers with `ShellApp::records_parked`. Emitted by `ShellApp::switch`
+    /// and `ShellApp::add_window` once `Workspaces` has committed the move,
+    /// never for a raise, a refusal or a switch within one window.
+    Park {
+        window: WindowKey,
+        workspace: WorkspaceIx,
+    },
+    /// The window that hosted `workspace` has parked its occupants' records
+    /// (`ShellApp::parked_tiles`): the window now showing it pulls them and
+    /// rebuilds on its next draw. A second event rather than part of
+    /// `Park`, because subscriber order is not a contract: one event could
+    /// not order the source's park before the destination's pull.
+    Parked { workspace: WorkspaceIx },
+    /// Window `window` is leaving the registry (`ShellApp::window_closed`,
+    /// inside its should-close, while it still stands): its view parks the
+    /// page it holds into `ShellApp::parked_pages` (`ShellView::park_page`),
+    /// as the `Park` events that follow park its tiles. Emitted before
+    /// those parks; a page has no workspace, so no `Park` names it.
+    WindowClosing { window: WindowKey },
+    /// A window joined or left the registry (`ShellApp::open_window`
+    /// confirmed one, `ShellApp::window_closed` forgot one): every window
+    /// re-reads `ShellApp::window_title`, which names the shown index
+    /// only with two or more windows. The title is set from this event,
+    /// never from render.
+    WindowsChanged,
     /// Views, dimensions or groupings changed and were applied; the app
     /// bridge forwards the new views to the data thread.
     ConfigReloaded,
@@ -219,8 +273,6 @@ pub enum ShellEvent {
     /// can name the file.
     ReloadRejected(Vec<geode_core::config::Diagnostic>),
 }
-
-impl EventEmitter<ShellEvent> for ShellView {}
 
 /// The coalescing key the dimension pickers submit their `Request::
 /// Distinct` under. Reserved, not user-reachable: every real
@@ -456,36 +508,22 @@ pub(super) struct PendingTile {
 /// this state with the workspace and tile lifecycle.
 ///, not a static `KeyBinding` table.
 pub struct ShellView {
-    services: ShellServices,
+    /// The app-level owner of the services, config directories and
+    /// workspaces this window reads; see [`ShellApp`].
+    app: Entity<ShellApp>,
+    /// This window's identity in `app`, issued by `ShellApp::add_window`.
+    key: WindowKey,
+    /// The window this view is the root of. The app's watcher asks whether
+    /// it is still open: a host (the bridge's closures, the quit hooks) can
+    /// hold this entity past its window, and liveness is the window's.
+    window_handle: gpui::AnyWindowHandle,
     matcher: Matcher,
-    /// The effective UI font size (small/medium/large — `[ui] font_size`).
-    /// Applied as the window's rem size at the top of `render`, the one
-    /// place with a `Window` on every path that can change it (startup,
-    /// the settings control via `settings_view::set_font_size`, config hot
-    /// reload) — see the `fontsize` module doc.
-    font_size: FontSize,
-    /// The configured `/`-find style (`[ui] find_style`). Resolved at startup,
-    /// on reload, and by the settings control. Each new `/` prompt chooses
-    /// the tile's Vim event stream or the shared Fzf picker from this value.
-    find_style: FindStyle,
     focus_handle: FocusHandle,
     /// State for the open command palette, or `None`. Each open rebuilds the
     /// registry/keymap/theme snapshot and reverse binding index; closing drops
-    /// it. Usage history persists separately in `palette_usage`.
+    /// it. Usage history is the app's (`ShellApp::palette_usage`), shared
+    /// by every window and persisted with the session.
     palette: Option<PaletteState>,
-    /// How often and how recently each palette row was chosen
-    /// (`crate::palette_usage`): read once per palette open to rank the
-    /// rows (`PaletteState::with_usage`), written by every palette
-    /// dispatch but `palette::toggle`'s own row, and persisted as
-    /// `session.toml`'s `[palette.usage]` table through the same
-    /// coalesced flush the layout rides.
-    palette_usage: crate::palette_usage::PaletteUsage,
-    /// Bumped by every `palette_usage` mutation; `take_dirty_session_write`
-    /// compares it against `last_palette_usage_written`, the same shape
-    /// as `last_frame_generation_written`, so a palette dispatch that
-    /// mutates nothing else still reaches the flush.
-    palette_usage_version: u64,
-    last_palette_usage_written: u64,
     /// Open modals, bottom first. Only the last entry paints and receives keys;
     /// the rest keep their state and reappear when everything above them pops.
     /// Installed through `dialog::open_shell_dialog`. Dialog-specific data and
@@ -534,48 +572,8 @@ pub struct ShellView {
     /// capture also blurs it and restores the starting mode's focus on exit.
     /// Value and naming fields manage focus according to their own editing state.
     dialog_input: Entity<InputState>,
-    /// Config directories read by each watcher poll from the live shell state.
-    desk_dir: Option<PathBuf>,
-    user_dir: Option<PathBuf>,
-    /// Last config-directory snapshot. The first background scan replaces the
-    /// empty initial value without triggering a reload. Later scans compare
-    /// against it about every 500 ms. Scanning never runs on the UI thread.
-    last_snapshot: reload::Snapshot,
-    /// The result of the last reload attempt, `Unchanged` until the first
-    /// one runs. Drives the status bar's reload indicator.
-    last_reload: reload::ReloadOutcome,
-    /// The rejected-reload segment, prepared when `last_reload` is set.
-    pub(crate) reload_status: Option<SharedString>,
-    /// Bumped by every applied reload — the one place `services.config` and
-    /// `services.keymap` are replaced. Config dialog rows derived from either are
-    /// keyed by it (`crate::prepared`).
-    config_revision: u64,
-    /// Layout changes awaiting snapshot extraction. The periodic watcher
-    /// clears this flag before serialization and writes in the background;
-    /// it is not a record of whether the disk write succeeded.
-    session_dirty: bool,
-    /// Tile records from the last successfully serialized periodic snapshot,
-    /// initially empty. Compared every tick to catch module-only state changes.
-    /// Updated before disk I/O; a failed write does not reset this baseline.
-    last_tiles_written: crate::session::TileRecords,
-    /// Page records from the last successfully serialized periodic snapshot,
-    /// initially empty. Compared every tick like `last_tiles_written`, since
-    /// a page's state changes do not set the layout flag.
-    last_pages_written: crate::session::PageRecords,
-    /// The frame's generation counter captured by the last successfully
-    /// serialized periodic snapshot, initially zero. Every scope, grouping,
-    /// as-of, pin, and unpin change in any lane advances it, so it detects
-    /// frame-only changes; updated before the disk write completes.
-    last_frame_generation_written: u64,
-    /// The last periodic snapshot handed to the writer, as text WITHOUT the
-    /// link groups' scopes (`[links]`); `None` before the first. A group's
-    /// scope moves with an emitting tile's cursor and advances the frame
-    /// generation, so a dirty check can produce a snapshot that differs
-    /// from the last only there; that snapshot is not written. The file's
-    /// text carries the groups' scopes whenever a snapshot is written.
-    last_session_text: Option<String>,
-    /// Deferred focus restoration for paths without a `Window`, such as hot
-    /// reload closing the palette. `render` consumes it before painting. Waiting
+    /// Deferred focus restoration, armed when a reload closes the palette
+    /// (`on_app_event`). `render` consumes it before painting. Waiting
     /// for a key event is unsafe: dropping a focused overlay can leave no live
     /// focus target through which that event could reach the shell.
     pending_focus_restore: bool,
@@ -649,38 +647,34 @@ pub struct ShellView {
     /// the roster never changes after startup, and the sidebar paints from
     /// this on every render without collecting.
     page_entries: Vec<crate::module::PageEntry>,
-    /// The shared frame, created here so every occupant can hold it.
+    /// The app's shared frame (`ShellApp::frame`), cloned here so every
+    /// occupant can hold it.
     frame: Entity<Frame>,
-    /// Shared diagnostics state, fed by the app bridge and config load/reload.
-    /// Its observer drains log-level and overlay requests; the app bridge
-    /// handles catalog requests.
+    /// The app's diagnostics state (`ShellApp::diagnostics`), fed by the app
+    /// bridge and config load/reload. This window's observer drains
+    /// log-level and overlay requests; the app bridge handles catalog
+    /// requests.
     diagnostics: Entity<Diagnostics>,
     /// Pending occupant creation, addressed by the tile ID allocated or filled
     /// by `add_tile`. `ensure_occupants` consumes each request at that tile on
     /// the next render; simultaneous requests cannot replace one another.
     pending_tiles: BTreeMap<TileId, PendingTile>,
+    /// Session tile records not yet consumed by an occupant, drained from
+    /// the app's parked records at construction
+    /// (`ShellApp::take_parked_records`): a restore input, not a shared
+    /// service, so creating an occupant during render reads nothing
+    /// through the app entity's writer.
+    restored_tiles: crate::session::TileRecords,
     /// Restored records whose module factory is unavailable. `current_tiles`
     /// writes them back unchanged, preserving sessions from builds with more
     /// modules. Closing or filling their tile removes them.
     unplaced_records: crate::session::TileRecords,
-    /// `[tiles] add`: resolved at startup,
-    /// re-derived on hot reload, stepped by the settings row.
-    pub(super) add_direction: crate::tileadd::AddDirection,
-    /// `[ui] line_numbers`: same lifecycle as
-    /// `add_direction`, and additionally published as the
-    /// `linenumbers::UiSettings` global on every change so a module
-    /// (the blotter) can read and observe it — see that module's doc.
-    pub(super) line_numbers: crate::linenumbers::LineNumbers,
-    /// `[timeseries] default_source`: same
-    /// lifecycle as `line_numbers`, published with it as the
-    /// `series::SeriesSettings` global so a timeseries tile can read the
-    /// source `:add` means without a path to `ShellView`.
-    pub(super) default_source: Option<String>,
     /// The frame's `(scope, grouping, as_of)` versions as of the last
     /// `on_frame_changed` — compared against the frame's
     /// current ones there to decide whether to open a fresh flip barrier.
-    /// Seeded once in `new`, right after a restored session's scope/slot/
-    /// as-of are applied, so that restore is never itself mistaken for
+    /// Seeded once in `new`, from the frame `ShellApp::new` has already
+    /// applied a restored session's scope/slot/as-of to, so that restore is
+    /// never itself mistaken for
     /// "just changed" (which would open a barrier over whatever tiles
     /// happen to exist yet at construction time, before any occupant
     /// does).
@@ -698,11 +692,6 @@ pub struct ShellView {
     /// tile announcing anything, so the frame observer re-pulls every
     /// emitter once the generation passes this.
     last_emit_generation: u64,
-    /// Whether a posting composes the emitter's own `:filter` layer in:
-    /// `[links] include_tile_filter`, seeded from config, written by
-    /// `set_link_filter` and hot reload, each of which re-pulls every
-    /// emitter on a change.
-    link_include_tile_filter: bool,
     /// Who lives in each tile. Created lazily in `ensure_occupants` and
     /// dropped when the tile is gone from every workspace.
     occupants: HashMap<TileId, TileOccupant>,
@@ -735,6 +724,11 @@ pub struct ShellView {
     /// or a row menu action's report (`opened <url>`).
     /// Cleared at the start of the next dispatch.
     notice: Option<SharedString>,
+    /// The title last given to the platform window (`sync_title`), so the
+    /// event and dispatch paths that may have changed it set it only when
+    /// it differs. `None` until the constructor's first set. Render never
+    /// reads or sets the title.
+    last_title: Option<String>,
     /// The transient stack-member list, or
     /// `None` when closed — `open_stack_list`'s own contract, the same
     /// "nothing survives a close/reopen" shape `palette`/`command_line`
@@ -759,48 +753,6 @@ pub struct ShellView {
     /// mutation of scope/grouping/as-of, nowhere near every render, but
     /// there is no reason for it to allocate fresh every time either.
     scratch_visible_keys: Vec<QueryKey>,
-    /// Restart notice for config that differs from the running data service.
-    /// Reload compares restart-sensitive settings against their startup
-    /// baselines; restoring those values clears the notice. The status bar
-    /// paints it and the app bridge receives `ShellEvent::RestartRequired`.
-    restart_required: Option<SharedString>,
-    /// The `sources` layered doc the running `DataService` was actually
-    /// built from — captured once here at construction, since a reload
-    /// never rebuilds the data engine (see `apply_reload`'s doc comment).
-    /// `apply_reload` compares each freshly loaded config's `sources` doc
-    /// against this baseline, not against the previous reload's config,
-    /// so reverting an edit back to the value the service was built from
-    /// clears `restart_required`: the message means "what's on disk no
-    /// longer matches what's running", and a revert makes that false
-    /// again.
-    sources_baseline: Vec<LayerDoc>,
-    /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
-    /// the `datasets` doc.
-    datasets_baseline: Vec<LayerDoc>,
-    /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
-    /// the `egress` doc: nothing reloads a
-    /// resolved target's transport live, so `egress.toml` is restart-
-    /// required exactly as `sources.toml` is.
-    egress_baseline: Vec<LayerDoc>,
-    /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
-    /// the `positions` doc: the position service is resolved once at
-    /// startup, so `positions.toml` is restart-required exactly as
-    /// `egress.toml` is.
-    positions_baseline: Vec<LayerDoc>,
-    /// Same purpose as [`sources_baseline`](Self::sources_baseline), for
-    /// the `panels` doc: panels become tile kinds once at startup, so
-    /// `panels.toml` is restart-required.
-    panels_baseline: Vec<LayerDoc>,
-    /// The same, for the `scenarios` doc: each accepted shape becomes a
-    /// tile kind (and its derived view a service view) once at startup.
-    scenarios_baseline: Vec<LayerDoc>,
-    /// The startup `[pricing] adapter` value used to build the data engine.
-    /// Reload compares against this baseline to determine whether a restart is
-    /// required. The rest of `[pricing]`, including `refresh`, remains live.
-    pricing_baseline: Option<toml::Value>,
-    /// The startup `[vol] model` value used to build the data engine's vol
-    /// worker, compared on reload exactly as `pricing_baseline` is.
-    vol_baseline: Option<toml::Value>,
     /// Cached [`pickable_columns`] for the current datasets and dimensions.
     /// Reload rebuilds this list; startup registers per-column actions once.
     /// Columns added later remain reachable through the two-stage `frame::pick`
@@ -815,9 +767,6 @@ pub struct ShellView {
     /// State for the open dimension picker. Created by `picker::open` and
     /// cleared when its kind pops.
     picker: Option<picker::PickerState>,
-    /// Next distinct-request tag. Shared across picker opens so a late reply
-    /// from a closed picker cannot match a fresh request for the same column.
-    next_picker_tag: u64,
     /// Scroll handle for the picker's virtualized Values list. Selection-change
     /// paths call `picker::sync_picker_scroll` to keep keyboard navigation
     /// visible; virtualization alone does not move the viewport.
@@ -877,10 +826,6 @@ pub struct ShellView {
     /// reload was rejected. Cleared by the next accepted flush. Kept on the
     /// shell because the debounced flush may finish after its dialog closes.
     pub(crate) config_write_error: Option<SharedString>,
-    /// Today on the configured clock, refreshed by the reload poll. Rendering
-    /// uses this cached date for the scope bar instead of reading the clock on
-    /// every repaint. A date change triggers a new render.
-    pub(super) today: chrono::NaiveDate,
 }
 
 /// Compare layered config documents by layer, name, path, and table content,
@@ -895,9 +840,8 @@ fn docs_equal(a: &[LayerDoc], b: &[LayerDoc]) -> bool {
 
 impl ShellView {
     pub fn new(
-        services: ShellServices,
-        desk_dir: Option<PathBuf>,
-        user_dir: Option<PathBuf>,
+        app: Entity<ShellApp>,
+        key: WindowKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -929,12 +873,12 @@ impl ShellView {
             |view, input, event, window, cx| match event {
                 InputEvent::Focus => {
                     view.filter_session_base = Some(input.read(cx).value().to_string());
-                    view.active_frame()
+                    view.active_frame(cx)
                         .update(cx, |f, _| f.begin_scope_session());
                 }
                 InputEvent::Change => {
                     let text = input.read(cx).value().to_string();
-                    view.active_frame().update(cx, |f, cx| {
+                    view.active_frame(cx).update(cx, |f, cx| {
                         let mut s = f.scope().clone();
                         s.text = (!text.trim().is_empty()).then_some(text);
                         if f.set_scope_in_session(s) {
@@ -944,13 +888,15 @@ impl ShellView {
                 }
                 InputEvent::PressEnter { .. } => {
                     view.filter_session_base = None;
-                    view.active_frame().update(cx, |f, _| f.end_scope_session());
+                    view.active_frame(cx)
+                        .update(cx, |f, _| f.end_scope_session());
                     view.focus_home(window, cx);
                     cx.notify();
                 }
                 InputEvent::Blur => {
                     view.filter_session_base = None;
-                    view.active_frame().update(cx, |f, _| f.end_scope_session());
+                    view.active_frame(cx)
+                        .update(cx, |f, _| f.end_scope_session());
                 }
             },
         )
@@ -1111,231 +1057,38 @@ impl ShellView {
                 && (view.tile_drag.is_some() || view.divider_drag.is_some())
             {
                 view.cancel_tile_drag();
-                view.cancel_divider_drag();
+                if view.cancel_divider_drag() {
+                    view.mark_session_dirty(cx);
+                }
                 cx.notify();
             }
         })
         .detach();
 
-        // Seed the config snapshot on the background executor. Directory scans
-        // perform filesystem I/O and must not run during UI construction.
-        let poll_window = window.window_handle();
-        cx.spawn(async move |this, cx| {
-            let mut is_first_poll = true;
-            let mut memory = crate::memory::MemoryTracker::new();
-            loop {
-                cx.background_executor()
-                    .timer(hot_reload::RELOAD_POLL_INTERVAL)
-                    .await;
-
-                // The loop ends with its window, not only with this entity: a
-                // host may hold the shell past the window's closure (the app's
-                // bridge observers do), and a tick then would still copy memory
-                // into diagnostics, write the session and reload config for a
-                // window nobody sees, its notifies waking data submissions.
-                if cx.update_window(poll_window, |_, _, _| ()).is_err() {
-                    return;
-                }
-
-                // Sweep the flip barrier on the shared poll loop. An expired barrier
-                // releases on the next iteration, so delay includes the timer, session
-                // write, and config scan rather than only the timer interval.
-                let Ok(frame) = this.update(cx, |view, _cx| view.frame.clone()) else {
-                    return; // window/entity gone; stop polling
-                };
-                frame.update(cx, |f, cx| {
-                    if f.sweep(Instant::now()) {
-                        cx.notify();
-                    }
-                });
-
-                // Refresh the diagnostics histogram only while a consumer watches it.
-                // The source clone is gated as well; the destination compares before
-                // copying and notifying.
-                let Ok((diagnostics, watched)) = this.update(cx, |view, cx| {
-                    let watched = view.diagnostics.read(cx).watchers() > 0;
-                    (view.diagnostics.clone(), watched)
-                }) else {
-                    return; // window/entity gone; stop polling
-                };
-                if watched {
-                    let Ok(perf) = this.update(cx, |view, _cx| view.perf.clone()) else {
-                        return; // window/entity gone; stop polling
-                    };
-                    diagnostics.update(cx, |d, cx| {
-                        if d.refresh_frame_hist(&perf) {
-                            cx.notify();
-                        }
-                    });
-                }
-
-                // Sample process memory on every tick, watched or not, so the
-                // `geode::memory` log keeps its peak record with the page
-                // closed. The copy into diagnostics is gated on watchers and
-                // on `refresh_memory`'s hysteresis, so idle jitter never
-                // notifies.
-                if let Some(sample) = crate::memory::sample() {
-                    let log = memory.observe(sample, Instant::now(), SystemTime::now());
-                    if let Some(reading) = memory.reading().copied() {
-                        crate::memory::emit(log, &reading);
-                        if watched {
-                            diagnostics.update(cx, |d, cx| {
-                                if d.refresh_memory(&reading) {
-                                    cx.notify();
-                                }
-                            });
-                        }
-                    }
-                }
-
-                // Refresh the cached date and notify only when it changes. Rendering
-                // reads this value without an additional clock read.
-                let Ok(changed) = this.update(cx, |view, cx| {
-                    let today = cx
-                        .global::<crate::clock::AppClock>()
-                        .0
-                        .today(chrono::Utc::now());
-                    let changed = view.today != today;
-                    view.today = today;
-                    changed
-                }) else {
-                    return; // window/entity gone; stop polling
-                };
-                if changed {
-                    let _ = this.update(cx, |_view, cx| cx.notify());
-                }
-
-                // Extract session state on the UI thread and await its write on the
-                // background executor. Run before config-scan early returns so saving
-                // does not depend on a config change. Write failures are logged without
-                // restoring the snapshot's dirty flag or comparison baselines.
-                let Ok(pending_write) =
-                    this.update(cx, |view, cx| view.take_dirty_session_write(cx))
-                else {
-                    return; // window/entity gone; stop polling
-                };
-                if let Some((path, text)) = pending_write {
-                    cx.background_executor()
-                        .spawn(async move { session::write_atomic(&path, &text) })
-                        .await
-                        .unwrap_or_else(|e| {
-                            tracing::warn!(target: "geode::session", "failed to save session: {e}")
-                        });
-                }
-
-                let Ok((desk_dir, user_dir)) = this.update(cx, |view, _cx| {
-                    (view.desk_dir.clone(), view.user_dir.clone())
-                }) else {
-                    return; // window/entity gone; stop polling
-                };
-
-                let scan_desk = desk_dir.clone();
-                let scan_user = user_dir.clone();
-                let snapshot = cx
-                    .background_executor()
-                    .spawn(async move { reload::scan(scan_desk.as_deref(), scan_user.as_deref()) })
-                    .await;
-
-                if is_first_poll {
-                    is_first_poll = false;
-                    // Seed-only: store this first background-thread scan as
-                    // the baseline and move on, without comparing it to the
-                    // `Snapshot::default()` placeholder — that comparison
-                    // would always read as "changed" (default is empty,
-                    // and a real desk/user dir practically never is) and
-                    // trigger a reload of the config `new` was just handed,
-                    // on every window open.
-                    if this
-                        .update(cx, |view, _cx| view.last_snapshot = snapshot)
-                        .is_err()
-                    {
-                        return;
-                    }
-                    continue;
-                }
-
-                let Ok(changed) = this.update(cx, |view, _cx| {
-                    let changed = snapshot.changed_since(&view.last_snapshot);
-                    if changed {
-                        view.last_snapshot = snapshot.clone();
-                    }
-                    changed
-                }) else {
-                    return;
-                };
-                if !changed {
-                    continue;
-                }
-
-                // The builtin layer is read off the live services rather
-                // than rebuilt here (see `ShellServices::builtin`), and
-                // only once a change has actually been seen — a clone per
-                // 500ms poll would be pure per-frame churn for a reload
-                // that almost never happens.
-                let Ok(builtin) = this.update(cx, |view, _cx| view.services.builtin.clone()) else {
-                    return;
-                };
-                let new_config = cx
-                    .background_executor()
-                    .spawn(async move { reload::load_config(builtin, desk_dir, user_dir) })
-                    .await;
-
-                if this
-                    .update(cx, |view, cx| view.apply_reload(new_config, cx))
-                    .is_err()
-                {
-                    return;
-                }
-            }
+        // A move or resize changes this window's `[windows.K]` record
+        // (display, bounds, maximized), so it marks the session for the
+        // next periodic snapshot. The platform's resize and move callbacks
+        // drive this, never the draw pass.
+        cx.observe_window_bounds(window, |view, _window, cx| {
+            view.mark_session_dirty(cx);
         })
         .detach();
 
-        let font_size = FontSize::from_config(&services.config);
-        let find_style = FindStyle::from_config(&services.config);
-        let add_direction = crate::tileadd::AddDirection::from_config(&services.config);
-        let line_numbers = crate::linenumbers::LineNumbers::from_config(&services.config);
-        cx.set_global(crate::linenumbers::UiSettings { line_numbers });
-        let link_include_tile_filter = crate::linkfilter::from_config(&services.config);
+        // What the app announces to every window: a reload's per-window
+        // work, a date change, and later a park. The watcher that reloads
+        // is the app's (`ShellApp::spawn_watcher`); this window only reacts.
+        cx.subscribe_in(&app, window, |view, _app, event, window, cx| {
+            view.on_app_event(event, window, cx);
+        })
+        .detach();
 
-        // `[timeseries] default_source` plus the fetch sources it names,
-        // one of the workspace's six globals (see `series`'s module doc). Set
-        // here and re-derived on reload; the settings row writes both
-        // through `set_default_source`.
-        let series = crate::series::SeriesSettings::from_config(&services.config);
-        let default_source = series.default_source.clone();
-        cx.set_global(series);
-        // The app-wide clock (`crate::clock::AppClock`, another of the workspace's
-        // six globals — see its own doc comment).
-        let (clock, clock_diags) = geode_core::clock::Clock::from_config(&services.config);
-        cx.set_global(crate::clock::AppClock(clock));
-        // Empty until the bridge's first live reference answer: a module
-        // reading it before then sees no table rather than a missing global.
-        cx.set_global(crate::reference::ReferenceGlobal::default());
-        // Likewise empty until the bridge's first watchlist resolution
-        // (`crate::watchlist::WatchlistGlobal`, the sixth global).
-        cx.set_global(crate::watchlist::WatchlistGlobal::default());
-
-        // Publish bindings for module tooltip chord lookup through `tips::Chords`.
-        cx.set_global(crate::tips::Chords(Arc::new(
-            services.keymap.bindings().to_vec(),
-        )));
-
-        // The shared frame: built from whatever `[groupings]`/
-        // `[scopes]` (plus the `datasets`/`dimensions` docs they validate
-        // against) config resolved to — see `hot_reload::rebuild_slots`/
-        // `rebuild_saved_scopes`, shared with `apply_reload`'s own
-        // rebuilds.
-        let frame = {
-            let slots = hot_reload::rebuild_slots(&services.config);
-            // Report saved-scope diagnostics here. Startup action registration
-            // loads the same scopes with reporting disabled to avoid duplicate logs.
-            let saved = hot_reload::rebuild_saved_scopes(&services.config, true);
-            let named = hot_reload::rebuild_named_expressions(&services.config);
-            cx.new(|_| {
-                let mut frame = Frame::new(slots, saved, user_dir.clone());
-                frame.replace_named_expressions(named);
-                frame
-            })
+        // The frame and the diagnostics gatherer are the app's, created and
+        // seeded in `ShellApp::new` (a restored session's lanes and group
+        // scopes are already applied); this window holds clones so its
+        // occupants and surfaces reach them without the app entity.
+        let (frame, diagnostics) = {
+            let app = app.read(cx);
+            (app.frame().clone(), app.diagnostics().clone())
         };
         // Observe the frame before creating occupants. GPUI notifies observers
         // in registration order, so `on_frame_changed` opens the flip barrier
@@ -1348,38 +1101,6 @@ impl ShellView {
             view.on_frame_changed(frame, window, cx)
         })
         .detach();
-
-        // The shell-owned diagnostics gatherer, created
-        // alongside the frame — see the field's own doc comment. Seeded
-        // from `services.log`'s levels when logging is wired up (`None`
-        // in every test setup that doesn't opt in, mirroring `log`
-        // itself), `LogLevels::default()` otherwise.
-        let diagnostics = {
-            let levels = services
-                .log
-                .as_ref()
-                .map(|l| l.levels.clone())
-                .unwrap_or_default();
-            cx.new(|_| Diagnostics::new(levels))
-        };
-        // Seed diagnostics from config loading, derived settings validation,
-        // and startup keymap compilation. Keep this order aligned with
-        // `apply_reload` so the section is consistent before and after reload.
-        let startup_diagnostics = {
-            let cfg = &services.config;
-            let mut diags = cfg.diagnostics.clone();
-            diags.extend(crate::defaults::mod_alias_from_config(cfg).1);
-            diags.extend(crate::defaults::modules_default_diagnostic(cfg));
-            // Warn when the default timeseries source names no fetch source.
-            diags.extend(crate::series::default_source_diagnostic(cfg));
-            diags.extend(clock_diags.iter().cloned());
-            diags.extend(services.keymap_diagnostics.iter().cloned());
-            diags.extend(services.composition_diagnostics.iter().cloned());
-            diags
-        };
-        diagnostics.update(cx, |d, _cx| {
-            d.note_config(startup_diagnostics, std::time::SystemTime::now());
-        });
         // Window-bound like the frame's observer above: the page-open drain
         // moves focus to the page.
         cx.observe_in(&diagnostics, window, |view, diagnostics, window, cx| {
@@ -1387,111 +1108,6 @@ impl ShellView {
         })
         .detach();
 
-        // Restore palette usage and frame state. Clearing scope history removes
-        // the undo entry created by `set_scope`, so startup does not offer an
-        // undo back to the initial empty scope.
-        let palette_usage = services.restored_palette_usage.clone();
-        if let Some(record) = services.restored_frame.clone() {
-            // `[frame]` is the shared lane's record; pinned lanes restore
-            // from their own workspace records.
-            frame.update(cx, |f, _cx| {
-                let mut s = f.shared_mut();
-                s.set_scope(record.scope);
-                s.set_active_slot(record.active_slot);
-                if let Some(chain) = record.ad_hoc {
-                    s.restore_ad_hoc(chain, record.ad_hoc_active);
-                }
-                if !s.restore_loaded_from(record.loaded_from.clone()) {
-                    tracing::warn!(
-                        target: "geode::session",
-                        "restored scope provenance dropped: no saved scope '{}'",
-                        record.loaded_from.as_deref().unwrap_or_default()
-                    );
-                }
-                s.set_as_of(record.as_of);
-                s.clear_history();
-            });
-        }
-        // Each restored pinned workspace gets its own lane. Clearing history
-        // keeps startup from offering an undo back to the empty scope; this
-        // runs before the flip seed below so a restored lane never reads as
-        // "just changed".
-        for (ws, record) in services.restored_pinned.clone() {
-            // A pin on a workspace the layout lacks would surface as an
-            // unexpected pin if that workspace were created later. Both come
-            // from one session read, so this only guards a hand-assembled
-            // `ShellServices`.
-            if !services.workspaces.spaces().any(|(ix, _)| ix == ws.get()) {
-                tracing::warn!(
-                    target: "geode::session",
-                    "pinned frame for workspace {} has no workspace; ignored",
-                    ws.get()
-                );
-                continue;
-            }
-            frame.update(cx, |f, _| {
-                f.pin(ws);
-                let mut lane = f.view_mut(ws);
-                lane.set_scope(record.scope);
-                // Pinning copied the shared slot and ad hoc chain. Clear
-                // both first so a recorded slot that is now empty (refused
-                // below) leaves no slot rather than the shared lane's, and a
-                // record without a chain does not keep the shared lane's
-                // chain, which the session writer would then save as this
-                // workspace's own.
-                lane.set_active_slot(None);
-                lane.forget_ad_hoc();
-                lane.set_active_slot(record.active_slot);
-                // After the slot, so an active chain wins over it; before
-                // `clear_history`, like every other restored value.
-                if let Some(chain) = record.ad_hoc {
-                    lane.restore_ad_hoc(chain, record.ad_hoc_active);
-                }
-                // `pin` copied the shared lane's provenance; the record names
-                // this lane's own, and a record without one clears the copy.
-                if !lane.restore_loaded_from(record.loaded_from.clone()) {
-                    tracing::warn!(
-                        target: "geode::session",
-                        "restored scope provenance dropped: no saved scope '{}'",
-                        record.loaded_from.as_deref().unwrap_or_default()
-                    );
-                }
-                lane.set_as_of(record.as_of);
-                lane.clear_history();
-            });
-        }
-        // A session written under another configuration can name columns
-        // this one cannot group by. Checked once for every restored lane.
-        let groupable = hot_reload::groupable_names(&services.config);
-        frame.update(cx, |f, _| {
-            for column in f.retain_ad_hoc(|column| groupable.iter().any(|g| g == column)) {
-                tracing::warn!(
-                    target: "geode::session",
-                    "restored ad hoc grouping dropped: '{column}' is not a groupable column"
-                );
-            }
-        });
-        // A group keeps its last scope across a restart. Restored before any
-        // membership is applied and before the flip baselines below are
-        // seeded, and nothing is notified: a restored follower's first
-        // query is already scoped by its group, with no emitter needed to
-        // post it again, and the restored scope is not read as a change.
-        // Lost, a follower that showed one underlying would show the whole
-        // book under the same chip.
-        if services
-            .restored_links
-            .iter()
-            .any(|scope| !scope.is_empty())
-        {
-            frame.update(cx, |f, _| {
-                for group in geode_core::link::Group::ALL {
-                    let scope = &services.restored_links[group.index()];
-                    if !scope.is_empty() {
-                        f.restore_group_scope(group, scope.clone());
-                    }
-                }
-            });
-        }
         // A restored tile is in its link groups before its occupant exists,
         // so the first query it sends is already scoped by the group it
         // follows. Two conditions, each for a tile that will never have a
@@ -1502,24 +1118,41 @@ impl ShellView {
         // the layout's healing left behind gets no occupant at all.
         // Nothing is notified. A membership moves no lane version and no
         // group's scope generation, so it is not a flip either.
-        if services
-            .restored_tiles
-            .values()
-            .any(|record| !record.link.is_empty())
-        {
+        // The restore inputs become this view's own (see the field's doc):
+        // the tile records the app parked for this window. Page records
+        // stay the app's (`ShellApp::parked_pages`) until a page of the
+        // kind opens, in this window or another.
+        let restored_tiles = app.update(cx, |app, _| app.take_parked_records(key));
+        // Gathered before the frame update: the record checks read the
+        // services, which the frame's writer cannot hold beside.
+        let restored_memberships: Vec<(u64, geode_core::link::Membership)> = {
+            let services = app.read(cx).services();
+            if restored_tiles
+                .values()
+                .any(|record| !record.link.is_empty())
+            {
+                restored_tiles
+                    .iter()
+                    .filter(|(id, record)| {
+                        services.roster.factory(&record.kind).is_some()
+                            && services.workspaces.workspace_of(TileId(**id)).is_some()
+                    })
+                    .map(|(id, record)| (*id, record.link))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        };
+        if !restored_memberships.is_empty() {
             frame.update(cx, |f, _| {
-                for (id, record) in &services.restored_tiles {
+                for (id, link) in &restored_memberships {
                     let tile = TileId(*id);
-                    if services.roster.factory(&record.kind).is_some()
-                        && services.workspaces.workspace_of(tile).is_some()
                     {
-                        f.follow(tile, record.link.follow);
+                        f.follow(tile, link.follow);
                         // A loop of groups would narrow every group on it
                         // on each pass; tiles restore in id order, so the
                         // later tile's emit is the one dropped.
-                        if let Some((from, to)) =
-                            f.closing_cycle(tile, record.link.follow, record.link.emit)
-                        {
+                        if let Some((from, to)) = f.closing_cycle(tile, link.follow, link.emit) {
                             tracing::warn!(
                                 target: "geode::session",
                                 "tile {id}: emit into {} dropped: {}",
@@ -1527,7 +1160,7 @@ impl ShellView {
                                 crate::shell::link::cycle_refusal(from, to)
                             );
                         } else {
-                            f.emit(tile, record.link.emit);
+                            f.emit(tile, link.emit);
                         }
                     }
                 }
@@ -1539,31 +1172,18 @@ impl ShellView {
         // `on_frame_changed`.
         let last_flip_versions = frame
             .read(cx)
-            .view(services.workspaces.active_ix())
+            .view(
+                app.read(cx)
+                    .services
+                    .workspaces
+                    .shown(key)
+                    .expect("the window was added to the workspaces before its view"),
+            )
             .versions();
         let last_flip_groups = frame.read(cx).group_scope_gens();
         let last_emit_generation = frame.read(cx).generation();
 
-        // The docs the data engine actually starts with — see
-        // `sources_baseline`'s field doc.
-        let sources_baseline = services.config.layered_docs("sources").to_vec();
-        let datasets_baseline = services.config.layered_docs("datasets").to_vec();
-        let egress_baseline = services.config.layered_docs("egress").to_vec();
-        let positions_baseline = services.config.layered_docs("positions").to_vec();
-        let panels_baseline = services
-            .config
-            .layered_docs(geode_core::panel::PANELS_DOC)
-            .to_vec();
-        let scenarios_baseline = services
-            .config
-            .layered_docs(geode_core::scenario::SCENARIOS_DOC)
-            .to_vec();
-        // Same reasoning, for the `[pricing] adapter` key the data
-        // engine's pricer was chosen from — see
-        // `pricing_baseline`'s field doc.
-        let pricing_baseline = services.config.get("app", "pricing.adapter").cloned();
-        // And for the `[vol] model` key — see `vol_baseline`'s field doc.
-        let vol_baseline = services.config.get("app", "vol.model").cloned();
+        let services = app.read(cx).services();
         // The dimension pickers' column list — see
         // `pickable`'s field doc.
         let pickable = pickable_columns(&services.config);
@@ -1571,16 +1191,16 @@ impl ShellView {
         let expr_vocab = std::rc::Rc::new(expr_vocab(&services.config));
         let page_entries: Vec<crate::module::PageEntry> = services.pages.entries().collect();
 
-        Self {
-            services,
+        // Registered with the app below, once the view is whole: the
+        // session writer asks every registered view for its records.
+        let weak = cx.weak_entity();
+        let mut view = Self {
+            app,
+            key,
+            window_handle: window.window_handle(),
             matcher: Matcher::default(),
-            font_size,
-            find_style,
             focus_handle,
             palette: None,
-            palette_usage,
-            palette_usage_version: 0,
-            last_palette_usage_written: 0,
             modals: Vec::new(),
             keybindings: None,
             keybindings_scroll: ScrollHandle::new(),
@@ -1594,17 +1214,6 @@ impl ShellView {
             fuzzy_find: None,
             fuzzy_find_subscriptions: Vec::new(),
             dialog_input,
-            desk_dir,
-            user_dir,
-            last_snapshot: reload::Snapshot::default(),
-            last_reload: reload::ReloadOutcome::Unchanged,
-            reload_status: None,
-            config_revision: 0,
-            session_dirty: false,
-            last_tiles_written: crate::session::TileRecords::new(),
-            last_pages_written: crate::session::PageRecords::new(),
-            last_frame_generation_written: 0,
-            last_session_text: None,
             pending_focus_restore: false,
             swallow_double_click_followup: false,
             overlay_return_to_filter: false,
@@ -1620,14 +1229,11 @@ impl ShellView {
             frame,
             diagnostics,
             pending_tiles: BTreeMap::new(),
+            restored_tiles,
             unplaced_records: crate::session::TileRecords::new(),
-            add_direction,
-            line_numbers,
-            default_source,
             last_flip_versions,
             last_flip_groups,
             last_emit_generation,
-            link_include_tile_filter,
             occupants: HashMap::new(),
             visible_tiles: HashSet::new(),
             emit_subs: HashMap::new(),
@@ -1640,20 +1246,10 @@ impl ShellView {
             scratch_all_tiles: HashSet::new(),
             scratch_active_tiles: HashSet::new(),
             scratch_visible_keys: Vec::new(),
-            restart_required: None,
-            sources_baseline,
-            datasets_baseline,
-            egress_baseline,
-            positions_baseline,
-            panels_baseline,
-            scenarios_baseline,
-            pricing_baseline,
-            vol_baseline,
             pickable,
             text_dims,
             expr_vocab,
             picker: None,
-            next_picker_tag: 0,
             picker_scroll: UniformListScrollHandle::new(),
             as_of_dialog: None,
             as_of_scroll: ScrollHandle::new(),
@@ -1670,8 +1266,14 @@ impl ShellView {
             pending_config_write: None,
             config_write_seq: 0,
             config_write_error: None,
-            today: clock.today(chrono::Utc::now()),
-        }
+            last_title: None,
+        };
+        let handle = window.window_handle();
+        view.app
+            .update(cx, |app, _| app.register_view(key, weak, handle));
+        // After registering: the title counts this window.
+        view.sync_title(window, cx);
+        view
     }
 
     /// Close the live (topmost) modal: clear only its kind's state, then give the
@@ -1796,7 +1398,15 @@ impl ShellView {
         // opens against the active lane, not a dialog's target lane. A link
         // group's scope is part of what its followers show, so a change to
         // it flips them as well.
-        let ws = self.active_ix();
+        //
+        // A window the close path has deregistered (see `render`) is still
+        // notified until gpui removes it. It shows no workspace, so there is
+        // no lane to flip against, no field to reflect into, and the queues
+        // drained below are the frame's, which every live window drains.
+        if self.workspaces(cx).shown(self.key).is_none() {
+            return;
+        }
+        let ws = self.shown_ix(cx);
         let (lane_now, groups_now) = {
             let f = frame.read(cx);
             (f.view(ws).versions(), f.group_scope_gens())
@@ -1808,7 +1418,7 @@ impl ShellView {
             self.last_flip_versions = lane_now;
             self.last_flip_groups = groups_now;
             let mut keys = std::mem::take(&mut self.scratch_visible_keys);
-            self.visible_tile_keys(&mut keys);
+            self.visible_tile_keys(&mut keys, cx);
             frame.update(cx, |f, _| {
                 // Each visible tile answers under its own identity: a
                 // follower's scope generation is its group's, and enrolled
@@ -1830,8 +1440,11 @@ impl ShellView {
                     .collect();
                 if lane_moved {
                     // A new flip for everyone: whatever was awaited before
-                    // answered an older frame.
-                    f.open_flip_each(awaited, Instant::now());
+                    // answered an older frame. Another window answering
+                    // this same change (same generation) joins it instead
+                    // of replacing it, or its tiles would no longer be
+                    // awaited and the two windows would flip apart.
+                    f.join_flip(awaited, Instant::now());
                 } else {
                     // A group's change alone joins the flip in progress.
                     // Replacing it would drop the other tiles while their
@@ -1850,7 +1463,7 @@ impl ShellView {
         // and as-of edits do not rebuild rows while the user is filtering.
         if self.as_of_dialog.is_some() && lane_now.data != self.as_of_data_version {
             self.as_of_data_version = lane_now.data;
-            let as_of = self.target_frame().read(cx).as_of().clone();
+            let as_of = self.target_frame(cx).read(cx).as_of().clone();
             let publishes: Vec<_> = frame.read(cx).recent_publishes().iter().cloned().collect();
             if let Some(state) = self.as_of_dialog.as_mut() {
                 state.refresh(&as_of, &publishes, chrono::Utc::now());
@@ -1862,7 +1475,7 @@ impl ShellView {
             }
         }
         if let Some((slot, grouping)) = frame.update(cx, |f, _| f.take_pending_persist())
-            && let Some(dir) = self.user_dir.clone()
+            && let Some(dir) = self.user_dir(cx)
         {
             crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
                 if let Err(e) = crate::frame::persist_slot_to_user_config(&dir, slot, &grouping) {
@@ -1875,7 +1488,7 @@ impl ShellView {
         // Scope dialog's save prompt writes through `config_write` directly;
         // this handles requests queued on the frame itself.
         if let Some((name, scope)) = frame.update(cx, |f, _| f.take_pending_scope_persist())
-            && let Some(dir) = self.user_dir.clone()
+            && let Some(dir) = self.user_dir(cx)
         {
             crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
                 if let Err(e) = crate::frame::persist_scope_to_user_config(&dir, &name, &scope) {
@@ -1949,7 +1562,7 @@ impl ShellView {
             .is_focused(window)
         {
             let frame_text = self
-                .active_frame()
+                .active_frame(cx)
                 .read(cx)
                 .scope()
                 .text
@@ -1988,6 +1601,13 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A window the close path has deregistered (see `render`) is still
+        // notified until gpui removes it; it shows no workspace, and a page
+        // opened here would read the shown lane. Another window drains the
+        // requests.
+        if self.workspaces(cx).shown(self.key).is_none() {
+            return;
+        }
         let (pending_level, pending_overlay, pending_page) = diagnostics.update(cx, |d, _cx| {
             (
                 d.take_pending_level(),
@@ -1997,12 +1617,12 @@ impl ShellView {
         });
         if let Some((target, level)) = pending_level {
             let levels = diagnostics.read(cx).levels.clone();
-            if let Some(log) = &self.services.log
+            if let Some(log) = &self.services(cx).log
                 && let Err(e) = log.control.set(&levels)
             {
                 tracing::warn!(target: "geode::config", "failed to apply [log]: {e}");
             }
-            if let Some(dir) = self.user_dir.clone() {
+            if let Some(dir) = self.user_dir(cx) {
                 crate::config_write::submit(&dir.clone(), cx.background_executor(), move || {
                     if let Err(e) =
                         log_persist::persist_log_level_to_user_config(&dir, &target, level)
@@ -2059,13 +1679,89 @@ impl ShellView {
         })
     }
 
+    /// The app entity this window reads its services from.
+    pub fn app(&self) -> &Entity<ShellApp> {
+        &self.app
+    }
+
+    /// This window's key in [`Self::app`].
+    pub fn key(&self) -> WindowKey {
+        self.key
+    }
+
+    /// The window this view is the root of, open or closed.
+    pub fn window_handle(&self) -> gpui::AnyWindowHandle {
+        self.window_handle
+    }
+
+    /// The services every window shares. The reference borrows `cx`, not
+    /// `self`, so a caller may hold it beside a mutable borrow of its own
+    /// fields; it may not hold it across a mutable use of `cx`.
+    pub(crate) fn services<'a>(&self, cx: &'a App) -> &'a ShellServices {
+        &self.app.read(cx).services
+    }
+
+    /// Change the app's own state in place: the settings a settings row
+    /// steps (`font_size` and its siblings). An event, dispatch or
+    /// constructor path only, never render.
+    pub(crate) fn with_app<R>(&self, cx: &mut App, f: impl FnOnce(&mut ShellApp) -> R) -> R {
+        self.app.update(cx, |app, _| f(app))
+    }
+
+    /// Change the shared services in place. Every write goes through here
+    /// or one of the narrower `with_*` siblings; nothing holds a mutable
+    /// reference to the services outside the closure.
+    pub(crate) fn with_services<R>(
+        &self,
+        cx: &mut App,
+        f: impl FnOnce(&mut ShellServices) -> R,
+    ) -> R {
+        self.with_app(cx, |app| f(&mut app.services))
+    }
+
+    /// A layout change in this window awaits the app's next periodic
+    /// snapshot. An event, dispatch or constructor path only: the draw
+    /// pass never updates the app entity, so a render-time cancellation
+    /// defers its mark (`render.rs`).
+    pub(crate) fn mark_session_dirty(&self, cx: &mut App) {
+        self.app.update(cx, |app, _| app.mark_session_dirty());
+    }
+
+    pub(crate) fn workspaces<'a>(&self, cx: &'a App) -> &'a Workspaces {
+        &self.services(cx).workspaces
+    }
+
+    pub(crate) fn with_workspaces<R>(
+        &self,
+        cx: &mut App,
+        f: impl FnOnce(&mut Workspaces) -> R,
+    ) -> R {
+        self.with_services(cx, |s| f(&mut s.workspaces))
+    }
+
+    /// The workspace this window shows.
+    pub(crate) fn workspace<'a>(&self, cx: &'a App) -> &'a Workspace {
+        self.workspaces(cx).workspace(self.key)
+    }
+
+    pub(crate) fn with_workspace<R>(&self, cx: &mut App, f: impl FnOnce(&mut Workspace) -> R) -> R {
+        let key = self.key;
+        self.with_workspaces(cx, |w| f(w.workspace_mut(key)))
+    }
+
     /// The current config, for the app bridge to read the new `views` doc
     /// out of after a `ShellEvent::ConfigReloaded` — `geode-app` is
     /// the only crate allowed to touch `geode-data`, so it needs to reach
     /// the reloaded config through the shell rather than reloading it a
     /// second time itself.
-    pub fn config(&self) -> &Config {
-        &self.services.config
+    pub fn config<'a>(&self, cx: &'a App) -> &'a Config {
+        &self.services(cx).config
+    }
+
+    /// The user config directory, the one layer runtime writes target;
+    /// `None` makes every persist path a silent no-op.
+    pub(crate) fn user_dir(&self, cx: &App) -> Option<PathBuf> {
+        self.app.read(cx).user_dir.clone()
     }
 
     /// The shared frame entity every occupant holds. Lane state (scope,
@@ -2075,8 +1771,37 @@ impl ShellView {
         &self.frame
     }
 
-    pub(crate) fn active_ix(&self) -> WorkspaceIx {
-        self.services.workspaces.active_ix()
+    /// The index of the workspace this window shows.
+    pub(crate) fn shown_ix(&self, cx: &App) -> WorkspaceIx {
+        self.workspaces(cx)
+            .shown(self.key)
+            .expect("a view's window is open on the workspaces")
+    }
+
+    /// Give the platform window its title (`ShellApp::window_title`:
+    /// `Geode`, or `Geode · N` once two windows are registered) when it
+    /// differs from the one last set. Called where the title can change
+    /// and a `Window` is at hand: the end of the constructor, the
+    /// `WindowsChanged` event, and this window's own switch and tear-out
+    /// (`after_shown_changed`). Never from render: a title is set, not
+    /// painted, and a per-frame compare would still format per frame. A
+    /// deregistered window (see `render`) is left as it was.
+    fn sync_title(&mut self, window: &mut Window, cx: &App) {
+        if self.workspaces(cx).shown(self.key).is_none() {
+            return;
+        }
+        let title = self.app.read(cx).window_title(self.key);
+        if self.last_title.as_deref() != Some(title.as_str()) {
+            window.set_window_title(&title);
+            self.last_title = Some(title);
+        }
+    }
+
+    /// The title last set on the platform window, or `None` before the
+    /// constructor's first set — test reach for the title rule.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn last_title(&self) -> Option<&str> {
+        self.last_title.as_deref()
     }
 
     pub(crate) fn frame_at(&self, ws: WorkspaceIx) -> FrameRef {
@@ -2086,12 +1811,12 @@ impl ShellView {
     /// The lane every shell surface reads and writes: the workspace the
     /// open modal stack was opened from, else the active one. A dialog
     /// therefore commits where it was opened, whatever is active later.
-    pub(crate) fn target_frame(&self) -> FrameRef {
+    pub(crate) fn target_frame(&self, cx: &App) -> FrameRef {
         let ws = self
             .modals
             .first()
             .map(|m| m.workspace)
-            .unwrap_or_else(|| self.active_ix());
+            .unwrap_or_else(|| self.shown_ix(cx));
         self.frame_at(ws)
     }
 
@@ -2106,7 +1831,7 @@ impl ShellView {
         name: &str,
         cx: &mut Context<Self>,
     ) -> Result<bool, String> {
-        self.target_frame().update(cx, |f, cx| {
+        self.target_frame(cx).update(cx, |f, cx| {
             let before = f.generation();
             let loaded = f.load_scope(name);
             // Loading the scope in force changes only the lane's provenance;
@@ -2118,9 +1843,9 @@ impl ShellView {
         })
     }
 
-    /// The active workspace's frame, for the app's catalog as-of.
-    pub fn active_frame(&self) -> FrameRef {
-        self.frame_at(self.active_ix())
+    /// The shown workspace's frame, for the app's catalog as-of.
+    pub fn active_frame(&self, cx: &App) -> FrameRef {
+        self.frame_at(self.shown_ix(cx))
     }
 
     /// The shared diagnostics entity available to occupants.
@@ -2136,23 +1861,6 @@ impl ShellView {
     #[cfg(any(test, feature = "test-support"))]
     pub fn picker(&self) -> Option<&picker::PickerState> {
         self.picker.as_ref()
-    }
-
-    /// Apply a loaded candidate exactly as the file watcher would —
-    /// cross-crate test reach, the same door `picker()` opens: `geode-app`'s
-    /// composition tests reload without a watcher (`apply_reload` is
-    /// `pub(super)`).
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn apply_reload_for_test(&mut self, config: Config, cx: &mut Context<Self>) {
-        self.apply_reload(config, cx);
-    }
-
-    /// The running shell's services (registry, roster) — cross-crate test
-    /// reach, the same door as `picker()`: `geode-app`'s composition tests
-    /// check that a reload added no tile kind and no add-tile action.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn services(&self) -> &ShellServices {
-        &self.services
     }
 
     /// The title `tile`'s occupant paints, or `None` without an occupant —

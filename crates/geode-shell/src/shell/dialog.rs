@@ -484,7 +484,7 @@ pub fn open_shell_dialog_with_key<F>(
         on_key: on_key.map(refreshing),
         back: None,
         saved_input: None,
-        workspace: view.services.workspaces.active_ix(),
+        workspace: view.shown_ix(cx),
         parked_object: None,
     });
 

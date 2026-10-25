@@ -614,7 +614,7 @@ fn handle_key(
     _window: &mut Window,
     cx: &mut Context<ShellView>,
 ) -> bool {
-    let user_dir = shell.user_dir.clone();
+    let user_dir = shell.user_dir(cx);
     let Some(state) = shell.keybindings.as_mut() else {
         return false;
     };
@@ -1074,7 +1074,7 @@ pub(crate) fn highlighted_text(text: &str, indices: &[usize], primary: Hsla) -> 
 /// while capture or confirmation owns input; otherwise clear the previous notice, arm a
 /// question or report a refusal, and synchronize the dialog.
 fn press_verb(shell: &mut ShellView, key: char, window: &mut Window, cx: &mut Context<ShellView>) {
-    let user_dir = shell.user_dir.clone();
+    let user_dir = shell.user_dir(cx);
     let Some(state) = shell.keybindings.as_mut() else {
         return;
     };

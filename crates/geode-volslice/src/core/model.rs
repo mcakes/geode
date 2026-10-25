@@ -227,7 +227,15 @@ impl State {
     /// first row (an expired front month must not leave an empty plot). An
     /// empty strip changes nothing, so the set survives a query that
     /// briefly returns no data. Returns whether the active set changed.
-    pub fn reconcile(&mut self, strip: &[StripRow]) -> bool {
+    ///
+    /// `cursor_on` is the expiry the cursor rested on in the strip being
+    /// replaced, or `None` before there was one. The cursor stays on that
+    /// expiry wherever the new strip lists it, so a row a trader moved to
+    /// is not taken away by a chain refresh that adds a term above it.
+    /// With no such row (a first or restored strip, or the row gone) the
+    /// cursor fronts the first active expiry: the lit row and the filled
+    /// dots then agree on where the tile is looking.
+    pub fn reconcile(&mut self, strip: &[StripRow], cursor_on: Option<NaiveDate>) -> bool {
         let Some(first) = strip.first() else {
             return false;
         };
@@ -244,7 +252,11 @@ impl State {
         } else {
             kept
         });
-        self.cursor = self.cursor.min(strip.len() - 1);
+        let row_of = |e: NaiveDate| strip.iter().position(|r| r.expiry == e);
+        self.cursor = cursor_on
+            .and_then(row_of)
+            .or_else(|| self.active_in(strip).first().map(|(i, _)| *i))
+            .unwrap_or(0);
         self.active != before
     }
 
@@ -419,9 +431,12 @@ pub(crate) mod tests {
         let l = fixture();
         let s = strip(&l, d(TODAY));
         let mut st = State::default();
-        assert!(st.reconcile(&s));
+        assert!(st.reconcile(&s, None));
         assert_eq!(st.active, Some([d("2026-10-16")].into()));
-        assert!(!st.reconcile(&s), "a second reconcile changes nothing");
+        assert!(
+            !st.reconcile(&s, None),
+            "a second reconcile changes nothing"
+        );
     }
 
     #[test]
@@ -431,7 +446,7 @@ pub(crate) mod tests {
             active: Some([d("2026-12-18"), d("2027-09-17")].into()),
             ..State::default()
         };
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         assert_eq!(st.active, Some([d("2026-12-18")].into()));
     }
 
@@ -442,7 +457,7 @@ pub(crate) mod tests {
             active: Some([d("2026-09-18")].into()),
             ..State::default()
         };
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         assert_eq!(st.active, Some([d("2026-10-16")].into()));
     }
 
@@ -452,15 +467,64 @@ pub(crate) mod tests {
             active: Some([d("2026-12-18")].into()),
             ..State::default()
         };
-        assert!(!st.reconcile(&[]));
+        assert!(!st.reconcile(&[], None));
         assert_eq!(st.active, Some([d("2026-12-18")].into()));
+    }
+
+    /// The lit row and the filled dots agree: a first or restored strip
+    /// puts the cursor on the first active expiry, not on row zero.
+    #[test]
+    fn a_first_strip_puts_the_cursor_on_the_first_active_expiry() {
+        let s = strip(&fixture(), d(TODAY));
+        let mut st = State {
+            active: Some([d("2026-12-18"), d("2027-06-18")].into()),
+            ..State::default()
+        };
+        st.reconcile(&s, None);
+        assert_eq!(st.cursor, 2, "2026-12-18 is the third row");
+        let mut fresh = State::default();
+        fresh.reconcile(&s, None);
+        assert_eq!(fresh.cursor, 0, "the seeded first row");
+    }
+
+    /// A strip rebuilt under the cursor keeps the cursor on its expiry,
+    /// wherever that row moved to; a cursor whose expiry left falls back
+    /// to the first active row.
+    #[test]
+    fn a_rebuilt_strip_keeps_the_cursor_on_its_expiry_or_fronts_the_active() {
+        let s = strip(&fixture(), d(TODAY));
+        let mut st = State::default();
+        st.reconcile(&s, None);
+        st.step_cursor(s.len(), 3);
+        assert_eq!(st.cursor, 3, "2027-03-19, an inactive row");
+        // A term joins above it: the same expiry is now row four.
+        let mut grown = s.clone();
+        grown.insert(
+            1,
+            StripRow {
+                expiry: d("2026-10-30"),
+                has: [false, false, true],
+            },
+        );
+        st.reconcile(&grown, Some(d("2027-03-19")));
+        assert_eq!(st.cursor, 4);
+        assert_eq!(grown[4].expiry, d("2027-03-19"));
+        // Its expiry gone: the first active row (the front month).
+        let shrunk: Vec<StripRow> = grown
+            .iter()
+            .filter(|r| r.expiry != d("2027-03-19"))
+            .cloned()
+            .collect();
+        st.reconcile(&shrunk, Some(d("2027-03-19")));
+        assert_eq!(st.cursor, 0);
+        assert_eq!(st.active, Some([d("2026-10-16")].into()));
     }
 
     #[test]
     fn solo_and_toggle_act_on_a_row() {
         let s = strip(&fixture(), d(TODAY));
         let mut st = State::default();
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         assert!(st.toggle(&s, 2));
         assert_eq!(
             st.active_in(&s),
@@ -475,7 +539,7 @@ pub(crate) mod tests {
     fn toggling_the_last_active_expiry_is_refused() {
         let s = strip(&fixture(), d(TODAY));
         let mut st = State::default();
-        st.reconcile(&s);
+        st.reconcile(&s, None);
         let before = st.active.clone();
         assert!(!st.toggle(&s, 0), "the only active row stays");
         assert_eq!(st.active, before);

@@ -12,12 +12,15 @@ impl ShellView {
     /// Refresh every open dialog's prepared rows against its current inputs,
     /// covered dialogs included, except a parked object dialog (see below).
     pub(crate) fn refresh_dialog_rows(&mut self, cx: &App) {
-        let revision = self.config_revision;
+        let revision = self.app.read(cx).config_revision();
+        // Read once, up front: the reference borrows `cx`, not `self`, so
+        // it stays usable beside the dialogs' own mutable borrows below.
+        let services = self.services(cx);
         if let Some(state) = self.keybindings.as_mut() {
-            state.refresh_rows(&self.services.registry, &self.services.keymap, revision);
+            state.refresh_rows(&services.registry, &services.keymap, revision);
         }
         if self.scope_dialog.is_some() {
-            let frame = self.target_frame();
+            let frame = self.target_frame(cx);
             let key = super::scopedialog::view::rows_key(frame.entity().read(cx));
             let view = frame.read(cx);
             if let Some(state) = self.scope_dialog.as_mut() {
@@ -49,7 +52,7 @@ impl ShellView {
         let (generation, lead) = self.object_rows_inputs(domain, cx);
         if let Some(state) = self.object_dialog.as_mut() {
             let key = state.rows_key(revision, generation);
-            state.refresh_rows(&self.services.config, key, lead);
+            state.refresh_rows(&services.config, key, lead);
         }
     }
 
@@ -65,7 +68,7 @@ impl ShellView {
         if !domain.applies_from_browse() {
             return (0, Vec::new());
         }
-        let frame = self.target_frame();
+        let frame = self.target_frame(cx);
         let generation = frame.entity().read(cx).generation();
         (generation, domain.lead_rows(&frame.read(cx)))
     }
@@ -77,7 +80,9 @@ impl ShellView {
     pub(crate) fn assert_rows_current(&self, cx: &App) {
         if let Some(state) = self.keybindings.as_ref() {
             assert!(
-                state.rows.is_current(&self.config_revision, &state.query),
+                state
+                    .rows
+                    .is_current(&self.app.read(cx).config_revision(), &state.query),
                 "prepared rows are stale: keybindings changed an input without refresh_dialog_rows"
             );
         }
@@ -85,14 +90,14 @@ impl ShellView {
             let (generation, _) = self.object_rows_inputs(state.domain, cx);
             assert!(
                 state.rows.is_current(
-                    &state.rows_key(self.config_revision, generation),
+                    &state.rows_key(self.app.read(cx).config_revision(), generation),
                     &state.query
                 ),
                 "prepared rows are stale: the object dialog changed an input without refresh_dialog_rows"
             );
         }
         if let Some(state) = self.scope_dialog.as_ref() {
-            let key = super::scopedialog::view::rows_key(self.target_frame().entity().read(cx));
+            let key = super::scopedialog::view::rows_key(self.target_frame(cx).entity().read(cx));
             assert!(
                 state.is_current(key),
                 "prepared rows are stale: the scope dialog's lane changed without refresh_dialog_rows"

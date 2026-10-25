@@ -121,8 +121,53 @@ return true.
 
 `Workspaces` stores indices 1–9. Switching creates an absent workspace and
 retains empty ones. Its tile allocator is shared across that collection's
-main and dock trees. A switch generation advances only when the active index
-changes, allowing a gesture to detect switching away and back between renders.
+main and dock trees.
+
+### Windows, shown and hosted
+
+One `Workspaces` serves every window of the app. Each window, named by its
+`WindowKey`, *shows* one index and *hosts* the indexes whose occupants it
+builds and keeps: the index it shows, every index it showed and switched
+away from (hidden in that window until another takes it), and, for the
+first window of the process, every index the restored session materialised,
+since no other window exists to build them. A later window hosts only the
+index it opens on. An index is shown by at most one window; a tile's window
+(`window_of`) is its workspace's host, which need not be showing it. A
+window's own builders (`split_in`, `stack_in`, `workspace`,
+`workspace_mut`, the keyed `apply_workspace_action`) act on the workspace it
+shows; its occupant set is `hosted_by`.
+
+`add_window(key, n)` opens a window on `n`, refusing an index outside 1–9 or
+shown by another window, and reports whether `n` was hidden in another
+window (`TakenFrom`) so the caller can move its occupants. The first window
+opens on the session's initial index, later ones on `lowest_free`, the
+lowest of 1–9 no window shows, whether or not it has been created. Nine
+windows exhaust it. `remove_window` returns the indexes the window hosted,
+now unhosted; the workspaces themselves stay stored.
+
+`switch(key, n)` has four outcomes. `Unchanged`: the window already shows
+`n`. `Raise(other)`: another window shows `n`; nothing changes and the
+caller brings that window forward instead. `Moved { from }`: another window
+hosted `n` hidden; this window now shows and hosts it and the caller moves
+the occupants. `Shown`: `n` was free, hidden in this same window, or not yet
+created; it is created if needed and shown and hosted here. The index left
+behind stays hosted by the window that showed it. `Invalid` names an index
+outside 1–9 or a window that is not open. `workspace::switch_*` is not the
+action router's (`apply_workspace_action` leaves it unhandled): the shell
+dispatches it through `ShellApp::switch` and acts on the outcome. `Raise`
+asks the other window forward; `Moved` tells the window it came from to
+park its occupants for the index, which the new host rebuilds from their
+records (see [workspaces moving between
+windows](shell.md#workspaces-moving-between-windows)); `Shown` and `Moved`
+pull any records already parked for what it now hosts, then re-seed the
+window's flip baseline; `Unchanged` reconciles focus as any recognised workspace
+action does; `Invalid` does nothing.
+
+Each window has its own switch generation (`switch_epoch`), advanced only by
+`Shown` and `Moved`, allowing a gesture to detect switching away and back
+between renders. The session file's `active` is `initial_index`: what the
+oldest open window shows, so a restart reopens there, or, before any window
+opens, what the file said.
 
 Restoration validates main-tree structure and repairs local dock conflicts as
 described in [session recovery](shell.md#recovery-and-restoration). Raw tree

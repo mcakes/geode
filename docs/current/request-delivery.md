@@ -151,40 +151,61 @@ no fixed overall capacity. Displaced snapshots are released after unlocking
 to reduce contention. The receiver consumes pending entries before awaiting
 another wakeup. See [`events.rs`](../../crates/geode-app/src/events.rs).
 
-## Routing into the window
+## Routing into the windows
 
-The bridge awaits mailbox arrivals on the foreground executor and routes
-every event through `window.update`. A closed window ends the drain on its
-next event; while idle, the task can remain awaiting the mailbox. This is
+The bridge awaits mailbox arrivals on the foreground executor and hands
+every event to the app (`bridge::attach` takes the `ShellApp` entity, never
+a window or a view). Each answer is routed when it arrives
+(`ShellApp::route`, `ShellApp::deliver`):
+
+| Answer | Route | Why |
+|---|---|---|
+| Keyed by a tile (query, series, pricing, vol slices, upload, text file, a tile's distinct values) | The one window hosting the tile's workspace (`Workspaces::window_of`), shown or hidden | A tile has one occupant, in the window that hosts its workspace; a hidden workspace's tile still holds its occupant and takes the answer. |
+| Keyless (a fetch finished) or under a shell-owned key (the picker, expression suggestions, action values, diagnostics, the reference and watchlist lanes) | Every registered window, each handed its own copy (`Delivery` is `Clone`; the last window takes the original) | Nothing names the asking window; each window applies the answer only where its own tag matches, and tags come from the app's one counter (`ShellApp::next_tag`), so one window's reply can never fill another's picker. |
+| Keyed by a tile no window hosts (parked by a window close, awaiting the next window to show its index) | Dropped, with a `trace` line on `geode::query` | There is no occupant to read it, and nothing is lost: the tile's record holds its query, not its answer, and the next window to show the index rebuilds the occupant from the record, as a restore does, so it requeries at the lane it is shown under. |
+
+The route is resolved under one short read of the app and the lease is
+released before any window is updated: a tile's `deliver` may reach back
+into the app (a session mark, a flip barrier releasing), and an update of
+a leased entity is refused. Delivery runs inside the target window's
+update, so the occupant has its `Window`. A window opened after attach is
+served as soon as its view registers; one that closed is not read. This is
 arrival-driven delivery with no fixed frame-latency guarantee.
 
-The bridge's observers hold the shell and diagnostics entities, so both
-outlive their window, and the shell keeps its tiles alive with them. The
-bridge's own lanes check the window: the catalog, reference-read and
-poll-now observers submit nothing, and the catalog and live-reference retry
-timers end, once the window has closed; demand queued at closure stays
-unserved. Module-owned timers and the `ShellEvent` lanes do not check. A
+Liveness is the app's registry (`ShellApp::any_window_open`: true until the
+first window registers, then while any window is registered), not gpui's
+window list and not an entity's liveness, since the bridge's closures and
+the quit hooks hold the app and its views past the last window. The drain
+and the bridge's own lanes run from attach, ahead of the first window (an
+answer arriving before it is routed and dropped, not fatal), and end once
+the last window has deregistered: the catalog, reference-read and poll-now
+observers submit nothing, and the catalog, live-reference and watchlist
+retry timers end; demand queued at closure stays unserved. The catalog and
+the page's reference reads submit at, and are compared against, the as-of
+of the window whose diagnostics page is open (its shown lane; a pinned
+workspace has its own as-of), else the oldest window's, else the shared
+lane's. Module-owned timers and the `ShellEvent` lanes do not check. A
 pricer tile's periodic refresh and its refusal retry keep submitting price
 requests after closure, and the diagnostics page's ages tick and tile stale
-timers keep waking. In the app this window is short: closing the window quits
-the process on every platform, so module timers end with it. The checks above
-still matter between the close and process exit, and in tests, where a
-closed window's shell stays alive.
+timers keep waking. In the app this window is short: closing the last window
+quits the process on every platform, so module timers end with it. The
+checks above still matter between the close and process exit, and in tests,
+where a closed window's shell stays alive.
 
-Keyed query, series, pricing, vol-slice, upload, and text file results go to
-the matching shell occupant;
-absent occupants are ignored. Fetch completion broadcasts to visible
+Within a window, keyed results go to the matching occupant; absent
+occupants are ignored. Fetch completion reaches that window's visible
 occupants, whose modules decide whether they watch that source/identity.
 Distinct results are routed by key. A shell key (`shell::is_shell_key`: the
 picker, expression suggestions, action values, diagnostics) goes
-to the shell's own consumers, and only the picker's key reaches the picker,
-which checks its current tag, column, and open state; a tile's tag counter can
-equal the picker's, so a tag check alone would let a tile's values fill it.
-Any other key is a tile's and is delivered to that occupant as
-`Delivery::Distinct`. If submitting the picker's request fails, the bridge
-immediately delivers a matching synthetic error rather than leaving it
-loading: `the data service is busy — try again` or `the data service has
-stopped`.
+to the shell's own consumers in every window, and only the picker's key
+reaches the picker, which checks its current tag, column, and open state; a
+tile's tag counter can equal the picker's, so a tag check alone would let a
+tile's values fill it. Any other key is a tile's and is delivered to that
+occupant as `Delivery::Distinct`. If submitting the picker's request fails,
+the bridge immediately delivers a matching synthetic error rather than
+leaving it loading: `the data service is busy — try again` or `the data
+service has stopped`. A position command's answer becomes every window's
+status notice.
 
 `ThreadStopped` records the thread in `Diagnostics` for the status bar and the
 diagnostics page. On every drained event the bridge also reads the handle's

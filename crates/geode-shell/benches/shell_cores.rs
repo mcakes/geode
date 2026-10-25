@@ -32,8 +32,8 @@ use geode_shell::shell::objectdialog::{Destination, Domain, apply};
 use geode_shell::shell::{keybindings_view, objectdialog, settings_view};
 use geode_shell::tileadd::AddDirection;
 use geode_shell::tiling::{
-    DIVIDER_HIT_WIDTH, DockSide, Orientation, Rect, TileId, Tree, Workspaces, divider_strips,
-    resolve_drop_target,
+    DIVIDER_HIT_WIDTH, DockSide, Orientation, Rect, TileId, Tree, WindowKey, Workspaces,
+    divider_strips, resolve_drop_target,
 };
 use geode_shell::vimfind::FindStyle;
 
@@ -258,9 +258,11 @@ fn bench_palette(c: &mut Criterion) {
 /// tiles in mixed orientations, a couple of docks in use — about what a
 /// desk layout looks like after a week of muscle memory.
 fn realistic_workspaces() -> Workspaces {
+    const W: WindowKey = WindowKey(1);
     let mut ws = Workspaces::new();
+    ws.add_window(W, 1);
     for i in 1..=9u8 {
-        ws.switch(i);
+        ws.switch(W, i);
         let tiles = 3 + (i % 4) as usize; // 3..=6
         for t in 0..tiles {
             let orientation = if t % 2 == 0 {
@@ -268,16 +270,16 @@ fn realistic_workspaces() -> Workspaces {
             } else {
                 Orientation::Vertical
             };
-            ws.split_active(orientation);
+            ws.split_in(W, orientation);
         }
         if i % 3 == 0 {
-            ws.active_mut().move_to_dock(DockSide::Left);
+            ws.workspace_mut(W).move_to_dock(DockSide::Left);
         }
         if i % 4 == 0 {
-            ws.active_mut().move_to_dock(DockSide::Bottom);
+            ws.workspace_mut(W).move_to_dock(DockSide::Bottom);
         }
     }
-    ws.switch(1);
+    ws.switch(W, 1);
     ws
 }
 
@@ -298,6 +300,7 @@ fn bench_session(c: &mut Criterion) {
                 &geode_shell::session::PinnedRecords::new(),
                 &geode_shell::palette_usage::PaletteUsage::new(),
                 &geode_shell::session::PageRecords::new(),
+                &[],
             ))
         })
     });
@@ -309,6 +312,7 @@ fn bench_session(c: &mut Criterion) {
         &geode_shell::session::PinnedRecords::new(),
         &geode_shell::palette_usage::PaletteUsage::new(),
         &geode_shell::session::PageRecords::new(),
+        &[],
     );
     group.bench_function("from_toml_9_workspaces", |b| {
         b.iter(|| {

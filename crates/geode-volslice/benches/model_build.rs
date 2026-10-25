@@ -102,7 +102,7 @@ fn model_build(c: &mut Criterion) {
         ],
         ..State::default()
     };
-    state.reconcile(&rows);
+    state.reconcile(&rows, None);
     let plan = batch(&state, &loaded, &rows);
     let params = plan.params(QueryKey(1), 1, Instant::now());
     let config = VolConfig::with(Arc::new(geode_pricing::DemoVolModel));

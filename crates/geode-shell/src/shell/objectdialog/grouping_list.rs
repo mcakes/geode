@@ -144,7 +144,7 @@ pub(super) fn click(
 fn apply(shell: &mut ShellView, kind: RowKind, window: &mut Window, cx: &mut Context<ShellView>) {
     // Resolved before the modal closes: the target lane is the one the
     // modal stack was opened from.
-    let frame = shell.target_frame();
+    let frame = shell.target_frame(cx);
     match kind {
         RowKind::ViewDefault => {
             frame.update(cx, |f, cx| {
@@ -241,7 +241,7 @@ pub(super) fn finish_list_chain(
     }
     // Both targets pass the same check: an untouched seed (a slot's chain as
     // the frame holds it) was never checked against this field's vocabulary.
-    render::revalidate(shell);
+    render::revalidate(shell, cx);
     if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
         // Refused in place, as a typed unknown name is: the field reopens on
         // the same chain, so the fix is an edit, not a retype from the list.
@@ -257,7 +257,7 @@ pub(super) fn finish_list_chain(
             // an untouched seed is still a request to apply that chain. The
             // field refused an empty chain in place, so `set_ad_hoc` refuses
             // only a chain already in force, where closing is the answer.
-            let frame = shell.target_frame();
+            let frame = shell.target_frame(cx);
             frame.update(cx, |f, cx| {
                 if f.set_ad_hoc(chain) {
                     cx.notify();
@@ -272,7 +272,7 @@ pub(super) fn finish_list_chain(
         render::set_notice(shell, refusal);
         return;
     }
-    let frame = shell.target_frame();
+    let frame = shell.target_frame(cx);
     frame.update(cx, |f, cx| {
         f.stage_slot(n, chain);
         f.set_active_slot(Some(n));
@@ -292,14 +292,14 @@ fn enter_ad_hoc_stage(
     let chain = seed
         .or_else(|| {
             shell
-                .target_frame()
+                .target_frame(cx)
                 .read(cx)
                 .ad_hoc()
                 .map(<[String]>::to_vec)
         })
         .unwrap_or_default();
-    let config =
-        super::apply::config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    let config = super::apply::config_with_pending(shell, cx)
+        .unwrap_or_else(|| shell.services(cx).config.clone());
     let draft = super::groupings::ad_hoc_draft(&config, &chain);
     render::enter_edit_stage(shell, AD_HOC, Some(draft), cx);
 }
@@ -320,7 +320,7 @@ pub(super) fn open_ad_hoc_chain(
 /// the stored ad hoc chain, nothing for the view default or an empty slot
 /// (the stored ad hoc chain then seeds instead).
 fn chain_of(shell: &ShellView, kind: RowKind, cx: &Context<ShellView>) -> Option<Vec<String>> {
-    let frame = shell.target_frame();
+    let frame = shell.target_frame(cx);
     let view = frame.read(cx);
     match kind {
         RowKind::Slot(n) => view.slots().get(n).map(<[String]>::to_vec),
@@ -350,7 +350,7 @@ pub(super) fn commit_ad_hoc(shell: &mut ShellView, cx: &mut Context<ShellView>) 
         render::set_notice(shell, refusal);
         return true;
     }
-    let frame = shell.target_frame();
+    let frame = shell.target_frame(cx);
     frame.update(cx, |f, cx| {
         if f.set_ad_hoc(chain) {
             cx.notify();
@@ -370,7 +370,7 @@ pub(super) fn commit_ad_hoc(shell: &mut ShellView, cx: &mut Context<ShellView>) 
 /// question: the chain is a few names and lives nowhere a revert could
 /// restore it from.
 pub(super) fn forget(shell: &mut ShellView, cx: &mut Context<ShellView>) {
-    let frame = shell.target_frame();
+    let frame = shell.target_frame(cx);
     let forgot = frame.update(cx, |f, cx| {
         let forgot = f.forget_ad_hoc();
         if forgot {
@@ -548,7 +548,7 @@ pub(super) fn save_from_field(shell: &mut ShellView, cx: &mut Context<ShellView>
             if let Some(state) = shell.object_dialog.as_mut() {
                 state.mode = crate::dialogmode::DialogMode::Normal;
             }
-            render::revalidate(shell);
+            render::revalidate(shell, cx);
             if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
                 reopen_list_field(shell);
                 render::set_notice(shell, refusal);
@@ -688,14 +688,14 @@ fn choose_slot(shell: &mut ShellView, slot: u8, window: &mut Window, cx: &mut Co
     // may have forked this slot (so a save would lose the user's chain) or
     // changed its chain (so an "equal" one is not), and neither reaches the
     // list's rows or the frame until promotion.
-    let target = match super::apply::config_with_pending(shell) {
+    let target = match super::apply::config_with_pending(shell, cx) {
         Some(config) => {
             let rows = super::Domain::Groupings.objects(&config);
             let slots = super::super::hot_reload::rebuild_slots(&config);
             classify(&rows, slots.get(slot), slot, &save.chain)
         }
         None => {
-            let frame = shell.target_frame();
+            let frame = shell.target_frame(cx);
             let view = frame.read(cx);
             let rows = shell
                 .object_dialog
@@ -707,7 +707,7 @@ fn choose_slot(shell: &mut ShellView, slot: u8, window: &mut Window, cx: &mut Co
     };
     match target {
         SaveTarget::Owned => {
-            let replaced = owned_label(shell, slot);
+            let replaced = owned_label(shell, slot, cx);
             if let Some(state) = shell.object_dialog.as_mut()
                 && let Some(save) = state.save.as_mut()
             {
@@ -733,9 +733,9 @@ fn choose_slot(shell: &mut ShellView, slot: u8, window: &mut Window, cx: &mut Co
 /// spells it (pending batch folded in). Read off the raw entry rather than the
 /// frame: a slot naming an unknown column is the user's, but the reader
 /// dropped it, and a label from the frame would be empty.
-fn owned_label(shell: &ShellView, slot: u8) -> String {
-    let pending = super::apply::config_with_pending(shell);
-    let config = pending.as_ref().unwrap_or(&shell.services.config);
+fn owned_label(shell: &ShellView, slot: u8, cx: &App) -> String {
+    let pending = super::apply::config_with_pending(shell, cx);
+    let config = pending.as_ref().unwrap_or(&shell.services(cx).config);
     config
         .doc(super::groupings::DOC)
         .and_then(|doc| doc.value.get(&slot.to_string()))
@@ -774,7 +774,7 @@ fn activate_and_close(
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    let frame = shell.target_frame();
+    let frame = shell.target_frame(cx);
     frame.update(cx, |f, cx| {
         if let Some(chain) = staged {
             f.stage_slot(slot, chain);

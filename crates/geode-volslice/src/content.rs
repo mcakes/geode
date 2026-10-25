@@ -145,12 +145,15 @@ context = "volslice && mode == menu && popup == diff"
 # `.` swaps the chooser for the action menu, as `⋯` does.
 "." = "volslice::menu"
 
+# Both menus (the action menu and the coordinate menu) are up under
+# `popup == actions`. `.` is the action menu's own toggle: it closes the
+# action menu and swaps the coordinate menu for it, as `⋯` does.
 [[bindings]]
 context = "volslice && mode == menu && popup == actions"
 [bindings.keys]
 "enter" = "volslice::menu_pick"
 "escape" = "volslice::cancel"
-"." = "volslice::cancel"
+"." = "volslice::menu"
 "#;
 
 pub struct VolsliceContent {

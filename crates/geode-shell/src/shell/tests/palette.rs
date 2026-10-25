@@ -12,7 +12,7 @@ fn a_palette_theme_pick_by_keystrokes_applies_that_theme(cx: &mut gpui::TestAppC
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -33,8 +33,8 @@ fn a_palette_theme_pick_by_keystrokes_applies_that_theme(cx: &mut gpui::TestAppC
     });
 
     assert_ne!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
+        shell.read_with(&cx, |shell, cx| shell
+            .services(cx)
             .theme
             .active_name()
             .to_string()),
@@ -52,8 +52,8 @@ fn a_palette_theme_pick_by_keystrokes_applies_that_theme(cx: &mut gpui::TestAppC
     });
 
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
+        shell.read_with(&cx, |shell, cx| shell
+            .services(cx)
             .theme
             .active_name()
             .to_string()),
@@ -76,9 +76,7 @@ fn first_key_of_a_sequence_leaves_pending_keys_and_still_draws(cx: &mut gpui::Te
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
-                });
+                let view = view_for_test(test_services_with_gg_binding(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -134,9 +132,7 @@ fn opening_the_palette_cancels_a_pending_keystroke_sequence(cx: &mut gpui::TestA
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(test_services_with_gg_binding(), None, None, window, cx)
-                });
+                let view = view_for_test(test_services_with_gg_binding(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -200,7 +196,7 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -256,9 +252,7 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_action(
         shell.read_with(&cx, |shell, _| shell.palette.is_none()),
         "enter should close the palette"
     );
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count, 1,
         "enter on \"Rec: Split\" should have dispatched tile::add_rec \
@@ -278,7 +272,7 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_theme(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -298,8 +292,8 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_theme(
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    let before = shell.read_with(&cx, |shell, _| {
-        shell.services.theme.active_name().to_string()
+    let before = shell.read_with(&cx, |shell, cx| {
+        shell.services(cx).theme.active_name().to_string()
     });
     assert_ne!(
         before, "Gruvbox Dark",
@@ -334,8 +328,8 @@ fn ctrl_k_opens_types_filters_and_enter_dispatches_the_selected_theme(
         shell.read_with(&cx, |shell, _| shell.palette.is_none()),
         "enter should close the palette"
     );
-    let after = shell.read_with(&cx, |shell, _| {
-        shell.services.theme.active_name().to_string()
+    let after = shell.read_with(&cx, |shell, cx| {
+        shell.services(cx).theme.active_name().to_string()
     });
     assert_eq!(
         after, "Gruvbox Dark",
@@ -356,7 +350,7 @@ fn arrow_down_past_visible_rows_advances_selection_and_scrolls_it_into_view(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -429,7 +423,7 @@ fn escape_closes_the_palette_without_dispatching(cx: &mut gpui::TestAppContext) 
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -472,9 +466,7 @@ fn escape_closes_the_palette_without_dispatching(cx: &mut gpui::TestAppContext) 
         shell.read_with(&cx, |shell, _| shell.palette.is_none()),
         "escape should close the palette"
     );
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count, 0,
         "escape must not dispatch the item that was filtered/selected"
@@ -500,7 +492,7 @@ fn left_and_right_arrows_move_the_input_caret_and_do_not_leak_to_the_shell(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -549,9 +541,7 @@ fn left_and_right_arrows_move_the_input_caret_and_do_not_leak_to_the_shell(
         shell.read_with(&cx, |shell, _| shell.palette.is_some()),
         "the palette should still be open — arrows are caret movement, not close"
     );
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count, 0,
         "left/right must not leak to the shell as workspace chords"
@@ -568,7 +558,7 @@ fn ctrl_a_is_consumed_by_the_input_and_does_not_leak_to_the_shell(cx: &mut gpui:
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -636,7 +626,7 @@ fn click_on_a_result_row_dispatches_it_like_enter(cx: &mut gpui::TestAppContext)
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -655,8 +645,8 @@ fn click_on_a_result_row_dispatches_it_like_enter(cx: &mut gpui::TestAppContext)
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
 
-    let before = shell.read_with(&cx, |shell, _| {
-        shell.services.theme.active_name().to_string()
+    let before = shell.read_with(&cx, |shell, cx| {
+        shell.services(cx).theme.active_name().to_string()
     });
     assert_ne!(
         before, "Gruvbox Light",
@@ -688,8 +678,8 @@ fn click_on_a_result_row_dispatches_it_like_enter(cx: &mut gpui::TestAppContext)
         shell.read_with(&cx, |shell, _| shell.palette.is_none()),
         "a row click dispatches, so the palette closes as it does on enter"
     );
-    let after = shell.read_with(&cx, |shell, _| {
-        shell.services.theme.active_name().to_string()
+    let after = shell.read_with(&cx, |shell, cx| {
+        shell.services(cx).theme.active_name().to_string()
     });
     assert_eq!(
         after, "Gruvbox Light",
@@ -706,7 +696,7 @@ fn click_outside_the_palette_panel_closes_it(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -759,7 +749,7 @@ fn click_on_the_palette_panel_does_not_close_it(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -815,7 +805,7 @@ fn shell_chord_does_not_fire_while_the_palette_is_open(cx: &mut gpui::TestAppCon
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -837,9 +827,8 @@ fn shell_chord_does_not_fire_while_the_palette_is_open(cx: &mut gpui::TestAppCon
     // Create a real tile (the test layer's ctrl+v = tile::add_rec_
     // horizontal) so there is something for a leaked ctrl+w to close.
     cx.simulate_keystrokes("ctrl-v");
-    let tile_count_before = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count_before =
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count_before, 1,
         "sanity: ctrl+v should have added a tile"
@@ -857,9 +846,8 @@ fn shell_chord_does_not_fire_while_the_palette_is_open(cx: &mut gpui::TestAppCon
         shell.read_with(&cx, |shell, _| shell.palette.is_some()),
         "ctrl+w must not close the palette either"
     );
-    let tile_count_after = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count_after =
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count_after, 1,
         "ctrl+w (workspace::close_tile) must not fire while the \
@@ -876,7 +864,7 @@ fn palette_selection_wraps_up_from_index_zero(cx: &mut gpui::TestAppContext) {
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1052,15 +1040,12 @@ fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_acti
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| {
-                    ShellView::new(
-                        test_services_with_ctrl_k_rebound_to_close_tile(),
-                        None,
-                        None,
-                        window,
-                        cx,
-                    )
-                });
+                let view = view_for_test(
+                    test_services_with_ctrl_k_rebound_to_close_tile(),
+                    None,
+                    window,
+                    cx,
+                );
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1088,13 +1073,7 @@ fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_acti
             .unwrap_or_else(|_| panic!("root view is not a ShellView"))
     });
     assert_eq!(
-        shell.read_with(&cx, |shell, _| shell
-            .services
-            .workspaces
-            .active()
-            .tree()
-            .tiles()
-            .len()),
+        shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len()),
         1,
         "sanity: ctrl+v should have added a tile"
     );
@@ -1110,9 +1089,7 @@ fn user_layer_rebinding_ctrl_k_prevents_palette_open_and_dispatches_rebound_acti
         "a user layer rebinding ctrl+k away from palette::toggle must shadow the \
          builtin binding — the palette must not open"
     );
-    let tile_count = shell.read_with(&cx, |shell, _| {
-        shell.services.workspaces.active().tree().tiles().len()
-    });
+    let tile_count = shell.read_with(&cx, |shell, cx| shell.workspace(cx).tree().tiles().len());
     assert_eq!(
         tile_count, 0,
         "ctrl-k should have dispatched the rebound workspace::close_tile \
@@ -1132,7 +1109,7 @@ fn enter_on_the_palette_toggle_row_closes_the_palette_without_reopening(
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1297,9 +1274,11 @@ fn a_palette_dispatch_is_recorded_and_ranks_first_on_the_next_open(cx: &mut gpui
     cx.simulate_keystrokes("enter");
     assert!(shell.read_with(&cx, |shell, _| shell.palette.is_none()));
 
-    let record = shell.read_with(&cx, |shell, _| {
+    let record = shell.read_with(&cx, |shell, cx| {
         shell
-            .palette_usage
+            .app()
+            .read(cx)
+            .palette_usage()
             .get("action:tile::add_rec_vertical")
             .copied()
     });
@@ -1325,7 +1304,9 @@ fn choosing_the_palette_toggle_row_records_nothing(cx: &mut gpui::TestAppContext
         Some("Toggle command palette")
     );
     cx.simulate_keystrokes("enter");
-    assert!(shell.read_with(&cx, |shell, _| shell.palette_usage.is_empty()));
+    assert!(shell.read_with(&cx, |shell, cx| {
+        shell.app().read(cx).palette_usage().is_empty()
+    }));
 }
 
 /// A restored history (`ShellServices::restored_palette_usage`, from
@@ -1354,7 +1335,7 @@ fn a_palette_dispatch_reaches_the_session_flush(cx: &mut gpui::TestAppContext) {
     let (mut cx, shell) =
         open_ranked_shell(cx, super::session::test_services_with_session(session_path));
 
-    let clean = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let clean = shell.take_dirty_session_write(&mut cx);
     assert!(clean.is_none(), "a fresh shell has nothing to flush");
 
     cx.simulate_keystrokes("ctrl-k");
@@ -1365,12 +1346,12 @@ fn a_palette_dispatch_reaches_the_session_flush(cx: &mut gpui::TestAppContext) {
     );
     cx.simulate_keystrokes("enter");
 
-    let pending = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let pending = shell.take_dirty_session_write(&mut cx);
     let (_, text) = pending.expect("a palette dispatch must dirty the session flush");
     assert!(text.contains("[palette.usage"), "{text}");
     assert!(text.contains("\"theme:Gruvbox Dark\""), "{text}");
 
-    let again = shell.update(&mut cx, |shell, cx| shell.take_dirty_session_write(cx));
+    let again = shell.take_dirty_session_write(&mut cx);
     assert!(again.is_none(), "one dispatch flushes once");
 }
 
@@ -1437,7 +1418,7 @@ fn pending_keys_which_key_and_palette_bindings_paint_as_kbd(cx: &mut gpui::TestA
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(services, None, None, window, cx));
+                let view = view_for_test(services, None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1494,7 +1475,7 @@ fn a_pointer_entering_a_result_row_repaints_at_once(cx: &mut gpui::TestAppContex
     let window = cx
         .update(|cx| {
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
-                let view = cx.new(|cx| ShellView::new(test_services(), None, None, window, cx));
+                let view = view_for_test(test_services(), None, window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })
         })
@@ -1594,10 +1575,10 @@ fn max_painted_palette_rows(cx: &mut gpui::VisualTestContext, row: usize) -> usi
 fn assert_palette_view_is_fresh(shell: &Entity<ShellView>, cx: &gpui::VisualTestContext) {
     shell.read_with(cx, |s, cx| {
         let open = s.palette.as_ref().expect("the palette is open");
-        let bindings = crate::palette::build_binding_index(&s.services.keymap);
+        let bindings = crate::palette::build_binding_index(&s.services(cx).keymap);
         let items = crate::palette::build_items(
-            &s.services.registry,
-            &s.services.theme,
+            &s.services(cx).registry,
+            &s.services(cx).theme,
             &bindings,
             s.frame.read(cx).saved_scopes(),
         );
@@ -1605,7 +1586,7 @@ fn assert_palette_view_is_fresh(shell: &Entity<ShellView>, cx: &gpui::VisualTest
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let mut fresh = PaletteState::with_usage(items, &s.palette_usage, now);
+        let mut fresh = PaletteState::with_usage(items, s.app().read(cx).palette_usage(), now);
         fresh.set_query(open.query());
         let (view, fresh) = (open.view(), fresh.view());
         assert_eq!(view.rows, fresh.rows, "query {:?}", open.query());
@@ -1884,7 +1865,7 @@ fn a_click_on_a_scrolled_palette_row_dispatches_that_row(cx: &mut gpui::TestAppC
         panic!("row {target} is a theme row: {item:?}");
     };
     assert_ne!(
-        shell.read_with(&vcx, |s, _| s.services.theme.active_name().to_string()),
+        shell.read_with(&vcx, |s, cx| s.services(cx).theme.active_name().to_string()),
         name
     );
     let selector: &'static str = Box::leak(format!("palette-row-{target}").into_boxed_str());
@@ -1897,7 +1878,7 @@ fn a_click_on_a_scrolled_palette_row_dispatches_that_row(cx: &mut gpui::TestAppC
     vcx.run_until_parked();
     assert!(shell.read_with(&vcx, |s, _| s.palette.is_none()));
     assert_eq!(
-        shell.read_with(&vcx, |s, _| s.services.theme.active_name().to_string()),
+        shell.read_with(&vcx, |s, cx| s.services(cx).theme.active_name().to_string()),
         name,
         "the click dispatched the row under the pointer"
     );

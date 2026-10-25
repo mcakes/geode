@@ -2,7 +2,7 @@
 //! catchers call these operations; divider moves apply immediately while
 //! tile movement only previews the operation applied on drop.
 
-use gpui::{Context, MouseDownEvent, Window};
+use gpui::{App, Context, MouseDownEvent, Window};
 use gpui_component::TITLE_BAR_HEIGHT;
 
 use crate::keymap::Modifiers;
@@ -113,19 +113,20 @@ impl ShellView {
     /// changed; stale addresses and moves already at a clamp are no-ops.
     /// Cancel if the workspace epoch changed, independently of render timing.
     /// A real change latches `moved`; the caller handles notification.
-    pub(super) fn apply_divider_drag(&mut self, x: f32, y: f32) -> bool {
+    pub(super) fn apply_divider_drag(&mut self, x: f32, y: f32, cx: &mut App) -> bool {
         let Some(epoch) = self.divider_drag.as_ref().map(|drag| drag.epoch) else {
             return false;
         };
-        if epoch != self.services.workspaces.switch_epoch() {
-            self.cancel_divider_drag();
+        if epoch != self.workspaces(cx).switch_epoch(self.key) {
+            if self.cancel_divider_drag() {
+                self.mark_session_dirty(cx);
+            }
             return false;
         }
         let Some(drag) = &self.divider_drag else {
             return false;
         };
-        let ws = self.services.workspaces.active_mut();
-        let changed = match &drag.target {
+        let changed = self.with_workspace(cx, |ws| match &drag.target {
             DividerDragTarget::MainTree { address } => {
                 ws.drag_main_divider(address, x, y, drag.bounds)
             }
@@ -133,7 +134,7 @@ impl ShellView {
                 ws.drag_dock_divider(*side, address, x, y, drag.bounds)
             }
             DividerDragTarget::DockEdge { side } => ws.drag_dock_edge(*side, x, y, drag.bounds),
-        };
+        });
         if changed && let Some(drag) = &mut self.divider_drag {
             drag.moved = true;
         }
@@ -147,19 +148,20 @@ impl ShellView {
     /// the dirty flag coalesces onto the watcher's ~500ms background
     /// flush, never a synchronous write on the UI thread.
     pub(super) fn finish_divider_drag(&mut self, cx: &mut Context<Self>) {
-        self.cancel_divider_drag();
+        if self.cancel_divider_drag() {
+            self.mark_session_dirty(cx);
+        }
         cx.notify();
     }
 
-    /// Stop divider tracking while preserving live resizes. Mark the session
-    /// dirty if anything moved. Shared by release and cancellation; callers
+    /// Stop divider tracking while preserving live resizes. Answers whether
+    /// anything moved, which the caller turns into a session-dirty mark on
+    /// its own path: an event path marks at once, the draw pass defers the
+    /// mark (`render.rs`). Shared by release and cancellation; callers
     /// notify when needed, keeping render-time invalidation notify-free.
-    pub(super) fn cancel_divider_drag(&mut self) {
-        if let Some(drag) = self.divider_drag.take()
-            && drag.moved
-        {
-            self.session_dirty = true;
-        }
+    #[must_use = "a moved divider's resize is persisted only when the caller marks the session dirty"]
+    pub(super) fn cancel_divider_drag(&mut self) -> bool {
+        self.divider_drag.take().is_some_and(|drag| drag.moved)
     }
 
     /// Open the tile picker on a bare double-click of the focused placeholder.
@@ -177,7 +179,7 @@ impl ShellView {
         cx: &mut Context<Self>,
     ) -> bool {
         if self.occupant_kind(id) != Some(crate::module::placeholder::PLACEHOLDER_KIND)
-            || self.services.workspaces.active().focused_tile() != Some(id)
+            || self.workspace(cx).focused_tile() != Some(id)
         {
             return false;
         }
@@ -206,8 +208,8 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.services.workspaces.active_mut().focus_empty_dock(side) {
-            self.session_dirty = true;
+        if self.with_workspace(cx, |ws| ws.focus_empty_dock(side)) {
+            self.mark_session_dirty(cx);
             cx.notify();
         }
         self.try_pick_on_double_click(event, window, cx);
@@ -256,7 +258,8 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if event.click_count != 2 || !mod_alias_held(self.services.mod_alias, &event.modifiers) {
+        if event.click_count != 2 || !mod_alias_held(self.services(cx).mod_alias, &event.modifiers)
+        {
             return false;
         }
         if self.palette.is_some()
@@ -269,10 +272,10 @@ impl ShellView {
         }
         // `focus_main_tile` answers false for a tile the main tree does
         // not hold — a docked one — which is the dock refusal.
-        if !self.services.workspaces.active_mut().focus_main_tile(id) {
+        if !self.with_workspace(cx, |ws| ws.focus_main_tile(id)) {
             return false;
         }
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         self.dispatch(
             &crate::actions::ActionId("workspace::fullscreen_tile".into()),
             None,
@@ -298,7 +301,7 @@ impl ShellView {
         event: &MouseDownEvent,
         cx: &mut Context<Self>,
     ) -> bool {
-        if !mod_alias_held(self.services.mod_alias, &event.modifiers) {
+        if !mod_alias_held(self.services(cx).mod_alias, &event.modifiers) {
             return false;
         }
         if self.palette.is_some()
@@ -306,20 +309,14 @@ impl ShellView {
             || !self.matcher.pending().is_empty()
             || self.divider_drag.is_some()
             || self.tile_drag.is_some()
-            || self
-                .services
-                .workspaces
-                .active()
-                .tree()
-                .fullscreen()
-                .is_some()
+            || self.workspace(cx).tree().fullscreen().is_some()
         {
             return false;
         }
         let position = (f32::from(event.position.x), f32::from(event.position.y));
         self.tile_drag = Some(TileDrag {
             tile: id,
-            epoch: self.services.workspaces.switch_epoch(),
+            epoch: self.workspaces(cx).switch_epoch(self.key),
             origin: position,
             cursor: position,
             active: false,
@@ -376,8 +373,8 @@ impl ShellView {
             self.cancel_tile_drag();
         }
         let heal_divider = self.divider_drag.is_some();
-        if heal_divider {
-            self.cancel_divider_drag();
+        if heal_divider && self.cancel_divider_drag() {
+            self.mark_session_dirty(cx);
         }
         if heal_tile || heal_divider {
             cx.notify();
@@ -404,15 +401,12 @@ impl ShellView {
         };
         if drag.active
             // The epoch catches switches away and back between renders.
-            && drag.epoch == self.services.workspaces.switch_epoch()
+            && drag.epoch == self.workspaces(cx).switch_epoch(self.key)
             && self.palette.is_none()
             && !self.modal_open()
             && self.matcher.pending().is_empty()
             // A close and release can arrive before another render.
-            && self
-                .services
-                .workspaces
-                .active()
+            && self.workspace(cx)
                 .region_of(drag.tile)
                 .is_some()
         {
@@ -423,9 +417,8 @@ impl ShellView {
             // conversion `render` bakes into its drag rects).
             let sx = x - sidebar::width(window);
             let sy = y - toolbar_height;
-            let target = locate_drop_target(self.services.workspaces.active(), area, sx, sy);
-            let ws = self.services.workspaces.active_mut();
-            let changed = match target {
+            let target = locate_drop_target(self.workspace(cx), area, sx, sy);
+            let changed = self.with_workspace(cx, |ws| match target {
                 Some(DropTarget::Tile {
                     id,
                     zone: DropZone::Center,
@@ -436,9 +429,9 @@ impl ShellView {
                 }) => ws.drop_split(drag.tile, id, edge),
                 Some(DropTarget::DockBackground { side }) => ws.drop_to_dock(drag.tile, side),
                 None => false,
-            };
+            });
             if changed {
-                self.session_dirty = true;
+                self.mark_session_dirty(cx);
             }
         }
         cx.notify();

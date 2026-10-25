@@ -5,6 +5,15 @@ consulting the ordinary keymap matcher. Dialog state owns the query, selection,
 and editing stage; GPUI inputs and scroll handles reflect that state. This guide
 describes those boundaries and the behavior of the shell's transient surfaces.
 
+Every window owns its own transient surfaces: the palette, the dialog
+stack, the per-tile command line and the matcher's pending chord and
+sequence state are a `ShellView`'s, so a dialog open in one window owns no
+keys in another, and a chord begun in one window is not finished in the
+next. The vocabulary is shared (the registry and keymap are the app's),
+and so is the frame a dialog commits to, which is why the window verbs
+`window::tear_out` and `window::open` are refused under a modal as a
+workspace switch is (see [palette and which-key](#palette-and-which-key)).
+
 See [keymaps and actions](keymaps.md) for binding resolution and
 [configuration dialogs](configuration-dialogs.md) for object drafts and writes.
 
@@ -15,7 +24,7 @@ this order:
 
 | Owner | Routing |
 |---|---|
-| Palette over a dialog stack | Takes precedence over the modal handler below: the palette owns keys while it is open, whether or not a dialog is open beneath it. Every action is listed; an `opens_dialog` action pushes, and any other action runs behind the stack and returns focus to the top dialog. Three actions that would open real transient chrome behind the stack (`tile::command_line`, `tile::find`, `stack::pick`) are refused instead, as are workspace switches (`workspace::switch_*`) and the pin toggle (`frame::pin_workspace`) — see [palette and which-key](#palette-and-which-key). |
+| Palette over a dialog stack | Takes precedence over the modal handler below: the palette owns keys while it is open, whether or not a dialog is open beneath it. Every action is listed; an `opens_dialog` action pushes, and any other action runs behind the stack and returns focus to the top dialog. Three actions that would open real transient chrome behind the stack (`tile::command_line`, `tile::find`, `stack::pick`) are refused instead, as are workspace switches (`workspace::switch_*`), the pin toggle (`frame::pin_workspace`) and the window verbs (`window::tear_out`, `window::open`) — see [palette and which-key](#palette-and-which-key). |
 | Shell modal or component dialog | Excludes the ordinary matcher. A shell modal's handler gets first refusal. A chord it declines is dispatched only if it is bound to a dialog-opening action or the palette toggle; every other chord stays inert. Unclaimed Escape closes the top dialog. |
 | Focused per-tile command line | Handles its own keys. The effective palette toggle remains available and cancels the line. |
 | Focused scope text field | Typing bypasses the matcher. Single-key chords resolve against the workspace context only, with or without an open page. Escape restores the entry text; Escape and Enter return focus home: the open page's handle, else the shell root. |
@@ -262,15 +271,21 @@ same notice. Either would change which frame lane the active workspace reads
 while the dialog stays bound to the lane it opened in, so the toolbar would
 mix two lanes (historical tiles without the historical stripe, for example).
 Refusing them keeps the dialog's lane and the active lane the same workspace
-for as long as a dialog is open.
+for as long as a dialog is open. The window verbs, "Tear out into a new
+window" (`window::tear_out`) and "New window" (`window::open`), are refused
+with the same notice: a tear-out switches the dispatching window, and either
+opens a window while this one's dialog is bound to its lane.
 
 While a page is open the three transient-chrome actions above are refused
 with `close the page first (esc)`, and so are `tile::add`, every per-kind add action,
-`tile::open_with`, `tile::autosize_columns`, `tile::link_group`, and every `workspace::`,
+`tile::open_with`, `tile::autosize_columns`, `tile::link_group`, the window
+verbs (`window::tear_out`, `window::open`), and every `workspace::`,
 `dock::`, and `stack::` action except the workspace switches: the page
 covers the tile surface they would open on or change, and a layout edited
 behind a page is a change the trader cannot see (`Close tile` would destroy
-an unseen tile with no undo). A switch closes the page and then switches.
+an unseen tile with no undo; a tear-out would move the covered tiles to a
+window the trader is not looking at). A switch closes the page and then
+switches.
 The palette reaches every other action over a page.
 
 [`palette`](../../crates/geode-shell/src/palette.rs) matches action title and

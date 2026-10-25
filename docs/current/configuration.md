@@ -802,9 +802,11 @@ and modification times, so additions and removals trigger reload but an edit
 with an unchanged mtime does not. Scan failures are silently skipped and may
 look like removals. Scanning and loading run in the background; validation
 and runtime application run on the UI thread. Work adds to the poll interval.
-The poll ends when its window closes, even while a host still holds the shell
-entity: no tick (config scan, session write, memory sample, date refresh)
-runs for a closed window.
+The watcher is the app's (`ShellApp::spawn_watcher`): one loop however many
+windows are open, started with the app and ended once every registered
+window has closed, even while the quit hooks still hold the app entity or
+the bridge's closures a window's view. No tick (config scan, session write,
+memory sample, date refresh) runs for nobody.
 
 The first poll establishes a baseline without loading; an edit between startup
 loading and that poll can therefore go unnoticed until another file change.
@@ -831,7 +833,7 @@ Accepted candidates update runtime state according to their inputs:
 
 | Input | Live effect |
 |---|---|
-| Keymap layers or modifier alias | Replace bindings and close an open palette whose snapshot depends on them; restore focus on the next render |
+| Keymap layers or modifier alias | Replace bindings and close every window's open palette, whose snapshot depends on them; each window restores focus on its next render |
 | Effective `app.theme` | Apply the theme when changed; unrelated edits preserve the current theme |
 | `groupings`, `datasets`, or `dimensions` | Rebuild shared grouping slots |
 | `scopes`, `datasets`, or `dimensions` | Rebuild saved scopes |
@@ -853,7 +855,11 @@ when their values change. The view-related event is queued before any frame
 notification so the bridge refreshes factory/handle views before tiles observe
 the new revision and submit queries. `AppSettingsReloaded` is queued the same
 way, so a tile's frame flip re-arms its stale wake-up against the new
-threshold.
+threshold. `Reloaded` follows both, carrying the revision and the reload's
+"changed" flags, so each window's own work (its picker vocabulary, its
+palette, its dialogs) runs after the bridge's and before the frame notifies;
+a rejected reload emits `ReloadRejected`, on which each window repaints its
+status.
 
 View and derived-dimension replacements use a latest-value mailbox into the
 data service, so a full request queue cannot permanently lose a configuration

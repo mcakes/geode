@@ -13,10 +13,314 @@ data handle while receiving only shell concepts such as `TileId`, `Frame`, and
 ## State ownership
 
 `ShellView` is the retained GPUI entity for one window. It owns transient
-window state: the active workspace, tile occupants, focus restoration,
-palette, modal, command line, drag state, and session dirt. Its `render`
-method describes the current frame; it must not become a second domain model
-or perform blocking work.
+window state: the workspace it shows, tile occupants, focus restoration,
+palette, modal, command line, and drag state. Its `render` method describes
+the current frame; it must not become a second domain model or perform
+blocking work.
+
+`ShellApp` is the one app-level entity behind every window. It owns
+`ShellServices` (config, the action registry, the keymap, the theme, the
+module roster, and `Workspaces`) and the desk and user config directories,
+and issues each window a `WindowKey` as it registers. A `ShellView` reads
+them through `services(cx)`, `workspaces(cx)`, `workspace(cx)` and
+`config(cx)` and writes them only inside `with_services`, `with_workspaces`
+and `with_workspace`, so a second window sees the same config revision and
+the same tile allocator as the first. Render reads through the `&App`
+accessors and never updates the app entity; `app.update` runs only on event,
+dispatch, constructor and deferred paths, because an update of the owner from
+inside a window's draw would be a nested update of an entity that window is
+reading. The restore inputs are consumed once, at construction: `ShellApp::new`
+takes the restored tile records into `parked_tiles` and the restored page
+records into `parked_pages`, applies the frame, pinned-lane and link-scope
+records and seeds the palette usage, and `ShellView::new` takes the parked
+tile records it hosts (`take_parked_records`) out of the app before it
+creates its occupants, so no restore input is read twice or by a second
+window. Page records stay the app's until a page of the kind opens, in
+whichever window (`take_parked_page`, on the open's dispatch path): a view
+that took them whole at construction would carry every kind's record away
+with it, so a page opened in a second window would restore nothing and the
+first window's close would drop the tables from every later save. The
+rosters hand out module and page factories as `Arc`s, so a factory's
+`create` runs with no lease on the owner.
+
+`ShellApp` also owns the session: the dirty flag, the baselines the periodic
+writer compares against, the palette's usage history, and the tile records
+no window holds an occupant for (`parked_tiles`: the restored session's
+until a window takes them, and the records a window parks when a workspace
+it hosted leaves for another window, see [workspaces moving between
+windows](#workspaces-moving-between-windows)). A window takes the parked
+records it should host through `take_parked_records`: a record whose tile
+sits in a workspace the window hosts (`Workspaces::window_of`), and, for the
+oldest open window only, a record whose tile is in no workspace, so the
+first window owns unplaced records and writes them back as it always has;
+every other record stays parked for the window that hosts it. A window
+pulls at construction and on the event and dispatch paths that make it
+host more (a switch that `Shown` or `Moved` a workspace to it, a `Parked`
+announcement), never from its draw. Each `ShellView` registers
+itself with the app at the end of its constructor (`register_view`: its
+key, its window's handle and a weak handle to the view). That is the
+window registry (`ShellApp::windows`, `handle`, `is_last_window`), and it
+is what "open" means to the app (`any_window_open`: true until the first
+window registers, then while the registry lists one): the watcher and the
+app bridge's drain and retry lanes run while it says so, the session is
+saved only while it lists a window, the diagnostics histogram sums the
+views it lists, a data answer is routed through it (`ShellApp::deliver`:
+a keyed answer to the window hosting its tile's workspace, a keyless or
+shell-keyed one to every window, one for a parked tile dropped, see
+[routing into the windows](request-delivery.md#routing-into-the-windows)),
+and the title names an index only when
+it lists two (`window_title`: `Geode`, or `Geode · N` with N the shown
+index). A window sets its own title (`ShellView::sync_title`) where it can
+have changed and a `Window` is at hand — the end of its constructor, the
+`WindowsChanged` event, and its own switch or tear-out — comparing against
+the title it last set, so an unchanged title is never re-set; render never
+reads or sets it. Neither `cx.windows()` nor a view entity's liveness decides, since
+a host such as the bridge or the quit hooks holds a view or the app past
+its window. A window leaves the registry through `ShellApp::window_closed`,
+which the close path calls while the window still stands: the view parks
+the page it holds (`WindowClosing`, answered by `ShellView::park_page`,
+which serializes the page into `parked_pages`; a page has no workspace,
+so no `Park` would carry it), then every index the
+window hosted leaves `Workspaces` (`remove_window`) and is parked through
+the ordinary `Park` event, so its tiles' records wait in `parked_tiles`
+for the next window to show the index or for the session file; the key
+then leaves the registry and `WindowsChanged` is emitted. A deregistered
+window can be drawn once more before gpui removes it (the parks notify its
+view); its render paints nothing then. The writer unions every registered
+view's records (`ShellView::current_tiles`: its non-placeholder occupants,
+then its own unplaced records and the records it has pulled but not yet
+built, which left the parked set when they were taken) with the parked
+ones, earlier sources winning an id; page records are the parked ones
+(`parked_pages`: kinds never opened, unknown kinds, a kind a window
+replaced, a closed window's) overlaid by each registered view's one
+retained page (`ShellView::current_pages`), so a live page wins a parked
+record of its kind. A window marks the session dirty through
+`ShellView::mark_session_dirty`, which updates the app entity, so it is
+called from event, dispatch and constructor paths only; the one render-time
+case, a divider drag cancelled because an overlay, page, fullscreen or
+workspace switch hid its boundary, defers the mark to the effects that flush
+after the draw. The palette records a chosen row the same way
+(`ShellApp::note_palette_use`), and the distinct-request tags the dimension
+pickers, the expression suggestions and a row action's value choice submit
+under come from the app's one counter (`ShellApp::next_tag`, drawn on those
+dispatch paths): their requests share a few reserved keys and their answers
+reach every window, so a tag that repeated across windows would let one
+window's reply fill another's picker.
+
+`ShellApp` also owns the app-wide settings a reload or a settings row changes
+(`font_size`, `find_style`, `add_direction`, `line_numbers`, `default_source`,
+`link_include_tile_filter`), the reload state (`config_revision`, the last
+outcome and its status text, the restart notice and the startup baselines it
+compares against) and the cached date, each behind a read accessor the status
+bar, the settings rows and the prepared dialog rows use; a settings row writes
+them through `ShellView::with_app` on its dispatch path. The watcher loop is
+the app's too, started once by `ShellApp::new` (`spawn_watcher`) and ended
+once the window registry is empty (`watcher_runs`: the registry decides,
+not the entity, since the bridge's closures and the quit hooks hold a view
+or the app past its window; a tick for nobody would wake diagnostics and
+write a session no one reads): every tick sweeps the flip barrier, refreshes
+the diagnostics histogram (every registered window's, summed) and the memory
+sample, refreshes the date, writes a dirty session and scans config, applying
+a changed candidate through `ShellApp::apply_reload`. `ShellApp` is
+the one emitter of `ShellEvent`: the bridge subscribes to it for
+`ConfigReloaded`, `AppSettingsReloaded` and `DistinctRequested` (a window's
+picker emits through the app), and each window subscribes in its constructor
+(`on_app_event`) for `Reloaded`, which carries the reload's "changed" flags so
+the window rebuilds only what the reload touched (its picker vocabulary, an
+open palette, its emitters' composition rule, an open expression dialog's
+offers, every open dialog's rows), for `ReloadRejected` (repaint the status),
+for `DayChanged` (repaint the scope bar), and for the pair that moves a
+workspace between windows, `Park` and `Parked` (below). `Reloaded` is queued
+after the bridge's events and before the frame's notifications, so a window
+sees a revision only after the bridge refreshed its views.
+
+### Workspaces moving between windows
+
+A live module entity renders only in the window that created it. When a
+workspace changes window, its occupants are not handed over: the window it
+leaves parks them into records and the window it reaches rebuilds them from
+those records, as a restore does. Three routes move a workspace: a switch in
+one window to an index another window hosts hidden (`Workspaces::switch`
+answers `Moved { from }`), a new window opening on such an index
+(`Workspaces::add_window` answers `TakenFrom`; a tear-out is this, for the
+index the old window showed), and a window closing (`ShellApp::window_closed`
+parks every index it hosted, for no destination yet). A switch within one window
+(`Shown`, `Unchanged`), a switch to an index another window shows
+(`Raise`, which asks that window forward and changes nothing) and a refused
+one (`Invalid`) move nothing and park nothing.
+
+The move runs in two app events, because subscriber order is not a
+contract and one event could not order the source's park before the
+destination's pull. `ShellApp::switch` (or `add_window`) commits the move
+in `Workspaces` and emits `ShellEvent::Park { window, workspace }`. The
+named window's `park_workspace` takes every tile in that workspace in id
+order: the occupant hears `park` with a live context (a module flushes
+unsaved work there; the pricer saves a dirty sheet), its record (kind,
+serialized state, the frame's membership) is put in `ShellApp::parked_tiles`,
+then it hears `set_visible(false)` and `closed`, as a closing tile does, and
+is dropped with its emitter subscription, its stack and focus bookkeeping
+and its visible-set entry. A record the window held but had not built (a
+restored record awaiting its first draw, an unplaced record behind a
+placeholder, an `add_tile` request not yet drawn) moves as a record too.
+Link membership stays on the frame: the tile lives on, in the same groups,
+and the destination's rebuild reads it there as a restore does. The source
+then calls `ShellApp::records_parked`, which emits `ShellEvent::Parked {
+workspace }`; the window showing that workspace pulls the records
+(`pull_parked_records`, through `take_parked_records`) into its own
+restored-record map, and its next draw's `ensure_occupants` builds the
+occupants from them, under the same tile ids. The draw pass itself never
+reads the app's parked records.
+
+### Opening windows
+
+`ShellApp` opens every window, the first included, through one installed
+`WindowOpener` (`set_window_opener`, a closure the composition root
+installs once, before the first window: it builds the platform window and
+a `ShellView` for a key, installs the window's own hooks, and returns the
+window's handle, or `None`). At startup the composition root
+(`startup::open_startup_windows` in `geode-app`) opens one window per
+restored `[windows.K]` record, in K order, each on the index its record
+names and placed where the record says, so the first record's window is
+the oldest (it writes `active` at the next save and hosts the restored
+indexes no window shows); a record whose open is refused (its index is
+shown by an earlier record's window, which the session reader already
+prevents; the opener failed) is skipped with a warning and the rest still
+open. With no record, or none that opened, one window opens on the
+session's initial index (the one the oldest window showed when the session
+was last saved; 1 without a session) at the platform's default placement,
+and a refusal there ends the run: without a window there is nothing to
+run. `ShellApp::open_window(app,
+spec, cx)` takes a `WindowSpec` (the workspace to show and a `Placement`:
+beside a window, where a restored session recorded it, or the platform's
+default) and runs three steps. Reserve, under one app update: the key is
+issued and the index opened in `Workspaces` (one code path with
+`add_window`, which the test fixtures that build a window by hand use),
+refusing
+`NoFreeWorkspace` with nothing changed when the index is shown elsewhere;
+an index hidden in another window emits that window's `Park`. Open, with
+no lease on the app: the opener's `ShellView::new` updates the app itself
+(`register_view`, `take_parked_records`), and an update of an entity
+already leased is refused, so the opener cannot run inside the reserve
+step; this is why `open_window`, `open_fresh` and `tear_out` are
+associated functions over the entity rather than methods. Confirm, under
+a second update: the registry must list the key (the view registered it),
+and `ShellEvent::WindowsChanged` is emitted; otherwise the reservation is
+removed (`Workspaces::remove_window`) and `OpenerFailed` returned. With no
+opener installed, `NoOpener` is refused before anything is reserved.
+
+`open_windows(app, specs, cx)` opens several windows as one batch, one
+answer per spec in order, and is what startup uses: the reserve step runs
+for every spec under one app update before the first opener runs, and
+each window is then opened and confirmed in order, lease-free around the
+opener. `open_window` is `open_windows` of one. The batch exists because
+the first window hosts every restored workspace no other window claims
+(`Workspaces::add_window` is `open_on`, which hosts the shown index alone,
+followed, for the first window, by `host_unclaimed`, which gives it every
+materialised index nobody hosts); opened one record at a time, the first
+window's view would take and build every restored tile, the second
+record's reserve would answer `TakenFrom` and the first window would park
+and drop what it built for that index while the second window painted
+placeholders and rebuilt on `Parked`: two module constructions and two
+query submissions per tile in every window but the first, at every
+launch. With every record's index hosted by its own key before any view
+exists, the first window takes only what it hosts and no park fires; a
+spec refused at the reserve step reserves nothing, and `host_unclaimed`
+goes to the first spec that reserved. If the first window's opener then
+fails, its reservation is rolled back and the unclaimed indexes it hosted
+are unhosted again; their records stay parked and are written by every
+save, as a tile in a workspace no window hosts always is.
+
+`open_fresh(app, beside, cx)` opens on `lowest_free`, beside the asking
+window; nine windows exhaust it. `tear_out(app, from, cx)` moves the
+workspace `from` shows into a new window beside it: under the reserve
+update, `from` is switched to `lowest_free` (refused first if there is
+none, so nothing changes) and the index it showed is reserved for the new
+key, which `Workspaces` answers `TakenFrom(from)`, parking its occupants
+through the ordinary `Park` for the new window to rebuild. If the opener
+fails, `from` is switched back before the queued `Park` is delivered, and
+a window's `Park` arm ignores a park for the workspace it shows, so the
+rolled-back tear-out parks nothing. The window that dispatched a tear-out
+has been switched by the app, not by its own dispatch, and runs its own
+post-switch work on the verb's path: the same `after_shown_changed` a
+`Shown` or `Moved` switch runs (pull parked records, session mark, flip
+baseline and scope field, focus, title). `activate_window(key, cx)` asks a
+registered window forward (`Switch::Raise`). None of these runs from render.
+
+The opener maps the spec's `Placement` to the platform's `display_id` and
+`window_bounds` through `placement::options_for` in `geode-app`, a pure
+function over facts gathered for it: the spawning window's frame and
+display, which the verb reads from the window it was dispatched in and
+carries in `Beside` (a window under update cannot be read again through
+its handle, so the opener reads it that way only when the payload is
+absent, as an app-level caller leaves it), the attached displays with
+their bounds, and the primary. `Beside` asks for the spawning window's
+display and its frame shifted by `CASCADE` (28 logical pixels) in x and
+y, clamped so the whole window stays inside that display: shifted back by
+the overflow on each axis, and at the display's origin when it is larger
+than the display. The frame cascaded from is the spawner's restore frame
+(`WindowBounds::get_bounds`), so a maximized spawner's new window lands at
+its pre-maximize frame plus `CASCADE`; the clamp is against the display's
+bounds, not its visible frame, so a dock or taskbar may cover part of a
+window clamped to the display's edge. With the spawner gone, or its
+display unknown, the platform places the window or the shifted frame
+alone is asked for. `Restored` asks for the
+recorded display and frame, maximized when the record says so; a recorded
+display no longer attached falls back to the primary, with the recorded
+size at the primary's origin plus `CASCADE`, so a window saved on a
+monitor since unplugged comes back on screen rather than off it; no
+recorded display leaves the frame alone to the platform, and no recorded
+frame leaves the size to it. `Default` asks for nothing. Every coordinate
+is a logical pixel in the global space, so a display to the left of the
+primary has a negative origin and the clamp needs no special case for it.
+
+The trader reaches the two through the palette: `window::tear_out` ("Tear
+out into a new window") and `window::open` ("New window"), category
+Workspace, with no default chord. Each acts on the window it was
+dispatched in and carries that window's frame and display
+(`Spawner::of`, read from the `Window` the dispatch holds) for the opener
+to place the new window beside it; a `window::open` changes nothing in
+that window but its title. Under a modal both are refused with the dialog's notice, as a
+workspace switch and the pin toggle are: a tear-out would switch the
+window under a dialog bound to its lane, and either opens a window while
+that dialog holds the lane. Over a page both are refused with `close the
+page first (esc)`, as the layout verbs are (every `workspace::`, `dock::`
+and `stack::` action but the switches, which close the page and then
+switch): a tear-out would move the tiles the page covers to a window the
+trader is not looking at. A refusal from the app leaves
+a notice and nothing else: `NoFreeWorkspace` shows `all nine workspaces
+are on screen`; `NoOpener` and `OpenerFailed` are the composition root's
+fault, logged under `geode::shell`, and show `could not open a window`.
+
+A draw can come before the records do: gpui draws a new window once inside
+`open_window`, before the effects carrying the two events flush, so a window
+opened on a taken index has already painted a placeholder for each of its
+tiles. A pulled record replaces such a placeholder the way `add_tile` fills
+one (the placeholder is closed and dropped, and the next draw builds the
+record's module); a real occupant is never replaced. The switch dispatch
+also pulls on every `Shown` or `Moved` outcome, so records parked earlier
+(a closed window's, or a move's that this window did not show at the time)
+reach the window that now hosts them.
+
+A moved workspace is rebuilt, not handed over, so it requeries when it is
+shown. The destination's module entities are new, built from records as
+a restore's are: a module's staged result, an in-flight query's answer
+and anything its state does not serialize are gone with the old
+entities, and each rebuilt tile asks its queries again against the frame
+it now reads. The cost is a restore's cost for that workspace's tiles,
+paid once per move; a switch within one window parks nothing and pays
+nothing, which is why the plain switch is kept apart from the move.
+
+`ShellApp` also creates the shared `Frame` and the `Diagnostics` entities
+(`frame()`, `diagnostics()`) and applies the session's restored frame state to
+the frame once, before any window exists: the `[frame]` record to the shared
+lane, each `workspaces.N.frame` record to its pinned lane, and each
+`[links.<letter>]` scope to its group, with scope history cleared. It seeds
+the diagnostics entity with the startup config, keymap and composition
+diagnostics in the same order `apply_reload` restates them. Each `ShellView`
+holds clones of both handles, observes them for its own window (the flip
+barrier, the page-open drain) and seeds its flip baselines from the frame it
+is handed, so a restored session is never read as a change by the first
+window or by a second one.
 
 State with a narrower owner stays outside `ShellView`:
 
@@ -38,7 +342,9 @@ New state belongs in the narrowest owner that can keep it correct. A global is
 appropriate only when independently hosted modules must observe the same
 application setting.
 
-The shell writes the first four. It installs `ReferenceGlobal` and
+`ShellApp::new` installs all six, before any window, so a second window
+opening resets none of them; the app writes the first four on a reload or a
+settings change. It installs `ReferenceGlobal` and
 `WatchlistGlobal` empty, and the app's bridge alone replaces them; modules
 only read and observe them (the watchlist tile observes both: its lists
 from `WatchlistGlobal`, the reference name beside each member from
@@ -96,6 +402,30 @@ geometry. Each workspace also owns left, right, and bottom dock trees.
 
 See [tiling and workspaces](tiling.md) for region crossing, empty-dock focus,
 insertion/removal rules, drag geometry, and restoration limits.
+
+Every window draws its workspaces from the one `Workspaces` the app owns.
+A window *shows* one index, 1–9, and *hosts* every index whose occupants
+it has built and keeps: the one it shows, each one it showed and switched
+away from (hidden in that window until another window takes it), and,
+for the first window of the process, every index the restored session
+materialised, since no other window existed to build them. An index is
+shown by at most one window; a tile's window is its workspace's host,
+which need not be showing it. `workspace::switch_N` is not the pure
+router's action: the shell dispatches it through `ShellApp::switch` and
+acts on what `Workspaces::switch` answers. `Unchanged`, the window
+already shows N: focus is reconciled as after any workspace action.
+`Shown`, N was free, hidden in this window or not yet created: the window
+shows it (and now hosts it), pulls any records already parked for what it
+hosts, then re-seeds its flip baseline from N's lane. `Raise`, another
+window shows N: nothing changes, and that window is asked forward
+instead (`ShellApp::activate_window`). `Moved`, another window hosted N
+hidden: this window now shows and hosts it, and N's occupants are parked
+in the window they leave and rebuilt here, under [workspaces moving
+between windows](#workspaces-moving-between-windows). `Invalid`, an
+index outside 1–9 or a window the map does not list, does nothing. Only
+`Shown` and `Moved` advance the window's switch generation. The map's own
+rules (`add_window`, `remove_window`, `lowest_free`) are under [windows,
+shown and hosted](tiling.md#windows-shown-and-hosted).
 
 A stack occupies one layout slot and keeps two or more leaf tiles alive. Only
 its active member is visible. Focusing a member activates it, so structural
@@ -184,7 +514,16 @@ must requery when shown if their followed versions changed. Removing an
 occupant (closing its tile, or filling a placeholder in place) calls
 `set_visible(false)` and then `closed`, once, before the occupant is dropped.
 Hiding never calls `closed`: a workspace switch, a dock toggle or a stack
-cycle only hides.
+cycle only hides. `park` is the one moment before that teardown: when the
+shell is about to serialise a tile's record and drop its occupant because
+the workspace is moving to another window or its window is closing (a live
+module entity never renders in a window other than the one that created
+it; the record rebuilds it there), it calls `park` first, with a live
+context, so a module queues unsaved work it would otherwise have saved on
+a timer that never fires; `closed` follows. The pricer queues its dirty
+sheet's save there. `park` is never called for a plain workspace switch,
+dock toggle or stack cycle, which only hide, nor for an ordinary tile
+close, which does not rebuild the occupant. The default does nothing.
 
 ### Dimension context
 
@@ -223,7 +562,7 @@ added with no state — from the palette, the tile picker, or
 `tile::open_with` falling back to the picker — asks for it here.
 
 `TileContent::set_focused` tells an occupant whether it is the focused tile
-of the active workspace's focused region. The shell diffs the focused tile
+of the window's shown workspace's focused region. The shell diffs the focused tile
 during its render, before the tiles render, and tells the tile that lost
 focus and the one that gained it; a fresh occupant under the focused id is
 told again. Focus is reported after visibility in the same render, so a tile
@@ -473,6 +812,22 @@ rows, toolbar controls, and pointer handlers route to that command instead of
 copying its mutation. Every pointer command exposed to the user must have a
 keyboard route.
 
+The workspace and window verbs are application-wide and live in the
+registry. `workspace::switch_N` (`mod+N`) is dispatched through
+`ShellApp::switch` and acts on the outcome (see [tiles, workspaces, and
+stacks](#tiles-workspaces-and-stacks)): a window already showing N is
+brought forward (`Switch::Raise`, `ShellApp::activate_window`) and the
+dispatching window changes nothing. `window::tear_out` ("Tear out into a
+new window") and `window::open` ("New window"), category Workspace with
+no default chord, open windows through the app's opener (see [opening
+windows](#opening-windows)). Under a modal the switches, the pin toggle
+and the window verbs are refused with the dialog's notice; over a page the
+window verbs are refused with `close the page first (esc)` as the layout
+verbs are, while a switch closes the page and then switches. A window
+verb the app refuses leaves only a notice: `all nine workspaces are on
+screen` when every index is shown, `could not open a window` when the
+opener is missing or failed.
+
 The per-tile `:` command line is local to that tile. It may change the tile's
 query, presentation, cursor, or draft. Frame-wide and application-wide
 commands belong in the action registry and palette. The existing `[ui]
@@ -653,10 +1008,16 @@ reads, and following a [link group](#link-groups) changes whose scope it
 reads, without it re-subscribing. Any lane's or group's change notifies every
 observer; each tile's version compare filters out the ones it does not read.
 
-Only the active workspace's lane opens a flip barrier: its visible tiles are
-the ones a barrier coordinates, so the shell compares and opens against the
-active lane. A workspace switch is not a frame change: it re-seeds the flip
-baseline from the new active lane instead of opening a barrier. When the
+A window answers a frame change for the lane its shown workspace reads,
+its active lane: that workspace's visible tiles are the ones a barrier
+coordinates, so each window compares and answers against its own shown
+lane. Two windows showing workspaces on one lane both answer a change to
+it; the second answer joins the barrier the first opened
+(`Frame::join_flip` keys the barrier by the frame generation, see
+**Flips** under [link groups](#link-groups)), and the one frame-wide
+`flip` releases both windows' tiles together. A workspace switch is not a
+frame change: it re-seeds the window's flip baseline from the newly shown
+lane instead of opening a barrier. When the
 switch leaves or enters a pinned workspace, the old lane's text session ends
 and the scope field re-reads the new lane; a focused field keeps focus and
 opens a fresh session there, so Escape restores the new lane's text. A switch
@@ -665,7 +1026,7 @@ ending it would split one edit into two undo entries. Pinning and unpinning
 rebind the field the same way.
 
 The toolbar's first readout control is a pin glyph, before the as-of chip:
-a bare, muted verb while the active workspace is unpinned, a solid chip in
+a bare, muted verb while the window's shown workspace is unpinned, a solid chip in
 the theme's primary color while it is pinned (`Tone::Active`: the fill is
 moved toward `foreground` where a theme's primary sits too close to its title
 bar, so the on state reads at a glance on every bundled theme). The glyph
@@ -678,9 +1039,10 @@ as-of together; there is no per-part pin.
 
 Shell surfaces resolve their lane through `ShellView::target_frame`: the
 workspace recorded on the base entry of the modal stack when a dialog is
-open, else the active workspace. A dialog therefore reads and commits the
-lane it was opened from. The flip barrier and the toolbar's scope text field
-use the active workspace's lane directly. Under a modal the two name the same
+open, else the workspace the window shows. A dialog therefore reads and
+commits the lane it was opened from. The flip barrier and the toolbar's
+scope text field use the shown workspace's lane directly. Under a modal
+the two name the same
 workspace: the palette refuses `workspace::switch_*` and
 `frame::pin_workspace` while a dialog is open (see
 [input and dialogs](input-and-dialogs.md#palette-and-which-key)), so the
@@ -751,7 +1113,11 @@ tuple that tile itself reads, so an old result cannot satisfy it. A later
 change to the active lane replaces the barrier with one over every visible
 tile: whatever was awaited before answered an older frame. A link group's
 scope change concerns only that group's followers, so it joins the open
-barrier instead of replacing it (see [link groups](#link-groups)).
+barrier instead of replacing it (see [link groups](#link-groups)). Two
+windows showing workspaces on one lane both answer a change to it, each with
+its own visible tiles; the second answer joins the barrier the first opened,
+so the tiles in both windows flip together (the rule is under **Flips** in
+[link groups](#link-groups)).
 
 Only visible occupants are barrier participants. Hiding a following tile (a
 stack, dock or workspace switch) cancels nothing: its in-flight query
@@ -769,8 +1135,13 @@ is refused or has nothing to ask, through
 `geode_tile::following::DeferredDoor`: the arrival and its notify land after
 the draw, and the other tiles promote at once. Frame observers, deliveries and
 key handlers keep `FrameDoor`, which notifies in the same pass. `closed` fires
-only for removal while the window lives; closing the window or quitting the
-application calls it for no occupant. A tile with its own error and no query
+for removal while the window lives, and for every occupant of a closing
+window: the close hook deregisters the window while it still stands
+(`ShellApp::window_closed`), whose `Park` reaches the view with a live
+context, and the view parks each occupant (`park`, then its record, then
+`closed`) whether another window stays open or this was the last one.
+Quitting the application (Dock Quit, logout) runs no close hook and calls
+`closed` for no occupant. A tile with its own error and no query
 to send (a blotter whose view is no longer configured, or whose scope names an
 undefined expression) answers the barrier at once, as a failed query does.
 The pricer submits no frame query and answers every barrier at once.
@@ -1034,8 +1405,20 @@ next registration.
 group's: enrolled under the lane's, its arrival would never match and every
 flip beside a follower would wait out the 250 ms deadline. The shell keeps
 two baselines, the active lane's versions and the four group scope
-generations. When the lane moved, it replaces the barrier over every visible
-tile, each under its own reading. When only a group's scope moved, it calls
+generations. When the lane moved, it answers with every visible tile, each
+under its own reading, through `Frame::join_flip`: a barrier opened at the
+same frame generation is joined, any other is replaced. The generation is
+the frame-wide counter every lane and group write advances, so "same
+generation" means "the same change": each window's `ShellView` observes the
+frame and answers a lane change with its own visible tiles, and the second
+window's answer must join the first's or the first window's tiles would no
+longer be awaited and the two windows would flip apart. The barrier is one
+per generation, not one per window, because the `flip` counter it releases
+is frame-wide: a per-window barrier releasing early would promote the other
+window's staged tiles before their answers arrived. A later edit advances
+the generation and its answer replaces the barrier, so keys carried from a
+workspace shown before (hidden tiles that submit nothing) never hold a new
+flip to its deadline. When only a group's scope moved, it calls
 `Frame::extend_flip` with that group's visible followers: an open barrier
 keeps its other keys and its deadline and takes the followers under their new
 identity, and with no barrier open one opens over those followers alone. A
@@ -1249,16 +1632,23 @@ flight is cancelled when a page opens.
 The sidebar paints one button per registered page between the workspace
 discs and the settings avatar, in roster order, with the factory's icon
 and a tooltip naming the page and its toggle binding. The open page's
-button takes the active workspace disc's treatment and no pointer states,
+button takes the shown workspace disc's treatment and no pointer states,
 because selected must stay distinct from hovered.
 
 A page persists as `[pages.<kind>]` in the session file, written from
 `serialize()` on the coalesced flush; a page-state change with no shell
 action behind it still flushes, because the flush compares the snapshot.
 Whether a page was open at quit is not saved; Geode starts in the
-workspace. A table for a kind that never opens, or that no factory knows,
-is kept as read and written back unchanged; a `pages` entry that is not a
-table warns and is dropped.
+workspace. The restored tables are the app's (`ShellApp::parked_pages`),
+not any window's: a page opening takes its kind's table from there on its
+dispatch path (`take_parked_page`) and hands it to the factory, so a page
+opened in a second window restores the session's record as the first
+would; a replaced kind's last state goes back there (`park_page`), and a
+closing window serializes the page it holds back there too
+(`ShellView::park_page`, on `ShellEvent::WindowClosing`), so the table
+survives the window. A table for a kind that never opens, or that no
+factory knows, stays parked and is written back unchanged; a `pages`
+entry that is not a table warns and is dropped.
 
 ## Diagnostics state and demand
 
@@ -1465,7 +1855,7 @@ The writer emits `config_version = 1` and these records:
 
 | Record | Contents |
 |---|---|
-| `active` | Workspace index, 1–9 |
+| `active` | Workspace index, 1–9: the one the oldest open window shows, which the first window of the next run opens on |
 | `workspaces.N` | Main tree, focused tile, optional fullscreen tile, and focused region |
 | `workspaces.N.docks.<side>` | Left, right, or bottom dock tree, focused tile, visibility, and size |
 | `workspaces.N.tiles.<id>` | Module name, its opaque state table, and the link groups the tile is in: `follow` and `emit`, each a group letter `"a"` to `"d"`, written only when set |
@@ -1474,6 +1864,7 @@ The writer emits `config_version = 1` and these records:
 | `links.<letter>` | One link group's scope, under `scope`, in the encoding `frame` uses for its own (dimension selections, text, expression, named-expression references); written only for a group whose scope is not empty, and an absent table reads as an empty scope |
 | `palette.usage` | Per-row usage count and last-used timestamp |
 | `pages.<kind>` | One opaque table per page kind from `PageContent::serialize`, kept for kinds that never opened this session; the diagnostics page writes its `section` |
+| `windows.K` | One open window per record, K its 1-based registration position (the order in `ShellApp::windows`): `workspace`, the index it showed; `display`, the platform display id, when known; `bounds = { x, y, w, h }`, the window's frame in logical pixels, what `Window::window_bounds` reports, which is the restore frame while maximized or fullscreen, when known; and `maximized = true` while it was. Fullscreen is not recorded. A file with no usable record opens one window on `active` |
 
 `ad_hoc` holds the lane's stored chain whenever one exists; `slot` is
 omitted while the chain is active. A malformed `ad_hoc` warns and is
@@ -1491,7 +1882,8 @@ its own provenance, or none, never the shared lane's.
 Trees use recursive `leaf`, `split`, and `stack` nodes. Splits store orientation,
 children, and ratios; stacks store tile IDs and the active member index. All
 materialized workspaces are saved, including empty ones. Default docks, empty
-module state, empty usage history, and an empty pages table are omitted. Only
+module state, empty usage history, an empty pages table and a window table
+with no record are omitted. Only
 tile records whose IDs belong to the workspace's main or dock trees are
 written. Whether a page was open is not recorded.
 
@@ -1524,6 +1916,13 @@ a later save replaces it with the current state.
 | `links` is not a table, a key under it names no group, a group's entry or its `scope` is not a table | Warn and read that group's scope as empty; the other groups and the rest of the file still read. A scope's own fields recover as `frame`'s do |
 | Invalid optional frame or palette data | Retain usable fields/entries and warn for the errors their readers report |
 | `workspaces.N.frame` is not a table | Warn; the workspace restores unpinned |
+| `windows` is not a table | Warn; no window record is restored |
+| A `windows` key that is not an integer, a record that is not a table, or a record whose `workspace` is missing, not an integer, or outside 1–9 | Warn and skip the record |
+| A window record claims a workspace a lower K already claimed | Warn and skip the later record: two windows cannot show one workspace. Records are read in K order, whatever their order in the file |
+| A window record's `display` is not a non-negative integer; its `bounds` is not a table or lacks a numeric `x`, `y`, `w` or `h` (integer or float); its `maximized` is not a boolean | Warn and read that field as unknown, unknown, or `false`; keep the record |
+| A window record's open is refused at startup (its index is shown by an earlier record's window; the opener failed) | Warn and skip the record; the other records still open. With none opened, one window opens on `active` |
+| A window record's display is no longer attached | Open the window on the primary display, its recorded size at the primary's origin plus the cascade offset (see [Opening windows](#opening-windows)) |
+| A window record without `display`, or without `bounds` | Open the window with the platform choosing what the record lacks: no display, and the recorded frame alone is asked for; no frame, and the recorded display alone |
 
 Frame restoration parses scope expressions but does not validate columns
 against the current schema. Invalid slots, expression syntax, date strings,
@@ -1577,17 +1976,43 @@ not read as a change and opens no flip.
 
 ### Saving and failure behavior
 
-Workspace actions mark layout state dirty and return without session file I/O.
-The shared reload watcher checks for a session snapshot on its 500 ms tick,
-before any configuration-scan early return. It also compares serialized module
-state, the frame's generation counter, and palette usage versions, so those
-changes can trigger a save independently of layout dirt. This is periodic
-coalescing, not a timer reset after each action; other work adds to the
-interval. A link group's scope moves with an emitter's cursor and advances
-the frame's generation each time, so the snapshot is compared, as text
-without the `links` tables, with the last one extracted, and an equal one is
-not written again. A group's scope alone therefore never causes a write; the
-text handed to the file includes the `links` tables whenever one is written.
+Workspace actions mark the app's layout state dirty and return without
+session file I/O. The writer is the app's (`ShellApp::take_dirty_session_write`,
+`ShellApp::save_session`): one loop, one writer, one snapshot over every
+registered window's records (its tiles and its one retained page) and the
+parked ones (`parked_tiles`, `parked_pages`), however many windows are
+open. The app's reload watcher checks for a session snapshot on its 500 ms
+tick, before any configuration-scan early return, from the app entity's own
+update and never from inside a window's, since the snapshot reads every
+window's view. It
+also compares serialized module state, the frame's generation counter, and
+palette usage versions, so those changes can trigger a save independently of
+layout dirt. This is periodic coalescing, not a timer reset after each
+action; other work adds to the interval. A link group's scope moves with an
+emitter's cursor and advances the frame's generation each time, so the
+snapshot is compared, as text without the `links` tables, with the last one
+extracted, and an equal one is not written again. A group's scope alone
+therefore never causes a write; the text handed to the file includes the
+`links` tables whenever one is written.
+
+Each snapshot and each final save first collects one placement record per
+registered window from the live windows (`ShellApp::window_records`: the
+shown index, display and bounds, in registration order), then builds the
+text. Reading a window's bounds updates it and needs `&mut App`, which no
+read lease on the app can share, so the final save is an associated
+function, `ShellApp::save_session(app, current, cx)`: the records are
+collected under a short update of the app with nothing else inside, then
+the app is read once to build and write. `current` is the window whose
+update the call runs inside: the should-close hook passes its own, whose
+bounds are read from the `Window` it holds because a window cannot be
+updated again from within its own update, and without which the usual way
+of quitting would record no window; the quit hook and the watcher pass
+`None`. A window move or resize marks the session dirty through the
+view's bounds observer (`observe_window_bounds`, a platform event path,
+never the draw pass), so the new bounds reach the file with the next
+periodic snapshot or the final save. A registered window that shows no
+workspace, or whose handle no longer updates, is skipped with a warning or
+a debug line rather than failing the save.
 
 Snapshot collection and TOML serialization run on the UI thread. The watcher
 awaits the file write on the background executor before continuing its loop.
@@ -1598,16 +2023,39 @@ leaves comparison baselines unchanged, but a layout-only change can lose its
 dirty flag. These baselines track extracted snapshots, not confirmed saves.
 
 The session is saved synchronously, regardless of dirty flags and with the
-link groups' scopes included, both when the window closes and when the
-application quits. Closing the window quits Geode on every platform
-(`QuitMode::LastWindowClosed`). gpui removes a closing window before it runs
-the quit hooks, so the quit hook's walk of the open windows would find
-nothing; the app's should-close hook on the main window
-(`bridge::save_on_close`) saves the session while the window still exists,
-then lets the close proceed. On an explicit application quit (Dock Quit,
-logout) no should-close runs and the quit hook saves alone. After a window
-close the quit hook still runs, but finds no window and saves nothing, so the
-session is written once.
+link groups' scopes included, when the last window closes and when the
+application quits. Every window carries the same should-close hook,
+installed by the opener as the window opens (`bridge::attach_window`), and
+what a close means depends on whether another window stays open
+(`ShellApp::is_last_window`). A close that leaves another window open
+parks and writes nothing: the hook deregisters the window while it still
+stands (`ShellApp::window_closed`), so its page, if it holds one, is
+serialized into the app's parked pages and its occupants park with a live
+context (`park`, which lets a module queue its unsaved work, then the
+record, then `closed`); their records wait in the app's parked tiles for
+the next window to show the workspace or for the next save, the page's
+for the next open of its kind, the remaining
+windows carry on, and the session file changes only at the next periodic
+snapshot or the last close. The last window's close saves: the session
+first, then unsaved pricer sheets, in the order the quit hooks run them,
+and only then deregisters the window; the close then proceeds and Geode
+quits on every platform (`QuitMode::LastWindowClosed`). The order is the
+guard against an empty save: gpui removes a closing window before it runs
+the quit hooks, and the window's view and occupants go with it unless a
+host still holds the view, so a snapshot taken then would write the layout
+with that window's tile records missing, and the next start would restore
+empty tiles over the close's save. `ShellApp::save_session` therefore
+writes nothing while no window is registered, and a save after the
+deregistration would be that nothing. The last close's save includes the
+records earlier closes parked, so a workspace closed with its window
+earlier in the run is restored with its tiles. The quit hook saves once,
+from the app entity, and walks no windows: on an explicit application quit
+(Dock Quit, logout) no should-close runs, every window is still registered
+with its occupants live, and that one save covers all of them; after the
+last window's close the hook finds the registry empty and writes nothing,
+so the session is written once either way. A view a host still holds past
+its window keeps its occupants with it, so a save it does reach writes
+that window's own records, not placeholders.
 
 Limit: on Linux with client-drawn decorations, gpui-component's `TitleBar`
 close button removes the window directly and never runs should-close, so a

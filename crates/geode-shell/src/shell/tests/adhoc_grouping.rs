@@ -166,7 +166,9 @@ fn a_reload_that_removes_a_column_drops_the_chain_naming_it(cx: &mut gpui::TestA
     let before = frame.read_with(&vcx, |f, _| f.shared().versions());
 
     let (config, _) = ShellServices::config_and_builtin(sources(DATASETS_WITHOUT_LHU));
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     vcx.run_until_parked();
 
     assert_eq!(
@@ -196,7 +198,9 @@ fn a_reload_that_removes_a_column_rebuilds_the_text_dimensions(cx: &mut gpui::Te
     assert_eq!(names(&shell, &vcx), chain(&["book", "lhu", "position_ref"]));
 
     let (config, _) = ShellServices::config_and_builtin(sources(DATASETS_WITHOUT_LHU));
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     vcx.run_until_parked();
 
     assert_eq!(names(&shell, &vcx), chain(&["book", "position_ref"]));
@@ -212,7 +216,9 @@ fn a_reload_that_keeps_every_column_keeps_the_chain(cx: &mut gpui::TestAppContex
         cx.notify();
     });
     let (config, _) = ShellServices::config_and_builtin(sources(DATASETS_WITHOUT_LHU));
-    shell.update(&mut vcx, |s, cx| s.apply_reload(config, cx));
+    shell.update(&mut vcx, |s, cx| {
+        s.app().update(cx, |a, cx| a.apply_reload(config, cx))
+    });
     vcx.run_until_parked();
     assert_eq!(
         frame.read_with(&vcx, |f, _| f
@@ -270,8 +276,8 @@ fn the_ad_hoc_action_with_nothing_stored_says_so(cx: &mut gpui::TestAppContext) 
 fn the_ad_hoc_action_is_in_the_palette_under_frame(cx: &mut gpui::TestAppContext) {
     let (window, mut vcx) = open_shell(cx, services());
     let shell = shell_of(&window, &mut vcx);
-    let title = shell.read_with(&vcx, |s, _| {
-        s.services
+    let title = shell.read_with(&vcx, |s, cx| {
+        s.services(cx)
             .registry
             .iter()
             .find(|d| d.id.0 == "frame::grouping_adhoc")
@@ -321,7 +327,7 @@ fn the_session_writer_saves_each_lanes_ad_hoc_chain(cx: &mut gpui::TestAppContex
     dispatch_action(&shell, "workspace::switch_2", &mut vcx);
     vcx.run_until_parked();
     // Baseline: whatever startup left dirty is written first.
-    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+    let _ = shell.take_dirty_session_write(&mut vcx);
 
     frame.update(&mut vcx, |f, cx| {
         assert!(f.shared_mut().set_ad_hoc(chain(&["lhu", "book"])));
@@ -332,7 +338,7 @@ fn the_session_writer_saves_each_lanes_ad_hoc_chain(cx: &mut gpui::TestAppContex
     vcx.run_until_parked();
 
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("an ad hoc chain and a pin dirty the session");
     let shared = written_frame(&text, None).expect("[frame] is written");
     assert_eq!(written_chain(&shared), Some(chain(&["lhu", "book"])));
@@ -358,14 +364,14 @@ fn the_session_writer_saves_each_lanes_ad_hoc_chain(cx: &mut gpui::TestAppContex
         cx.notify();
     });
     vcx.run_until_parked();
-    let _ = shell.update(&mut vcx, |s, cx| s.take_dirty_session_write(cx));
+    let _ = shell.take_dirty_session_write(&mut vcx);
     frame.update(&mut vcx, |f, cx| {
         assert!(f.shared_mut().forget_ad_hoc());
         cx.notify();
     });
     vcx.run_until_parked();
     let (_, text) = shell
-        .update(&mut vcx, |s, cx| s.take_dirty_session_write(cx))
+        .take_dirty_session_write(&mut vcx)
         .expect("forgetting an inactive chain dirties the session");
     let shared = written_frame(&text, None).expect("[frame] is written");
     assert!(!shared.contains_key("ad_hoc"), "{shared:?}");

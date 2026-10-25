@@ -31,17 +31,17 @@ impl ShellView {
         // Pending matcher state cannot survive an overlay with separate key
         // routing, or later shell keys could complete an abandoned sequence.
         self.matcher.cancel();
-        let bindings = palette::build_binding_index(&self.services.keymap);
+        let bindings = palette::build_binding_index(&self.services(cx).keymap);
         let saved = self.frame.read(cx).saved_scopes().clone();
         let items = palette::build_items(
-            &self.services.registry,
-            &self.services.theme,
+            &self.services(cx).registry,
+            &self.services(cx).theme,
             &bindings,
             &saved,
         );
         self.palette = Some(PaletteState::with_usage(
             items,
-            &self.palette_usage,
+            self.app.read(cx).palette_usage(),
             unix_now(),
         ));
         // Fresh scroll state for a fresh palette session — a stale offset
@@ -103,8 +103,9 @@ impl ShellView {
         // later fails. The toggle row is just dismissal and receives no usage bonus.
         let is_toggle = matches!(item, PaletteItem::Action(id, ..) if id.0 == "palette::toggle");
         if !is_toggle {
-            self.palette_usage.record(&item.usage_key(), unix_now());
-            self.palette_usage_version += 1;
+            let key = item.usage_key();
+            self.app
+                .update(cx, |app, _| app.note_palette_use(&key, unix_now()));
         }
         match item {
             PaletteItem::Action(..) if is_toggle => {}
@@ -112,7 +113,8 @@ impl ShellView {
             PaletteItem::Theme(name) => {
                 // The name is already fully qualified (e.g. "Gruvbox
                 // Dark"), which `ThemeService::resolve` matches outright.
-                self.services.theme.apply(name, cx);
+                self.app
+                    .update(cx, |app, cx| app.services.theme.apply(name, cx));
                 self.persist_theme(cx);
             }
             PaletteItem::Scope(name) => {

@@ -2,8 +2,8 @@
 //! visibility announcements, and the insert-mode route for page inputs.
 
 use super::{
-    dispatch_action, open_shell, services_with_page, services_with_recorders, shell_of, with_page,
-    with_pages,
+    SessionWriteExt as _, dispatch_action, open_shell, services_with_page, services_with_recorders,
+    shell_of, with_page, with_pages,
 };
 use crate::actions::ActionId;
 use crate::module::recording::{PageRecorded, RecordingPageFactory};
@@ -244,9 +244,9 @@ fn a_workspace_switch_closes_the_page(cx: &mut gpui::TestAppContext) {
     let shell = shell_of(&window, &mut cx);
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
     cx.simulate_keystrokes("alt-2");
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert!(!s.page_open());
-        assert_eq!(s.services.workspaces.active_index(), 2);
+        assert_eq!(s.shown_ix(cx).get(), 2);
     });
 }
 
@@ -265,9 +265,9 @@ fn a_workspace_switch_chord_from_a_focused_page_input_closes_the_page(
     cx.simulate_keystrokes("j");
     assert_eq!(cx.update(|_, cx| input.read(cx).value().to_string()), "j");
     cx.simulate_keystrokes("alt-3");
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert!(!s.page_open(), "the chord resolved against the whole stack");
-        assert_eq!(s.services.workspaces.active_index(), 3);
+        assert_eq!(s.shown_ix(cx).get(), 3);
     });
 }
 
@@ -283,9 +283,7 @@ fn layout_edits_are_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) 
     let shell = shell_of(&window, &mut cx);
     dispatch_action(&shell, "tile::add_rec", &mut cx);
     let tiles = |shell: &gpui::Entity<ShellView>, cx: &gpui::VisualTestContext| {
-        shell.read_with(cx, |s, _| {
-            s.services.workspaces.active().tree().tiles().len()
-        })
+        shell.read_with(cx, |s, cx| s.workspace(cx).tree().tiles().len())
     };
     assert_eq!(tiles(&shell, &cx), 1);
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
@@ -305,13 +303,11 @@ fn layout_edits_are_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) 
     });
     assert_eq!(tiles(&shell, &cx), 1, "the unseen tile still exists");
     dispatch_action(&shell, "dock::toggle_left", &mut cx);
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert!(s.page_open());
         assert_eq!(s.notice.as_deref(), Some(CLOSE_PAGE_FIRST));
         assert!(
-            !s.services
-                .workspaces
-                .active()
+            !s.workspace(cx)
                 .docks()
                 .get(crate::tiling::DockSide::Left)
                 .visible(),
@@ -325,9 +321,9 @@ fn layout_edits_are_refused_while_a_page_is_open(cx: &mut gpui::TestAppContext) 
     });
     // The switch is exempt: it closes the page and switches.
     dispatch_action(&shell, "workspace::switch_2", &mut cx);
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert!(!s.page_open());
-        assert_eq!(s.services.workspaces.active_index(), 2);
+        assert_eq!(s.shown_ix(cx).get(), 2);
     });
 }
 
@@ -611,9 +607,9 @@ fn tiles_beneath_are_hidden_on_open_and_shown_on_close(cx: &mut gpui::TestAppCon
         page_focused(&shell, &mut cx),
         "the page keeps focus through the render that hides the tiles"
     );
-    let keys = shell.read_with(&cx, |s, _| {
+    let keys = shell.read_with(&cx, |s, cx| {
         let mut v = Vec::new();
-        s.visible_tile_keys(&mut v);
+        s.visible_tile_keys(&mut v, cx);
         v
     });
     assert!(keys.is_empty(), "no visible tile keys while a page is open");
@@ -718,12 +714,14 @@ fn page_table(key: &str, value: &str) -> toml::Table {
 /// Point the flush at a path (it never writes; the snapshot is returned) and
 /// force one flush so the baselines are clean.
 fn arm_session_flush(shell: &gpui::Entity<ShellView>, cx: &mut gpui::VisualTestContext) -> String {
+    shell.update(cx, |s, cx| {
+        s.with_services(cx, |s| {
+            s.session_path = Some(std::path::PathBuf::from("/nonexistent/session.toml"));
+        });
+        s.mark_session_dirty(cx);
+    });
     shell
-        .update(cx, |s, cx| {
-            s.services.session_path = Some(std::path::PathBuf::from("/nonexistent/session.toml"));
-            s.session_dirty = true;
-            s.take_dirty_session_write(cx)
-        })
+        .take_dirty_session_write(cx)
         .expect("the layout flag forces a flush")
         .1
 }
@@ -743,7 +741,9 @@ fn a_restored_pages_table_reaches_the_factory_create(cx: &mut gpui::TestAppConte
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
     assert_eq!(*restored.borrow(), Some(table));
     // Consumed: the live page's own state is what the next flush writes.
-    shell.read_with(&cx, |s, _| assert!(s.services.restored_pages.is_empty()));
+    shell.read_with(&cx, |s, cx| {
+        assert!(s.app().read(cx).parked_pages.is_empty())
+    });
 }
 
 #[gpui::test]
@@ -756,17 +756,13 @@ fn a_page_state_change_alone_flushes_once_and_is_quiet_afterwards(cx: &mut gpui:
     let text = arm_session_flush(&shell, &mut cx);
     assert!(!text.contains("[pages"), "no page created, nothing written");
     dispatch_action(&shell, "page::toggle_diagnostics", &mut cx);
-    let (_, text) = shell
-        .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
-        .unwrap();
+    let (_, text) = shell.take_dirty_session_write(&mut cx).unwrap();
     assert!(
         text.contains("[pages.diagnostics]") && text.contains("recorded = true"),
         "{text}"
     );
     assert!(
-        shell
-            .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut cx).is_none(),
         "nothing changed: nothing written"
     );
     // The page's state moves without any shell action, so no layout flag
@@ -774,17 +770,13 @@ fn a_page_state_change_alone_flushes_once_and_is_quiet_afterwards(cx: &mut gpui:
     serialized
         .borrow_mut()
         .insert("section".into(), toml::Value::String("log".into()));
+    shell.read_with(&cx, |s, cx| assert!(!s.app().read(cx).session_dirty));
     let (_, text) = shell
-        .update(&mut cx, |s, cx| {
-            assert!(!s.session_dirty);
-            s.take_dirty_session_write(cx)
-        })
+        .take_dirty_session_write(&mut cx)
         .expect("a page-state-only change flushes");
     assert!(text.contains("section = \"log\""), "{text}");
     assert!(
-        shell
-            .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
-            .is_none(),
+        shell.take_dirty_session_write(&mut cx).is_none(),
         "written once, then quiet"
     );
 }
@@ -808,9 +800,7 @@ fn a_replaced_page_kind_keeps_its_state_through_the_next_flush(cx: &mut gpui::Te
     // A different kind replaces the retained page; its last state is kept.
     dispatch_action(&shell, "page::toggle_other", &mut cx);
     shell.read_with(&cx, |s, _| assert_eq!(s.open_page_kind(), Some("other")));
-    let (_, text) = shell
-        .update(&mut cx, |s, cx| s.take_dirty_session_write(cx))
-        .unwrap();
+    let (_, text) = shell.take_dirty_session_write(&mut cx).unwrap();
     assert!(
         text.contains("[pages.diagnostics]") && text.contains("which = \"diagnostics\""),
         "the replaced kind's table survives: {text}"
@@ -830,10 +820,10 @@ fn a_replaced_page_kind_keeps_its_state_through_the_next_flush(cx: &mut gpui::Te
         *diagnostics_restored.borrow(),
         Some(page_table("which", "diagnostics"))
     );
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert_eq!(s.open_page_kind(), Some("diagnostics"));
         assert_eq!(
-            s.services.restored_pages.keys().collect::<Vec<_>>(),
+            s.app().read(cx).parked_pages.keys().collect::<Vec<_>>(),
             vec!["other"]
         );
     });
@@ -969,10 +959,10 @@ fn a_queued_page_open_clears_the_notice_and_records_the_action(cx: &mut gpui::Te
         cx.notify();
     });
     cx.run_until_parked();
-    shell.read_with(&cx, |s, _| {
+    shell.read_with(&cx, |s, cx| {
         assert!(s.page_open());
         assert_eq!(s.notice, None, "the request expired the old refusal");
-        let last = s.services.action_tail.lock().unwrap().recent().last();
+        let last = s.services(cx).action_tail.lock().unwrap().recent().last();
         assert_eq!(
             last,
             Some(crate::diagnostics::fnv1a("page::toggle_diagnostics"))

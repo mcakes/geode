@@ -29,8 +29,9 @@ impl AsOf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct QueryKey(pub u64);
 
-/// One query's result, addressed to the key that asked.
-#[derive(Debug)]
+/// One query's result, addressed to the key that asked. `Clone` so a
+/// delivery can be copied per window; the snapshot is shared, not copied.
+#[derive(Debug, Clone)]
 pub struct QueryOutcome {
     pub key: QueryKey,
     /// Echoed from the request. The submitter compares it with its current tag
@@ -63,7 +64,7 @@ pub struct DistinctParams {
 }
 
 /// The picker's distinct-values result, addressed to the key that asked.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DistinctOutcome {
     pub key: QueryKey,
     pub tag: u64,

@@ -21,10 +21,9 @@ use geode_core::watchlist::state::{
 };
 use geode_data::{DataHandle, Refusal};
 use geode_shell::shell::objectdialog::shadow_of;
-use geode_shell::shell::{WATCHLIST_KEY_BASE, WATCHLIST_KEY_COUNT};
+use geode_shell::shell::{ShellApp, WATCHLIST_KEY_BASE, WATCHLIST_KEY_COUNT};
 use geode_shell::watchlist::WatchlistGlobal;
-use gpui::{App, AsyncApp, WindowHandle};
-use gpui_component::Root;
+use gpui::{App, AsyncApp, Entity};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
@@ -197,7 +196,7 @@ impl WatchlistCache {
     pub fn set_definitions(
         self: &Rc<Self>,
         folded: BTreeMap<String, Folded>,
-        window: WindowHandle<Root>,
+        app: &Entity<ShellApp>,
         cx: &mut App,
     ) {
         let diff = diff_definitions(&self.folded.borrow(), &folded);
@@ -254,19 +253,19 @@ impl WatchlistCache {
             cx.set_global(WatchlistGlobal(Arc::new(next)));
         }
         for name in &diff.resolve {
-            self.refresh(name, window, cx);
+            self.refresh(name, app, cx);
         }
     }
 
     /// A publish of `dataset`: resolve again every list with a good rule
     /// over it.
-    pub fn on_published(self: &Rc<Self>, dataset: &str, window: WindowHandle<Root>, cx: &mut App) {
+    pub fn on_published(self: &Rc<Self>, dataset: &str, app: &Entity<ShellApp>, cx: &mut App) {
         let names: Vec<String> = lists_naming(&self.folded.borrow(), dataset)
             .into_iter()
             .map(str::to_string)
             .collect();
         for name in &names {
-            self.refresh(name, window, cx);
+            self.refresh(name, app, cx);
         }
     }
 
@@ -296,9 +295,9 @@ impl WatchlistCache {
     /// Resolve `name` under a new tag, superseding any resolution in
     /// flight. `Busy` arms a retry; `Stopped` drops the demand, since
     /// nothing would ever serve it. A name no longer defined (a late timer
-    /// for a removed list) is ignored. `window` is the window the cache
-    /// serves; its closure ends a retry.
-    pub fn refresh(self: &Rc<Self>, name: &str, window: WindowHandle<Root>, cx: &mut App) {
+    /// for a removed list) is ignored. `app` is the app the cache serves;
+    /// its last window's closure ends a retry.
+    pub fn refresh(self: &Rc<Self>, name: &str, app: &Entity<ShellApp>, cx: &mut App) {
         let params = {
             let folded = self.folded.borrow();
             let Some(f) = folded.get(name) else { return };
@@ -324,29 +323,31 @@ impl WatchlistCache {
                     .borrow_mut()
                     .insert(name.to_string(), Instant::now());
             }
-            Err(Refusal::Busy) => self.retry(name, window, cx),
+            Err(Refusal::Busy) => self.retry(name, app, cx),
             Err(Refusal::Stopped) => {}
         }
     }
 
     /// Resolve again after the delay. A list already waiting keeps its one
     /// timer, so a burst of refused publishes cannot pile up resolutions.
-    /// The timer holds the cache weakly and checks the window: the drain
-    /// keeps the cache alive until its next event, so only the window's
-    /// closure reliably ends the lane.
-    fn retry(self: &Rc<Self>, name: &str, window: WindowHandle<Root>, cx: &mut App) {
+    /// The timer holds the cache weakly and checks the app's window
+    /// registry: the drain keeps the cache alive until its next event, so
+    /// only the last window's closure (`ShellApp::any_window_open`)
+    /// reliably ends the lane.
+    fn retry(self: &Rc<Self>, name: &str, app: &Entity<ShellApp>, cx: &mut App) {
         if !self.retry.borrow_mut().insert(name.to_string()) {
             return;
         }
         let cache = Rc::downgrade(self);
         let name = name.to_string();
+        let app = app.clone();
         cx.spawn(async move |cx: &mut AsyncApp| {
             cx.background_executor().timer(WATCHLIST_RETRY_DELAY).await;
             cx.update(|cx| {
                 if let Some(cache) = cache.upgrade() {
                     cache.retry.borrow_mut().remove(&name);
-                    if window.read(cx).is_ok() {
-                        cache.refresh(&name, window, cx);
+                    if app.read(cx).any_window_open() {
+                        cache.refresh(&name, &app, cx);
                     }
                 }
             });

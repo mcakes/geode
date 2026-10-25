@@ -16,7 +16,7 @@ impl ShellView {
     /// ends before the field moves to the new lane. On an unpin the pinned
     /// lane, session included, is dropped anyway.
     pub(super) fn toggle_workspace_pin(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let ws = self.active_ix();
+        let ws = self.shown_ix(cx);
         self.frame.update(cx, |f, cx| {
             f.view_mut(ws).end_scope_session();
             if !f.unpin(ws) {
@@ -24,7 +24,7 @@ impl ShellView {
             }
             cx.notify();
         });
-        self.session_dirty = true;
+        self.mark_session_dirty(cx);
         self.rebind_scope_field(window, cx);
     }
 
@@ -39,7 +39,7 @@ impl ShellView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let active = self.active_ix();
+        let active = self.shown_ix(cx);
         let lane_changed = {
             let f = self.frame.read(cx);
             f.is_pinned(prev) || f.is_pinned(active)
@@ -49,7 +49,7 @@ impl ShellView {
         // the groups here would take a group change whose notification is
         // still pending for already seen, and its followers on the workspace
         // now shown would never flip.
-        self.last_flip_versions = self.active_frame().read(cx).versions();
+        self.last_flip_versions = self.active_frame(cx).read(cx).versions();
         if lane_changed {
             self.frame
                 .update(cx, |f, _| f.view_mut(prev).end_scope_session());
@@ -62,7 +62,7 @@ impl ShellView {
     /// focus and starts a fresh session on the new lane, so the next
     /// keystroke coalesces there and Escape restores the new lane's text.
     fn rebind_scope_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let here = self.active_frame();
+        let here = self.active_frame(cx);
         let text = here.read(cx).scope().text.clone().unwrap_or_default();
         let focused = self.filter_field_focused(window, cx);
         // `set_value` emits no Change event, so this cannot feed the session.

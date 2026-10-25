@@ -13,7 +13,6 @@
 use geode_core::colour::readable_on;
 use geode_core::series::SlotKind;
 use geode_shell::actions::ActionId;
-use geode_shell::fonts;
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
 use geode_shell::module::{CloseHandle, StackHandle};
 use geode_shell::shell::chip::{Tone, chip_paint};
@@ -23,11 +22,11 @@ use geode_shell::shell::kbd;
 use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
 use geode_shell::tips::{self, Chords, chord_for};
-use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks};
+use geode_tile::header::{Cluster, HealthChip, MenuTrigger, Mode, TileLinks, trigger};
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString,
-    Stateful, Window, div, rems,
+    AnyElement, App, Div, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, SharedString, div,
+    rems,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
@@ -239,57 +238,6 @@ pub(crate) struct HeaderPopups {
     pub under_range: Option<AnyElement>,
     /// The frequency menu, hung under the frequency trigger.
     pub under_freq: Option<AnyElement>,
-}
-
-/// Range or frequency trigger with a popup anchored at its bottom-left.
-/// Closed triggers use bare-control hover and press states. An open trigger
-/// keeps a neutral fill without additional pointer feedback.
-///
-/// Toggle during capture, before the popup's outside-press listener can close
-/// it; toggling during bubble would reopen the popup on the same click.
-/// Propagation continues so the shell can focus the clicked tile.
-#[allow(clippy::too_many_arguments)]
-fn trigger(
-    theme: &Theme,
-    rest: control::ControlPaint,
-    id: &'static str,
-    selector: impl Fn() -> String + 'static,
-    label: SharedString,
-    open: bool,
-    tip: (&'static str, &'static str, &'static str),
-    on_press: impl Fn(&mut Window, &mut App) + 'static,
-    popup: Option<AnyElement>,
-) -> Stateful<Div> {
-    let open_paint = chip_paint(theme, Tone::Neutral);
-    let (tip_id, tip_text, tip_action) = tip;
-    div()
-        .id(ElementId::Name(SharedString::new_static(id)))
-        .relative()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap_1()
-        .px_1()
-        .rounded(theme.radius)
-        .font_family(fonts::MONO)
-        .when(open, |d| {
-            d.text_color(open_paint.text)
-                .when_some(open_paint.fill, |d, fill| d.bg(fill))
-        })
-        .when(!open, |d| d.pointer_states(rest))
-        .child(label)
-        .child(div().text_xs().child("▾"))
-        .debug_selector(selector)
-        .tooltip(tips::tip(tip_id, tip_text, Some(tip_action), None))
-        .capture_any_mouse_down(move |event: &MouseDownEvent, window, cx| {
-            if event.button != MouseButton::Left {
-                return;
-            }
-            on_press(window, cx);
-        })
-        .when_some(popup, |d, popup| {
-            d.child(div().absolute().left_0().top_full().child(popup))
-        })
 }
 
 #[allow(clippy::too_many_arguments)]

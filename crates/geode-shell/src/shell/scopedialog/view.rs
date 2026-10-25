@@ -369,7 +369,7 @@ pub(crate) fn open_saved(
 fn jump_saved(view: &mut ShellView, section: super::saved_view::Section, cx: &App) {
     let prefer = (section == super::saved_view::Section::Scopes)
         .then(|| {
-            view.target_frame()
+            view.target_frame(cx)
                 .read(cx)
                 .loaded_from()
                 .map(str::to_string)
@@ -510,7 +510,7 @@ pub(crate) fn open_save(view: &mut ShellView, window: &mut Window, cx: &mut Cont
         return;
     }
     let (empty, seed) = {
-        let frame = view.target_frame().read(cx);
+        let frame = view.target_frame(cx).read(cx);
         (
             frame.scope().is_empty(),
             frame.loaded_from().map(str::to_string),
@@ -626,7 +626,7 @@ pub(super) fn edit_lane<R>(
     cx: &mut Context<ShellView>,
     edit: impl FnOnce(&mut FrameViewMut) -> R,
 ) -> R {
-    shell.target_frame().update(cx, |f, cx| {
+    shell.target_frame(cx).update(cx, |f, cx| {
         let before = f.generation();
         let out = edit(f);
         if f.generation() != before {
@@ -724,7 +724,7 @@ fn handle_key(
             return super::saved_view::row_key(shell, ks.key.as_str(), window, cx);
         }
         ("i", true, false) if zone == Zone::Saved => set_error(shell, INLINE_ONLY_NAMED),
-        ("s", false, false) if zone == Zone::Saved && ks.mods == shell.services.mod_alias => {
+        ("s", false, false) if zone == Zone::Saved && ks.mods == shell.services(cx).mod_alias => {
             set_error(shell, NAME_ONLY_TERMS)
         }
         ("d", true, false) => remove_cursor_row(shell, cx),
@@ -739,7 +739,7 @@ fn handle_key(
         ("c", true, false) => set_error(shell, COPY_ONLY_SAVED),
         ("r", true, false) => set_error(shell, REVERT_ONLY_SAVED),
         ("i", true, false) => inline_cursor_row(shell, cx),
-        ("s", false, false) if ks.mods == shell.services.mod_alias => {
+        ("s", false, false) if ks.mods == shell.services(cx).mod_alias => {
             name_cursor_term(shell, window, cx);
             return true;
         }
@@ -938,7 +938,7 @@ fn open_term_row(
     cx: &mut Context<ShellView>,
 ) -> bool {
     if !shell
-        .target_frame()
+        .target_frame(cx)
         .read(cx)
         .expression_term_is(index, term)
     {
@@ -965,7 +965,7 @@ fn enter_text_step(shell: &mut ShellView, window: &mut Window, cx: &mut Context<
         return;
     }
     let seed = shell
-        .target_frame()
+        .target_frame(cx)
         .read(cx)
         .scope()
         .text
@@ -1375,7 +1375,7 @@ fn build(
     let border = theme.border;
     let footer = match super::prompt::pending_footer(state, entity, cx) {
         Some(question) => question,
-        None => dialog::hint_rows(&hints(shell, state)),
+        None => dialog::hint_rows(&hints(shell, state, cx)),
     };
     body.child(
         v_flex()
@@ -1389,7 +1389,7 @@ fn build(
     .into_any_element()
 }
 
-fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
+fn hints(shell: &ShellView, state: &ScopeDialogState, cx: &App) -> Vec<Hint> {
     // Inside the text step only its own two keys act; the screen's verbs type.
     if in_text_step(state) {
         return vec![
@@ -1407,12 +1407,12 @@ fn hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
         ];
     }
     match state.zone {
-        Zone::Current => current_hints(shell, state),
+        Zone::Current => current_hints(shell, state, cx),
         Zone::Saved => saved_hints(state),
     }
 }
 
-fn current_hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
+fn current_hints(shell: &ShellView, state: &ScopeDialogState, cx: &App) -> Vec<Hint> {
     let mut hints = vec![
         Hint::new(HintRow::Move, &["j", "k"], "row"),
         Hint::new(HintRow::Edit, &["p"], "dimension…"),
@@ -1430,7 +1430,7 @@ fn current_hints(shell: &ShellView, state: &ScopeDialogState) -> Vec<Hint> {
             HintRow::Edit,
             Keystroke {
                 key: "s".into(),
-                mods: shell.services.mod_alias,
+                mods: shell.services(cx).mod_alias,
             },
             "name",
         )),

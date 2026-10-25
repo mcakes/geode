@@ -142,15 +142,11 @@ fn a_chord_closes_the_row_menu_and_dispatches(cx: &mut gpui::TestAppContext) {
     let shell = shell_of(&window, &mut vcx);
     vcx.simulate_keystrokes("ctrl-v");
     draw(&mut vcx);
-    let tiles_before = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().tree().tiles().len()
-    });
+    let tiles_before = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles().len());
     vcx.simulate_keystrokes("g . ctrl-v");
     draw(&mut vcx);
     assert!(row_menu_titles(&shell, &vcx).is_none());
-    let tiles_after = shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().tree().tiles().len()
-    });
+    let tiles_after = shell.read_with(&vcx, |s, cx| s.workspace(cx).tree().tiles().len());
     assert_eq!(tiles_after, tiles_before + 1, "the chord still split");
 }
 
@@ -271,12 +267,7 @@ fn a_row_menu_with_nowhere_to_hang_is_dropped(cx: &mut gpui::TestAppContext) {
     let shell = shell_of(&window, &mut vcx);
     draw(&mut vcx);
     assert!(
-        shell.read_with(&vcx, |s, _| s
-            .services
-            .workspaces
-            .active()
-            .focused_tile()
-            .is_none()),
+        shell.read_with(&vcx, |s, cx| s.workspace(cx).focused_tile().is_none()),
         "a fresh session has no tile"
     );
     shell.update_in(&mut vcx, |s, window, cx| {
@@ -287,9 +278,7 @@ fn a_row_menu_with_nowhere_to_hang_is_dropped(cx: &mut gpui::TestAppContext) {
     // Keys reach the shell again: `ctrl-v` splits.
     vcx.simulate_keystrokes("ctrl-v");
     draw(&mut vcx);
-    assert!(shell.read_with(&vcx, |s, _| {
-        s.services.workspaces.active().focused_tile().is_some()
-    }));
+    assert!(shell.read_with(&vcx, |s, cx| { s.workspace(cx).focused_tile().is_some() }));
 }
 
 #[gpui::test]
@@ -782,11 +771,14 @@ fn moving_unopened(cx: &mut gpui::TestAppContext) -> Moving {
     let requested = Rc::new(std::cell::RefCell::new(Vec::new()));
     vcx.update(|_, cx| {
         let requested = requested.clone();
-        cx.subscribe(&shell, move |_, e: &ShellEvent, _| {
-            if let ShellEvent::DistinctRequested(p) = e {
-                requested.borrow_mut().push(p.clone());
-            }
-        })
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, e: &ShellEvent, _| {
+                if let ShellEvent::DistinctRequested(p) = e {
+                    requested.borrow_mut().push(p.clone());
+                }
+            },
+        )
         .detach();
     });
     vcx.simulate_keystrokes("ctrl-v");
@@ -975,7 +967,7 @@ fn a_confirm_under_a_plain_dialog_is_refused_with_a_notice(cx: &mut gpui::TestAp
     m.vcx.update(|window, cx| {
         shell.update(cx, |s, cx| {
             let at = s
-                .services
+                .services(cx)
                 .roster
                 .actions()
                 .iter()
@@ -1207,9 +1199,9 @@ fn open_color_list_on(
 ) -> (Entity<ShellView>, gpui::VisualTestContext) {
     let (window, mut vcx) = open_shell(cx, services);
     let shell = shell_of(&window, &mut vcx);
-    shell.update(&mut vcx, |s, _| {
+    shell.update(&mut vcx, |s, cx| {
         s.text_dims.insert("underlying_ref".into());
-        s.user_dir = user_dir;
+        s.app().update(cx, |a, _| a.user_dir = user_dir);
     });
     vcx.simulate_keystrokes("ctrl-v");
     draw(&mut vcx);

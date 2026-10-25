@@ -2,8 +2,9 @@
 
 The `geode` binary. This is the one crate where everything meets: it
 loads the layered config, builds the action registry and keymap, installs
-logging, spawns the data service, fills the module roster and opens the
-window on `geode_shell::shell::ShellView`.
+logging, spawns the data service, fills the module roster, builds the one
+`geode_shell::shell::ShellApp` and opens its windows, each a
+`geode_shell::shell::ShellView` over it.
 
 The `guide` tile factory is always registered, independently of data setup.
 It displays the bundled user guide through **Guide: Split** in the palette
@@ -58,10 +59,12 @@ The demo transports, their behavior and the store and config paths live in
 
 | Module | Holds |
 |---|---|
-| `main` | Startup composition: logging (`geode_compose::logging::install("geode", true)`), config, registry and keymap, roster (module factories, then the row menu's actions: `add_dimension_actions` registers `geode-nemo`'s two Open in Nemo actions, then `geode-positions`' Move LHU, disabled unless startup resolved a position service), service, and window. Pure argument parsing; store and config paths come from `geode_compose` (`store_path`, `config_dirs`). |
-| `bridge` | Service setup and module factories (loads `panels` against the registered document kinds and kind actions and builds one market-data factory per accepted panel; refused panels, including one named after another module's kind, become composition diagnostics in the shell's config section; then `load_scenarios_from_config` loads `scenarios` against the schema after the panels, refuses a shape named like another module's or an accepted panel's kind, or whose `scenario:<kind>` view is already configured, withholds a builtin shape over an undeclared dataset with an info log line instead of an Error, hands the service the configured views then each accepted shape's derived view (never the blotter's view list), and builds one `ScenarioFactory` per shape after the panels, the first shipping the keymap fragment; the scenario factories share one schema, dimensions and colors cell that `ConfigReloaded` rewrites, and a reloaded view named like a running shape's derived view is dropped from every consumer with one Warning; `scenarios` is restart-required), window event routing (including stopped data threads, and the handle's `Busy`-refusal total read on each drained event into `Diagnostics`), catalog refresh/retry (a `Stopped` refusal drops the demand), the startup schema's reference datasets handed to `Diagnostics` at attach, reference reads at the frame's as-of and poll-now requests drained from `Diagnostics` (only the latest-tagged `DataEvent::Reference` is stored; a refusal is stored with its reason, never retried), the live reference cache behind `ReferenceGlobal` (every reference dataset read at `AsOf::Live` under `REFERENCE_KEY` at attach and on each of its publishes; only a dataset's latest tag is applied, the global is set only when a table changed, `Ok(None)` removes the table, a failed read keeps it and warns once per run of failures on `geode::reference`, a `Busy` refusal rereads after one second with one timer per dataset, `Stopped` drops the demand), position-service resolution from `positions.toml` (`positions_configured`), each `DataEvent::Command` routed to `ShellView::note_command`, and forwarding view reloads to the data service (a refused hand-off is a diagnostic). |
+| `main` | Startup composition: logging (`geode_compose::logging::install("geode", true)`), config, registry and keymap, roster (module factories, then the row menu's actions: `add_dimension_actions` registers `geode-nemo`'s two Open in Nemo actions, then `geode-positions`' Move LHU, disabled unless startup resolved a position service), service, the window opener (`bridge::window_opener`, installed through `ShellApp::set_window_opener`) and the startup windows (`startup::open_startup_windows`). Pure argument parsing; store and config paths come from `geode_compose` (`store_path`, `config_dirs`). |
+| `bridge` | Service setup and module factories (`attach` holds the `ShellApp` entity and no window: it runs once per process, ahead of the first window, routes each data answer through `ShellApp::deliver` when it arrives (a keyed answer to the window hosting its tile, a keyless or shell-keyed one to every window, one for a parked tile dropped), checks the app's registry (`any_window_open`) for liveness on every event and in every retry timer, and reads the catalog and reference lanes' as-of from the window whose diagnostics page is open, else the oldest window, else the shared lane; `window_opener` is the one opener every window opens through, in production over `TitleBar::window_options` and in the tests over default options: it places the window (`placement::options_for`, over the spawning window's frame and display carried in `Placement::Beside` by the verb, else read through its handle, the attached displays and the primary; a spawner that cannot be read leaves placement to the platform with a debug line), opens a `Root` over a `ShellView` for the reserved key and calls `attach_window`; `attach_window` installs a window's own should-close hook from the opener, with or without a bridge: a close that leaves another window open deregisters the window and parks its tiles, the last window's close saves the session and unsaved sheets first; `attach` also subscribes to `ShellApp`, the one emitter of `ShellEvent`, for reloads and distinct requests, and reads the reloaded config from it; loads `panels` against the registered document kinds and kind actions and builds one market-data factory per accepted panel; refused panels, including one named after another module's kind, become composition diagnostics in the shell's config section; then `load_scenarios_from_config` loads `scenarios` against the schema after the panels, refuses a shape named like another module's or an accepted panel's kind, or whose `scenario:<kind>` view is already configured, withholds a builtin shape over an undeclared dataset with an info log line instead of an Error, hands the service the configured views then each accepted shape's derived view (never the blotter's view list), and builds one `ScenarioFactory` per shape after the panels, the first shipping the keymap fragment; the scenario factories share one schema, dimensions and colors cell that `ConfigReloaded` rewrites, and a reloaded view named like a running shape's derived view is dropped from every consumer with one Warning; `scenarios` is restart-required), window event routing (including stopped data threads, and the handle's `Busy`-refusal total read on each drained event into `Diagnostics`), catalog refresh/retry (a `Stopped` refusal drops the demand), the startup schema's reference datasets handed to `Diagnostics` at attach, reference reads at the frame's as-of and poll-now requests drained from `Diagnostics` (only the latest-tagged `DataEvent::Reference` is stored; a refusal is stored with its reason, never retried), the live reference cache behind `ReferenceGlobal` (every reference dataset read at `AsOf::Live` under `REFERENCE_KEY` at attach and on each of its publishes; only a dataset's latest tag is applied, the global is set only when a table changed, `Ok(None)` removes the table, a failed read keeps it and warns once per run of failures on `geode::reference`, a `Busy` refusal rereads after one second with one timer per dataset, `Stopped` drops the demand), position-service resolution from `positions.toml` (`positions_configured`), each `DataEvent::Command` routed to `ShellView::note_command`, and forwarding view reloads to the data service (a refused hand-off is a diagnostic). |
 | `events` | Coalesced pending state with a one-slot wakeup channel. Retains publication book unions and highest-tagged query results; upload outcomes have separate `(tile key, tag)` entries; local-write, position-command, and reference-table outcomes never coalesce. |
-| `watchlists` | The resolved watchlists behind `WatchlistGlobal`: `fold_watchlists` folds every list in the config against the schema the service serves (a rule that does not fold is a warning diagnostic and a `RuleError` on its list; the list is kept), and `WatchlistCache` resolves each list through `DataHandle::watchlist` under its own key from the `WATCHLIST_KEY_BASE` range, allocated on first sight of a name and never reused within the run. Only a list's latest tag is applied, and a per-list tag floor drops an answer to a definition since replaced or removed, even while the replacement's refresh waits on a `Busy` retry (one timer per list, one second); `Stopped` drops the demand. A failed resolution keeps the last members, marks the list `Failed` and warns once per run of failures on `geode::watchlist`; a successful one sets `Current`, `resolved_at` and the rule errors (the fold's plus the data layer's `rules_failed`). The bridge calls `set_definitions` at attach and on `ConfigReloaded`, `on_published` for a non-local publish, and `answer` for each `DataEvent::Watchlist` under a watchlist key. |
+| `watchlists` | The resolved watchlists behind `WatchlistGlobal`: `fold_watchlists` folds every list in the config against the schema the service serves (a rule that does not fold is a warning diagnostic and a `RuleError` on its list; the list is kept), and `WatchlistCache` resolves each list through `DataHandle::watchlist` under its own key from the `WATCHLIST_KEY_BASE` range, allocated on first sight of a name and never reused within the run. Only a list's latest tag is applied, and a per-list tag floor drops an answer to a definition since replaced or removed, even while the replacement's refresh waits on a `Busy` retry (one timer per list, one second); `Stopped` drops the demand. A failed resolution keeps the last members, marks the list `Failed` and warns once per run of failures on `geode::watchlist`; a successful one sets `Current`, `resolved_at` and the rule errors (the fold's plus the data layer's `rules_failed`). The bridge calls `set_definitions` at attach and on `ConfigReloaded`, `on_published` for a non-local publish, and `answer` for each `DataEvent::Watchlist` under a watchlist key; a retry timer submits only while the app's registry lists a window. |
+| `placement` | Pure: `options_for` maps a `Placement` to the platform's `display_id` and `window_bounds` from the facts the opener gathers. `Beside`: the spawner's display and frame shifted by `CASCADE` (28 logical pixels) on both axes, clamped inside that display (shifted back by the overflow; a window larger than the display sits at its origin); no spawner asks for nothing. `Restored`: the recorded display and frame, `Maximized` when recorded so; a display no longer attached falls back to the primary with the recorded size at the primary's origin plus `CASCADE`; no recorded display leaves the frame alone. `Default`: nothing. Global logical coordinates, so a negative display origin needs no special case. |
+| `startup` | `open_startup_windows`: one window per restored `[windows.K]` record through `ShellApp::open_windows`, one batch in K order (the first record's window is the oldest), each on its recorded index with a `Restored` placement; every record's index is reserved before the first window opens, so each window builds only the tiles it hosts, once, and nothing is parked and rebuilt between the startup windows; a refused open is warned and skipped; with none opened, one window on the session's initial index at the platform's default placement, and a refusal there ends the run. Its tests live beside the opener's in `bridge`, which hold the service fixtures. |
 | `demo_tests` | Tests of `geode_compose`'s demo modules that need the bridge, `builtin_layer`, a feature module or a window. |
 | `crash` | The process panic hook and crash-report retention (through `geode_compose::logging::prune_files`): marked containment boundaries log without a report; other panics attempt a report before chaining the previous hook. |
 | `assets` | The asset source: gpui-kit's component icons plus the catalogue icons Geode's own surfaces name. |
@@ -121,19 +124,45 @@ cargo check -p geode-app --features profiling
   `the_app_and_the_collector_build_the_same_schema_and_sources` compares the
   app's `builtin_layer` through `bridge::data_setup` with
   `geode_compose::builtin_data_layer` through `engine_setup`.
-- Closing the window quits the app on every platform: `main` sets
+- Every window opens through the one opener `main` installs on `ShellApp`
+  (`bridge::window_opener` through `set_window_opener`, before the first
+  window): it builds the platform window from `TitleBar::window_options`
+  and the spec's `Placement` (`placement::options_for`: beside the window
+  that asked, cascaded and clamped into its display; where a session
+  recorded it, on the primary when that display is gone; or wherever the
+  platform puts it), opens a `Root` over a `ShellView` for the reserved
+  key, and installs the window's hooks (`bridge::attach_window`). The
+  bridge's test opener is the same closure over default options, so the
+  close and placement tests run the production route. Startup
+  (`startup::open_startup_windows`) opens one window per restored record
+  in K order as one batch (`ShellApp::open_windows`: every record's index
+  reserved before the first window opens, so each window builds its own
+  tiles once and the first parks nothing for the others), else one on the
+  session's initial index; a refusal there ends the run, since without a
+  window there is nothing to run. Nothing opens a window by hand. The spawning window's frame and display travel
+  in `Placement::Beside`, read by the verb from its own window (a window
+  under update cannot be read through its handle); the opener reads them
+  through the handle only when they are absent, as an app-level caller
+  leaves them.
+- Closing the last window quits the app on every platform: `main` sets
   `QuitMode::LastWindowClosed` (gpui's default keeps a macOS process alive
-  with no window). `save_on_close` registers the main window's should-close
-  hook, which saves the session and flushes unsaved pricer sheets while the
-  window still exists, then lets the close proceed: gpui removes the window
-  before the quit hooks run, so the session quit hook would find none. The
-  quit hooks run after it too: the session hook finds no window and saves
-  nothing, and the sheet flush finds nothing dirty. The real close button is
-  not exercised headlessly; tests reach the hook through
-  `VisualTestContext::simulate_close`, which runs only the handler. Also
-  untestable headlessly: the quit-mode line (gpui exposes no reader and the
-  test platform's quit does nothing), and the order "the close removes the
-  window, then the quit hook finds none".
+  with no window). The should-close hook `attach_window` installs decides
+  what a close means by `ShellApp::is_last_window`: with another window
+  open it deregisters the window while it still stands
+  (`ShellApp::window_closed`, which parks its tiles through the view with
+  a live context) and saves nothing; for the last window it saves the
+  session (parked records included), flushes unsaved pricer sheets, and
+  only then deregisters, because `ShellApp::save_session` writes nothing
+  once no window is registered. Either way the close proceeds. The quit
+  hook saves once, from the app, and walks no windows: on an explicit quit
+  every window is still registered; after the last close it finds none and
+  writes nothing. The real close button is not exercised headlessly; tests
+  drive the installed hook through `bridge::run_should_close_for_test`,
+  which is `VisualTestContext::simulate_close` (it runs the one handler
+  the test platform window holds, the production closure, and does not
+  remove the window). Also untestable headlessly: the quit-mode line (gpui
+  exposes no reader and the test platform's quit does nothing), and the
+  order "the close removes the window, then the quit hook finds none".
 - At quit, `stop_at_quit` attempts each pricer tile's unsaved-sheet flush
   before starting data shutdown on a background executor. Admitted writes
   precede `Shutdown` and the writer drains them, but submission/write failures

@@ -72,6 +72,15 @@ impl Render for ShellView {
         }
         self.last_render_started = Some(render_started);
 
+        // A window the close path has deregistered (`ShellApp::window_closed`)
+        // is no longer open on the workspaces, yet it can be drawn once more
+        // between that and gpui removing it: the parks the deregistration
+        // triggered notify this view. Nothing of it is left to paint, and
+        // every workspace accessor below would panic for its key.
+        if self.workspaces(cx).shown(self.key).is_none() {
+            return div().into_any_element();
+        }
+
         // Restore focus for deferred paths that lack a `Window`, before any
         // painting. Preserve a focused tile's own insert-mode input using the
         // same predicate as key routing, so a mouse-opened editor keeps focus.
@@ -106,13 +115,8 @@ impl Render for ShellView {
         // Close a member list when its tile loses workspace focus or leaves
         // the stack. This check needs no occupant or geometry reconciliation.
         if self.stack_list.as_ref().is_some_and(|l| {
-            self.services.workspaces.active().focused_tile() != Some(l.tile)
-                || self
-                    .services
-                    .workspaces
-                    .active()
-                    .stack_position(l.tile)
-                    .is_none()
+            self.workspace(cx).focused_tile() != Some(l.tile)
+                || self.workspace(cx).stack_position(l.tile).is_none()
         }) {
             self.stack_list = None;
         }
@@ -143,16 +147,18 @@ impl Render for ShellView {
                 || self.modal_open()
                 || page_open
                 // Epoch, not index — see `DividerDrag::epoch`.
-                || drag.epoch != self.services.workspaces.switch_epoch()
-                || self
-                    .services
-                    .workspaces
-                    .active()
+                || drag.epoch != self.workspaces(cx).switch_epoch(self.key)
+                || self.workspace(cx)
                     .tree()
                     .fullscreen()
                     .is_some()
-        }) {
-            self.cancel_divider_drag();
+        }) && self.cancel_divider_drag()
+        {
+            // The resize already applied must still reach the session, but
+            // render never holds the app entity's writer: the mark runs when
+            // this draw's effects flush, before the watcher's next tick.
+            let app = self.app.clone();
+            cx.defer(move |cx| app.update(cx, |app, _| app.mark_session_dirty()));
         }
 
         // Cancel tile tracking when overlays or a page obscure its targets, the
@@ -165,18 +171,12 @@ impl Render for ShellView {
                 || page_open
                 || !self.matcher.pending().is_empty()
                 // Epoch, not index — see `DividerDrag::epoch`.
-                || drag.epoch != self.services.workspaces.switch_epoch()
-                || self
-                    .services
-                    .workspaces
-                    .active()
+                || drag.epoch != self.workspaces(cx).switch_epoch(self.key)
+                || self.workspace(cx)
                     .tree()
                     .fullscreen()
                     .is_some()
-                || self
-                    .services
-                    .workspaces
-                    .active()
+                || self.workspace(cx)
                     .region_of(drag.tile)
                     .is_none()
         }) {
@@ -188,7 +188,7 @@ impl Render for ShellView {
         // input clicks as well as the explicit tile-click paths. Leaving commits
         // a find and cancels a command; it is distinct from Escape cancellation.
         if self.command_line.as_ref().is_some_and(|line| {
-            self.services.workspaces.active().focused_tile() != Some(line.tile)
+            self.workspace(cx).focused_tile() != Some(line.tile)
                 || !self
                     .command_input
                     .read(cx)
@@ -208,7 +208,7 @@ impl Render for ShellView {
         // makes (`content_area`, `sidebar::width`, `status::height`,
         // `rem_size` below) must sit AFTER this line, and nothing rendered
         // between `Root`'s set and this one may read the rem.
-        let rem = gpui::px(self.font_size.rem_px());
+        let rem = gpui::px(self.app.read(cx).font_size().rem_px());
         if window.rem_size() != rem {
             window.set_rem_size(rem);
         }
@@ -216,7 +216,7 @@ impl Render for ShellView {
         // Layout uses the viewport minus toolbar, sidebar, and status bar. A
         // historical frame adds a warning stripe below the toolbar; subtract its
         // height before sizing the tile surface so content fits below it.
-        let is_historical = matches!(self.target_frame().read(cx).as_of(), AsOf::At(_));
+        let is_historical = matches!(self.target_frame(cx).read(cx).as_of(), AsOf::At(_));
         let stripe_height = if is_historical {
             AS_OF_STRIPE_HEIGHT
         } else {
@@ -284,15 +284,15 @@ impl Render for ShellView {
         // tile, its group or the group's scope moved. A field write, ahead
         // of the borrows the bar's other arguments take.
         self.refresh_link_label(cx);
-        let active_index = self.services.workspaces.active_index();
-        let non_empty = self.services.workspaces.non_empty_indices();
+        let active_index = self.shown_ix(cx).get();
+        let non_empty = self.workspaces(cx).non_empty_indices();
         // Share the cached scope bar model between toolbar and status bar.
         // Use the poll-updated date and configured clock, avoiding a fresh
         // clock read during rendering.
         let bar_model = self
-            .target_frame()
+            .target_frame(cx)
             .read(cx)
-            .bar_model(self.clock(cx), self.today);
+            .bar_model(self.clock(cx), self.app.read(cx).today());
         // Read the cached diagnostics summary. Cloning its shared string
         // increments a reference count without copying its buffer.
         let diagnostics_read = self.diagnostics.read(cx);
@@ -324,7 +324,7 @@ impl Render for ShellView {
         };
         // Clicking the fullscreen segment restores the layout through the
         // same action `mod+f` and a tile double-click dispatch.
-        let fullscreen_hidden = self.services.workspaces.active().fullscreen_hidden();
+        let fullscreen_hidden = self.workspace(cx).fullscreen_hidden();
         let fullscreen_click_entity = cx.entity();
         let on_fullscreen_click = move |window: &mut Window, cx: &mut App| {
             fullscreen_click_entity.update(cx, |view, cx| {
@@ -351,12 +351,14 @@ impl Render for ShellView {
                 cx.notify();
             });
         };
+        // The reload state is the app's; read, never updated, from here.
+        let app = self.app.read(cx);
         let status_bar = status::status_bar(
             self.matcher.pending(),
             self.matcher.count_label(),
-            self.reload_status.as_ref(),
+            app.reload_status(),
             self.config_write_error.as_ref(),
-            self.restart_required.as_ref(),
+            app.restart_required(),
             self.notice.as_ref(),
             stopped,
             store_waiting,
@@ -369,7 +371,7 @@ impl Render for ShellView {
             on_fullscreen_click,
             bar_model.as_of_status.as_ref(),
             bar_model.as_of_full.as_ref(),
-            self.services.theme.active_label(),
+            self.services(cx).theme.active_label(),
             cx,
         );
         let sidebar = sidebar::sidebar(
@@ -387,7 +389,7 @@ impl Render for ShellView {
         let chip_close_entity = cx.entity();
         let on_chip_close = move |column: &str, _window: &mut Window, cx: &mut App| {
             chip_close_entity.update(cx, |view, cx| {
-                view.target_frame().update(cx, |f, cx| {
+                view.target_frame(cx).update(cx, |f, cx| {
                     if f.drop_dimension(column) {
                         cx.notify();
                     }
@@ -450,7 +452,7 @@ impl Render for ShellView {
         let term_close_entity = cx.entity();
         let on_term_close = move |i: usize, _window: &mut Window, cx: &mut App| {
             term_close_entity.update(cx, |view, cx| {
-                view.target_frame().update(cx, |f, cx| {
+                view.target_frame(cx).update(cx, |f, cx| {
                     if f.drop_expression_term(i) {
                         cx.notify();
                     }
@@ -469,7 +471,7 @@ impl Render for ShellView {
         let named_close_entity = cx.entity();
         let on_named_close = move |name: &str, _window: &mut Window, cx: &mut App| {
             named_close_entity.update(cx, |view, cx| {
-                view.target_frame().update(cx, |f, cx| {
+                view.target_frame(cx).update(cx, |f, cx| {
                     if f.drop_named(name) {
                         cx.notify();
                     }
@@ -494,7 +496,7 @@ impl Render for ShellView {
         let scope_dialog_open = self.scope_dialog.is_some();
         // The pin glyph names the active workspace, whose tiles are the
         // ones on screen, not a dialog's target.
-        let ws = self.active_ix();
+        let ws = self.shown_ix(cx);
         let pin = toolbar::PinState {
             ws,
             pinned: self.frame.read(cx).is_pinned(ws),
@@ -541,10 +543,8 @@ impl Render for ShellView {
         // state here must not change how the next keystroke resolves.
         let pending = self.matcher.pending();
         let which_key_continuations = (!pending.is_empty()).then(|| {
-            whichkey::continuations(&self.services.keymap, pending, &self.context_stack(cx))
+            whichkey::continuations(&self.services(cx).keymap, pending, &self.context_stack(cx))
         });
-        let registry = &self.services.registry;
-
         // Clone the modal's shared title and callbacks before building the
         // element tree, releasing the borrow of `self.modals` before closures
         // need access to the rest of the view.
@@ -669,6 +669,7 @@ impl Render for ShellView {
                                     if view.apply_divider_drag(
                                         f32::from(event.position.x),
                                         f32::from(event.position.y),
+                                        cx,
                                     ) {
                                         cx.notify();
                                     }
@@ -953,7 +954,7 @@ impl Render for ShellView {
                 el.child(whichkey::render(
                     &continuations,
                     self.matcher.count(),
-                    registry,
+                    &self.services(cx).registry,
                     width,
                     status_height,
                     rem_size,
@@ -981,6 +982,7 @@ impl Render for ShellView {
             // component dialog and notification layers after shell content.
             .children(Root::render_dialog_layer(window, cx))
             .children(Root::render_notification_layer(window, cx))
+            .into_any_element()
     }
 }
 
@@ -1033,7 +1035,7 @@ impl ShellView {
             h: r.h,
         };
         let (region, focused, tree_area, rects, dock_cells, strips) = {
-            let workspace = self.services.workspaces.active();
+            let workspace = self.workspace(cx);
             let tree = workspace.tree();
             let (tree_area, dock_rects) = if tree.fullscreen().is_some() {
                 (area, Vec::new())
@@ -1133,9 +1135,7 @@ impl ShellView {
                     (DropTarget::Tile { id: _, zone }, tr) => Some(drop_highlight_rect(tr, zone)),
                     (DropTarget::DockBackground { side }, frame) => {
                         let already_here = self
-                            .services
-                            .workspaces
-                            .active()
+                            .workspace(cx)
                             .docks()
                             .get(side)
                             .tree()
@@ -1304,8 +1304,8 @@ impl ShellView {
                                 {
                                     return;
                                 }
-                                if view.services.workspaces.active_mut().focus_main_tile(id) {
-                                    view.session_dirty = true;
+                                if view.with_workspace(cx, |ws| ws.focus_main_tile(id)) {
+                                    view.mark_session_dirty(cx);
                                 }
                                 // An occupant can claim window focus on mouse-down. Re-arm
                                 // restoration so the next render preserves a valid editor or
@@ -1328,8 +1328,8 @@ impl ShellView {
                                     return;
                                 }
                                 view.leave_command_line(window, cx);
-                                if view.services.workspaces.active_mut().focus_main_tile(id) {
-                                    view.session_dirty = true;
+                                if view.with_workspace(cx, |ws| ws.focus_main_tile(id)) {
+                                    view.mark_session_dirty(cx);
                                 }
                                 view.pending_focus_restore = true;
                                 cx.notify();
@@ -1376,13 +1376,8 @@ impl ShellView {
                                     {
                                         return;
                                     }
-                                    if view
-                                        .services
-                                        .workspaces
-                                        .active_mut()
-                                        .focus_dock_tile(side, id)
-                                    {
-                                        view.session_dirty = true;
+                                    if view.with_workspace(cx, |ws| ws.focus_dock_tile(side, id)) {
+                                        view.mark_session_dirty(cx);
                                     }
                                     // Dock occupants can also claim window focus; use the same
                                     // deferred restoration as main-tree clicks.
@@ -1399,13 +1394,8 @@ impl ShellView {
                                         return;
                                     }
                                     view.leave_command_line(window, cx);
-                                    if view
-                                        .services
-                                        .workspaces
-                                        .active_mut()
-                                        .focus_dock_tile(side, id)
-                                    {
-                                        view.session_dirty = true;
+                                    if view.with_workspace(cx, |ws| ws.focus_dock_tile(side, id)) {
+                                        view.mark_session_dirty(cx);
                                     }
                                     view.pending_focus_restore = true;
                                     cx.notify();
@@ -1530,7 +1520,7 @@ impl ShellView {
                                 // to (read at mouse-down, not paint): a
                                 // mod+N switch mid-drag cancels rather
                                 // than retargeting — see `DividerDrag`.
-                                epoch: view.services.workspaces.switch_epoch(),
+                                epoch: view.workspaces(cx).switch_epoch(view.key),
                                 moved: false,
                             });
                             cx.stop_propagation();
