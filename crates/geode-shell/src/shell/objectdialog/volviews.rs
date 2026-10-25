@@ -47,7 +47,8 @@ pub fn summary_in(config: &Config, name: &str, value: &toml::Value) -> String {
     summary(value, is_default)
 }
 
-/// `pair · 10 columns`, with ` · default` when `name` is the document's default.
+/// `pair · 10 columns` (`1 column`), with ` · default` when `name` is the
+/// document's default.
 pub fn summary(value: &toml::Value, is_default: bool) -> String {
     let cells = match value.get("cells").and_then(|v| v.as_str()) {
         Some("single") => "single",
@@ -57,7 +58,8 @@ pub fn summary(value: &toml::Value, is_default: bool) -> String {
         .get("columns")
         .and_then(|v| v.as_array())
         .map_or(0, |a| a.len());
-    let mut s = format!("{cells} · {n} columns");
+    let plural = if n == 1 { "" } else { "s" };
+    let mut s = format!("{cells} · {n} column{plural}");
     if is_default {
         s.push_str(" · default");
     }
@@ -213,8 +215,18 @@ pub(super) fn spec_of(source: &toml::Table) -> Option<VolColumnSpec> {
 
 /// Each open-form dataset — a `history` dataset keyed by `underlying_ref`
 /// and at most one more column, with one value column — by name, with the
-/// count of key columns after the underlying (0 or 1). Sorted by name.
+/// count of key columns after the underlying (0 or 1). Sorted by name. A
+/// dataset whose catalogue label would be a builtin family's is not
+/// offered ([`clashing_datasets`] says so in validation).
 fn open_form_datasets(config: &Config) -> Vec<(String, usize)> {
+    open_form_shapes(config)
+        .into_iter()
+        .filter(|(name, _)| !clashes_with_a_family(name))
+        .collect()
+}
+
+/// [`open_form_datasets`] before the family-label guard.
+fn open_form_shapes(config: &Config) -> Vec<(String, usize)> {
     let schema = config
         .doc("datasets")
         .map(|d| SchemaSpec::from_doc(d).0)
@@ -232,6 +244,27 @@ fn open_form_datasets(config: &Config) -> Vec<(String, usize)> {
         .collect();
     out.sort();
     out
+}
+
+/// Whether a dataset's catalogue label (`Family::label` upper-cases the
+/// name) is a builtin family's. The Family row resolves a label to the
+/// builtin first, so such a dataset's row could never be picked back; it
+/// is not offered, and validation says so.
+fn clashes_with_a_family(dataset: &str) -> bool {
+    let label = dataset.to_ascii_uppercase();
+    Family::builtin_families()
+        .iter()
+        .any(|f| f.label() == label)
+}
+
+/// The open-form datasets [`open_form_datasets`] leaves out for a family
+/// label clash, by name.
+fn clashing_datasets(config: &Config) -> Vec<String> {
+    open_form_shapes(config)
+        .into_iter()
+        .filter(|(name, _)| clashes_with_a_family(name))
+        .map(|(name, _)| name)
+        .collect()
 }
 
 /// The catalogue's families in its order: the twelve builtin families, then
@@ -426,6 +459,15 @@ fn validate_against(
     };
     let (_, d2) = volviews::resolve(&parsed, &shape);
     diags.extend(d2);
+    for dataset in clashing_datasets(config) {
+        diags.push(Diagnostic {
+            severity: Severity::Warning,
+            layer: None,
+            file: None,
+            message: format!("{dataset} clashes with a family name; not offered"),
+            path: Some(format!("vol_views.{}.columns", draft.name)),
+        });
+    }
     // By the reader's own rule (`Domain::names_collide`): `Vol` beside `vol`
     // is a duplicate the reader would skip.
     if let Some(name) = draft.text("name").filter(|n| *n != draft.name)
@@ -875,7 +917,7 @@ mod tests {
             "document order, as the tile's tabs are"
         );
         assert_eq!(rows[0].summary, "pair · 2 columns · default");
-        assert_eq!(rows[1].summary, "single · 1 columns");
+        assert_eq!(rows[1].summary, "single · 1 column");
     }
 
     #[test]
@@ -924,6 +966,43 @@ mod tests {
         let families = catalogue_families(&config);
         assert_eq!(families.len(), 13);
         assert_eq!(families.last(), Some(&Family::Table("spot".into())));
+    }
+
+    /// A dataset whose upper-cased name is a builtin family's label
+    /// (`atfm`) is left out of the catalogue — the Family row would read
+    /// its label back as the builtin — and validation says why.
+    #[test]
+    fn a_dataset_whose_label_is_a_familys_is_not_offered_and_warns() {
+        let clash = SSR_DATASET.replace("ssr", "atfm");
+        let config = config_with(TWO_TABS, &clash);
+        assert_eq!(catalogue(&config).len(), 12);
+        assert!(
+            !catalogue_families(&config).contains(&Family::Table("atfm".into())),
+            "{:?}",
+            catalogue_families(&config)
+        );
+        let draft = Domain::VolViews.draft(&config, "skew");
+        assert!(
+            draft
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == Severity::Warning
+                    && d.message == "atfm clashes with a family name; not offered"),
+            "{:?}",
+            draft.diagnostics
+        );
+        // A dataset that clashes with nothing is offered without a word.
+        let config = config_with(TWO_TABS, SSR_DATASET);
+        assert_eq!(catalogue(&config).len(), 13);
+        let draft = Domain::VolViews.draft(&config, "skew");
+        assert!(
+            !draft
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("clashes")),
+            "{:?}",
+            draft.diagnostics
+        );
     }
 
     #[test]

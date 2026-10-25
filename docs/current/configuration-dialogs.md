@@ -282,12 +282,12 @@ Only the user layer is written, so every shipped tab the move crosses (the
 inclusive range where the new and the current order disagree) is forked
 first through the ordinary fork path, sidecar entry included, with one notice
 (`copied N tabs to your config — r restores each`); a move among the user's
-own tabs forks nothing. The forks go through the keyed batch at zero delay
-and `geode_core::volviews::reorder` rewrites the user file in the new order
-after them, in the same batch (`apply::queue_document_order`); memory takes
-the same order through the batch (`PendingConfigWrite::order`, one per
-document, the latest), so the browse rows show the new order when the batch
-is applied and the watcher's later read finds equal documents. The merge
+own tabs forks nothing. The forks and the order are one batch
+(`apply::queue_document_order`): `geode_core::volviews::reorder` rewrites
+the user file in the new order after the forks have landed, and memory
+takes the same order (`PendingConfigWrite::order`, one per document, the
+latest), so the browse rows show the new order when the batch is applied
+and the watcher's later read finds equal documents. The merge
 honours the user layer's table order for `vol_views` alone (see
 [configuration](configuration.md#layers-and-provenance)); without that rule the
 rewritten file would change nothing the tile or the list can see.

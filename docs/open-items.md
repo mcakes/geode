@@ -818,6 +818,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   tile's and the dialog is the shell's, so a row needs a tile-to-shell
   hook (as `config_object` is the shell-to-tile one); `e` and the palette
   are the routes.
+- The Vol views browse list reorders by `shift+j`/`shift+k` only; the
+  member rows' grip drag has no tab counterpart yet.
+- A `[[columns]]` entry that is not a table (`columns = ["x"]`) cannot be
+  a list item and is dropped by the next save of its tab; the reader warns
+  about it on every load.
 - A muted slider paints its number alone; the table's `slider_muted`
   paint is never reached (paint the muted gauge, or drop the paint).
 - A tab of sparklines alone asks the board for nothing, under the same

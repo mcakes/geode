@@ -790,6 +790,11 @@ fn renumber(table: &mut toml_edit::Table, next: &mut isize) {
 /// then any top-level value the source held that this writer does not
 /// model. A source table the doc no longer lists is a deleted view and is
 /// not copied: the reader takes every table for a view.
+///
+/// The whole-document rendering, which the tests use to prove the writer
+/// round-trips a file; the Vol views dialog writes one view at a time
+/// through [`to_table_from`] and reorders the file in place through
+/// [`reorder`], so no running path renders a document whole.
 pub fn to_document(
     doc: &VolViewsDoc,
     source: Option<&toml_edit::DocumentMut>,
@@ -824,7 +829,10 @@ pub fn to_document(
 /// Move the named view tables to the front in `order`; tables not named
 /// keep their relative order after them; `config_version` and `default`
 /// stay first. Removing and re-inserting keeps each table's decor; the
-/// tables are then renumbered so the order reaches the file.
+/// tables are then renumbered so the order reaches the file. The shell's
+/// `objectdialog::apply::docs_reordered` is the same rule over the
+/// `toml::Table` memory holds, so what a batch does to memory and to the
+/// file agree.
 pub fn reorder(document: &mut toml_edit::DocumentMut, order: &[String]) {
     let table = document.as_table_mut();
     let keys: Vec<String> = table.iter().map(|(k, _)| k.to_string()).collect();
@@ -1657,11 +1665,9 @@ mod tests {
 
     #[test]
     fn a_view_defined_twice_keeps_the_first_and_says_so() {
-        // `merge_docs` keeps TOML order; a second `[vol]` table in one layer is a
-        // parse error in TOML itself, so the duplicate arrives through two
-        // layers merged into one doc — model that with the merged doc's own
-        // `value` holding the name once per layer is impossible; instead the
-        // reader sees a duplicate only via the case-insensitive match below.
+        // A TOML layer cannot hold `[vol]` twice and `merge_docs` collapses a
+        // cross-layer duplicate, so the one duplicate that can reach the
+        // reader is a case collision.
         let (d, diags) = from_doc(&doc(
             "config_version = 1\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n\
              [Vol]\n[[Vol.columns]]\nmeasure = \"atfm 1Y\"\n",
