@@ -3727,7 +3727,9 @@ Its browse list is the tabs in document order — the order the digits pick
 tab. `shift+j` and `shift+k` move the selected tab and write the user layer
 in the new order; a move that crosses a shipped tab copies it into the
 user's file first (one notice, `copied N tabs to your config — r restores
-each`; a move among the user's own tabs copies nothing). `n` names a new
+each`; a move among the user's own tabs copies nothing). Only a move
+changes the order: a copy an edit makes lands in the user's file at the
+tab's merged position, and a new tab follows the rest. `n` names a new
 tab, which opens empty; a name another tab holds in any case is refused
 with `'<name>' already exists — open it instead`, and `default` and
 `config_version` are reserved. `d y` deletes a tab, clearing `default`

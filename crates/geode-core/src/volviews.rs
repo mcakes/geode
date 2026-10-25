@@ -1270,7 +1270,7 @@ pub(crate) fn tests_builtin_text() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LayerDoc, merge_docs};
+    use crate::config::{Layer, LayerDoc, merge_docs};
 
     fn doc(text: &str) -> MergedDoc {
         merge_docs(
@@ -1854,6 +1854,56 @@ mod tests {
         assert!(at("[[c.columns]]") < at("[a]"), "{out}");
         assert!(at("[[a.columns]]") < at("[b]"), "{out}");
         assert!(at("[b]") < at("[[b.columns]]"), "{out}");
+    }
+
+    /// A user file that forks `surface` and then `vol` holds them in that
+    /// order, which the merge reads as the tab order; put in the merged
+    /// order after each write, the file leaves the tabs where they were.
+    #[test]
+    fn a_user_file_in_merged_order_leaves_the_merged_tabs_in_place() {
+        let shipped: Vec<String> = ["vol", "skew", "varswap", "surface"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let builtin: toml::Table = "config_version = 1\n[vol]\n[skew]\n[varswap]\n[surface]\n"
+            .parse()
+            .unwrap();
+        let mut user: toml_edit::DocumentMut = "config_version = 1\n".parse().unwrap();
+        let merged = |user: &toml_edit::DocumentMut| {
+            let docs = [
+                LayerDoc {
+                    layer: Layer::Builtin,
+                    name: "vol_views".into(),
+                    file: "builtin".into(),
+                    table: builtin.clone(),
+                },
+                LayerDoc {
+                    layer: Layer::User,
+                    name: "vol_views".into(),
+                    file: "user".into(),
+                    table: user.to_string().parse().unwrap(),
+                },
+            ];
+            merge_docs("vol_views", &docs)
+                .value
+                .keys()
+                .filter(|k| *k != "config_version")
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        user["surface"] = toml_edit::table();
+        reorder(&mut user, &shipped);
+        assert_eq!(merged(&user), shipped);
+        user["vol"] = toml_edit::table();
+        assert_eq!(
+            merged(&user),
+            ["surface", "skew", "varswap", "vol"],
+            "appended as written, the second fork takes the first's slot"
+        );
+        reorder(&mut user, &shipped);
+        assert_eq!(merged(&user), shipped);
+        let keys: Vec<&str> = user.as_table().iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["config_version", "vol", "surface"]);
     }
 
     #[test]

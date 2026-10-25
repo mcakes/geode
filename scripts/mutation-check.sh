@@ -9570,24 +9570,15 @@ run_mutation "objectdialog: a new view starts on the first real dataset" \
   a_new_view_draft_picks_the_first_real_dataset_and_no_columns_of_its_own
 
 # Create flushes at zero debounce like a removal, not 250 ms like an edit.
-# The anchor is longer than just the `queue_batch` tail: `commit_removal`
-# ends in the exact same three lines (`queue_batch(..Duration::ZERO..);
-# None }`), so only including `commit_create`'s own `mark_saved()` guard
-# above it keeps the anchor at one match rather than two.
+# The anchor is longer than just the `queue_batch` call: `commit_reorder`
+# queues with the same arguments, so the Vol views order line that follows
+# only in `commit_create` keeps the anchor at one match rather than two.
 run_mutation "objectdialog: create does not wait for the edit debounce" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
-  '    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
-        draft.mark_saved();
-    }
-    queue_batch(shell, edits, user_dir, Duration::ZERO, Some(domain), cx);
-    None
-}' \
-  '    if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
-        draft.mark_saved();
-    }
-    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, Some(domain), cx);
-    None
-}' \
+  '    queue_batch(shell, edits, user_dir, Duration::ZERO, Some(domain), cx);
+    if let Some(order) = order {' \
+  '    queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, Some(domain), cx);
+    if let Some(order) = order {' \
   geode-shell \
   commit_create_writes_one_doc_entry_immediately
 
@@ -42905,6 +42896,16 @@ run_mutation "volviews: the revert keeps the startup set" \
   '    let _ = (&rebuilt, config);' \
   geode-shell \
   the_restart_warning_survives_a_failed_writes_revert
+
+# A fork lands at its merged position: without the order rewrite the user
+# file holds the copies in the order they were made, which the merge reads
+# as the tab order, and an edit moves a tab.
+run_mutation "volviews: a fork keeps the merged order" \
+  crates/geode-shell/src/shell/objectdialog/apply.rs \
+  '        writes_vol_views_table(domain, &edits).then(|| current_order(shell, Domain::VolViews));' \
+  '        false.then(|| current_order(shell, Domain::VolViews));' \
+  geode-shell \
+  an_edit_on_a_later_tab_does_not_reorder_the_tabs
 
 # A slider places a rank and nothing else: under z or moves the chip
 # stands in, and the readout says why.

@@ -57,8 +57,8 @@ pub(crate) const REJECTED_STATUS: &str = "saved to disk · rejected by the merge
 pub type ObjectEdit = Option<toml::Value>;
 
 /// A whole-document rewrite that runs on the writer after a batch's keyed
-/// edits have landed, in the same job: the tab reorder, which has to read
-/// the forked tabs the batch just wrote. Given the user directory.
+/// edits have landed, in the same job: the Vol views order rewrite, which
+/// has to read the tabs the batch just wrote. Given the user directory.
 type ThenWrite = Box<dyn FnOnce(&Path) -> Result<(), String> + Send>;
 
 /// The result of rendering one object. Removal inherits the layer below; `Nothing`
@@ -390,7 +390,12 @@ pub(super) fn commit_edit(shell: &mut ShellView, cx: &mut Context<ShellView>) ->
         draft.mark_saved();
     }
 
+    let order =
+        writes_vol_views_table(domain, &edits).then(|| current_order(shell, Domain::VolViews));
     queue_batch(shell, edits, user_dir, WRITE_DEBOUNCE, domain, cx);
+    if let Some(order) = order {
+        queue_document_order(shell, super::volviews::DOC, order);
+    }
     None
 }
 
@@ -450,8 +455,43 @@ pub(crate) fn commit_create(shell: &mut ShellView, cx: &mut Context<ShellView>) 
     if let Some(draft) = shell.object_dialog.as_mut().and_then(|s| s.draft.as_mut()) {
         draft.mark_saved();
     }
+    let order = writes_vol_views_table(Some(domain), &edits).then(|| current_order(shell, domain));
     queue_batch(shell, edits, user_dir, Duration::ZERO, Some(domain), cx);
+    if let Some(order) = order {
+        queue_document_order(shell, super::volviews::DOC, order);
+    }
     None
+}
+
+/// Whether `edits` put a view table into `vol_views.toml`'s user layer — a
+/// fork or a creation. A keyed write appends a key the file lacks, and
+/// the merge reads the user file's table order as the tab order, so such
+/// a batch also has to put the file in the merged order
+/// ([`queue_document_order`]): a tab forked after another would
+/// otherwise take that tab's place with no move asked. The document's own
+/// keys (`default`) are values, which take part in no order.
+fn writes_vol_views_table(
+    domain: Option<Domain>,
+    edits: &BTreeMap<(&'static str, String), ObjectEdit>,
+) -> bool {
+    domain == Some(Domain::VolViews)
+        && edits.iter().any(|((doc, key), value)| {
+            *doc == super::volviews::DOC
+                && value.is_some()
+                && !Domain::VolViews.document_keys().contains(&key.as_str())
+        })
+}
+
+/// The browse order of `domain`'s objects, pending batch included — the
+/// merged document's order, which for Vol views is the tabs' — before a
+/// new batch joins it. A tab forked a moment ago is already in its place.
+fn current_order(shell: &ShellView, domain: Domain) -> Vec<String> {
+    let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
+    domain
+        .objects(&config)
+        .into_iter()
+        .map(|row| row.name)
+        .collect()
 }
 
 /// Color `hook`'s value with `name` once the pending batch, which creates that color,
@@ -746,20 +786,17 @@ pub(crate) fn refresh_definitions_now(shell: &mut ShellView, cx: &mut Context<Sh
 }
 
 /// Write the browse list's new object order, `order`, for the open dialog's
-/// domain: the user document is rewritten in that order through the domain's
-/// writer, after the batch has copied into the user layer every tab the move
-/// crossed that a lower layer defines — the file can only carry an order
-/// among tabs it holds. Zero delay, on the batch's own writer job, so the
-/// copies are in the file before the reorder reads it. Each copy is recorded
-/// in the sidecar as any fork is, so `r` restores it; the announcement is one
-/// notice for them all. A move among the user's own tabs copies nothing.
+/// domain: the user document is rewritten in that order
+/// ([`queue_document_order`]), after the batch has copied into the user
+/// layer every tab the move crossed that a lower layer defines — the file
+/// can only carry an order among tabs it holds. Zero delay. Each copy is
+/// recorded in the sidecar as any fork is, so `r` restores it; the
+/// announcement is one notice for them all. A move among the user's own
+/// tabs copies nothing.
 ///
 /// The crossed tabs are where `order` and the current order disagree, first
 /// to last inclusive — the moved tab and every tab it passed, whichever way
-/// it went. Memory takes the order as it takes the keyed edits: the promote
-/// folds it into the user document before the re-merge, and the browse rows
-/// re-derive from what was applied; the watcher's later read of the file
-/// finds the same documents.
+/// it went.
 pub(super) fn commit_reorder(
     shell: &mut ShellView,
     order: Vec<String>,
@@ -776,11 +813,7 @@ pub(super) fn commit_reorder(
     let doc = domain.doc();
     // Pending-aware: a tab forked a moment ago is already the user's.
     let config = config_with_pending(shell).unwrap_or_else(|| shell.services.config.clone());
-    let before: Vec<String> = domain
-        .objects(&config)
-        .into_iter()
-        .map(|row| row.name)
-        .collect();
+    let before = current_order(shell, domain);
     let differs = |(a, b): (&String, &String)| a != b;
     let crossed: &[String] = match (
         order.iter().zip(&before).position(differs),
@@ -807,36 +840,42 @@ pub(super) fn commit_reorder(
             many.len()
         )),
     };
-    let memory_order = order.clone();
-    queue_batch_then(
-        shell,
-        edits,
-        user_dir,
-        Duration::ZERO,
-        Some(domain),
-        cx,
-        move |dir| {
-            config_write::try_edit(dir, Layer::User, doc, |document| {
-                geode_core::volviews::reorder(document, &order);
-                Ok(())
-            })
-        },
-    );
-    if let Some(pending) = shell.pending_config_write.as_mut() {
-        // A second move before the flush supersedes the first: one order per
-        // document, the latest, as the file ends up holding.
-        pending.order.retain(|(d, _)| *d != doc);
-        pending.order.push((doc, memory_order));
-    }
+    queue_batch(shell, edits, user_dir, Duration::ZERO, Some(domain), cx);
+    queue_document_order(shell, doc, order);
     notice
+}
+
+/// Put `doc`'s user document in `order` on the batch just queued: the
+/// file through `geode_core::volviews::reorder` under `config_write::try_edit`
+/// on the batch's own writer job, after its keyed edits have landed (the
+/// rewrite reads the tables they put there); memory through
+/// [`PendingConfigWrite::order`], which the promote folds in the same way.
+/// One spelling for the browse list's move and for the fork or creation
+/// that has to hold the merged order. A later entry before the flush
+/// supersedes the earlier: one order per document, the latest, as the
+/// file ends up holding. With no batch pending there is nothing to order.
+fn queue_document_order(shell: &mut ShellView, doc: &'static str, order: Vec<String>) {
+    let Some(pending) = shell.pending_config_write.as_mut() else {
+        return;
+    };
+    let file_order = order.clone();
+    pending.then_write.push(Box::new(move |dir: &Path| {
+        config_write::try_edit(dir, Layer::User, doc, |document| {
+            geode_core::volviews::reorder(document, &file_order);
+            Ok(())
+        })
+    }));
+    pending.order.retain(|(d, _)| *d != doc);
+    pending.order.push((doc, order));
 }
 
 /// The in-memory half of a reorder: `doc`'s user-layer table with the
 /// tables named in `order` in that order, after its top-level values
-/// (`config_version`, `default`) and before any table `order` does not name —
-/// the rule `geode_core::volviews::reorder` applies to the file, over the
-/// `toml::Table` memory holds. A document the user layer lacks is left
-/// alone: there is nothing of the user's to order.
+/// (`config_version`, `default`) and before any table `order` does not name.
+/// The same rule as `geode_core::volviews::reorder`, which applies it to
+/// the file's `toml_edit::DocumentMut`; this is it over the `toml::Table`
+/// memory holds, so the promote and the write agree. A document the user
+/// layer lacks is left alone: there is nothing of the user's to order.
 fn docs_reordered(mut docs: Vec<LayerDoc>, doc: &str, order: &[String]) -> Vec<LayerDoc> {
     let Some(user) = docs
         .iter_mut()
@@ -853,24 +892,6 @@ fn docs_reordered(mut docs: Vec<LayerDoc>, doc: &str, order: &[String]) -> Vec<L
         user.table.insert(key, value);
     }
     docs
-}
-
-/// [`queue_batch`], then `then` on the writer once the batch's keyed edits
-/// have landed — the same job, so nothing can come between them. For a
-/// rewrite that has to read what the batch wrote.
-fn queue_batch_then(
-    shell: &mut ShellView,
-    edits: BTreeMap<(&'static str, String), ObjectEdit>,
-    user_dir: PathBuf,
-    delay: Duration,
-    origin: Option<Domain>,
-    cx: &mut Context<ShellView>,
-    then: impl FnOnce(&Path) -> Result<(), String> + Send + 'static,
-) {
-    queue_batch(shell, edits, user_dir, delay, origin, cx);
-    if let Some(pending) = shell.pending_config_write.as_mut() {
-        pending.then_write.push(Box::new(then));
-    }
 }
 
 /// Capture the batch's initial documents and schedule its accumulated edits. Callers

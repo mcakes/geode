@@ -17,9 +17,17 @@ use geode_core::config::Severity;
 const BUILTIN: &str = "config_version = 1\ndefault = \"vol\"\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n[[vol.columns]]\nkind = \"vega\"\n[skew]\ncells = \"single\"\n[[skew.columns]]\nmeasure = \"skew 1Y\"\ncompanion = \"slider\"\n";
 const SSR_DATASET: &str = "[ssr]\nfamily = \"history\"\nkey = [\"underlying_ref\", \"tenor\"]\nhistory = \"800d\"\n[ssr.columns.underlying_ref]\ntype = \"utf8\"\nrole = \"dimension\"\n[ssr.columns.tenor]\ntype = \"utf8\"\nrole = \"dimension\"\n[ssr.columns.ssr]\ntype = \"f64\"\nrole = \"value\"\n";
 
+/// The four shipped tabs by name, one measure column each, `vol` the default.
+const FOUR_TABS: &str = "config_version = 1\ndefault = \"vol\"\n[vol]\n[[vol.columns]]\nmeasure = \"atfm 3M\"\n[skew]\n[[skew.columns]]\nmeasure = \"skew 1Y\"\n[varswap]\n[[varswap.columns]]\nmeasure = \"varswap 3M\"\n[surface]\n[[surface.columns]]\nmeasure = \"atfm 1Y\"\n";
+
 fn services_with_vol_views() -> ShellServices {
+    services_over(BUILTIN)
+}
+
+/// [`services_with_vol_views`] over another builtin `vol_views.toml`.
+fn services_over(vol_views: &str) -> ShellServices {
     let mut services = test_services();
-    let builtin = LayerDoc::builtin("vol_views", BUILTIN).unwrap();
+    let builtin = LayerDoc::builtin("vol_views", vol_views).unwrap();
     let datasets = LayerDoc::builtin("datasets", SSR_DATASET).unwrap();
     (services.config, services.builtin) = ShellServices::config_and_builtin(ConfigSources {
         builtin: vec![builtin, datasets],
@@ -424,6 +432,72 @@ fn shift_k_on_the_first_tab_is_refused_and_writes_nothing(cx: &mut gpui::TestApp
     );
     flush_config_write(&mut cx);
     assert!(!dir.path().join("vol_views.toml").exists());
+}
+
+/// The four shipped tabs. A glyph edit forks `surface`, then another forks
+/// `vol`: the user file holds both copies and the merged order — the
+/// browse rows, the tile's digits — stays `vol skew varswap surface`. A
+/// keyed write appends the key the file lacks, so without the batch's order
+/// rewrite the second copy would follow the first and the merge, which
+/// takes the user layer's order for the tabs it holds, would read
+/// `surface skew varswap vol` with no move asked.
+#[gpui::test]
+fn an_edit_on_a_later_tab_does_not_reorder_the_tabs(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_over(FOUR_TABS),
+        dir.path(),
+        "config::vol_views",
+    );
+    let names = |shell: &Entity<ShellView>, cx: &gpui::VisualTestContext| {
+        dialog_state(shell, cx, |s| {
+            s.rows
+                .rows()
+                .iter()
+                .map(|r| r.name.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(names(&shell, &cx), ["vol", "skew", "varswap", "surface"]);
+    // surface: its first column's stage, Companion (family, tenor, level,
+    // companion) stepped to chip, then back to the browse list.
+    cx.simulate_keystrokes("shift-g enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j j space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    assert_eq!(names(&shell, &cx), ["vol", "skew", "varswap", "surface"]);
+    // vol, the same edit.
+    cx.simulate_keystrokes("k k k enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("j j j space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+    flush_config_write(&mut cx);
+    assert_eq!(
+        names(&shell, &cx),
+        ["vol", "skew", "varswap", "surface"],
+        "a fork lands at its merged position; only a move changes the order"
+    );
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle}: {text}"))
+    };
+    assert!(at("[vol]") < at("[surface]"), "{text}");
+    assert_eq!(text.matches("companion = \"chip\"").count(), 2, "{text}");
+    assert!(
+        !text.contains("[skew]") && !text.contains("[varswap]"),
+        "the tabs between were not crossed and are not copied: {text}"
+    );
 }
 
 /// Turning Default on for `skew` writes the top-level key alone — the

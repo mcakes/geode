@@ -283,15 +283,25 @@ inclusive range where the new and the current order disagree) is forked
 first through the ordinary fork path, sidecar entry included, with one notice
 (`copied N tabs to your config — r restores each`); a move among the user's
 own tabs forks nothing. The forks go through the keyed batch at zero delay
-and `geode_core::volviews::reorder` rewrites the user file under
-`config_write::try_edit` in the same writer job, after the keyed edits have
-landed, so the forks are in the file before the reorder reads it; memory
-takes the same order through the batch (`PendingConfigWrite::order`, one per
-document, the latest), so the browse rows show the new order on the promote
-and the watcher's later read finds equal documents. The merge honours the
-user layer's table order for `vol_views` alone (see
+and `geode_core::volviews::reorder` rewrites the user file in the new order
+after them, in the same batch (`apply::queue_document_order`); memory takes
+the same order through the batch (`PendingConfigWrite::order`, one per
+document, the latest), so the browse rows show the new order when the batch
+is applied and the watcher's later read finds equal documents. The merge
+honours the user layer's table order for `vol_views` alone (see
 [configuration](configuration.md#layers-and-provenance)); without that rule the
 rewritten file would change nothing the tile or the list can see.
+
+The same rewrite follows every batch that puts a tab's table into the user
+file — a fork by a field or column edit, a new tab — in the merged order as
+it stood before the batch. A keyed write appends a key the file lacks, and
+the merge reads the user file's table order as the tab order, so left
+appended a tab forked after another would take that tab's place with no
+move asked; rewritten, a copy lands at its merged position and a new tab
+follows the rest, and only a move changes the order. A rewrite that fails
+fails its batch: memory reverts to the batch's starting documents and the
+failure is shown, while the keyed writes that already landed stay in the
+file, as for any partial write.
 
 The document's `default` key is edited as the tab's `Default` field, a
 `Destination::TopLevel` field: its batch key is the field's key, not the
