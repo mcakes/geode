@@ -1221,6 +1221,9 @@ fn rebuild_after_revert(state: &mut super::ObjectDialogState, config: &Config, m
     let selected = draft.selected;
     let name = draft.name.clone();
     let mut rebuilt = state.domain.draft(config, &name);
+    // `Domain::draft` knows no launch; without this the restart warning a
+    // column carried would drop out of the edit at the revert.
+    state.validate_against_startup(&mut rebuilt, config);
     // The rebuilt draft has object fields, not a column projection. Return to the
     // object stage and select the column by name rather than reusing an index into
     // its seven presentation fields.

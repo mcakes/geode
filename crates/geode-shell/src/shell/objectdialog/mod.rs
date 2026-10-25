@@ -3451,8 +3451,14 @@ impl ObjectDialogState {
     /// build without a dialog, so the one check that compares against
     /// launch (`volviews::validate_with`) can only run once the draft is
     /// this dialog's; for every other domain the second pass repeats the
-    /// first over the same config.
-    fn validate_against_startup(&self, draft: &mut Draft, config: &Config) {
+    /// first over the same config. Every door that builds a draft for this
+    /// dialog passes through here — stage entry and `apply`'s rebuild after
+    /// a failed write's revert — or the warning would vanish mid-edit.
+    pub(in crate::shell::objectdialog) fn validate_against_startup(
+        &self,
+        draft: &mut Draft,
+        config: &Config,
+    ) {
         draft.startup_datasets = Some(self.startup_datasets.clone());
         draft.diagnostics = self.domain.validate(draft, config);
     }

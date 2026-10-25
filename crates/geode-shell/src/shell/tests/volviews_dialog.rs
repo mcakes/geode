@@ -670,3 +670,61 @@ fn a_dataset_added_since_launch_warns_that_it_needs_a_restart(cx: &mut gpui::Tes
         "{diags:?}"
     );
 }
+
+/// A failed write's revert rebuilds the draft from the reverted config; a
+/// restart warning a saved column carries survives the rebuild.
+#[gpui::test]
+fn the_restart_warning_survives_a_failed_writes_revert(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    add_user_dataset(&shell, &mut cx, "spotvol_cov", TWO_KEY_DATASET);
+    cx.simulate_keystrokes("enter"); // vol
+    cx.run_until_parked();
+    cx.simulate_keystrokes("shift-g k space"); // SPOTVOL_COV
+    cx.run_until_parked();
+    flush_config_write(&mut cx); // saved: the column is in the live config
+    let text = std::fs::read_to_string(dir.path().join("vol_views.toml")).unwrap();
+    assert!(text.contains("measure = \"spotvol_cov 1W\""), "{text}");
+    // Unparseable and never loaded by this shell, so only the next write
+    // can discover it (`config_write::edit` refuses the file untouched).
+    std::fs::write(dir.path().join("vol_views.toml"), "[vol\nmeasure =").unwrap();
+    cx.simulate_keystrokes("shift-g space"); // SSR
+    cx.run_until_parked();
+    flush_config_write(&mut cx); // fails; the revert rebuilds the draft
+    let notice = dialog_state(&shell, &cx, |s| s.notice.clone());
+    assert!(
+        notice.as_deref().is_some_and(|n| n.contains("reverted")),
+        "{notice:?}"
+    );
+    let (items, diags) = edit_draft(&shell, &cx, |d| {
+        (
+            d.list_items("columns")
+                .unwrap()
+                .iter()
+                .map(|i| i.name.clone())
+                .collect::<Vec<_>>(),
+            d.diagnostics
+                .iter()
+                .map(|d| (d.severity, d.message.clone(), d.path.clone()))
+                .collect::<Vec<_>>(),
+        )
+    });
+    assert_eq!(
+        items,
+        ["ATFM 3M", "Book vega", "SPOTVOL_COV 1W"],
+        "the refused SSR column is gone, the saved one stays"
+    );
+    assert!(
+        diags.contains(&(
+            Severity::Warning,
+            "spotvol_cov needs a restart to paint".to_string(),
+            Some("vol_views.vol.columns.2".to_string()),
+        )),
+        "the rebuilt draft must carry the warning: {diags:?}"
+    );
+}
