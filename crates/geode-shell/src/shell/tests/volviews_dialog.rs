@@ -185,3 +185,31 @@ fn a_new_tab_opens_empty_and_writes_an_empty_column_list(cx: &mut gpui::TestAppC
         "{text}"
     );
 }
+
+/// A name differing only in case from an existing tab is the reader's
+/// duplicate (`from_doc` skips the second), so the naming prompt refuses it
+/// and nothing reaches the user file.
+#[gpui::test]
+fn naming_a_tab_in_another_case_of_an_existing_one_is_refused(cx: &mut gpui::TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (shell, mut cx) = dialog_test_shell_in_dir(
+        cx,
+        services_with_vol_views(),
+        dir.path(),
+        "config::vol_views",
+    );
+    cx.simulate_keystrokes("n");
+    cx.simulate_input("Vol");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some("'Vol' already exists — open it instead")
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.stage.clone()),
+        Stage::Naming
+    );
+    flush_config_write(&mut cx);
+    assert!(!dir.path().join("vol_views.toml").exists());
+}

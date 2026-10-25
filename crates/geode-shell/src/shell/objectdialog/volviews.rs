@@ -333,11 +333,13 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
     };
     let (_, d2) = volviews::resolve(&parsed, &shape);
     diags.extend(d2);
+    // By the reader's own rule (`Domain::names_collide`): `Vol` beside `vol`
+    // is a duplicate the reader would skip.
     if let Some(name) = draft.text("name").filter(|n| *n != draft.name)
         && Domain::VolViews
             .objects(config)
             .iter()
-            .any(|r| r.name == name)
+            .any(|r| Domain::VolViews.names_collide(&r.name, name))
     {
         diags.push(Diagnostic {
             severity: Severity::Error,
@@ -672,5 +674,31 @@ mod tests {
         assert!(!Domain::VolViews.is_reserved("vol"));
         assert_eq!(Domain::VolViews.document_keys(), ["default"]);
         assert!(Domain::Views.document_keys().is_empty());
+    }
+
+    /// The reader skips a second `Vol` beside `vol`, so the dialog's gates
+    /// treat the two as one name: creation and the clash check both refuse,
+    /// while Views keeps its exact comparison.
+    #[test]
+    fn a_name_differing_only_in_case_is_taken_and_refused() {
+        let config = config_with(TWO_TABS, SSR_DATASET);
+        assert!(Domain::VolViews.names_collide("Vol", "vol"));
+        assert!(!Domain::Views.names_collide("Vol", "vol"));
+        assert!(Domain::VolViews.name_taken(&config, "Vol"));
+        assert!(Domain::VolViews.name_taken(&config, "SKEW"));
+        assert!(!Domain::VolViews.name_taken(&config, "analytics"));
+
+        let mut draft = Domain::VolViews.draft(&config, "skew");
+        let FieldKind::Text(name) = &mut draft.fields[0].kind else {
+            panic!()
+        };
+        *name = "VOL".into();
+        let diags = Domain::VolViews.validate(&draft, &config);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.severity == Severity::Error && d.message == "a view named VOL exists"),
+            "{diags:?}"
+        );
     }
 }

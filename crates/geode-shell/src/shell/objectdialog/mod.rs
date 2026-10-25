@@ -382,25 +382,43 @@ impl Domain {
             || (self == Domain::Colors && name.starts_with(geode_core::colour::RESERVED_PREFIX))
     }
 
+    /// Whether two object names name the same object, as this domain's
+    /// reader decides it. Vol views compares case-insensitively because
+    /// `geode_core::volviews::from_doc` skips a second `Vol` beside `vol`
+    /// with only a warning — a dialog gate that let it through would write
+    /// a tab the tile never shows. Every other reader keys exactly.
+    pub fn names_collide(self, a: &str, b: &str) -> bool {
+        match self {
+            Domain::VolViews => a.eq_ignore_ascii_case(b),
+            _ => a == b,
+        }
+    }
+
     /// Whether a name is already present in a definition, fixed roster, or user
-    /// presentation overlay. Include orphaned overlays so a new object cannot silently
+    /// presentation overlay — by [`Self::names_collide`], so the gate agrees with
+    /// the reader. Include orphaned overlays so a new object cannot silently
     /// inherit their old personalisation. `config_version` is rejected separately by
     /// `check_object_name`.
     pub fn name_taken(self, config: &Config, name: &str) -> bool {
         if self.is_reserved(name) {
             return true;
         }
-        if self.roster().is_some_and(|roster| roster.contains(&name)) {
+        if self
+            .roster()
+            .is_some_and(|roster| roster.iter().any(|r| self.names_collide(r, name)))
+        {
             return true;
         }
         if config
             .layered_docs(self.doc())
             .iter()
-            .any(|layered| layered.table.contains_key(name))
+            .any(|layered| layered.table.keys().any(|k| self.names_collide(k, name)))
         {
             return true;
         }
-        personalised_names(config, self.presentation_doc()).contains(name)
+        personalised_names(config, self.presentation_doc())
+            .iter()
+            .any(|p| self.names_collide(p, name))
     }
 }
 

@@ -538,11 +538,13 @@ fn create_from_name(shell: &mut ShellView, cx: &mut Context<ShellView>) {
         // different remedies. Only an existing object can be opened from this list.
         let notice = if domain.is_reserved(&name) {
             format!("'{name}' is reserved")
-        } else if shell
-            .object_dialog
-            .as_ref()
-            .is_some_and(|state| state.rows.rows().iter().any(|row| row.name == name))
-        {
+        } else if shell.object_dialog.as_ref().is_some_and(|state| {
+            state
+                .rows
+                .rows()
+                .iter()
+                .any(|row| domain.names_collide(&row.name, &name))
+        }) {
             format!("'{name}' already exists — open it instead")
         } else {
             format!(
