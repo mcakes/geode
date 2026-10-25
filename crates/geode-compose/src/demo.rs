@@ -257,10 +257,11 @@ const TERM_DATASET: &str = "term_sensitivities";
 /// catalogue and the latter requires entered identities. The position
 /// service is `demo_positions`, which rewrites the risk CSVs in place.
 /// `refdb` polls the `underlyings` reference table from `demo_refdb` every
-/// 30 s. `hanweck_surface`, `hanweck_realized`, `hanweck_varswap` and
-/// `hanweck_ssr` answer the `vol_surface`, `realized_vol`, `varswap` and
-/// `ssr` history datasets from `demo_hanweck`'s `surface`, `realized`,
-/// `varswap` and `ssr` tables.
+/// 30 s. `hanweck_surface`, `hanweck_realized`, `hanweck_varswap`,
+/// `hanweck_ssr` and `hanweck_spotvol_cov` answer the `vol_surface`,
+/// `realized_vol`, `varswap`, `ssr` and `spotvol_cov` history datasets
+/// from `demo_hanweck`'s `surface`, `realized`, `varswap`, `ssr` and
+/// `spotvol_cov` tables.
 /// Each scenario dataset has a `demo_scenario_<dataset>` directory
 /// source over `scenario/` beside `source_dir`, polled every five seconds,
 /// except `term_sensitivities`: one report per measure feeds it, each from
@@ -321,7 +322,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [hanweck_varswap]\nadapter = \"demo_hanweck\"\ndataset = \"varswap\"\n\
          table = \"varswap\"\n\
          [hanweck_ssr]\nadapter = \"demo_hanweck\"\ndataset = \"ssr\"\n\
-         table = \"ssr\"\n{}",
+         table = \"ssr\"\n\
+         [hanweck_spotvol_cov]\nadapter = \"demo_hanweck\"\ndataset = \"spotvol_cov\"\n\
+         table = \"spotvol_cov\"\n{}",
         source_dir.join("*.csv").to_string_lossy(),
         scenario_sources
     );
@@ -556,10 +559,10 @@ mod tests {
         );
         assert_eq!(
             sources.len(),
-            20,
+            21,
             "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
-             hanweck_realized, hanweck_varswap, hanweck_ssr + four scenario datasets' \
-             sources + five term reports' sources"
+             hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
+             scenario datasets' sources + five term reports' sources"
         );
     }
 
@@ -591,10 +594,10 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            20,
+            21,
             "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
-             hanweck_realized, hanweck_varswap, hanweck_ssr + four scenario datasets' \
-             sources + five term reports' sources"
+             hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
+             scenario datasets' sources + five term reports' sources"
         );
         assert!(sources.iter().any(|s| s.name == "dividend"));
     }
@@ -627,10 +630,10 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            20,
+            21,
             "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
-             hanweck_realized, hanweck_varswap, hanweck_ssr + four scenario datasets' \
-             sources + five term reports' sources"
+             hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
+             scenario datasets' sources + five term reports' sources"
         );
         assert!(sources.iter().any(|s| s.name == "opra_sim"));
     }
@@ -673,10 +676,10 @@ mod tests {
         );
         assert_eq!(
             sources.len(),
-            20,
+            21,
             "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
-             hanweck_realized, hanweck_varswap, hanweck_ssr + four scenario datasets' \
-             sources + five term reports' sources"
+             hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
+             scenario datasets' sources + five term reports' sources"
         );
         let kdb = sources.iter().find(|s| s.name == "demo_kdb").unwrap();
         let rest = sources.iter().find(|s| s.name == "demo_rest").unwrap();
@@ -690,11 +693,11 @@ mod tests {
         );
     }
 
-    /// The four Hanweck sources resolve to the history shape over their
+    /// The five Hanweck sources resolve to the history shape over their
     /// datasets, each reading its own `demo_hanweck` table, and the
     /// adapter answers every table they name.
     #[test]
-    fn the_demo_layer_declares_the_four_history_sources() {
+    fn the_demo_layer_declares_the_five_history_sources() {
         let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
             builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
             ..geode_core::config::ConfigSources::default()
@@ -711,6 +714,7 @@ mod tests {
             ("hanweck_realized", "realized_vol", "realized"),
             ("hanweck_varswap", "varswap", "varswap"),
             ("hanweck_ssr", "ssr", "ssr"),
+            ("hanweck_spotvol_cov", "spotvol_cov", "spotvol_cov"),
         ] {
             let source = sources.iter().find(|s| s.name == name).unwrap();
             assert_eq!(
@@ -836,10 +840,10 @@ mod tests {
         }
         assert_eq!(
             sources.len(),
-            20,
+            21,
             "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
-             hanweck_realized, hanweck_varswap, hanweck_ssr + four scenario datasets' \
-             sources + five term reports' sources"
+             hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
+             scenario datasets' sources + five term reports' sources"
         );
     }
 

@@ -82,10 +82,12 @@ walks a mean-reverting AR(1) from 2024-06-03 with shocks on the 3rd Monday of
 March and the 2nd Monday of October; the term structure rises, the skew is
 steeper on the low-strike side, realized vol for a window `<W>D` tracks the
 1M implied W weekdays ago, the varswap strike sits above ATM, and the
-skew-stickiness ratio (`ssr`) is precomputed per tenor. There is one close
-per weekday at 21:00 UTC. The current business day (the adapter's clock
-on a weekday) also has a point at every five-minute mark from 14:30 up to
-now, before 21:00: that day's close with its vol (not its forward) nudged.
+skew-stickiness ratio (`ssr`) and realized spot/vol covariance
+(`spotvol_cov`, negative and fading toward zero with term) are precomputed
+per tenor. There is one close per weekday at 21:00 UTC. The current business
+day (the adapter's clock on a weekday) also has a point at every five-minute
+mark from 14:30 up to now, before 21:00: that day's close with its vol (not
+its forward) nudged.
 Past days have their close only. `Latest` and `At` answer the last
 observation at or before the instant; `Between` answers every observation in
 `[from, to)`, closes and today's marks, and ignores `step`. So a cached

@@ -1286,7 +1286,7 @@ mod tests {
                 values: 1,
             }),
             "spotvol_cov" => Some(TableShape {
-                key_len: 1,
+                key_len: 2,
                 values: 1,
             }),
             "two_values" => Some(TableShape {
@@ -1361,10 +1361,10 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_measure("spotvol_cov").unwrap(),
+            parse_measure("spotvol_cov 3M").unwrap(),
             MeasureText::Table {
                 dataset: "spotvol_cov".into(),
-                suffix: vec![]
+                suffix: vec!["3M".into()]
             }
         );
         assert_eq!(
@@ -1491,7 +1491,7 @@ mod tests {
     fn resolve_keeps_builtins_resolves_tables_and_picks_the_default() {
         let (d, _) = from_doc(&doc("config_version = 1\ndefault = \"ssr\"\n\
              [vol]\n[[vol.columns]]\nmeasure = \"atfm 1M\"\n\
-             [ssr]\n[[ssr.columns]]\nmeasure = \"ssr 3M\"\n[[ssr.columns]]\nmeasure = \"spotvol_cov\"\n"));
+             [ssr]\n[[ssr.columns]]\nmeasure = \"ssr 3M\"\n[[ssr.columns]]\nmeasure = \"spotvol_cov 3M\"\n"));
         let (v, diags) = resolve(&d, &surface_only);
         assert!(diags.is_empty(), "{diags:?}");
         assert_eq!(v.default, 1);
@@ -1514,7 +1514,7 @@ mod tests {
             VolColumn::Measure {
                 measure: Measure::Table {
                     dataset: "spotvol_cov".into(),
-                    suffix: vec![]
+                    suffix: vec!["3M".into()]
                 },
                 label: None,
                 group: None,

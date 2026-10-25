@@ -1,7 +1,8 @@
 //! Deterministic Hanweck/KDB-style history for the demo: constant-maturity
 //! implied-vol surface points (`surface`), realized vol (`realized`),
-//! variance-swap strikes (`varswap`) and the skew-stickiness ratio (`ssr`)
-//! for the demo underlyings.
+//! variance-swap strikes (`varswap`), the skew-stickiness ratio (`ssr`)
+//! and realized spot/vol covariance (`spotvol_cov`) for the demo
+//! underlyings.
 //!
 //! Every value is a pure function of `(seed, key, day)`, so overlapping
 //! asks agree and the service's coverage subtraction is sound. Each
@@ -149,13 +150,14 @@ fn weekday_index(d: NaiveDate) -> Option<usize> {
     (is_weekday(d) && d >= EPOCH).then(|| weekdays_between(EPOCH, d) as usize)
 }
 
-/// The four tables' key columns, in key order.
+/// The five tables' key columns, in key order.
 fn key_columns(table: &str) -> Option<&'static [&'static str]> {
     match table {
         "surface" => Some(&["underlying_ref", "tenor", "delta"]),
         "realized" => Some(&["underlying_ref", "window"]),
         "varswap" => Some(&["underlying_ref", "tenor"]),
         "ssr" => Some(&["underlying_ref", "tenor"]),
+        "spotvol_cov" => Some(&["underlying_ref", "tenor"]),
         _ => None,
     }
 }
@@ -266,7 +268,17 @@ fn close(seed: u64, table: &str, tuple: &[String], walk: &[f64], index: usize) -
             let a = atm(x, tenor);
             vec![(1.0 + 0.8 * skew(tenor) + 0.02 * (a - 15.0)).clamp(0.5, 3.0)]
         }
-        _ => unreachable!("key_columns knows only the four tables"),
+        "spotvol_cov" => {
+            // Realized spot/vol covariance: negative in calm markets (spot
+            // down, vol up), deeper with the walk's level and the skew,
+            // nearer zero as the tenor lengthens; clamped to a plausible
+            // band in vol points × percent.
+            let tenor = tuple[1].as_str();
+            let a = atm(x, tenor);
+            let fade = 1.0 / (1.0 + years(tenor));
+            vec![(-(0.6 + 0.5 * skew(tenor) + 0.03 * (a - 15.0)) * fade).clamp(-3.0, 0.5)]
+        }
+        _ => unreachable!("key_columns knows only the five tables"),
     }
 }
 
@@ -595,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn the_surface_ladders_1w_to_5y_at_seven_deltas_and_ssr_is_a_fourth_table() {
+    fn the_surface_ladders_1w_to_5y_at_seven_deltas_and_ssr_and_spotvol_cov_are_tables() {
         assert_eq!(TENORS.first(), Some(&"1W"));
         assert_eq!(TENORS.last(), Some(&"5Y"));
         assert_eq!(DELTAS.len(), 7);
@@ -618,6 +630,17 @@ mod tests {
         let mut h = DemoHanweck::new(42).history().unwrap();
         assert_eq!(h.keys("ssr", "tenor"), Some(strings(&TENORS)));
         assert!(h.keys("ssr", "delta").is_none());
+        let cov = point(42, "spotvol_cov", &["SPX", "3M"], day).unwrap();
+        assert_eq!(cov.len(), 1);
+        assert!((-3.0..=0.5).contains(&cov[0]), "{cov:?}");
+        let long = point(42, "spotvol_cov", &["SPX", "5Y"], day).unwrap()[0];
+        assert!(
+            long.abs() < cov[0].abs(),
+            "nearer zero as the tenor lengthens: {long} vs {cov:?}"
+        );
+        assert!(point(42, "spotvol_cov", &["SPX", "3M", "0.5"], day).is_none());
+        assert_eq!(h.keys("spotvol_cov", "tenor"), Some(strings(&TENORS)));
+        assert!(h.keys("spotvol_cov", "delta").is_none());
     }
 
     #[test]
@@ -876,7 +899,7 @@ mod tests {
             ]))
         );
         assert_eq!(h.keys("realized", "window"), Some(strings(&WINDOWS)));
-        for table in ["surface", "realized", "varswap", "ssr"] {
+        for table in ["surface", "realized", "varswap", "ssr", "spotvol_cov"] {
             assert_eq!(h.keys(table, "underlying_ref"), Some(strings(&UNDERLYINGS)));
         }
         assert_eq!(h.keys("surface", "vol"), None);

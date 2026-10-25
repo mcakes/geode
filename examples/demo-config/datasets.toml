@@ -1041,6 +1041,28 @@ order = "tenor"
 type = "f64"
 role = "value"
 
+# Precomputed realized spot/vol covariance per underlying and tenor, as
+# the feed would publish it: the covariance of daily spot log-returns with
+# daily ATM vol changes over the tenor's window, in vol points × percent.
+# The vol board reads it by name (`spotvol_cov 3M`) through the open
+# measure form; the board never derives it from spot and vol series.
+[spotvol_cov]
+family = "history"
+key = ["underlying_ref", "tenor"]
+history = "800d"
+retention = "7d"
+[spotvol_cov.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[spotvol_cov.columns.tenor]
+type = "utf8"
+role = "dimension"
+order = "tenor"
+[spotvol_cov.columns.cov]
+type = "f64"
+role = "value"
+
 # ---- Underlying reference data. ----
 # One row per underlying: system ticker to vendor tickers and static
 # attributes. `geode_compose::demo_refdb` serves it through the generated

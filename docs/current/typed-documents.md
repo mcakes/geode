@@ -429,7 +429,7 @@ number strictly between 0 and 1. The open form names a `history` dataset
 by its schema name and qualifies when the dataset's key is `underlying_ref`
 followed by zero, one or two more columns and it has exactly one value
 column; the words after the name are the remaining key values in key
-order (`spotvol_cov`, `ssr 3M`, `smile_curv 3M 0.25`), whatever the key
+order (`term_slope`, `ssr 3M`, `smile_curv 3M 0.25`), whatever the key
 columns are called. A built-in keyword is never read as a dataset name, so
 a dataset called `skew` is unreachable by the open form and the resolver
 says so.
