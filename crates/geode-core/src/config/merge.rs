@@ -51,10 +51,25 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
     }
 }
 
+/// Documents whose top-level key order a higher layer may change. Inserting
+/// into the merged table keeps a key where the lowest defining layer put it,
+/// so a user file listing two shipped tables the other way round would leave
+/// the merged order as shipped. Here the slots a layer's keys already hold
+/// are refilled in that layer's order instead: keys the layer does not
+/// define stay where they are, and keys new to the document follow at the
+/// end. Vol views alone, whose tables are the watchlist's tabs, picked by
+/// digit in document order, and whose dialog reorders them by writing the
+/// user layer in the new order. Every other document keeps each key where
+/// the lowest defining layer put it.
+fn order_follows_layers(doc_name: &str) -> bool {
+    doc_name == "vol_views"
+}
+
 /// Merge layer docs in slice order (callers pass Builtin → Desk → User).
 pub fn merge_docs(name: &str, layered: &[LayerDoc]) -> MergedDoc {
     let mut out = MergedDoc::default();
     let atomic = atomic_depth(name);
+    let reorders = order_follows_layers(name);
     for doc in layered {
         merge_table(
             &mut out.value,
@@ -65,8 +80,33 @@ pub fn merge_docs(name: &str, layered: &[LayerDoc]) -> MergedDoc {
             0,
             atomic,
         );
+        if reorders {
+            refill_slots(&mut out.value, &doc.table);
+        }
     }
     out
+}
+
+/// Put `src`'s keys, in `src`'s order, into the positions of `dst` they
+/// already occupy (every one of them does: `src` was just merged in). The
+/// other keys keep their positions.
+fn refill_slots(dst: &mut Table, src: &Table) {
+    let mut keys: Vec<String> = dst.keys().cloned().collect();
+    let slots: Vec<usize> = keys
+        .iter()
+        .enumerate()
+        .filter(|(_, key)| src.contains_key(*key))
+        .map(|(i, _)| i)
+        .collect();
+    for (slot, key) in slots.into_iter().zip(src.keys()) {
+        keys[slot] = key.clone();
+    }
+    let mut old = std::mem::take(dst);
+    for key in keys {
+        if let Some(value) = old.remove(&key) {
+            dst.insert(key, value);
+        }
+    }
 }
 
 fn merge_table(
@@ -126,6 +166,42 @@ mod tests {
             file: format!("{}/{name}.toml", layer.name()).into(),
             table: text.parse().unwrap(),
         }
+    }
+
+    /// A user `vol_views.toml` that lists two shipped tabs the other way
+    /// round swaps them in the merged document; a tab it does not list
+    /// stays put and a new one follows. The same two files as `views`
+    /// merge in the shipped order, as every other document does.
+    #[test]
+    fn vol_views_takes_a_higher_layers_order_for_the_keys_it_defines() {
+        let keys = |merged: &MergedDoc| merged.value.keys().cloned().collect::<Vec<_>>();
+        let merged = merge_docs(
+            "vol_views",
+            &[
+                doc(
+                    Layer::Builtin,
+                    "vol_views",
+                    "config_version = 1\n[vol]\n[skew]\n[wing]\n",
+                ),
+                doc(
+                    Layer::User,
+                    "vol_views",
+                    "config_version = 1\n[wing]\n[vol]\n[mine]\n",
+                ),
+            ],
+        );
+        assert_eq!(
+            keys(&merged),
+            ["config_version", "wing", "skew", "vol", "mine"]
+        );
+        let merged = merge_docs(
+            "views",
+            &[
+                doc(Layer::Builtin, "views", "[a]\n[b]\n"),
+                doc(Layer::User, "views", "[b]\n[a]\n"),
+            ],
+        );
+        assert_eq!(keys(&merged), ["a", "b"]);
     }
 
     #[test]

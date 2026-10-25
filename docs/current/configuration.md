@@ -32,6 +32,14 @@ Top-level entries in `views`, `view_presentation`, `dataset_presentation`,
 Overriding one source therefore requires its complete configuration, including
 required fields; omitted fields do not inherit from the lower-layer source.
 
+In `vol_views` alone, a higher layer also sets the order of the top-level keys
+it defines: the positions those keys already hold are refilled in that layer's
+order, keys the layer does not define stay where they are, and new keys follow
+at the end. The tabs are picked by digit in document order, and the Vol views
+dialog reorders them by writing the user layer in the new order, which needs
+the merged order to follow it. Every other document keeps each key where the
+lowest defining layer put it.
+
 `value_colors` replaces whole at depth 2. A dimension's values merge per value,
 so a user entry for one value keeps the lower layers' other values. One value's
 entry (a name, `"none"`, or an inline table) is replaced whole, so a user
