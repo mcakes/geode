@@ -87,18 +87,24 @@ pub fn merge_docs(name: &str, layered: &[LayerDoc]) -> MergedDoc {
     out
 }
 
-/// Put `src`'s keys, in `src`'s order, into the positions of `dst` they
-/// already occupy (every one of them does: `src` was just merged in). The
-/// other keys keep their positions.
+/// Put `src`'s table-valued keys, in `src`'s order, into the positions of
+/// `dst` they already occupy (every one of them does: `src` was just merged
+/// in). The other keys keep their positions — the top-level values among
+/// them (`config_version`, `default`), which are not objects and take part
+/// in no order: a value `src` adds was appended by the merge and stays
+/// there, rather than taking a table's slot and pushing that table to the
+/// end. The same values-apart partition the file writer makes.
 fn refill_slots(dst: &mut Table, src: &Table) {
+    let is_table = |key: &str| src.get(key).is_some_and(Value::is_table);
     let mut keys: Vec<String> = dst.keys().cloned().collect();
     let slots: Vec<usize> = keys
         .iter()
         .enumerate()
-        .filter(|(_, key)| src.contains_key(*key))
+        .filter(|(_, key)| is_table(key))
         .map(|(i, _)| i)
         .collect();
-    for (slot, key) in slots.into_iter().zip(src.keys()) {
+    let tables = src.keys().filter(|key| is_table(key));
+    for (slot, key) in slots.into_iter().zip(tables) {
         keys[slot] = key.clone();
     }
     let mut old = std::mem::take(dst);
@@ -194,6 +200,45 @@ mod tests {
             keys(&merged),
             ["config_version", "wing", "skew", "vol", "mine"]
         );
+        // A value the lower layer lacks (`default`) is no slot: it stays where
+        // the merge appended it, and only the tables trade places.
+        let merged = merge_docs(
+            "vol_views",
+            &[
+                doc(
+                    Layer::Builtin,
+                    "vol_views",
+                    "config_version = 1\n[vol]\n[skew]\n[wing]\n",
+                ),
+                doc(
+                    Layer::User,
+                    "vol_views",
+                    "config_version = 1\ndefault = \"skew\"\n[skew]\n[vol]\n",
+                ),
+            ],
+        );
+        assert_eq!(
+            keys(&merged),
+            ["config_version", "skew", "vol", "wing", "default"]
+        );
+        // Each higher layer in turn reorders the tables it defines.
+        let merged = merge_docs(
+            "vol_views",
+            &[
+                doc(
+                    Layer::Builtin,
+                    "vol_views",
+                    "config_version = 1\n[a]\n[b]\n[c]\n",
+                ),
+                doc(
+                    Layer::Desk,
+                    "vol_views",
+                    "config_version = 1\n[c]\n[a]\n[d]\n",
+                ),
+                doc(Layer::User, "vol_views", "config_version = 1\n[d]\n[b]\n"),
+            ],
+        );
+        assert_eq!(keys(&merged), ["config_version", "c", "d", "a", "b"]);
         let merged = merge_docs(
             "views",
             &[
