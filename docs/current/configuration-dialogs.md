@@ -1,6 +1,6 @@
 # Configuration dialogs
 
-The object dialogs edit Views, Groupings, Sources, Colors and Vol views (the
+The object dialogs edit Views, Groupings, Sources, Colors and VolMonitor views (the
 VolMonitor's tabs), and inspect Schema. They share a pure draft model and
 a GPUI adapter. See
 [configuration](configuration.md) for layer merging, file writes, and reload
@@ -35,7 +35,7 @@ repay a cache key and its refresh seams (see
 | Browse | Effective objects and provenance, filtered by visible name and summary |
 | Naming | New name; Enter validates and creates, Escape returns without creating |
 | Edit | One object's fields; Escape returns to browsing after clearing mode/query |
-| Column | Seven presentation fields (Views, Schema) or a vol column's own parts (Vol views) projected over the same draft; returns to its object |
+| Column | Seven presentation fields (Views, Schema) or a vol column's own parts (VolMonitor views) projected over the same draft; returns to its object |
 
 Normal mode leaves the input blurred so bare keys act as commands. In Browse,
 Edit, and Column, `/` or a click on the frozen filter row enters Filter
@@ -118,7 +118,7 @@ column the object no longer has stops on the object's Edit stage with a
 notice. Escape then walks the usual ladder: Edit, Browse, close.
 
 Rows carry no destination badge: every field of one stage writes the same
-place (the object's document — a Vol views tab's `Default` writes that
+place (the object's document — a VolMonitor views tab's `Default` writes that
 document's top-level key — or a Column stage's one overlay), so the badge
 would read the same on every row. Rows name a layer instead where one
 applies. A Column stage names the layer a value comes from (`desk`,
@@ -263,16 +263,16 @@ inherited slot therefore leaves the lane on that slot with the lower layer's
 chain; a slot that was empty disappears, and the lane returns to each view's
 own grouping.
 
-## The Vol views dialog
+## The VolMonitor views dialog
 
 `Domain::VolViews` edits `vol_views.toml` beside the five domains above
-(`config::vol_views`, `Edit vol views…`; `e` on a VolMonitor tile). Its objects are
+(`config::vol_views`, `Edit VolMonitor views…`; `e` on a VolMonitor tile). Its objects are
 the watchlist's tabs, which the tile paints and the digits pick in document
 order, so three things differ from the other domains.
 
 The browse list keeps the merged document's order
 (`Domain::keeps_document_order`) rather than sorting by name, and `shift+j`/`shift+k` on it reorder
-(`Domain::reorderable`, Vol views alone): `ObjectDialogState::move_object`
+(`Domain::reorderable`, VolMonitor views alone): `ObjectDialogState::move_object`
 swaps the selected row with its neighbour in derived order — not the filtered
 list's, so a filter hiding the tab in between does not make a two-place move
 look like one — and `apply::commit_reorder` writes the order. The refusals

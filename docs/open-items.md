@@ -850,11 +850,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
-- The `.` menu has no row for the Vol views dialog: the menu is the
+- The `.` menu has no row for the VolMonitor views dialog: the menu is the
   tile's and the dialog is the shell's, so a row needs a tile-to-shell
   hook (as `config_object` is the shell-to-tile one); `e` and the palette
   are the routes.
-- The Vol views browse list reorders by `shift+j`/`shift+k` only; the
+- The VolMonitor views browse list reorders by `shift+j`/`shift+k` only; the
   member rows' grip drag has no tab counterpart yet.
 - A column move in the VolMonitor tile (`shift+h`/`shift+l`, saved per view as
   `column_order`) has no pointer route and no `.` menu row; two columns
@@ -880,7 +880,7 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   not the pending view.
 - The column stage's family options come from two sources (the catalogue
   at stage entry, the fold's own list later); `startup_datasets` is
-  computed on every domain's open, not only Vol views'; validation runs
+  computed on every domain's open, not only VolMonitor views'; validation runs
   twice on edit-stage entry (`Domain::draft` and `validate_against_startup`);
   the dialog's validation parses the draft three times per keystroke.
 - Tenor sets and ladder generators (a tab over every listed tenor in one

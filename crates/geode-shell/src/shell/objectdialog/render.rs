@@ -2658,7 +2658,7 @@ fn run_confirmed(
             }
             match removal_edits(shell, &docs, cx) {
                 Ok(mut keys) => {
-                    // A document key naming the deleted object (Vol views'
+                    // A document key naming the deleted object (VolMonitor views'
                     // `default`) would dangle; it goes with the object.
                     if confirm == Confirm::Delete {
                         keys.extend(document_keys_naming_target(shell, domain, cx));
@@ -4244,7 +4244,7 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
             "members",
         ),
         (Domain::Views, false) => ("AVAILABLE — `space` adds", "available"),
-        // A Vol views column has no hidden state — it is in the view or
+        // A VolMonitor views column has no hidden state — it is in the view or
         // removed — so `space` is not offered on a member row.
         (Domain::VolViews, true) => (
             "COLUMNS — `shift+j` / `shift+k` reorder · `x` removes",

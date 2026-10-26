@@ -196,7 +196,7 @@ impl Domain {
             Domain::Schema => "schema is already open underneath",
             Domain::Sources => "sources is already open underneath",
             Domain::Colors => "colors is already open underneath",
-            Domain::VolViews => "the Vol views dialog is already open",
+            Domain::VolViews => "the VolMonitor views dialog is already open",
         }
     }
 
@@ -208,7 +208,7 @@ impl Domain {
             Domain::Schema => "Schema",
             Domain::Sources => "Sources",
             Domain::Colors => "Colors",
-            Domain::VolViews => "Vol views",
+            Domain::VolViews => "VolMonitor views",
         }
     }
 
@@ -263,9 +263,9 @@ impl Domain {
     /// genuinely domain-specific part of a row, and therefore the only
     /// part an adapter gets to supply. The object's name comes with its
     /// value: a summary that depends on a document-level key naming the
-    /// object (Vol views' `default`) has no other way to know which row it
+    /// object (VolMonitor views' `default`) has no other way to know which row it
     /// is describing.
-    /// Only Sources and Vol views read the config: whether a source is a
+    /// Only Sources and VolMonitor views read the config: whether a source is a
     /// snapshot depends on its dataset's family, and whether a tab is the
     /// default on the merged document's `default`.
     fn summary_fn(self) -> fn(&Config, &str, &toml::Value) -> String {
@@ -341,7 +341,7 @@ impl Domain {
     }
 
     /// Whether the browse list keeps the merged document's order instead of
-    /// sorting by name. Vol views alone: its objects are the watchlist's
+    /// sorting by name. VolMonitor views alone: its objects are the watchlist's
     /// tabs, which the tile paints and the digits pick in that order.
     pub fn keeps_document_order(self) -> bool {
         matches!(self, Domain::VolViews)
@@ -370,7 +370,7 @@ impl Domain {
     }
 
     /// Names reserved by syntax outside the domain's own document. Colors excludes
-    /// `none` and `sign`, which already mean built-in formatting choices. Vol views
+    /// `none` and `sign`, which already mean built-in formatting choices. VolMonitor views
     /// excludes its document's own keys, which a view name would shadow. Other
     /// domains have no additional reserved names.
     pub fn reserved_names(self) -> &'static [&'static str] {
@@ -391,7 +391,7 @@ impl Domain {
     }
 
     /// Whether two object names name the same object, as this domain's
-    /// reader decides it. Vol views compares case-insensitively because
+    /// reader decides it. VolMonitor views compares case-insensitively because
     /// `geode_core::volviews::from_doc` skips a second `Vol` beside `vol`
     /// with only a warning — a dialog gate that let it through would write
     /// a tab the tile never shows. Every other reader keys exactly.
@@ -612,7 +612,7 @@ fn drift_of(entry: Option<&(String, String)>, shadow: Option<&toml::Value>, name
 /// definition, not with the user's edited copy.
 ///
 /// Rows sort by name, or by `(prefix, name)` for Sources so sources cluster by dataset,
-/// or in the merged document's order where the domain keeps it (Vol views' tabs).
+/// or in the merged document's order where the domain keeps it (VolMonitor views' tabs).
 /// Presentation-only names affect override status but do not create browse rows without
 /// a definition.
 ///
@@ -673,7 +673,7 @@ fn derive_rows(
             if name == "config_version" {
                 continue;
             }
-            // A document-level key (Vol views' `default`) is not an object:
+            // A document-level key (VolMonitor views' `default`) is not an object:
             // listing it would offer a row nothing can open or edit.
             if document_keys.contains(&name.as_str()) {
                 continue;
@@ -800,11 +800,11 @@ impl Destination {
             (Destination::Presentation, Domain::Colors) => {
                 unreachable!("Colors has no Presentation-destined fields")
             }
-            // Vol views joins the same list: `volviews.rs`'s module doc has
+            // VolMonitor views joins the same list: `volviews.rs`'s module doc has
             // the reasoning (every field is `Destination::Doc`; a column's
             // label, group and glyphs live in the view's own table).
             (Destination::Presentation, Domain::VolViews) => {
-                unreachable!("Vol views has no Presentation-destined fields")
+                unreachable!("VolMonitor views has no Presentation-destined fields")
             }
             (Destination::DatasetPresentation, Domain::Schema) => {
                 geode_core::view::DATASET_PRESENTATION_DOC
@@ -919,7 +919,7 @@ impl Provenance {
 
 /// Which door opened the column stage: the Views dialog's member row (the fields write
 /// the view overlay over a desk + dataset baseline), the Schema dialog's column row
-/// (the fields write the dataset overlay over the kind default), or the Vol views
+/// (the fields write the dataset overlay over the kind default), or the VolMonitor views
 /// dialog's member row (the fields rebuild the column's own table on its list item,
 /// which the view's `to_table` renders — no overlay, and nothing inherits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1393,7 +1393,7 @@ impl Draft {
         }
     }
 
-    /// Column stage opened by Enter on the given row: a Views or Vol views member names
+    /// Column stage opened by Enter on the given row: a Views or VolMonitor views member names
     /// its column, and a Schema `columns.<name>` field names that column. An
     /// already-open column projection has no nested column target.
     ///
@@ -2431,7 +2431,7 @@ impl Draft {
                 let Some(included) = items.get(item).map(|entry| entry.included) else {
                     return Step::Inert;
                 };
-                // An item carrying its own table (a Vol views column) is
+                // An item carrying its own table (a VolMonitor views column) is
                 // written whole whenever it is in the list: it has no
                 // hidden state for a tick to flip, so the flip would paint
                 // a `·` the file never reads. `x` is the one way out.
@@ -3055,7 +3055,7 @@ impl Domain {
 
     /// A step of the selected row that the adapter refuses before the draft
     /// takes it, with the reason — a refusal the draft alone cannot judge
-    /// because it reads the layered configuration. Vol views alone: turning
+    /// because it reads the layered configuration. VolMonitor views alone: turning
     /// `Default` off on the tab a lower layer's `default` names
     /// (`volviews::step_refusal`). `None` lets the step proceed.
     pub fn step_refusal(self, draft: &Draft, config: &Config) -> Option<String> {
@@ -3302,7 +3302,7 @@ pub struct ObjectDialogState {
     /// The datasets the data engine was built over at launch — the
     /// shell's startup `datasets` layers, not the live config, which a
     /// reload may since have grown. Set by `render::open`; empty from
-    /// `new`. A Vol views column over a dataset the live config declares
+    /// `new`. A VolMonitor views column over a dataset the live config declares
     /// but this set lacks is offered and warned about
     /// (`volviews::validate_with`): the schema is restart-required, so
     /// the column cannot paint until then.

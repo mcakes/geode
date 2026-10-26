@@ -792,7 +792,7 @@ fn renumber(table: &mut toml_edit::Table, next: &mut isize) {
 /// not copied: the reader takes every table for a view.
 ///
 /// The whole-document rendering, which the tests use to prove the writer
-/// round-trips a file; the Vol views dialog writes one view at a time
+/// round-trips a file; the VolMonitor views dialog writes one view at a time
 /// through [`to_table_from`] and reorders the file in place through
 /// [`reorder`], so no running path renders a document whole.
 pub fn to_document(

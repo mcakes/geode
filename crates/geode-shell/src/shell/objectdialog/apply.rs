@@ -57,7 +57,7 @@ pub(crate) const REJECTED_STATUS: &str = "saved to disk · rejected by the merge
 pub type ObjectEdit = Option<toml::Value>;
 
 /// A whole-document rewrite that runs on the writer after a batch's keyed
-/// edits have landed, in the same job: the Vol views order rewrite, which
+/// edits have landed, in the same job: the VolMonitor views order rewrite, which
 /// has to read the tabs the batch just wrote. Given the user directory.
 type ThenWrite = Box<dyn FnOnce(&Path) -> Result<(), String> + Send>;
 
@@ -484,7 +484,7 @@ fn writes_vol_views_table(
 }
 
 /// The browse order of `domain`'s objects, pending batch included — the
-/// merged document's order, which for Vol views is the tabs' — before a
+/// merged document's order, which for VolMonitor views is the tabs' — before a
 /// new batch joins it. A tab forked a moment ago is already in its place.
 fn current_order(shell: &ShellView, domain: Domain, cx: &App) -> Vec<String> {
     let config =

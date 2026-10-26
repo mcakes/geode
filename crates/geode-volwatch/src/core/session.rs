@@ -18,7 +18,7 @@ use super::lens::{Lens, LensState, Metric, Shown, Window};
 // with the default lens, so the version stays.
 const VERSION: i64 = 1;
 
-/// Everything a tile restores. `view` names a tab in the vol views
+/// Everything a tile restores. `view` names a tab in the VolMonitor views
 /// document; whether that name still exists is the tile's to say. `sort`
 /// names a column id.
 #[derive(Debug, Clone, PartialEq, Default)]

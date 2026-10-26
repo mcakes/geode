@@ -20,7 +20,7 @@ measured against). Behaviour and limits are in the features guide's
   wildcard: `VolBoard`, `HistoryKeys` and the vega `Query`),
   `with_dims`/`set_dims`/`dims` (the derived dimensions the grouping
   reads, pushed by the app at startup and on every dimensions reload),
-  `config_object` (the shown tab as `vol_views.<name>`, so the Vol views
+  `config_object` (the shown tab as `vol_views.<name>`, so the VolMonitor views
   dialog opens on it), `ACTIONS` (the lens and chrome verbs and the five
   fold actions: toggle, expand, collapse, expand all, collapse all),
   `RENAMED_ACTIONS` (the retired `volwatch::down` … `bottom`, renames of
@@ -128,7 +128,7 @@ measured against). Behaviour and limits are in the features guide's
     times); `resubmit` asks nothing for an ask with no measure (an empty
     tab), since the service would only refuse it.
   - `chrome.rs`: notices, the empty state (a tab with no columns names the
-    key bound to `config::vol_views`, else `Edit vol views…`), the
+    key bound to `config::vol_views`, else `Edit VolMonitor views…`), the
     switcher and the `.` action menu (the tabs as rows, the shown one
     ticked; every lens verb as a row, the swap disabled with its reason in a pair view; the three fold
     verbs, enabled on a group row or while grouped; inspect disabled on a

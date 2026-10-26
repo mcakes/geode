@@ -1,4 +1,4 @@
-//! The Vol views object dialog through real key dispatch: the tabs listed in
+//! The VolMonitor views object dialog through real key dispatch: the tabs listed in
 //! document order, a catalogue row added with `space` and written to the user
 //! layer as a fork of the builtin tab, a taken name refused at the naming
 //! prompt, and a new tab's first write.

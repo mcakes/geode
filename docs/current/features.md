@@ -3752,14 +3752,14 @@ shows the builtin tabs with a configuration warning, never an empty tile. A
 tab with no columns (a tab the dialog has just made, or one whose every
 column was refused) is a tab all the same: it paints the strip and the
 empty state `<name> has no columns — e adds one` (naming the key bound to
-`config::vol_views`, else the palette entry `Edit vol views…`), asks the
+`config::vol_views`, else the palette entry `Edit VolMonitor views…`), asks the
 service for nothing — a board with no measure would only be refused — and
 shows no grid until a column arrives. A second tab whose name differs from
 an earlier one only in case is skipped by the reader, so the digits never
 hold two tabs `:view` cannot tell apart.
 
-**Tabs and the Vol views dialog.** `e` on a VolMonitor tile opens the Vol views
-dialog on the shown tab (`Edit vol views…` in the palette,
+**Tabs and the VolMonitor views dialog.** `e` on a VolMonitor tile opens the VolMonitor views
+dialog on the shown tab (`Edit VolMonitor views…` in the palette,
 `config::vol_views`, opens it on the first tab when no VolMonitor tile is
 focused): the object dialog over `vol_views.toml`, described in
 [configuration dialogs](configuration-dialogs.md#the-vol-views-dialog).
@@ -4059,7 +4059,7 @@ keeps painting; the next answer restores it.
 (`6M → 1Y → 2Y`), `m` the shown number in a single view, `p` paint, `s`
 sort, `shift+h`/`shift+l` move the cursor's column (counted), `enter`
 the band, `t` the timeseries refusal (below), `y` yank,
-`shift+r` refresh now, `g w` the switcher, `e` the Vol views dialog on the
+`shift+r` refresh now, `g w` the switcher, `e` the VolMonitor views dialog on the
 shown tab, `.` the action menu,
 `space`/`z a` toggle the cursor's group, `z o`/`z c` open and close it,
 `z shift+r`/`z shift+m` every group, `v`/`shift+v` a row selection,
@@ -4156,7 +4156,7 @@ Known limitations:
   restart; the dialog warns and writes it anyway.
 - A tab whose columns are all sparklines asks the board for nothing, as an
   empty tab does, and says nothing about it: the sparklines stay blank.
-- The `.` menu has no row for the Vol views dialog; `e` and the palette
+- The `.` menu has no row for the VolMonitor views dialog; `e` and the palette
   are its routes.
 - A measure over two tables (`a − b` between open-form datasets) is not
   expressible; the open form reads one tuple of one dataset.

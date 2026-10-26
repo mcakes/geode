@@ -1,4 +1,4 @@
-//! The Vol views domain: `vol_views.toml`, the vol watchlist's tabs. A
+//! The VolMonitor views domain: `vol_views.toml`, the vol watchlist's tabs. A
 //! view is a name, `cells` and an ordered list of columns; each column is
 //! one measure chosen by family, tenor, delta or span, with label, group
 //! and two glyphs, held as the column's own TOML table on its list item

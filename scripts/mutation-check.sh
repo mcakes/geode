@@ -9950,7 +9950,7 @@ run_mutation "objectdialog: a new view starts on the first real dataset" \
 
 # Create flushes at zero debounce like a removal, not 250 ms like an edit.
 # The anchor is longer than just the `queue_batch` call: `commit_reorder`
-# queues with the same arguments, so the Vol views order line that follows
+# queues with the same arguments, so the VolMonitor views order line that follows
 # only in `commit_create` keeps the anchor at one match rather than two.
 run_mutation "objectdialog: create does not wait for the edit debounce" \
   crates/geode-shell/src/shell/objectdialog/apply.rs \
@@ -43443,7 +43443,7 @@ run_mutation "volwatch: the menu offers the lens verbs" \
   geode-volwatch \
   the_menu_lists_the_verbs_with_their_chords_and_a_pick_dispatches
 
-# ---- Vol views: the reader rules, the writer, the dialog and the glyphs ----
+# ---- VolMonitor views: the reader rules, the writer, the dialog and the glyphs ----
 #
 # `vol_views.toml` is the one document the shell writes whole: the reader
 # keeps the first of two views that differ only in case and keeps an empty

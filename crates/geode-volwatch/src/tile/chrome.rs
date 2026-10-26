@@ -143,7 +143,7 @@ const NOTHING_TO_SWITCH: &str = "no watchlists to switch to";
 /// The configuration action that edits `vol_views.toml`, and its palette
 /// title, which the empty tab names when no key is bound to it.
 const VOL_VIEWS_ACTION: &str = "config::vol_views";
-const VOL_VIEWS_LABEL: &str = "Edit vol views\u{2026}";
+const VOL_VIEWS_LABEL: &str = "Edit VolMonitor views\u{2026}";
 
 impl VolwatchTile {
     pub(super) fn settle_menu(&mut self, shown: bool, snapshot: &WatchlistSnapshot) {

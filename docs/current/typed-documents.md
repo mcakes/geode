@@ -393,7 +393,7 @@ elsewhere, and restoring a stored snapshot would silently revert that edit.
 `to_toml` writes `include`, then `exclude` and `rules` when nonempty, each
 rule `dataset` then its `scope` or `expression`, and reads back equal.
 
-## Vol views
+## VolMonitor views
 
 [`volviews`](../../crates/geode-core/src/volviews.rs) reads
 `vol_views.toml`, the VolMonitor's tabs: one top-level table per view
@@ -482,7 +482,7 @@ tile shows the builtin tabs` and the builtin document stands in. The
 resolved `VolViews` travels inside `VolwatchSettings` and is pushed whole
 on every reload, so the tile never re-reads the document itself.
 
-The same module holds the pickers' model and the writer the Vol views
+The same module holds the pickers' model and the writer the VolMonitor views
 dialog uses. `Family` is the grammar's forms plus the two non-measure
 columns and an open-form dataset (`Table(name)`), each saying which parts
 it takes (`takes_tenor`, `takes_delta`, `takes_span`, `takes_window`,
@@ -513,7 +513,7 @@ written, a `span` only when it is not 30 days, and a measure as
 not know, and a comment on one, do not survive the rewrite.
 `to_table_from(cells, columns, source)` is the same rendering with the
 columns given as tables, so a caller can put a table the reader refused
-back as it was read beside the ones the writer renders; the Vol views
+back as it was read beside the ones the writer renders; the VolMonitor views
 dialog writes through it. `span_text` writes a span at the coarsest
 unit of the duration grammar that spells it exactly (`7d`, `12h`, `90s`,
 `500ms`, `1y` for 365 days), never a rounded `0d` the reader would

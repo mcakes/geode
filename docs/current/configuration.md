@@ -39,7 +39,7 @@ new tables follow at the end. Only tables trade slots; the top-level values
 (`config_version`, `default`) are not objects and take part in no order, so a
 `default` a user file adds is appended rather than taking a tab's slot and
 pushing that tab to the end. The tabs are picked by digit in document order,
-and the Vol views dialog reorders them by writing the user layer in the new
+and the VolMonitor views dialog reorders them by writing the user layer in the new
 order, which needs the merged order to follow it. Every other document keeps
 each key where the lowest defining layer put it.
 
@@ -1142,7 +1142,7 @@ opening tab (without one the first view opens). Layers replace whole views
 by name, so a user view appends after the builtin four (`vol`, `skew`,
 `varswap`, `surface`) unless it replaces one of them, and a user file that
 lists shipped tabs in another order moves them (the merge rule above). The
-Vol views dialog (`e` on a VolMonitor tile) writes this file's user layer; its
+VolMonitor views dialog (`e` on a VolMonitor tile) writes this file's user layer; its
 writer rewrites each column from its pickers, so a hand edit inside a
 `[[columns]]` table that the reader does not know, or a comment on one,
 does not survive the next save, while a comment on a tab's table and any

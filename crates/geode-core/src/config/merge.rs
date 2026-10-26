@@ -57,7 +57,7 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
 /// the merged order as shipped. Here the slots a layer's keys already hold
 /// are refilled in that layer's order instead: keys the layer does not
 /// define stay where they are, and keys new to the document follow at the
-/// end. Vol views alone, whose tables are the watchlist's tabs, picked by
+/// end. VolMonitor views alone, whose tables are the watchlist's tabs, picked by
 /// digit in document order, and whose dialog reorders them by writing the
 /// user layer in the new order. Every other document keeps each key where
 /// the lowest defining layer put it.

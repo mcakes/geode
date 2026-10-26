@@ -353,7 +353,12 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
     // The palette groups named-object editors under Configuration.
     action(reg, "config::views", "Edit views…", "Configuration");
     // Edit the vol watchlist's tabs: their cells and columns.
-    action(reg, "config::vol_views", "Edit vol views…", "Configuration");
+    action(
+        reg,
+        "config::vol_views",
+        "Edit VolMonitor views…",
+        "Configuration",
+    );
     // Edit the groupings assigned to the nine Control-digit slots.
     action(reg, "config::groupings", "Edit groupings…", "Configuration");
     // Manage saved scopes in the Scope dialog, the cursor on its saved scopes
