@@ -110,7 +110,7 @@ The main configuration documents have distinct owners:
 | `scopes.toml` | Named scopes |
 | `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
 | `watchlists.toml` | Named lists of underlyings: manual names, exclusions, and rules deriving names from a dataset under a saved scope or expression |
-| `vol_views.toml` | The vol watchlist's tabs: named column lists over the board's measures (hot) |
+| `vol_views.toml` | The VolMonitor's tabs: named column lists over the board's measures (hot) |
 | `colors.toml` | Named semantic data colors |
 | `value_colors.toml` | A color per value of a text dimension: a colors.toml name or an inline { hue } / { token } table |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
@@ -841,7 +841,7 @@ Accepted candidates update runtime state according to their inputs:
 | `datasets` or `dimensions` | Rebuild dimension-picker columns |
 | Views, either presentation document, dimensions, colors, value colors, watchlists, scopes, or expressions | Emit `ConfigReloaded` for the app bridge |
 | `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter, panel and scenario factories |
-| `app.volwatch` (`refresh`, `vega`, `stale_after`) or `vol_views` | The vol watchlist's own revision observer re-reads `[volwatch]` and `vol_views.toml`, resolves the tabs against the startup schema and pushes the settings whole to the factory; an unchanged key or document neither pushes nor repeats a warning |
+| `app.volwatch` (`refresh`, `vega`, `stale_after`) or `vol_views` | The VolMonitor's own revision observer re-reads `[volwatch]` and `vol_views.toml`, resolves the tabs against the startup schema and pushes the settings whole to the factory; an unchanged key or document neither pushes nor repeats a warning |
 | Sources, datasets, egress, positions, panels, scenarios, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
@@ -1097,10 +1097,10 @@ default and the only one in every build is `demo`, a smooth stand-in that is
 not a financial model. A name the binary lacks warns at startup and every vol
 slice answers with that reason. Changing `model` marks restart required, as `[pricing] adapter` does.
 
-## Vol watchlist
+## VolMonitor
 
-`[volwatch]` in `app.toml` configures the vol watchlist tile (see
-[Vol watchlist](features.md#vol-watchlist)) and `vol_views.toml` declares
+`[volwatch]` in `app.toml` configures the VolMonitor tile (see
+[VolMonitor](features.md#volmonitor)) and `vol_views.toml` declares
 its tabs. All three `[volwatch]` keys and the tabs are hot: a reload that
 changes any of them pushes the new settings whole to the factory and the
 open tiles; a `stale_after` change re-arms each tile's stale wake-ups; a
@@ -1142,7 +1142,7 @@ opening tab (without one the first view opens). Layers replace whole views
 by name, so a user view appends after the builtin four (`vol`, `skew`,
 `varswap`, `surface`) unless it replaces one of them, and a user file that
 lists shipped tabs in another order moves them (the merge rule above). The
-Vol views dialog (`e` on a vol tile) writes this file's user layer; its
+Vol views dialog (`e` on a VolMonitor tile) writes this file's user layer; its
 writer rewrites each column from its pickers, so a hand edit inside a
 `[[columns]]` table that the reader does not know, or a comment on one,
 does not survive the next save, while a comment on a tab's table and any

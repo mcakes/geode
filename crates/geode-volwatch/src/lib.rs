@@ -1,4 +1,4 @@
-//! The vol watchlist tile: a watchlist's members as rows of a vol board.
+//! The VolMonitor tile: a watchlist's members as rows of a vol board.
 //!
 //! [`core`] owns the pure parts (views, their columns and the board ask);
 //! [`tile`] holds the entity; [`content`] is the shell's door and factory.

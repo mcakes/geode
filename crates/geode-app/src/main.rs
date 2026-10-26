@@ -112,7 +112,7 @@ fn main() {
             geode_classifications::init(cx);
             // The watchlist grid likewise.
             geode_watchlist::init(cx);
-            // The vol watchlist's grid likewise.
+            // The VolMonitor tile's grid likewise.
             geode_volwatch::init(cx);
             // The scenario grid likewise.
             geode_scenario::init(cx);
@@ -393,7 +393,7 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_scenario::core::spec::BUILTIN_SCENARIOS,
         )
         .expect("BUILTIN_SCENARIOS is well-formed TOML"),
-        // The vol watchlist's builtin tabs. `vol_views` replaces per view
+        // The VolMonitor tile's builtin tabs. `vol_views` replaces per view
         // name, so a desk or user document adds tabs beside these or
         // replaces one whole.
         LayerDoc::builtin(
@@ -1148,9 +1148,9 @@ label = "skew"
         bridge.handle.shutdown();
     }
 
-    /// The production roster hosts the vol watchlist, titled `Vol`.
+    /// The production roster hosts the VolMonitor tile, titled `VolMonitor`.
     #[gpui::test]
-    fn the_roster_lists_volwatch_titled_vol(cx: &mut gpui::TestAppContext) {
+    fn the_roster_lists_volwatch_titled_volmonitor(cx: &mut gpui::TestAppContext) {
         use geode_shell::actions::ActionId;
         let dir = tempfile::tempdir().unwrap();
         let (config, _) = ShellServices::config_and_builtin(ConfigSources {
@@ -1171,7 +1171,7 @@ label = "skew"
         add_bridge_modules(&mut roster, &bridge);
         let titled = roster.titled_kinds();
         assert!(
-            titled.contains(&("volwatch", "Vol".to_string())),
+            titled.contains(&("volwatch", "VolMonitor".to_string())),
             "{titled:?}"
         );
         let mut registry = ActionRegistry::default();
@@ -1181,7 +1181,7 @@ label = "skew"
                 .get(&ActionId("tile::add_volwatch".to_string()))
                 .expect("the volwatch kind gets an add-tile row")
                 .title,
-            "Vol: Split"
+            "VolMonitor: Split"
         );
         bridge.handle.shutdown();
     }

@@ -1,4 +1,4 @@
-//! The shell-hosted vol watchlist entity. It shows one list from the
+//! The shell-hosted VolMonitor entity. It shows one list from the
 //! resolved snapshot in `WatchlistGlobal` as rows of a vol board and
 //! answers the shell's door (`crate::content::VolwatchContent`). This
 //! file holds the entity, the snapshot settle and the keys; `data` the
@@ -1555,7 +1555,7 @@ impl VolwatchTile {
                 let a = grouping::applicable(&dims, &self.shared.dims.borrow());
                 if a.kept.is_empty() && !dims.iter().any(|d| d == geode_core::link::UNDERLYING) {
                     return Err(format!(
-                        "nothing in {} applies to a vol tile: it groups by underlying_ref or a classification over it",
+                        "nothing in {} applies to a VolMonitor tile: it groups by underlying_ref or a classification over it",
                         dims.join(" ")
                     ));
                 }

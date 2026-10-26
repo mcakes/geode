@@ -72,9 +72,9 @@ Feature crates such as `geode-blotter`, `geode-marketdata`,
 `geode-watchlist`, `geode-volwatch`, `geode-scenario`, and `geode-pricer`
 implement the shell's module contract and may ask the data service through
 `DataHandle` (the watchlist tile asks nothing: its lists arrive through
-`WatchlistGlobal`; the vol watchlist reads the same global and asks a vol
+`WatchlistGlobal`; the VolMonitor tile reads the same global and asks a vol
 board, a tenor listing and a vega query). They do not depend on sibling
-features: the watchlist and the vol watchlist share their row model through
+features: the watchlist and the VolMonitor tile share their row model through
 `geode-tile::rows`, not through each other.
 `geode-compose` builds the engine configuration: the schema with the app's
 datasets pinned, sources, dimensions, document kinds, the clock and the

@@ -259,7 +259,7 @@ Each tile's own behaviour around the shared result:
 - Diagnostics: a bare `G` in the Log section resumes following the tail; any
   other row motion, a counted `G` included, stops following.
 - Blotter: the column motions move its column cursor.
-- Vol watchlist: the column motions move its column cursor, which never
+- VolMonitor: the column motions move its column cursor, which never
   rests on the pinned Underlying column (`^` lands on the first measure).
 - Timeseries has no grid cursor and never publishes `grid`, so its own `h`/`l`
   pan the view and `g`/`shift+g` jump it to the start and end.
@@ -1223,7 +1223,7 @@ does not rebuild the data model. The timeseries tile hosts the time chart and
 the vol slice viewer the xy element. `spark::Spark` is the grid-cell glyph: a
 sparkline or term glyph with an optional end dot and marked point, on its own
 or a column's shared y-range, with no axes, grid or tooltip; the
-[vol watchlist](#vol-watchlist) paints its spark columns and the band's
+[VolMonitor tile](#volmonitor) paints its spark columns and the band's
 sparklines with it.
 
 The header's `⋯` button, a chip's right-click, and `.` open the action menu.
@@ -1333,7 +1333,7 @@ core that decides the numbers and a painter that draws them from the host's
 preformatted text and a paint struct of theme colors the host builds. The
 change chip paints the signed number in its sign's color on a tint of that
 color, alpha by the move's size over the column's largest finite move, up to a
-ceiling the host sets (the vol watchlist's is a quarter: the number carries
+ceiling the host sets (the VolMonitor's is a quarter: the number carries
 the sign, the tint only says how big). The percentile slider fills a track to
 the rank with quartile ticks; its marker takes the warning color at or beyond
 0.10 and 0.90. The bar from zero
@@ -1345,7 +1345,7 @@ paints the number alone. The chip and the bar take the sign the host displays,
 which follows the rounded value, so a change shown as `0.0` is neither tinted
 nor barred; the host passes the slider's rank at display precision. Slider
 tracks and bar axes start at the cell's leading edge, so they line up down a
-column whatever the width of each number. The [vol watchlist](#vol-watchlist)
+column whatever the width of each number. The [VolMonitor tile](#volmonitor)
 tile paints its companion chips, the tint behind a single view's level and
 the band's heat range with them, and a view's `level = "heat"`,
 `companion = "bar"` and `companion = "slider"` columns with the heat tint
@@ -3704,7 +3704,7 @@ Known limitations:
 See the [crate guide](../../crates/geode-watchlist/README.md) for the
 module map.
 
-## Vol watchlist
+## VolMonitor
 
 `geode-volwatch` shows one watchlist's members as rows of a vol board:
 surface levels, skews, varswap strikes and any precomputed per-underlying
@@ -3716,10 +3716,10 @@ change, rank, window statistic and sparkline is a cell of the
 display (a z from the board's mean and sd, a rank times a hundred, the
 scales the chips are measured against).
 
-**Kinds.** One kind, `volwatch`, titled `Vol` (`Vol: Split` in the palette
+**Kinds.** One kind, `volwatch`, titled `VolMonitor` (`VolMonitor: Split` in the palette
 and the tile picker). It opens from the add-tile picker and never from a
 dimension: a new tile opens the watchlist switcher at once and asks
-nothing until a list is picked. The header reads `Vol · <list>`, the list's
+nothing until a list is picked. The header reads `VolMonitor · <list>`, the list's
 name before its members arrive. The members come from `WatchlistGlobal`
 (see [Watchlists](#watchlists)); a snapshot that leaves the shown list's
 members unchanged asks nothing. A list that fails to resolve keeps its last
@@ -3730,7 +3730,7 @@ lists `EU50X` in `europe_risk`, a name the demo surface does not carry, so
 the tile shows a member `not in surface`.
 
 **Tabs.** Tabs come from `vol_views.toml`
-([configuration](configuration.md#vol-watchlist)): named column lists in
+([configuration](configuration.md#volmonitor)): named column lists in
 document order, on `g 1`–`g 9` (a bare digit is a motion count), `tab`
 and `shift+tab` stepping with wrap, and
 `:view <name>` with completion over the names (an unknown name refuses
@@ -3758,9 +3758,9 @@ shows no grid until a column arrives. A second tab whose name differs from
 an earlier one only in case is skipped by the reader, so the digits never
 hold two tabs `:view` cannot tell apart.
 
-**Tabs and the Vol views dialog.** `e` on a vol tile opens the Vol views
+**Tabs and the Vol views dialog.** `e` on a VolMonitor tile opens the Vol views
 dialog on the shown tab (`Edit vol views…` in the palette,
-`config::vol_views`, opens it on the first tab when no vol tile is
+`config::vol_views`, opens it on the first tab when no VolMonitor tile is
 focused): the object dialog over `vol_views.toml`, described in
 [configuration dialogs](configuration-dialogs.md#the-vol-views-dialog).
 Its browse list is the tabs in document order — the order `g N` picks
@@ -3952,7 +3952,7 @@ skipped and the header's grouping chip says so (`region`, `region ·
 sector`, `region · lhu skipped`, `ungrouped · lhu, position_ref not
 applicable`, `pinned region`, `pinned ungrouped`; muted while nothing
 groups). A `:group` naming nothing applicable refuses and keeps the
-grouping (`nothing in lhu applies to a vol tile: it groups by
+grouping (`nothing in lhu applies to a VolMonitor tile: it groups by
 underlying_ref or a classification over it`); `:group underlying_ref`
 alone pins the flat list; bare `:group` and `:group ,` refuse with `group
 needs dimensions, slot N or none`, a dimension named twice with `group
@@ -4044,7 +4044,7 @@ never requeries. A member the board lacks refuses with `<name> is not in
 the surface`. Before a board lands the band opens on dashes.
 
 **Vega.** With `[volwatch] vega` set (see
-[configuration](configuration.md#vol-watchlist)), book vega is one
+[configuration](configuration.md#volmonitor)), book vega is one
 ordinary grouped query over the named view, scoped to the frame scope
 narrowed to the members, under the tile's key but never with the board.
 Its depth-1 rows join by `underlying_ref` into the `vega k` column
@@ -4078,7 +4078,7 @@ paint tick, and a disabled row's reason in place of its chord. `escape` peels on
 the menu, the band, a selection, a `/` narrowing, then the notices.
 
 **Header and footer.** The header carries the switch control
-(`Vol · <list> ▾`), the member count, the grouping chip (above), the lens
+(`VolMonitor · <list> ▾`), the member count, the grouping chip (above), the lens
 chips (the lookbacks under
 moves, the one in force lit as `Δ 1d`; the windows under rich/cheap, lit
 as `z · 1Y` or `pctl · 6M`; a press sets it), the sort chip, `<n> not in

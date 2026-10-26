@@ -1687,7 +1687,7 @@ once. With no call needed the board is read at once.
 The read runs on the query pool under `board_pool_key(key)`, the
 requester's key with bit 63 flipped, and the answer is addressed to `key`:
 the pool coalesces and cancels per key, and the tile's own view queries
-(the vol watchlist's vega query) under its key must not replace the board
+(the VolMonitor's vega query) under its key must not replace the board
 read.
 `DataHandle::cancel(key)` cancels both. A board and a history request under
 one key supersede each other's pending tickets, but at the pool they run

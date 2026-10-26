@@ -384,8 +384,8 @@ covariance per underlying, asked per key on demand and cached in `history`
 datasets (`vol_surface`, `realized_vol`, `varswap`, `ssr`, `spotvol_cov` in
 the demo).
 The vol board request reads them (see
-[board requests](data-path.md#board-requests)), and the vol watchlist tile
-paints the board (see [Vol watchlist](features.md#vol-watchlist)).
+[board requests](data-path.md#board-requests)), and the VolMonitor tile
+paints the board (see [VolMonitor](features.md#volmonitor)).
 
 **Simulator:** `DemoHanweck` in
 [`demo_hanweck.rs`](../../crates/geode-compose/src/demo_hanweck.rs)

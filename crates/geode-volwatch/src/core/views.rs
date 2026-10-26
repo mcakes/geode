@@ -20,7 +20,7 @@ use geode_core::volviews::{
 use super::lens::{LensState, Shown};
 
 pub const KIND: &str = "volwatch";
-pub const TITLE: &str = "Vol";
+pub const TITLE: &str = "VolMonitor";
 pub const SURFACE: &str = "vol_surface";
 pub const REALIZED: &str = "realized_vol";
 pub const VARSWAP: &str = "varswap";

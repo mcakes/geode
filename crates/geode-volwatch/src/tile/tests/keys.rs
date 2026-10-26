@@ -1375,6 +1375,6 @@ fn e_opens_the_vol_views_dialog_through_the_shells_action(cx: &mut gpui::TestApp
     );
     let object = vcx
         .update(|_, cx| h.content.config_object(cx))
-        .expect("a vol tile names the tab it shows");
+        .expect("a VolMonitor tile names the tab it shows");
     assert_eq!((object.doc, object.name.as_str()), ("vol_views", "vol"));
 }

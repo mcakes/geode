@@ -1,7 +1,7 @@
 # Configuration dialogs
 
 The object dialogs edit Views, Groupings, Sources, Colors and Vol views (the
-vol watchlist's tabs), and inspect Schema. They share a pure draft model and
+VolMonitor's tabs), and inspect Schema. They share a pure draft model and
 a GPUI adapter. See
 [configuration](configuration.md) for layer merging, file writes, and reload
 acceptance; this guide describes what editing adds to those contracts.
@@ -266,7 +266,7 @@ own grouping.
 ## The Vol views dialog
 
 `Domain::VolViews` edits `vol_views.toml` beside the five domains above
-(`config::vol_views`, `Edit vol views…`; `e` on a vol tile). Its objects are
+(`config::vol_views`, `Edit vol views…`; `e` on a VolMonitor tile). Its objects are
 the watchlist's tabs, which the tile paints and the digits pick in document
 order, so three things differ from the other domains.
 

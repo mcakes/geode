@@ -50,7 +50,7 @@ pub const HEAT_CEILING: f32 = 0.40;
 /// head. A head that forgot it loses its leading letters under the mark.
 pub const SORT_MARK_DESIGN_PX: f32 = 0.75 * DESIGN_REM + 4.0;
 /// Design px a row steps right per tree depth: the pricer's tree indent,
-/// so a grouped vol tile and a grouped sheet read alike.
+/// so a grouped VolMonitor tile and a grouped sheet read alike.
 pub const TREE_INDENT_PX: f32 = 14.0;
 /// Design px a group row's chevron takes ahead of its label: one mono
 /// advance and its gap, so a member one level down lines up under its
@@ -1470,7 +1470,7 @@ impl Default for HeaderModel {
     }
 }
 
-/// The header's text and counts. With no list the title reads `Vol · New…`.
+/// The header's text and counts. With no list the title reads `VolMonitor · New…`.
 /// `grouping` is the grouping chip's prepared text, muted while nothing
 /// groups.
 pub fn header(
@@ -2825,7 +2825,7 @@ mod tests {
             "ungrouped",
             true,
         );
-        assert_eq!(h.title, "Vol · europe_risk");
+        assert_eq!(h.title, "VolMonitor · europe_risk");
         assert_eq!(h.not_in_surface, 1);
         assert_eq!(h.failed, ["realized_vol"]);
         assert_eq!(h.chips[1], ("\u{394} 1w".to_string(), true));
@@ -2841,7 +2841,7 @@ mod tests {
                 true
             )
             .title,
-            "Vol · New…"
+            "VolMonitor · New…"
         );
         assert_eq!(
             h.chip_texts()[4..7],

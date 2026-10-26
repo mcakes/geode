@@ -19,7 +19,7 @@ fn the_header_names_the_list_count_lookback_sort_and_the_missing(cx: &mut gpui::
         chip_texts(&h, &vcx),
         [
             "▤",
-            "Vol · europe_risk ▾",
+            "VolMonitor · europe_risk ▾",
             "3",
             "ungrouped",
             "Δ 1d",

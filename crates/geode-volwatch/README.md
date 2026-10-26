@@ -1,17 +1,17 @@
 # geode-volwatch
 
-The vol watchlist tile: one watchlist's members as rows of a vol board,
+The VolMonitor tile: one watchlist's members as rows of a vol board,
 under tabs read from `vol_views.toml` and a lens that picks the companion
 beside every level. Every level, change, rank, window statistic and
 sparkline it paints is a cell of the data tier's board request
 (`DataHandle::vol_board`); the crate's arithmetic is display (a z from
 the board's mean and sd, a rank times a hundred, the scales a chip is
 measured against). Behaviour and limits are in the features guide's
-"Vol watchlist" section.
+"VolMonitor" section.
 
 ## Module map
 
-- `content.rs`: `VolwatchFactory` (kind `volwatch`, title `Vol`, accepts
+- `content.rs`: `VolwatchFactory` (kind `volwatch`, title `VolMonitor`, accepts
   no dimension), `VolwatchSettings` (`refresh` clamped to `MIN_REFRESH`,
   `vega`, the tile's own `stale_after`, a day by default since a surface
   publishes daily, and `views`, the resolved tabs; pushed whole by the app

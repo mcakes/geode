@@ -1,5 +1,5 @@
 //! The tile's chrome, top to bottom: the shared header strip (the mark,
-//! the `Vol · <list> ▾` switch control with the switcher hung beneath it,
+//! the `VolMonitor · <list> ▾` switch control with the switcher hung beneath it,
 //! the member count, the grouping chip (muted while nothing groups), the
 //! lens chips (the lookbacks under moves, the
 //! windows under rich/cheap) with the one in force lit, the sort chip, the
@@ -162,7 +162,7 @@ fn actions_menu(
     }
 }
 
-/// The `Vol · <list> ▾` control: a press toggles the switcher (`g w`'s
+/// The `VolMonitor · <list> ▾` control: a press toggles the switcher (`g w`'s
 /// action), which hangs from the control's bottom-left edge. The press is
 /// taken in the capture phase, ahead of the open switcher's outside-press
 /// closer: in the bubble phase the closing press would find the switcher

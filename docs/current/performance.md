@@ -201,8 +201,8 @@ the measurement log for fixture and hardware details.
 | History exact `At` from coverage (`history/exact_at_250_from_coverage`) | 250 exact tuples: `uncovered_at` (two statements on `VALUES` lists, 15 ms) and the read, no fetch (197 ms before, with a term per tuple in each predicate) | 30 ms |
 | History exact `Between` from coverage (`history/exact_between_30d_250_from_coverage`) | 250 exact tuples, 30 days to now: `missing_by_key` (one statement), the recent-tail fetch and append, the read (579 ms before the batch: its append rewrote coverage one tuple at a time; 61 ms before an empty tail answer skipped its dedupe and insert) | 23 ms |
 | History `Between` plan (`history/plan_between_250`) | the same ask's `plan_calls` alone, `missing_by_key` reading every tuple's coverage in one statement: the service thread's share of the round trip (2%; 1-minute load 16.3 → 11.9) | 5.14 ms |
-| Vol watchlist prepare (`prepare_25x24`) | `core::model::prepare`, 25 members under the builtin `vol` tab (19 columns: Underlying, eight level-and-companion pairs, a spark, vega): every cell's text, chip or tint, id and muted flag, scales and widths; per board, tab, lens or paint change, never per frame (load 5 to 12; 115 µs under the retired 18-column Changes view, the companion now costing three cell lookups where it cost one) | 148 µs |
-| Vol watchlist prepare, grouped (`prepare_25x24_grouped`) | the same 25 members under five `region` groups of five (30 rows, 19 columns): the group rows' means are built by `group_rows` on every row rebuild (each board landing or refresh and each regroup), outside the timing; prepare walks the five extra rows and the tree lead (load 2.5 to 7.7, the flat case reading 94.7 µs in the same run) | 113 µs |
+| VolMonitor prepare (`prepare_25x24`) | `core::model::prepare`, 25 members under the builtin `vol` tab (19 columns: Underlying, eight level-and-companion pairs, a spark, vega): every cell's text, chip or tint, id and muted flag, scales and widths; per board, tab, lens or paint change, never per frame (load 5 to 12; 115 µs under the retired 18-column Changes view, the companion now costing three cell lookups where it cost one) | 148 µs |
+| VolMonitor prepare, grouped (`prepare_25x24_grouped`) | the same 25 members under five `region` groups of five (30 rows, 19 columns): the group rows' means are built by `group_rows` on every row rebuild (each board landing or refresh and each regroup), outside the timing; prepare walks the five extra rows and the tree lead (load 2.5 to 7.7, the flat case reading 94.7 µs in the same run) | 113 µs |
 | History append (`append/between_400d_prefix_answer_deduped`) | one member's 400-day surface answer (about 11,400 rows, all equal to live) into the full table: dedupe, coverage coalescing (four statements whatever the tuple count), retention sweep | 19 ms |
 | History answer validation (`validate/286k_rows_vs_25_prefix`) | `validate_against`, 285,000 rows against a 25-member prefix; in the history worker, not the UI | 59 to 79 ms |
 | Demo Hanweck prefix `Latest` (`demo_hanweck/prefix_latest_10` / `single_latest_x10`) | the demo adapter alone: one call over ten underlyings / ten single-member calls; excludes the store and service | 785 µs / 1.32 ms |
@@ -357,7 +357,7 @@ joined on the unique source value, if the idle figure stays over budget.
   tuples on every read. A latest-version table maintained on append (a
   DDL change) could cut it, and grows in value if a desk's cache grows
   past the bench's 400 days of closes.
-- The vol watchlist prepares every row whole rather than through
+- The VolMonitor tile prepares every row whole rather than through
   `WindowCache`: 25 members prepare in 115 µs, so a list of a few hundred
   stays in the low milliseconds. Past about 256 members the grid should
   prepare only the rows in view. A heat column's range (`heat_range`) is

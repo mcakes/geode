@@ -92,7 +92,7 @@ fn a_view_naming_a_table_dataset_lists_it_in_the_request(cx: &mut gpui::TestAppC
 #[gpui::test]
 fn a_new_tile_with_no_list_opens_the_switcher_and_asks_nothing(cx: &mut gpui::TestAppContext) {
     let (h, vcx) = open_with(cx, one_list(), None, VolwatchSettings::default());
-    assert_eq!(h.title(&vcx), "Vol · New…");
+    assert_eq!(h.title(&vcx), "VolMonitor · New…");
     assert!(h.tile.read_with(&vcx, |t, _| matches!(
         t.menu,
         Some(MenuState {
@@ -357,7 +357,7 @@ fn removing_the_shown_list_opens_the_switcher_and_drops_the_board(cx: &mut gpui:
     );
     // Enter on the switcher shows `us` and asks for it.
     h.press(&mut vcx, "enter");
-    assert_eq!(h.title(&vcx), "Vol · us");
+    assert_eq!(h.title(&vcx), "VolMonitor · us");
     assert_eq!(Harness::boards(&h.requests())[0].members, ["SPX"]);
 }
 
@@ -417,7 +417,7 @@ fn the_title_names_the_list_before_its_members_arrive_and_after_a_switch(
     );
     assert_eq!(
         h.title(&vcx),
-        "Vol · europe_risk",
+        "VolMonitor · europe_risk",
         "a restore names its list before the snapshot"
     );
     let mut snap = one_list();
@@ -426,13 +426,13 @@ fn the_title_names_the_list_before_its_members_arrive_and_after_a_switch(
     snap.lists.insert("bare".into(), empty);
     vcx.update(|_, cx| cx.set_global(WatchlistGlobal(Arc::new(snap))));
     vcx.run_until_parked();
-    assert_eq!(h.title(&vcx), "Vol · europe_risk");
+    assert_eq!(h.title(&vcx), "VolMonitor · europe_risk");
     // The switcher opens on the shown list; `bare` sorts above it and has
     // no live members.
     h.press(&mut vcx, "g w");
     h.press(&mut vcx, "k");
     h.press(&mut vcx, "enter");
-    assert_eq!(h.title(&vcx), "Vol · bare");
+    assert_eq!(h.title(&vcx), "VolMonitor · bare");
     assert!(h.shown(&vcx).is_empty());
 }
 

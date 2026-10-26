@@ -396,7 +396,7 @@ rule `dataset` then its `scope` or `expression`, and reads back equal.
 ## Vol views
 
 [`volviews`](../../crates/geode-core/src/volviews.rs) reads
-`vol_views.toml`, the vol watchlist's tabs: one top-level table per view
+`vol_views.toml`, the VolMonitor's tabs: one top-level table per view
 in document order, each with a `columns` array, and a top-level string
 `default`. `from_doc` parses without the schema and keeps every column
 whose text reads, answering a `VolViewsDoc` of `VolViewSpec`s whose

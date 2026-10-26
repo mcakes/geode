@@ -379,7 +379,7 @@ impl VolwatchTile {
         let none_defined = snapshot.lists.is_empty();
         let switch = tips::chord_for(&self.chords, SWITCH_ACTION)
             .map(|ks| spell(&ks))
-            .unwrap_or_else(|| "Vol: Switch list".to_string());
+            .unwrap_or_else(|| "VolMonitor: Switch list".to_string());
         let no_columns = self
             .shown_view()
             .filter(|v| v.columns.is_empty())
