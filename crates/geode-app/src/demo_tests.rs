@@ -25,6 +25,14 @@ mod demo_config_integration {
         vol_models
     }
 
+    fn test_calibrators() -> geode_data::CalibratorRegistry {
+        let mut calibrators = geode_data::CalibratorRegistry::default();
+        calibrators.register(std::sync::Arc::new(
+            geode_pricing::DemoForwardCalibrator::new(),
+        ));
+        calibrators
+    }
+
     /// Registers the demo bus required by the `sophis` egress target,
     /// the demo position service `positions.toml` names, and the demo
     /// reference database the `refdb` source polls, as `main.rs` does.
@@ -69,6 +77,7 @@ mod demo_config_integration {
                 adapters,
                 test_pricers(),
                 test_vol_models(),
+                test_calibrators(),
             )
             .unwrap();
             let bridge = cx.update(|cx| {
@@ -115,6 +124,7 @@ mod demo_config_integration {
             adapters,
             test_pricers(),
             test_vol_models(),
+            test_calibrators(),
         )
         .unwrap();
         assert!(setup.config.positions.is_some());
@@ -238,6 +248,7 @@ mod demo_config_integration {
             adapters,
             test_pricers(),
             test_vol_models(),
+            test_calibrators(),
         )
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -302,6 +313,7 @@ mod demo_config_integration {
             adapters,
             test_pricers(),
             test_vol_models(),
+            test_calibrators(),
         )
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -412,6 +424,7 @@ mod demo_config_integration {
             adapters,
             test_pricers(),
             test_vol_models(),
+            test_calibrators(),
         )
         .expect("datasets + views are both present in the demo layer");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -476,6 +489,7 @@ mod demo_bus {
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let dividend = setup
@@ -527,6 +541,8 @@ mod demo_bus {
         pricers.register(Arc::new(geode_pricing::MockPricer::new()));
         let mut vol_models = VolModelRegistry::default();
         vol_models.register(Arc::new(geode_pricing::DemoVolModel));
+        let mut calibrators = geode_data::CalibratorRegistry::default();
+        calibrators.register(Arc::new(geode_pricing::DemoForwardCalibrator::new()));
 
         let db_dir = tempfile::tempdir().unwrap();
         let setup = crate::bridge::data_setup(
@@ -535,6 +551,7 @@ mod demo_bus {
             adapters,
             pricers,
             vol_models,
+            calibrators,
         )
         .expect("the demo layer carries both a datasets and a views document");
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -675,6 +692,8 @@ mod demo_bus {
         pricers.register(Arc::new(geode_pricing::MockPricer::new()));
         let mut vol_models = VolModelRegistry::default();
         vol_models.register(Arc::new(geode_pricing::DemoVolModel));
+        let mut calibrators = geode_data::CalibratorRegistry::default();
+        calibrators.register(Arc::new(geode_pricing::DemoForwardCalibrator::new()));
         let db_dir = tempfile::tempdir().unwrap();
         let setup = crate::bridge::data_setup(
             &config,
@@ -682,6 +701,7 @@ mod demo_bus {
             adapters,
             pricers,
             vol_models,
+            calibrators,
         )
         .expect("the demo layer opens");
         let (service, rx) = DataService::open_channel(setup.config).expect("the store opens");
@@ -840,9 +860,17 @@ mod demo_bus {
             pricers.register(Arc::new(geode_pricing::MockPricer::new()));
             let mut vol_models = VolModelRegistry::default();
             vol_models.register(Arc::new(geode_pricing::DemoVolModel));
-            let setup =
-                crate::bridge::data_setup(&config, db.clone(), adapters, pricers, vol_models)
-                    .expect("the demo layer opens");
+            let mut calibrators = geode_data::CalibratorRegistry::default();
+            calibrators.register(Arc::new(geode_pricing::DemoForwardCalibrator::new()));
+            let setup = crate::bridge::data_setup(
+                &config,
+                db.clone(),
+                adapters,
+                pricers,
+                vol_models,
+                calibrators,
+            )
+            .expect("the demo layer opens");
             DataService::open_channel(setup.config).expect("the store opens")
         };
         let timeout = Duration::from_secs(15);

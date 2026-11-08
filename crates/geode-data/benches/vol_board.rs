@@ -366,6 +366,7 @@ fn service(dir: &tempfile::TempDir, now: DateTime<Utc>) -> (DataService, Receive
         clock: geode_core::clock::Clock::utc(),
         pricer: PricerConfig::default(),
         vol: geode_data::VolConfig::default(),
+        calibration: geode_data::CalibratorConfig::default(),
         positions: None,
     })
     .unwrap()

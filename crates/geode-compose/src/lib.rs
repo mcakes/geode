@@ -26,7 +26,7 @@ use geode_core::schema::SchemaSpec;
 use geode_data::adapter::{AdapterRegistry, ChannelAdapter, ChannelFeed};
 use geode_data::documents::DocumentRegistry;
 use geode_data::source::SourceSpec;
-use geode_data::{DataServiceConfig, PricerConfig, VolConfig};
+use geode_data::{CalibratorConfig, DataServiceConfig, PricerConfig, VolConfig};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -159,6 +159,7 @@ pub fn engine_setup(config: &Config, db_path: PathBuf, adapters: AdapterRegistry
             clock: geode_core::clock::Clock::from_config(config).0,
             pricer: PricerConfig::default(),
             vol: VolConfig::default(),
+            calibration: CalibratorConfig::default(),
             egress: Vec::new(),
             positions: None,
         },

@@ -327,6 +327,7 @@ fn service_with(
         clock: geode_core::clock::Clock::utc(),
         pricer: Default::default(),
         vol: Default::default(),
+        calibration: Default::default(),
         positions: None,
     })
     .unwrap();
@@ -359,6 +360,7 @@ fn reopen(
         clock: geode_core::clock::Clock::utc(),
         pricer: Default::default(),
         vol: Default::default(),
+        calibration: Default::default(),
         positions: None,
     })
     .unwrap()
@@ -460,6 +462,7 @@ fn service_with_history(
         clock: geode_core::clock::Clock::utc(),
         pricer: Default::default(),
         vol: Default::default(),
+        calibration: Default::default(),
         positions: None,
     })
     .unwrap();

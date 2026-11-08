@@ -4,6 +4,7 @@
 //! `DataHandle` instead of owning a connection or source transport.
 
 pub mod adapter;
+pub mod calibration;
 pub mod documents;
 pub mod egress;
 pub mod files;
@@ -21,6 +22,7 @@ pub mod store;
 pub mod supervise;
 pub mod vol;
 
+pub use calibration::{CalibratorConfig, CalibratorRegistry};
 pub use egress::{UploadOutcome, UploadParams};
 pub use handle::{DataHandle, REQUEST_BOUND, Refusal, Request, StopMode};
 pub use pricing::{PricerConfig, PricerRegistry};

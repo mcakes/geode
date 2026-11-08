@@ -18131,6 +18131,33 @@ run_mutation "vol handle: a request-loop panic answers every job" \
   '                    results: Vec::new(),' \
   geode-data a_request_loop_panic_on_a_vol_batch_answers_every_job_with_the_reason
 
+run_mutation "calibration worker: a seed is never replaced" \
+  crates/geode-data/src/calibration/worker.rs \
+  '                    let replaces = waiting.back().is_some_and(|b| b.action.replaceable())
+                        && request.action.replaceable();' \
+  '                    let replaces = true;' \
+  geode-data a_seed_is_never_replaced_and_runs_exactly_once
+
+run_mutation "calibration worker: a run never displaces a user action" \
+  crates/geode-data/src/calibration/worker.rs \
+  '        let slot: Slot = (request.key, lane);' \
+  '        let slot: Slot = (request.key, Lane::Background);' \
+  geode-data a_run_never_displaces_a_queued_user_action
+
+run_mutation "calibration service: a full queue answers the refused request" \
+  crates/geode-data/src/service.rs \
+  '        let _ = (self.sink)(DataEvent::Calibration(
+            crate::calibration::worker::request_failed(
+                key,
+                tag,
+                submitted,
+                action,
+                "the calibration queue is full; resubmit".to_string(),
+            ),
+        ));' \
+  '        let _ = (key, tag, submitted, action);' \
+  geode-data a_refused_calibration_is_answered_with_a_terminal_failed_outcome
+
 run_mutation "shell: a vol slices delivery is routed by key" \
   crates/geode-shell/src/module.rs \
   '            Delivery::VolSlices(outcome) => Some(outcome.key),' \

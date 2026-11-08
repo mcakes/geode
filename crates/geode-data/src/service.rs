@@ -3,6 +3,7 @@
 //! `docs/current/data-path.md` for ownership and delivery contracts.
 
 use crate::adapter::{AdapterRegistry, ConnectionState, HealthSink, HistoryRequest};
+use crate::calibration::{CalibrationSink, CalibrationWorker, CalibratorConfig};
 use crate::documents::DocumentRegistry;
 use crate::egress::{EgressWorkers, UploadOutcome, UploadParams};
 use crate::health::{Health, severity_rank};
@@ -36,6 +37,7 @@ use crate::store::catalog::BookFreshness;
 use crate::store::{Catalog, Store, StoreError, StoreOptions, stamp};
 use crate::vol::{VolConfig, VolSink, VolWorker};
 use chrono::{DateTime, Utc};
+use geode_core::calibration::{CalibrationOutcome, CalibrationRequest};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::check_kind_against;
@@ -111,6 +113,8 @@ pub struct DataServiceConfig {
     pub pricer: PricerConfig,
     /// Vol model registered by geode-app.
     pub vol: VolConfig,
+    /// Calibration engine registered by geode-app.
+    pub calibration: CalibratorConfig,
     /// Upload targets, already passed through `egress::resolve`. Each gets
     /// its own worker thread at open; empty means every upload answers
     /// "unknown target".
@@ -153,6 +157,8 @@ pub enum DataEvent {
     Price(PriceOutcome),
     /// Vol slice batch result, addressed by the requesting tile's key.
     VolSlices(VolSliceOutcome),
+    /// Calibration outcome, addressed by the requesting tile's key.
+    Calibration(CalibrationOutcome),
     /// File or document publication. Dataset, batch, and books identify the
     /// partitions whose subscribers need invalidation; the app coalesces bursts.
     Published {
@@ -1268,6 +1274,7 @@ pub struct DataService {
     pool: Arc<QueryPool>,
     pricing: PricingWorker,
     vol: VolWorker,
+    calibration: CalibrationWorker,
     scheduler: Scheduler,
     ingest: Arc<IngestHandle>,
     /// A dedicated read connection for service-side catalog and coverage reads.
@@ -1562,6 +1569,16 @@ impl DataService {
             Arc::new(move |o| sink(DataEvent::VolSlices(o)))
         };
         let vol = VolWorker::spawn(config.vol.clone(), vol_sink, Arc::clone(&sink));
+
+        let calibration_sink: CalibrationSink = {
+            let sink = Arc::clone(&sink);
+            Arc::new(move |o| sink(DataEvent::Calibration(o)))
+        };
+        let calibration = CalibrationWorker::spawn(
+            config.calibration.clone(),
+            calibration_sink,
+            Arc::clone(&sink),
+        );
 
         // Shared by the runner's sink (file notes) and the history workers'
         // sinks (non-finite values dropped), so both dedupe under one cap.
@@ -2458,6 +2475,7 @@ impl DataService {
             pool,
             pricing,
             vol,
+            calibration,
             scheduler,
             ingest,
             conn,
@@ -2802,6 +2820,33 @@ impl DataService {
         }));
     }
 
+    /// Queue a calibration request without waiting. Refusal produces a
+    /// terminal `CalibrationOutcome` whose one `request` stage is `Failed`
+    /// so callers do not wait forever.
+    pub fn calibrate(&self, request: CalibrationRequest) {
+        let key = request.key;
+        let tag = request.tag;
+        let submitted = request.submitted;
+        let action = request.action.clone();
+        if self.calibration.request(request) {
+            return;
+        }
+        tracing::warn!(
+            target: "geode::calibration",
+            "the calibration queue is full; request for key {} tag {tag} was refused",
+            key.0
+        );
+        let _ = (self.sink)(DataEvent::Calibration(
+            crate::calibration::worker::request_failed(
+                key,
+                tag,
+                submitted,
+                action,
+                "the calibration queue is full; resubmit".to_string(),
+            ),
+        ));
+    }
+
     /// Publish an app-authored document. The dataset
     /// must be declared `local = true`: anything else is refused with an
     /// error diagnostic and nothing is written. Accepted, the rows go
@@ -2945,6 +2990,7 @@ impl DataService {
             .cancel(crate::query::volboard::board_pool_key(key));
         self.pricing.cancel(key);
         self.vol.cancel(key);
+        self.calibration.cancel(key);
     }
 
     /// Answer a fetch the request loop could not run the way the fetch worker
@@ -3645,6 +3691,7 @@ impl DataService {
                 self.pool.shutdown();
                 self.pricing.shutdown();
                 self.vol.shutdown();
+                self.calibration.shutdown();
                 self.scheduler.shutdown();
                 self.ingest.shutdown();
             }
@@ -3656,6 +3703,7 @@ impl DataService {
                 self.pool.shutdown();
                 self.pricing.shutdown();
                 self.vol.shutdown();
+                self.calibration.shutdown();
             }
         }
     }
@@ -3746,6 +3794,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -3790,6 +3839,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -3896,6 +3946,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -3959,6 +4010,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -4003,6 +4055,7 @@ mod tests {
                 asked: Default::default(),
                 delay,
             })),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -4550,6 +4603,7 @@ mod tests {
             positions: None,
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
         };
         (dir, feed, config)
     }
@@ -4656,6 +4710,7 @@ mod tests {
             positions: None,
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
         }
     }
 
@@ -5000,6 +5055,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -5318,6 +5374,7 @@ mod tests {
             positions: None,
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
         })
         .expect("a drifted table does not stop the service opening");
         service.publish(LocalPublish {
@@ -5489,6 +5546,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -5588,6 +5646,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -5982,6 +6041,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -7382,6 +7442,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -7453,6 +7514,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -7806,6 +7868,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -8042,6 +8105,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -8671,6 +8735,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -8708,6 +8773,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .expect("a broken view must not stop the service opening")
@@ -8749,6 +8815,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .expect("a broken view must not stop the service opening");
@@ -8808,6 +8875,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .expect("a broken view must not stop the service opening");
@@ -9084,6 +9152,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -9156,6 +9225,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -9258,6 +9328,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -9338,6 +9409,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -9462,6 +9534,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -9548,6 +9621,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -9651,6 +9725,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         }
     }
@@ -10535,6 +10610,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -10637,6 +10713,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -10734,6 +10811,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -10989,6 +11067,7 @@ source_name = "NPV"
             positions: None,
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
         })
         .unwrap();
         (db, svc, rx)
@@ -11092,6 +11171,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -11137,6 +11217,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -11161,6 +11242,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         }
     }
@@ -11259,6 +11341,7 @@ source_name = "NPV"
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -11335,6 +11418,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -11395,6 +11479,7 @@ source_name = "NPV"
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();
@@ -11642,6 +11727,7 @@ source_name = "NPV"
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -11921,6 +12007,7 @@ source_name = "NPV"
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,

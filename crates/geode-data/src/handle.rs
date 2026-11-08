@@ -15,6 +15,7 @@ use crate::service::{
     QueryParams, StoreRole,
 };
 use crate::supervise::REQUEST_LOOP;
+use geode_core::calibration::{CalibrationRequest, RunAction};
 use geode_core::config::{Diagnostic, Severity};
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::positions::{CommandOutcome, MoveLhuParams};
@@ -92,6 +93,9 @@ pub enum Request {
     Price(PriceParams),
     /// Vol slice batch, answered by the vol worker with DataEvent::VolSlices.
     VolSlices(VolSliceParams),
+    /// Calibration request, answered by the calibration worker with
+    /// DataEvent::Calibration.
+    Calibrate(CalibrationRequest),
     /// App-authored document for a dataset declared local.
     Publish(LocalPublish),
     /// Delete one local document's whole history, answered with
@@ -358,6 +362,15 @@ impl DataHandle {
     /// instead produces an error for each job.
     pub fn vol_slices(&self, params: VolSliceParams) -> Result<(), Refusal> {
         self.send(Request::VolSlices(params))
+    }
+
+    /// Queue a calibration request. `Err(Busy)` means the queue was full
+    /// and a later submission can succeed; `Err(Stopped)` means the service
+    /// can no longer serve and no outcome is owed. A subsequent
+    /// calibration-worker refusal instead produces a terminal outcome whose
+    /// `request` stage is `Failed`.
+    pub fn calibrate(&self, request: CalibrationRequest) -> Result<(), Refusal> {
+        self.send(Request::Calibrate(request))
     }
 
     /// Queue local publication. `Err(Busy)` means the queue was full and a
@@ -772,6 +785,12 @@ enum PanicAnswer {
         submitted: Instant,
         jobs: usize,
     },
+    Calibrate {
+        key: QueryKey,
+        tag: u64,
+        submitted: Instant,
+        action: RunAction,
+    },
     Upload {
         key: QueryKey,
         tag: u64,
@@ -907,6 +926,15 @@ impl PanicAnswer {
                     tag: p.tag,
                     submitted: p.submitted,
                     jobs: p.jobs.len(),
+                },
+            ),
+            Request::Calibrate(r) => (
+                "calibrate",
+                PanicAnswer::Calibrate {
+                    key: r.key,
+                    tag: r.tag,
+                    submitted: r.submitted,
+                    action: r.action.clone(),
                 },
             ),
             Request::Upload(p) => (
@@ -1098,6 +1126,22 @@ impl PanicAnswer {
                     submitted,
                     results: (0..jobs).map(|_| Err(reason.clone())).collect(),
                 }));
+            }
+            PanicAnswer::Calibrate {
+                key,
+                tag,
+                submitted,
+                action,
+            } => {
+                let _ = sink(DataEvent::Calibration(
+                    crate::calibration::worker::request_failed(
+                        key,
+                        tag,
+                        submitted,
+                        action,
+                        reason.clone(),
+                    ),
+                ));
             }
             PanicAnswer::Upload { key, tag, target } => {
                 let _ = sink(DataEvent::Upload(UploadOutcome {
@@ -1395,6 +1439,7 @@ fn dispatch(service: &DataService, sink: &EventSink, req: Request) {
         Request::Poll { dataset } => service.poll(&dataset),
         Request::Price(params) => service.price(params),
         Request::VolSlices(params) => service.vol_slices(params),
+        Request::Calibrate(request) => service.calibrate(request),
         Request::Publish(publish) => service.publish(publish),
         Request::Forget(forget) => service.forget(forget),
         Request::Upload(params) => service.upload(params),
@@ -1460,6 +1505,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         };
         let (tx, outcomes) = channel();
@@ -1644,6 +1690,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -1891,6 +1938,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -1963,6 +2011,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -2036,6 +2085,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -2119,6 +2169,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -2167,6 +2218,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::missing("vendor"),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -2229,6 +2281,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::missing("vendor"),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -2252,6 +2305,94 @@ mod tests {
         handle.shutdown();
         assert_eq!(
             handle.vol_slices(crate::vol::worker::tests::params(1, 2, &["2026-10-16"])),
+            Err(Refusal::Stopped),
+            "refused after shutdown"
+        );
+    }
+
+    /// The calibration worker's queue is bounded by distinct slots. With
+    /// the engine held on one request, fill every slot, then submit one
+    /// more: the service answers it at once with a terminal outcome whose
+    /// one `request` stage is `Failed`, under the request's key, tag and
+    /// action, so the tile does not wait forever.
+    #[test]
+    fn a_refused_calibration_is_answered_with_a_terminal_failed_outcome() {
+        use crate::calibration::worker::tests::{FakeCalibrator, Gate, request, run, seed};
+        use geode_core::calibration::StageStatus;
+        let dir = tempfile::tempdir().unwrap();
+        let mut schema = geode_core::schema::SchemaSpec::default();
+        schema.datasets.push(local_dataset());
+        let (tx, outcomes) = std::sync::mpsc::channel();
+        let sink: EventSink = Arc::new(move |e| tx.send(e).is_ok());
+        let gate = Gate::closed();
+        let seen: Arc<Mutex<Vec<(u64, u64, geode_core::calibration::RunAction)>>> = Arc::default();
+        let handle = DataService::spawn(
+            DataServiceConfig {
+                db_path: dir.path().join("geode.duckdb"),
+                schema,
+                views: Vec::new(),
+                dimensions: DerivedDimensions::default(),
+                query_workers: 1,
+                sources: Vec::new(),
+                adapters: Default::default(),
+                documents: Default::default(),
+                egress: Vec::new(),
+                clock: geode_core::clock::Clock::utc(),
+                pricer: PricerConfig::default(),
+                vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::with(Arc::new(FakeCalibrator {
+                    seen: Arc::clone(&seen),
+                    gate: Arc::clone(&gate),
+                })),
+                positions: None,
+            },
+            sink,
+        );
+        // The handle's own channel is bounded too: retry a `Busy` so the
+        // worker's queue, not the channel, is what fills.
+        let submit = |key: u64, tag: u64, action: geode_core::calibration::RunAction| loop {
+            match handle.calibrate(request(key, tag, action.clone())) {
+                Ok(()) => return,
+                Err(Refusal::Busy) => std::thread::sleep(Duration::from_millis(5)),
+                Err(Refusal::Stopped) => panic!("the service stopped"),
+            }
+        };
+        submit(0, 0, run());
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while seen.lock().unwrap().is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the blocker never started"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let bound = crate::calibration::CALIBRATION_BOUND as u64;
+        for k in 1..=bound {
+            submit(k, 1, run());
+        }
+        submit(bound + 1, 7, seed());
+        let refused = loop {
+            match outcomes
+                .recv_timeout(Duration::from_secs(10))
+                .expect("an event")
+            {
+                DataEvent::Calibration(o) if o.key == QueryKey(bound + 1) => break o,
+                _ => continue,
+            }
+        };
+        assert_eq!(refused.tag, 7);
+        assert_eq!(refused.action, seed());
+        assert_eq!(refused.stages.len(), 1);
+        assert_eq!(refused.stages[0].name, "request");
+        assert_eq!(
+            refused.stages[0].status,
+            StageStatus::Failed("the calibration queue is full; resubmit".into())
+        );
+        assert!(refused.publish_rows.is_none());
+        gate.release();
+        handle.shutdown();
+        assert_eq!(
+            handle.calibrate(request(1, 2, run())),
             Err(Refusal::Stopped),
             "refused after shutdown"
         );
@@ -2292,6 +2433,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -2529,6 +2671,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -2570,6 +2713,7 @@ mod tests {
                 clock: geode_core::clock::Clock::utc(),
                 pricer: crate::pricing::PricerConfig::default(),
                 vol: crate::vol::VolConfig::default(),
+                calibration: crate::calibration::CalibratorConfig::default(),
                 positions: None,
             },
             sink,
@@ -2606,6 +2750,7 @@ mod tests {
             Request::Poll { dataset } => dataset == "marked",
             Request::Price(p) => p.key == MARKED,
             Request::VolSlices(p) => p.key == MARKED,
+            Request::Calibrate(p) => p.key == MARKED,
             Request::Upload(p) => p.key == MARKED,
             Request::TextFile(p) => p.key == MARKED,
             Request::MoveLhu(p) => p.tag == MARKED.0,
@@ -2651,6 +2796,7 @@ mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::default(),
             vol: crate::vol::VolConfig::default(),
+            calibration: crate::calibration::CalibratorConfig::default(),
             positions: None,
         }
     }

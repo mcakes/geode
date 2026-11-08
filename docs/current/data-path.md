@@ -130,7 +130,8 @@ Every long-lived data thread is spawned through
 [`supervise::spawn_supervised`](../../crates/geode-data/src/supervise.rs): the
 request loop (`geode-data`), the ingest writer (`geode-ingest`), discovery
 (`geode-discovery`), each read-pool worker (`geode-query-N`), pricing
-(`geode-pricing`), the vol worker (`geode-vol`), and one thread per fetch
+(`geode-pricing`), the vol worker (`geode-vol`), the calibration worker
+(`geode-calibration`), and one thread per fetch
 source (`geode-fetch-<source>`), history source (`geode-history-<source>`),
 subscribed source (`geode-subscribe-<source>`), and egress target
 (`geode-egress-<target>`), plus the position worker (`geode-positions`) and
@@ -348,8 +349,9 @@ it. In order:
    for the next discovery`) and left for the next owner's discovery, whose
    stale check skips any already published. Queued local writes always run,
    as at `shutdown`, even past the deadline.
-6. The read pool, pricing and the vol worker stop, the store closes, and the
-   app lease (a service holding one) is released last.
+6. The read pool, pricing, the vol worker and the calibration worker stop,
+   the store closes, and the app lease (a service holding one) is released
+   last.
 
 DuckDB checkpoints its write-ahead log when the store closes, so the
 checkpoint is part of the handoff time the app waits through. Shutdown, not
@@ -1879,6 +1881,37 @@ finiteness (a kind's parser refuses NaN where it must, as the CVI parser does
 on every number it reads), so a one-sided quote passes it. The slice viewer
 reads only `bid_vol` and `ask_vol`, and treats a NaN or NULL side vol as that
 side absent.
+
+## The calibration worker
+
+`DataHandle::calibrate` carries one `CalibrationRequest`: the pipeline
+itself, the underlying, the source documents (each an `Arc`) and the
+`RunAction`. The calibration worker (`geode-calibration`) runs the
+configured engine ([`[calibration] engine`](configuration.md#calibration))
+one request at a time and answers `DataEvent::Calibration` with a
+`CalibrationOutcome` under the request's key, tag and action. The engine
+call is a containment boundary: a panic fails that request alone with
+`calibrator panicked: <message>` and the worker continues; an engine
+error fails it with the engine's message; an engine the binary lacks fails
+every request with that reason. Each of these is one `request` stage
+`Failed(reason)` with no `ran_at`, so a tile paints it as any other stage
+card.
+
+The queue has two lanes per tile key. A `Run` waits in the background
+lane, which holds one request: a newer `Run` for the same key replaces
+it. Every other action waits in the user lane, a queue in which a newer
+replaceable action (`Evaluate`) supersedes a replaceable one at the tail,
+while a `Seed` or `Publish` is never replaced and runs exactly once, in
+submission order. A `Run` never displaces a queued user action. At most
+`CALIBRATION_BOUND` (64) distinct `(key, lane)` slots wait; a request for
+a slot already waiting always fits. Slots run in the order they were
+filled, one request per turn, so one tile's runs cannot starve another's
+keypress. A request the queue refuses is answered at once from the service
+thread with a terminal outcome whose `request` stage is
+`Failed("the calibration queue is full; resubmit")`; a request-loop
+panic answers the same way with the panic's reason. Cancellation by key
+drops both lanes and withholds the outcome of a request already running;
+the engine call itself is not interrupted.
 
 ## Retention and maintenance
 

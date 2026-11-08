@@ -129,6 +129,8 @@ fn main() {
             // The demo vol model likewise; `[vol] model` selects it by name.
             let mut vol_models = geode_data::VolModelRegistry::default();
             vol_models.register(Arc::new(geode_pricing::DemoVolModel));
+            let mut calibrators = geode_data::CalibratorRegistry::default();
+            calibrators.register(Arc::new(geode_pricing::DemoForwardCalibrator::new()));
 
             let (mut services, desk, user, bridge, diagnostics_factory) = build_shell_services(
                 demo_root.as_deref(),
@@ -138,6 +140,7 @@ fn main() {
                 adapters,
                 pricers,
                 vol_models,
+                calibrators,
                 cx,
             );
 
@@ -441,6 +444,7 @@ fn build_shell_services(
     adapters: geode_data::adapter::AdapterRegistry,
     pricers: geode_data::PricerRegistry,
     vol_models: geode_data::VolModelRegistry,
+    calibrators: geode_data::CalibratorRegistry,
     cx: &mut App,
 ) -> (
     ShellServices,
@@ -503,15 +507,16 @@ fn build_shell_services(
     // shell's config section, where they stay until a restart can change
     // which kinds exist.
     let mut composition_diagnostics = Vec::new();
-    let bridge = bridge::data_setup(&config, db, adapters, pricers, vol_models).map(|setup| {
-        composition_diagnostics = setup.panel_diagnostics.clone();
-        composition_diagnostics.extend(setup.scenario_diagnostics.iter().cloned());
-        let find_style = FindStyle::from_config(&config);
-        let stale_after = bridge::stale_after_from_config(&config);
-        let bridge = bridge::start(setup, find_style, stale_after, cx);
-        add_bridge_modules(&mut roster, &bridge);
-        bridge
-    });
+    let bridge =
+        bridge::data_setup(&config, db, adapters, pricers, vol_models, calibrators).map(|setup| {
+            composition_diagnostics = setup.panel_diagnostics.clone();
+            composition_diagnostics.extend(setup.scenario_diagnostics.iter().cloned());
+            let find_style = FindStyle::from_config(&config);
+            let stale_after = bridge::stale_after_from_config(&config);
+            let bridge = bridge::start(setup, find_style, stale_after, cx);
+            add_bridge_modules(&mut roster, &bridge);
+            bridge
+        });
     // Keep the existing launcher's order while making the bundled guide
     // available even when data setup fails.
     roster.add(Box::new(geode_guide::GuideFactory));
@@ -994,6 +999,7 @@ label = "skew"
                     geode_compose::adapters(demo_root).0,
                     Default::default(),
                     Default::default(),
+                    Default::default(),
                 )
                 .expect("the app's builtin layer supplies datasets and views");
                 let collector = geode_compose::engine_setup(
@@ -1102,6 +1108,7 @@ label = "skew"
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -1161,6 +1168,7 @@ label = "skew"
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let bridge =
@@ -1194,6 +1202,7 @@ label = "skew"
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let bridge =
@@ -1234,6 +1243,7 @@ label = "skew"
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let bridge =
@@ -1284,6 +1294,7 @@ label = "skew"
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -1398,6 +1409,7 @@ label = "skew"
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .expect("the builtin pricer layer declares datasets and views");
         let paths: Vec<&str> = setup
@@ -1641,12 +1653,17 @@ label = "skew"
         pricers.register(std::sync::Arc::new(geode_pricing::MockPricer::new()));
         let mut vol_models = geode_data::VolModelRegistry::default();
         vol_models.register(std::sync::Arc::new(geode_pricing::DemoVolModel));
+        let mut calibrators = geode_data::CalibratorRegistry::default();
+        calibrators.register(std::sync::Arc::new(
+            geode_pricing::DemoForwardCalibrator::new(),
+        ));
         let setup = bridge::data_setup(
             &config,
             dir.path().join("geode.duckdb"),
             geode_data::adapter::AdapterRegistry::default(),
             pricers,
             vol_models,
+            calibrators,
         )
         .expect("the demo layer declares datasets and views");
         let bridge =
@@ -1829,6 +1846,7 @@ label = "skew"
             geode_data::adapter::AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let bridge =
@@ -1937,6 +1955,7 @@ label = "skew"
                 geode_data::adapter::AdapterRegistry::default(),
                 pricers,
                 geode_data::VolModelRegistry::default(),
+                geode_data::CalibratorRegistry::default(),
                 cx,
             )
         });

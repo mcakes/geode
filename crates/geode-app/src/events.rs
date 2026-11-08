@@ -34,6 +34,9 @@ enum Key {
     Catalog(QueryKey),
     Price(QueryKey),
     VolSlices(QueryKey),
+    /// Keyed on `(tile, tag)` like `Upload`: a seed or publish is a user
+    /// action whose outcome must not be coalesced away behind a later run.
+    Calibration(QueryKey, u64),
     /// Keyed on `(tile, tag)`, not on the tile alone: uploads are separate
     /// user actions whose outcomes must remain distinct. Keying on the tile would
     /// let `Sender::try_send`'s highest-tag-wins coalescing drop an earlier
@@ -77,6 +80,7 @@ fn key(event: &DataEvent, seq: u64) -> Key {
         DataEvent::Catalog(o) => Key::Catalog(o.key),
         DataEvent::Price(o) => Key::Price(o.key),
         DataEvent::VolSlices(o) => Key::VolSlices(o.key),
+        DataEvent::Calibration(o) => Key::Calibration(o.key, o.tag),
         DataEvent::Upload(o) => Key::Upload(o.key, o.tag),
         DataEvent::TextFile(o) => Key::TextFile(o.key, o.tag),
         DataEvent::Published { dataset, batch, .. } => {
@@ -118,6 +122,7 @@ fn tag(event: &DataEvent) -> Option<u64> {
         DataEvent::Catalog(o) => Some(o.tag),
         DataEvent::Price(o) => Some(o.tag),
         DataEvent::VolSlices(o) => Some(o.tag),
+        DataEvent::Calibration(o) => Some(o.tag),
         DataEvent::Upload(o) => Some(o.tag),
         DataEvent::TextFile(o) => Some(o.tag),
         _ => None,

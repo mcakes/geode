@@ -1258,6 +1258,7 @@ pub(crate) mod tests {
             clock: geode_core::clock::Clock::utc(),
             pricer: PricerConfig::missing("none"),
             vol: geode_data::VolConfig::default(),
+            calibration: geode_data::CalibratorConfig::default(),
             positions: None,
         })
         .unwrap();

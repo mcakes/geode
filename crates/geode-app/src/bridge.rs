@@ -24,8 +24,9 @@ use geode_core::volviews;
 use geode_data::adapter::AdapterRegistry;
 use geode_data::source::SourceSpec;
 use geode_data::{
-    DEFAULT_STORE_DEADLINE, DataEvent, DataHandle, DataService, DataServiceConfig, EventSink,
-    PricerConfig, PricerRegistry, Refusal, StoreRole, VolConfig, VolModelRegistry,
+    CalibratorConfig, CalibratorRegistry, DEFAULT_STORE_DEADLINE, DataEvent, DataHandle,
+    DataService, DataServiceConfig, EventSink, PricerConfig, PricerRegistry, Refusal, StoreRole,
+    VolConfig, VolModelRegistry,
 };
 use geode_marketdata::MarketDataFactory;
 use geode_pricer::content::{PayoutSource, PricerFactory, PricerSettings, UnderlyingList};
@@ -85,6 +86,15 @@ pub struct DataSetup {
     pub pricer_key: PricerConfigKey,
     /// `[volwatch]` as read at startup, pushed whole to the factory.
     pub volwatch_settings: VolwatchSettings,
+    /// The `calibration` document's pipelines, read and checked against
+    /// the schema and the egress targets at startup, for the calibration
+    /// tile's factory. The factory does not exist yet; the lint expectation
+    /// fails the build the moment a reader appears, so it is removed then.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the calibration tile's factory")
+    )]
+    pub calibration_pipelines: geode_core::calibration::Pipelines,
     /// The accepted market-data panels in `panels` document order, and an
     /// Error per refused panel for the shell's config section.
     pub panels: Vec<PanelSpec>,
@@ -225,16 +235,17 @@ fn load_scenarios_from_config(
 
 /// Build setup when both datasets and views documents are present. Empty
 /// parsed definitions still produce Some with any diagnostics; missing either
-/// document returns None. Adapters, pricers and vol models come from the
-/// caller's registries; the engine half (schema with the app datasets
-/// pinned, dimensions, sources, document kinds, clock) comes from
-/// `geode_compose::engine_setup`.
+/// document returns None. Adapters, pricers, vol models and calibration
+/// engines come from the caller's registries; the engine half (schema with
+/// the app datasets pinned, dimensions, sources, document kinds, clock)
+/// comes from `geode_compose::engine_setup`.
 pub fn data_setup(
     config: &Config,
     db_path: PathBuf,
     adapters: AdapterRegistry,
     pricers: PricerRegistry,
     vol_models: VolModelRegistry,
+    calibrators: CalibratorRegistry,
 ) -> Option<DataSetup> {
     config.doc("datasets")?;
     // Require a views document, then use load_views for presentation overlays.
@@ -256,6 +267,31 @@ pub fn data_setup(
         .map(|doc| egress_config::from_doc(doc, &service.schema))
         .unwrap_or_default();
     diagnostics.extend(d);
+    // The calibration pipelines, read and then checked against the schema
+    // and the egress targets as declared, before `resolve` consumes the
+    // specs. A bad builtin or desk document is reported here at startup,
+    // as a bad `vol_views` is; no document means no pipelines.
+    let calibration_pipelines = match config.doc(geode_core::calibration::CALIBRATION_DOC) {
+        Some(doc) => {
+            let (pipelines, d) = geode_core::calibration::from_doc(doc);
+            diagnostics.extend(d);
+            let (pipelines, mut d) =
+                geode_core::calibration::check_against(pipelines, &service.schema, &egress_specs);
+            // The pure check cannot know which layer supplied the stage it
+            // refused; its paths are keys of the document.
+            for diag in &mut d {
+                if diag.layer.is_none() {
+                    diag.layer = diag
+                        .path
+                        .as_deref()
+                        .and_then(|p| config.explain(geode_core::calibration::CALIBRATION_DOC, p));
+                }
+            }
+            diagnostics.extend(d);
+            pipelines
+        }
+        None => geode_core::calibration::Pipelines::default(),
+    };
     let (egress, d) = geode_data::egress::resolve(egress_specs, &service.adapters);
     diagnostics.extend(d);
     // Resolve the one position service the same way: an unknown adapter, or
@@ -316,6 +352,31 @@ pub fn data_setup(
                 path: Some("app.vol.model".to_string()),
             });
             VolConfig::missing(&vol_name)
+        }
+    };
+    // Resolve the configured calibration engine the same way, defaulting
+    // to the demo forward calibrator. An unavailable name warns and leaves
+    // the engine absent; the calibration worker answers every request
+    // with that reason while the service still opens.
+    let calibrator_name = config
+        .get("app", "calibration.engine")
+        .and_then(|v| v.as_str())
+        .unwrap_or(geode_pricing::DEMO_CALIBRATOR)
+        .to_string();
+    let calibration = match calibrators.get(&calibrator_name) {
+        Some(e) => CalibratorConfig::with(e),
+        None => {
+            diagnostics.push(Diagnostic {
+                severity: Severity::Warning,
+                layer: config.explain("app", "calibration.engine"),
+                file: None,
+                message: format!(
+                    "calibration engine \"{calibrator_name}\" ([calibration] engine) is not built into this binary (have: {}); every calibration will say so",
+                    calibrators.names().join(", ")
+                ),
+                path: Some("app.calibration.engine".to_string()),
+            });
+            CalibratorConfig::missing(&calibrator_name)
         }
     };
     let (pricer_views, view_diags) = pricer_views_from_specs(config, &views);
@@ -379,12 +440,14 @@ pub fn data_setup(
         .collect();
     service.pricer = pricer;
     service.vol = vol;
+    service.calibration = calibration;
     service.egress = egress;
     service.positions = positions;
     Some(DataSetup {
         config: service,
         views,
         dimensions,
+        calibration_pipelines,
         colours,
         diagnostics,
         local_datasets,
@@ -2238,6 +2301,15 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
                     DataEvent::VolSlices(outcome) => {
                         ShellApp::deliver(&app, Delivery::VolSlices(outcome), cx);
                     }
+                    // No tile submits a calibration request yet; the shell gains
+                    // its delivery with the calibration tile.
+                    DataEvent::Calibration(outcome) => {
+                        tracing::debug!(
+                            target: "geode::calibration",
+                            "calibration outcome for key {} tag {} has no recipient yet",
+                            outcome.key.0, outcome.tag
+                        );
+                    }
                     // Each list's lane keeps `WatchlistGlobal`; see `WatchlistCache`.
                     DataEvent::Watchlist(outcome) if is_watchlist_key(outcome.key) => {
                         watchlist_cache.answer(outcome, cx);
@@ -3945,6 +4017,7 @@ role = "attribute"
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let views = setup.views.len();
@@ -4673,6 +4746,7 @@ grain = "underlying"
                 AdapterRegistry::default(),
                 geode_data::PricerRegistry::default(),
                 geode_data::VolModelRegistry::default(),
+                geode_data::CalibratorRegistry::default(),
             )
             .unwrap()
         };
@@ -4768,6 +4842,7 @@ grain = "underlying"
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -7454,6 +7529,7 @@ grain = "underlying"
             AdapterRegistry::default(),
             pricers,
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let bridge =
@@ -7521,6 +7597,7 @@ grain = "underlying"
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -8389,6 +8466,7 @@ h = 480.0
             AdapterRegistry::default(),
             pricers.clone(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.pricer.name, "mock");
@@ -8413,6 +8491,7 @@ h = 480.0
             AdapterRegistry::default(),
             pricers,
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.pricer.name, "vendor");
@@ -8463,6 +8542,7 @@ h = 480.0
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.vol.name, "vendor");
@@ -8483,6 +8563,8 @@ h = 480.0
         // The default: no [vol] table at all resolves to the registered demo model.
         let mut vol_models = geode_data::VolModelRegistry::default();
         vol_models.register(Arc::new(geode_pricing::DemoVolModel));
+        let mut calibrators = geode_data::CalibratorRegistry::default();
+        calibrators.register(Arc::new(geode_pricing::DemoForwardCalibrator::new()));
         let config = config_with_app("");
         let setup = data_setup(
             &config,
@@ -8490,6 +8572,7 @@ h = 480.0
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             vol_models,
+            calibrators,
         )
         .unwrap();
         assert_eq!(setup.config.vol.name, "demo");
@@ -8504,6 +8587,156 @@ h = 480.0
         );
     }
 
+    /// Resolve `[calibration] engine` through the supplied registry the way
+    /// the vol model resolves. An unknown name warns, names what the binary
+    /// has, and leaves the engine absent without preventing setup; no
+    /// `[calibration]` table means the demo engine.
+    #[test]
+    fn an_unknown_calibration_engine_warns_and_leaves_the_engine_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_with_app = |app_text: &str| {
+            let mut builtin = vec![
+                LayerDoc::builtin(
+                    "datasets",
+                    "[risk.columns.book]\ntype = \"utf8\"\nrole = \"dimension\"\n[risk.columns.position_ref]\ntype = \"utf8\"\nrole = \"key\"\n",
+                )
+                .unwrap(),
+                LayerDoc::builtin("views", "[v]\ndataset = \"risk\"\ngrouping = [\"book\"]\n")
+                    .unwrap(),
+            ];
+            if !app_text.is_empty() {
+                builtin.push(LayerDoc::builtin("app", app_text).unwrap());
+            }
+            Config::load(&ConfigSources {
+                builtin,
+                ..ConfigSources::default()
+            })
+        };
+
+        let config = config_with_app("[calibration]\nengine = \"vendor\"\n");
+        let setup = data_setup(
+            &config,
+            dir.path().join("a.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
+        )
+        .unwrap();
+        assert_eq!(setup.config.calibration.name, "vendor");
+        assert!(setup.config.calibration.engine.is_none());
+        let d = setup
+            .diagnostics
+            .iter()
+            .find(|d| d.message.contains("calibration engine"))
+            .unwrap();
+        assert_eq!(d.severity, Severity::Warning);
+        assert_eq!(
+            d.message,
+            "calibration engine \"vendor\" ([calibration] engine) is not built into this \
+             binary (have: ); every calibration will say so"
+        );
+        assert_eq!(d.path.as_deref(), Some("app.calibration.engine"));
+        assert!(
+            setup.calibration_pipelines.pipelines.is_empty(),
+            "no calibration document, no pipelines"
+        );
+
+        // The default: no [calibration] table at all resolves to the
+        // registered demo engine.
+        let mut calibrators = geode_data::CalibratorRegistry::default();
+        calibrators.register(Arc::new(geode_pricing::DemoForwardCalibrator::new()));
+        let config = config_with_app("");
+        let setup = data_setup(
+            &config,
+            dir.path().join("b.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+            calibrators,
+        )
+        .unwrap();
+        assert_eq!(setup.config.calibration.name, "demo");
+        assert!(setup.config.calibration.engine.is_some());
+        assert!(
+            !setup
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("calibration engine")),
+            "{:?}",
+            setup.diagnostics
+        );
+    }
+
+    /// The builtin `calibration` document's pipeline reaches the setup
+    /// struct, checked against the demo schema and egress targets with no
+    /// diagnostic; a stage naming a dataset the schema lacks is refused
+    /// with the layer that supplied it filled in.
+    #[test]
+    fn data_setup_carries_the_calibration_pipelines_and_reports_their_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let setup = demo_setup(dir.path(), None);
+        let names: Vec<&str> = setup
+            .calibration_pipelines
+            .pipelines
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["implied_forwards"]);
+        assert!(
+            !setup
+                .diagnostics
+                .iter()
+                .any(|d| d.message.starts_with("calibration:")),
+            "{:?}",
+            setup.diagnostics
+        );
+
+        let desk = tempfile::tempdir().unwrap();
+        std::fs::write(
+            desk.path().join("calibration.toml"),
+            "[pipelines.p]\n\
+             [stages.src]\npipeline = \"p\"\nkind = \"source\"\ndataset = \"nope\"\n",
+        )
+        .unwrap();
+        let config = Config::load(&ConfigSources {
+            builtin: crate::builtin_layer(Some(dir.path())),
+            desk: Some(desk.path().to_path_buf()),
+            user: None,
+        });
+        let setup = data_setup(
+            &config,
+            dir.path().join("d.duckdb"),
+            AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
+        )
+        .unwrap();
+        let names: Vec<&str> = setup
+            .calibration_pipelines
+            .pipelines
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["implied_forwards"],
+            "the bad pipeline is dropped"
+        );
+        let d = setup
+            .diagnostics
+            .iter()
+            .find(|d| d.path.as_deref() == Some("stages.src.dataset"))
+            .expect("the source stage's dataset is refused");
+        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(
+            d.layer,
+            Some(Layer::Desk),
+            "the layer is filled in from provenance"
+        );
+    }
+
     /// Verify setup carries every local dataset name and excludes non-local ones.
     /// The routing test supplies its set directly, so it cannot prove this extraction.
     #[test]
@@ -8512,6 +8745,8 @@ h = 480.0
         pricers.register(Arc::new(geode_pricing::MockPricer::new()));
         let mut vol_models = geode_data::VolModelRegistry::default();
         vol_models.register(Arc::new(geode_pricing::DemoVolModel));
+        let mut calibrators = geode_data::CalibratorRegistry::default();
+        calibrators.register(Arc::new(geode_pricing::DemoForwardCalibrator::new()));
         let dir = tempfile::tempdir().unwrap();
         let config = Config::load(&ConfigSources {
             builtin: vec![
@@ -8540,6 +8775,7 @@ h = 480.0
             AdapterRegistry::default(),
             pricers,
             vol_models,
+            calibrators,
         )
         .unwrap();
         assert!(setup.diagnostics.is_empty(), "{:?}", setup.diagnostics);
@@ -10639,6 +10875,7 @@ h = 480.0
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let builtin = crate::builtin_layer(None);
@@ -10673,6 +10910,7 @@ h = 480.0
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -10716,6 +10954,7 @@ h = 480.0
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let ds = setup
@@ -10789,7 +11028,8 @@ h = 480.0
                 "/tmp/x.duckdb".into(),
                 AdapterRegistry::default(),
                 PricerRegistry::default(),
-                geode_data::VolModelRegistry::default()
+                geode_data::VolModelRegistry::default(),
+                geode_data::CalibratorRegistry::default()
             )
             .is_none()
         );
@@ -10811,6 +11051,7 @@ h = 480.0
             AdapterRegistry::default(),
             PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert_eq!(setup.config.sources.len(), 1);
@@ -10850,6 +11091,7 @@ h = 480.0
             AdapterRegistry::default(),
             PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let view = &setup.views[0];
@@ -10892,6 +11134,7 @@ h = 480.0
             AdapterRegistry::default(),
             PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         let v = setup.views.iter().find(|v| v.name == "v").unwrap();
@@ -10932,6 +11175,7 @@ h = 480.0
             AdapterRegistry::default(),
             PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .unwrap();
         assert!(
@@ -10997,6 +11241,7 @@ h = 480.0
             AdapterRegistry::default(),
             pricers,
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .expect("the demo layer declares datasets and views");
         let bridge =
@@ -11028,6 +11273,7 @@ h = 480.0
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .expect("the demo layer declares datasets and views")
     }
@@ -11109,6 +11355,7 @@ h = 480.0
             AdapterRegistry::default(),
             geode_data::PricerRegistry::default(),
             geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
         )
         .expect("the pricer's builtin datasets and an empty views doc");
         assert!(setup.panels.is_empty());

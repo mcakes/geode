@@ -103,7 +103,7 @@ The main configuration documents have distinct owners:
 
 | Document | Defines |
 |---|---|
-| `app.toml` | Theme, primary modifier, UI settings, logging, time zone, link groups, pricing, vol model, and timeseries settings |
+| `app.toml` | Theme, primary modifier, UI settings, logging, time zone, link groups, pricing, vol model, calibration engine, and timeseries settings |
 | `datasets.toml` | Dataset families, columns, roles, types, grains, retention, local publication, `computed`, and a measures dataset's `axes` (each axis column's `axis` kind and `order`) |
 | `views.toml` | Queryable views, joins, columns, expressions, grouping, and sorting |
 | `sources.toml` | File, subscription, fetch, reference snapshot, and history sources with readiness and adapter settings |
@@ -1105,7 +1105,19 @@ default and the only one in every build is `demo`, a smooth stand-in that is
 not a financial model. A name the binary lacks warns at startup and every vol
 slice answers with that reason. Changing `model` marks restart required, as `[pricing] adapter` does.
 
-## VolMonitor
+## Calibration
+
+`[calibration]` in `app.toml` selects the engine the data service's
+calibration requests run on. `engine` names an engine the binary
+registers; the default and the only one in every build is `demo`, the
+forward calibrator simulator, which is not a financial model. A name the
+binary lacks warns at startup and every calibration answers with that
+reason. The key is read at startup only; a change takes effect at the
+next start. The pipelines themselves come from `calibration.toml`
+(`CALIBRATION_DOC`), read and checked against the schema and the egress
+targets at startup: a stage naming a dataset that is not a document
+dataset, or a publish naming a target `egress.toml` lacks, drops its
+pipeline with an Error that names the layer which supplied the stage.
 
 `[volwatch]` in `app.toml` configures the VolMonitor tile (see
 [VolMonitor](features.md#volmonitor)) and `vol_views.toml` declares
