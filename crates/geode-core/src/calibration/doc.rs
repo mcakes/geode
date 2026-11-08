@@ -796,32 +796,40 @@ check = "monotone_df"
 
     #[test]
     fn an_input_cycle_drops_the_pipeline_whole() {
+        // Two implied_rates stages reading each other as `parity`: every
+        // port is filled with the right payload (TermPoints, Schedule,
+        // Curve), so the cycle is the only error and the drop is its doing.
         let text = r#"
 [pipelines.p]
 
+[stages.dividends]
+pipeline = "p"
+kind = "source"
+dataset = "dividend_schedule"
+
+[stages.rates]
+pipeline = "p"
+kind = "source"
+dataset = "rate_curve"
+
 [stages.a]
 pipeline = "p"
-kind = "check"
-inputs = ["b"]
-check = "monotone_df"
+kind = "implied_rates"
+inputs = ["b", "dividends", "rates"]
 
 [stages.b]
 pipeline = "p"
-kind = "kalman_fit"
-inputs = ["a"]
-series = "repo"
-knots = [0.25, 0.5]
-process_noise = 1.0e-4
-measurement_noise = "spread"
+kind = "implied_rates"
+inputs = ["a", "dividends", "rates"]
 "#;
         let (pipelines, diags) = read(text);
         assert!(pipelines.pipelines.is_empty(), "{pipelines:?}");
-        let cycle: Vec<&Diagnostic> = errors(&diags)
-            .into_iter()
-            .filter(|d| d.message.contains("cycle"))
-            .collect();
-        assert_eq!(cycle.len(), 1, "{diags:?}");
-        assert!(cycle[0].message.contains("'a'") && cycle[0].message.contains("'b'"));
+        let all = errors(&diags);
+        assert_eq!(all.len(), 1, "the cycle is the only error: {diags:?}");
+        let cycle = all[0];
+        assert!(cycle.message.contains("cycle"), "{}", cycle.message);
+        assert!(cycle.message.contains("'a'") && cycle.message.contains("'b'"));
+        assert_eq!(cycle.path.as_deref(), Some("stages.a.inputs"));
     }
 
     #[test]

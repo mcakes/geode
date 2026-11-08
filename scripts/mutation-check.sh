@@ -2242,10 +2242,15 @@ run_mutation "calibration doc: a foreign-pipeline input is refused" \
   geode-core \
   an_input_naming_a_stage_of_another_pipeline_is_an_error
 
+# The diagnostic is still pushed; only the drop is forgotten, so a cyclic
+# pipeline would be kept with an error beside it.
 run_mutation "calibration doc: a cycle drops the pipeline" \
   crates/geode-core/src/calibration/doc.rs \
-  '    if let Some(cycle) = find_cycle(stages) {' \
-  '    if let Some(cycle) = find_cycle(stages).filter(|_| false) {' \
+  '            format!("inputs form a cycle: {}", trail.join(" -> ")),
+        ));
+        ok = false;' \
+  '            format!("inputs form a cycle: {}", trail.join(" -> ")),
+        ));' \
   geode-core \
   an_input_cycle_drops_the_pipeline_whole
 
