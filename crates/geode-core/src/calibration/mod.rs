@@ -9,9 +9,11 @@
 //! that need the schema and the egress targets.
 
 pub mod doc;
+pub mod engine;
 
 pub use crate::config::CALIBRATION_DOC;
 pub use doc::{check_against, from_doc};
+pub use engine::*;
 
 /// The builtin document: the one `implied_forwards` pipeline.
 pub const BUILTIN_CALIBRATION: &str = include_str!("builtin.toml");
