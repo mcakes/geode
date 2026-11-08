@@ -37,6 +37,11 @@ pub const WATCHLISTS_DOC: &str = "watchlists";
 /// tab of the vol watchlist (a column list over the board measures).
 pub const VOL_VIEWS_DOC: &str = "vol_views";
 
+/// The calibration document, `calibration.toml`: a `pipelines` table of
+/// named pipelines and a `stages` table of the named stages that form
+/// each one's DAG. A pipeline or a stage is one whole object across layers.
+pub const CALIBRATION_DOC: &str = "calibration";
+
 /// Documents whose file was renamed: `(old stem, current doc name)`. A layer
 /// directory still holding only the old file loads it under the current name
 /// with a warning; when a layer holds both, the current file wins and the old

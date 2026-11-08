@@ -1,0 +1,82 @@
+config_version = 1
+
+[pipelines.implied_forwards]
+title = "Implied forwards"
+run   = "on_input"            # or "manual"
+
+# Stages are top-level objects so the shell's object dialog can list and
+# edit them without new scaffolding. `pipeline` names the pipeline a stage
+# belongs to; `inputs` may name only stages of the same pipeline.
+
+[stages.chain]
+pipeline = "implied_forwards"
+kind     = "source"
+dataset  = "option_chain"
+
+[stages.dividends]
+pipeline = "implied_forwards"
+kind     = "source"
+dataset  = "dividend_schedule"
+
+[stages.rates]
+pipeline = "implied_forwards"
+kind     = "source"
+dataset  = "rate_curve"        # the prod repo/box curves, also the publish target
+series   = "funding"           # which series of the document this source reads
+
+[stages.parity]
+pipeline      = "implied_forwards"
+kind          = "parity_fit"
+inputs        = ["chain"]
+min_strikes   = 6
+strike_window = [0.8, 1.2]     # moneyness band used for the fit
+
+[stages.implied_rates]
+pipeline = "implied_forwards"
+kind     = "implied_rates"
+inputs   = ["parity", "dividends", "rates"]   # spot comes with the chain (spot_ref)
+
+[stages.df_monotone]
+pipeline = "implied_forwards"
+kind     = "check"
+inputs   = ["parity"]
+check    = "monotone_df"
+
+[stages.repo_fit]
+pipeline          = "implied_forwards"
+kind              = "kalman_fit"
+inputs            = ["implied_rates"]
+series            = "repo"
+basis             = "knots"
+knots             = [0.25, 0.5, 1.0, 2.0, 3.0, 5.0]
+process_noise     = 1.0e-4
+measurement_noise = "spread"   # or a number
+
+[stages.box_fit]
+pipeline          = "implied_forwards"
+kind              = "kalman_fit"
+inputs            = ["implied_rates"]
+series            = "box"
+basis             = "knots"
+knots             = [0.25, 0.5, 1.0, 2.0, 3.0, 5.0]
+process_noise     = 1.0e-4
+measurement_noise = "spread"
+
+[stages.repo_curve]
+pipeline = "implied_forwards"
+kind     = "rasterize"
+inputs   = ["repo_fit"]
+grid     = "monthly_to_5y"
+
+[stages.box_curve]
+pipeline = "implied_forwards"
+kind     = "rasterize"
+inputs   = ["box_fit"]
+grid     = "monthly_to_5y"
+
+[stages.publish]
+pipeline = "implied_forwards"
+kind     = "publish"
+inputs   = ["repo_curve", "box_curve", "df_monotone"]   # Check inputs are gates
+document = "rate_curve"
+target   = "sophis"

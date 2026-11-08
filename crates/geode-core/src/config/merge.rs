@@ -35,6 +35,11 @@ fn atomic_depth(doc_name: &str) -> Option<u32> {
         // name or an inline `{ hue }` / `{ token }` table) is replaced whole,
         // so a user hue never deep-merges into a desk token.
         "value_colors" => Some(2),
+        // The top-level keys are the two tables `pipelines` and `stages`;
+        // the named objects sit one level down. A higher layer replaces one
+        // pipeline or one stage whole and keeps the other entries of both
+        // tables, so a user stage never inherits a builtin stage's fields.
+        "calibration" => Some(2),
         // One complete definition per pricer view name.
         "pricer_views" => Some(1),
         // One complete definition per pricer template name.

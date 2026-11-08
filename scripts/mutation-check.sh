@@ -2233,6 +2233,22 @@ run_mutation "egress config: a config_version header is not a spurious diagnosti
   geode-core \
   an_egress_config_version_header_is_not_a_spurious_diagnostic
 
+# ---- calibration document
+
+run_mutation "calibration doc: a foreign-pipeline input is refused" \
+  crates/geode-core/src/calibration/doc.rs \
+  '                    if home != pipeline {' \
+  '                    if false {' \
+  geode-core \
+  an_input_naming_a_stage_of_another_pipeline_is_an_error
+
+run_mutation "calibration doc: a cycle drops the pipeline" \
+  crates/geode-core/src/calibration/doc.rs \
+  '    if let Some(cycle) = find_cycle(stages) {' \
+  '    if let Some(cycle) = find_cycle(stages).filter(|_| false) {' \
+  geode-core \
+  an_input_cycle_drops_the_pipeline_whole
+
 # ---- egress workers
 
 run_mutation "egress: a write error answers Err" \

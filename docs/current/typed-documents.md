@@ -527,6 +527,77 @@ in `order`, tables not named keeping their relative order after them and
 `config_version` and `default` first; tables are removed and re-inserted,
 so each keeps its comments.
 
+## Calibration
+
+[`calibration`](../../crates/geode-core/src/calibration/mod.rs) reads
+`calibration.toml`: a `pipelines` table of named pipelines and a `stages`
+table of named stages, each stage naming the `pipeline` it belongs to. A
+pipeline is a DAG of stages over one underlying; its edges are the ordered
+`inputs` lists and nothing else. Stages are top-level objects rather than
+nested under their pipeline so the object dialog, provenance badges and
+layer merging treat them like every other document's objects.
+
+```toml
+[pipelines.implied_forwards]
+title = "Implied forwards"     # defaults to the name
+run   = "on_input"             # or "manual"; defaults to on_input
+
+[stages.chain]
+pipeline = "implied_forwards"
+kind     = "source"
+dataset  = "option_chain"
+series   = "funding"           # optional: which series of the document
+
+[stages.parity]
+pipeline      = "implied_forwards"
+kind          = "parity_fit"
+inputs        = ["chain"]
+min_strikes   = 6              # a positive whole number
+strike_window = [0.8, 1.2]     # [low, high], low < high
+```
+
+Stage kinds are a closed set with typed ports. `inputs` fills a fixed
+kind's ports by position and a variadic kind's as a list:
+
+| kind | input ports | output | fields |
+|---|---|---|---|
+| `source` | none | `Chain` for `option_chain`, `Schedule` for `dividend_schedule`, `Curve` for any other dataset | `dataset`, optional `series` |
+| `parity_fit` | `chain: Chain` | `TermPoints` | `min_strikes`, `strike_window` |
+| `implied_rates` | `parity: TermPoints`, `dividends: Schedule`, `rates: Curve` | `TermPoints` | |
+| `check` | `points: TermPoints` | `Check` | `check`, one of `monotone_df` |
+| `kalman_fit` | `points: TermPoints` | `Fit` | `series`, `knots` (two or more, strictly ascending), `process_noise` (positive), `measurement_noise` (`"spread"` or a positive number) |
+| `rasterize` | `fit: Fit` | `Raster` | `grid`, one of `monthly_to_5y` |
+| `publish` | one or more `Raster`, plus zero or more `Check` gates | `PublishReady` | `document`, `target` |
+
+`from_doc` reads without the schema. Every problem is an Error carrying a
+`path` (`pipelines.<name>.<field>`, `stages.<name>.<field>` or
+`stages.<name>.inputs.<i>`) and the layer that supplied the object: a
+non-table pipeline or stage; a `run` other than `on_input` or `manual`; a
+stage without a `pipeline`, or naming one the document does not declare; a
+`kind` outside the set; a missing or mistyped field; `knots`, the noise
+fields, `check` or `grid` outside their rules above; an input naming no
+stage, or a stage of another pipeline; a fixed kind given the wrong number
+of inputs, or an input whose output type is not the port's (a source's
+dataset is named in the message, since the dataset decides its type); a
+`publish` with no `Raster` input or with an input that is neither a
+`Raster` nor a `Check`; and a cycle, reported once naming the stages round
+it. A pipeline with any error is dropped whole and the others are kept; a
+stage naming an undeclared pipeline belongs to none and drops nothing. An
+unknown top-level key warns and is ignored.
+
+`check_against(pipelines, schema, egress)` adds the checks that need the
+schema and the egress targets, dropping a pipeline the same way: a `source`
+whose dataset is not a document-family dataset, a `publish` whose
+`document` is not one or whose `target` names no egress target. The
+target's own document list is not consulted; the upload answers that when
+it runs. The two passes are separate because the reader has no schema in
+hand; a consumer runs both.
+
+`Pipeline::topological` orders the stages so each follows all of its
+inputs: every stage with none first, then every stage whose inputs are all
+placed, and so on, each round in document order. `consumers(name)` lists
+the stages whose `inputs` name it, in document order.
+
 ## Colors and numeric formatting
 
 [`NamedColours`](../../crates/geode-core/src/colour/mod.rs) reads a hue or a

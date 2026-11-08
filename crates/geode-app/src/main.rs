@@ -401,6 +401,14 @@ fn builtin_layer(demo_root: Option<&Path>) -> Vec<LayerDoc> {
             geode_volwatch::core::views::BUILTIN_VOL_VIEWS,
         )
         .expect("BUILTIN_VOL_VIEWS is well-formed TOML"),
+        // The builtin calibration pipeline. `calibration` replaces per
+        // pipeline and per stage, so a desk or user document adds stages
+        // beside these or replaces one whole.
+        LayerDoc::builtin(
+            geode_core::calibration::CALIBRATION_DOC,
+            geode_core::calibration::BUILTIN_CALIBRATION,
+        )
+        .expect("BUILTIN_CALIBRATION is well-formed TOML"),
     ];
     builtin.extend(geode_compose::builtin_data_layer(demo_root));
     builtin
@@ -749,6 +757,29 @@ label = "skew"
         assert_eq!(names, vec!["vol", "skew", "varswap", "surface"]);
         assert_eq!(settings.views.default, 0);
         assert_eq!(settings.views, geode_volwatch::core::views::builtin());
+    }
+
+    /// The builtin `calibration` document reads as the one
+    /// `implied_forwards` pipeline of eleven stages with no diagnostic.
+    #[test]
+    fn the_builtin_layer_carries_the_implied_forwards_pipeline() {
+        let config = Config::load(&ConfigSources {
+            builtin: builtin_layer(None),
+            desk: None,
+            user: None,
+        });
+        let doc = config
+            .doc(geode_core::calibration::CALIBRATION_DOC)
+            .expect("the builtin calibration doc");
+        let (pipelines, diags) = geode_core::calibration::from_doc(doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        let names: Vec<&str> = pipelines
+            .pipelines
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["implied_forwards"]);
+        assert_eq!(pipelines.pipelines[0].stages.len(), 11);
     }
 
     /// The two bundled views are `views` doc entries over the `pricer`

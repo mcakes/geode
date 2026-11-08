@@ -5,6 +5,7 @@
 
 pub mod attribution;
 pub mod builtin;
+pub mod calibration;
 pub mod classification;
 pub mod clock;
 pub mod colour;

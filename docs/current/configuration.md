@@ -49,6 +49,13 @@ entry (a name, `"none"`, or an inline table) is replaced whole, so a user
 `{ hue = 30 }` over a desk `{ token = "warning" }` is that hue and never a
 table with both keys. An entry of `"none"` clears a lower layer's color.
 
+`calibration` also replaces whole at depth 2. Its two top-level tables,
+`pipelines` and `stages`, merge per name, so a user file adds a stage beside
+the builtin ones or replaces one pipeline or one stage whole; a replaced
+stage inherits none of the lower layer's fields, so a user stage that omits
+a required field is an error on the user layer, not a silent fallback to the
+builtin value.
+
 ```toml
 [underlying_ref]
 SPX  = "blue"                       # a named color from colors.toml
@@ -111,6 +118,7 @@ The main configuration documents have distinct owners:
 | `expressions.toml` | Named scope expressions, referenced by name from a saved scope or the frame |
 | `watchlists.toml` | Named lists of underlyings: manual names, exclusions, and rules deriving names from a dataset under a saved scope or expression |
 | `vol_views.toml` | The VolMonitor's tabs: named column lists over the board's measures (hot) |
+| `calibration.toml` | Calibration pipelines: a `pipelines` table of named pipelines and a `stages` table of the typed stages (sources, fits, checks, rasters, publish) whose `inputs` form each one's DAG |
 | `colors.toml` | Named semantic data colors |
 | `value_colors.toml` | A color per value of a text dimension: a colors.toml name or an inline { hue } / { token } table |
 | `dataset_presentation.toml` | Desk-level column presentation between schema and view overrides |
