@@ -113,8 +113,8 @@ pub struct CalibrationOutcome {
 pub struct StageResult {
     pub name: StageName,
     pub status: StageStatus,
-    /// The source time of the newest input the stage ran against; `None`
-    /// when it did not run.
+    /// The wall-clock UTC time the stage finished; `None` when it did not
+    /// run.
     pub ran_at: Option<DateTime<Utc>>,
     pub elapsed: Duration,
     /// The card's third line, engine-worded.

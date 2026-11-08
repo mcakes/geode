@@ -1170,6 +1170,9 @@ fn publish(
     let started = Instant::now();
     let mut rasters: HashMap<String, Raster> = HashMap::new();
     let mut rows: Vec<DocumentRows> = Vec::new();
+    // A draft for a fit no raster of the publish stage reads would publish
+    // the filters unchanged under the user's name for it: refused instead.
+    let mut draft_consumed = false;
     for input in &publish.inputs {
         let Some(raster_stage) = pipeline.stage(input) else {
             continue;
@@ -1190,7 +1193,10 @@ fn publish(
             unreachable!("kalman_stage answered a kalman_fit");
         };
         let params: Vec<f64> = match draft {
-            Some((stage, params)) if stage == fit_stage.name => params.to_vec(),
+            Some((stage, params)) if stage == fit_stage.name => {
+                draft_consumed = true;
+                params.to_vec()
+            }
             _ => state
                 .filters
                 .get(&key(&fit_stage.name))
@@ -1213,6 +1219,14 @@ fn publish(
     if rows.is_empty() {
         return Err(CalibrationError(format!(
             "{} publishes no rasterized series",
+            publish.name
+        )));
+    }
+    if let Some((stage, _)) = draft
+        && !draft_consumed
+    {
+        return Err(CalibrationError(format!(
+            "{stage} feeds no raster of {}; the draft would not be published",
             publish.name
         )));
     }
@@ -1981,6 +1995,76 @@ mod tests {
             ],
         );
         assert_eq!(stage(&outcome, "chain").summary, "0 documents");
+    }
+
+    #[test]
+    fn measurement_variance_follows_the_noise_kind_and_floors_a_zero_spread() {
+        let points = TermPoints {
+            tenors: vec![0.5, 1.0, 2.0],
+            series: vec![Series {
+                name: "repo".into(),
+                mid: vec![0.01, 0.02, 0.03],
+                lo: vec![0.01, 0.015, 0.03],
+                hi: vec![0.01, 0.025, 0.03],
+            }],
+        };
+        let s = &points.series[0];
+        let (tenors, ys, vars) = measurements(&points, s, &Noise::Spread);
+        assert_eq!(tenors, vec![0.5, 1.0, 2.0]);
+        assert_eq!(ys, vec![0.01, 0.02, 0.03]);
+        assert_eq!(
+            vars[0], MIN_MEASUREMENT_VARIANCE,
+            "lo == hi takes the floor"
+        );
+        assert!((vars[1] - 0.005 * 0.005).abs() < 1e-18, "((hi - lo) / 2)²");
+        assert_eq!(vars[2], MIN_MEASUREMENT_VARIANCE);
+        let (_, _, vars) = measurements(&points, s, &Noise::Fixed(0.5));
+        assert_eq!(vars, vec![0.5, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn a_publish_draft_for_a_fit_no_raster_reads_is_refused() {
+        let mut pipeline = pipeline();
+        let publish = pipeline
+            .stages
+            .iter_mut()
+            .find(|s| s.name == "publish")
+            .unwrap();
+        publish.inputs = vec!["repo_curve".into(), "df_monotone".into()];
+        let engine = DemoForwardCalibrator::new();
+        let mut req = request(full(), chain(1.0));
+        req.pipeline = pipeline.clone();
+        engine.run(&req).unwrap();
+        let mut draft = request(
+            RunAction::Publish {
+                from: PublishSource::Draft {
+                    stage: "box_fit".into(),
+                    params: vec![0.02; 6],
+                },
+            },
+            chain(1.0),
+        );
+        draft.pipeline = pipeline.clone();
+        assert_eq!(
+            engine.run(&draft).unwrap_err(),
+            CalibrationError(
+                "box_fit feeds no raster of publish; the draft would not be published".into()
+            )
+        );
+        // A draft for the fit the one raster does read still publishes it.
+        let mut draft = request(
+            RunAction::Publish {
+                from: PublishSource::Draft {
+                    stage: "repo_fit".into(),
+                    params: vec![0.02; 6],
+                },
+            },
+            chain(1.0),
+        );
+        draft.pipeline = pipeline;
+        let rows = engine.run(&draft).unwrap().publish_rows.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key[1], "repo");
     }
 
     #[test]
