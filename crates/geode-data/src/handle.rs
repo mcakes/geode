@@ -2350,11 +2350,20 @@ mod tests {
         );
         // The handle's own channel is bounded too: retry a `Busy` so the
         // worker's queue, not the channel, is what fills.
-        let submit = |key: u64, tag: u64, action: geode_core::calibration::RunAction| loop {
-            match handle.calibrate(request(key, tag, action.clone())) {
-                Ok(()) => return,
-                Err(Refusal::Busy) => std::thread::sleep(Duration::from_millis(5)),
-                Err(Refusal::Stopped) => panic!("the service stopped"),
+        let submit = |key: u64, tag: u64, action: geode_core::calibration::RunAction| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                match handle.calibrate(request(key, tag, action.clone())) {
+                    Ok(()) => return,
+                    Err(Refusal::Busy) => {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "the request loop never drained key {key}"
+                        );
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(Refusal::Stopped) => panic!("the service stopped"),
+                }
             }
         };
         submit(0, 0, run());
@@ -2371,13 +2380,17 @@ mod tests {
             submit(k, 1, run());
         }
         submit(bound + 1, 7, seed());
+        // An overall deadline, not a per-event one: the service keeps
+        // emitting other events, so a refusal that is never answered must
+        // fail here rather than wait on the next unrelated event forever.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let refused = loop {
-            match outcomes
-                .recv_timeout(Duration::from_secs(10))
-                .expect("an event")
-            {
-                DataEvent::Calibration(o) if o.key == QueryKey(bound + 1) => break o,
-                _ => continue,
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            assert!(!left.is_zero(), "the refused request was never answered");
+            match outcomes.recv_timeout(left) {
+                Ok(DataEvent::Calibration(o)) if o.key == QueryKey(bound + 1) => break o,
+                Ok(_) => continue,
+                Err(_) => panic!("the refused request was never answered"),
             }
         };
         assert_eq!(refused.tag, 7);

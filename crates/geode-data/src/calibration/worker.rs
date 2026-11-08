@@ -311,10 +311,18 @@ pub(crate) mod tests {
             self.cv.notify_all();
         }
 
+        /// Bounded: a test that fails while the gate is closed never
+        /// releases it, and the worker's `Drop` joins this thread, so an
+        /// unbounded wait would turn that failure into a hang.
         fn wait(&self) {
+            let deadline = Instant::now() + Duration::from_secs(10);
             let mut open = self.open.lock().unwrap();
             while !*open {
-                open = self.cv.wait(open).unwrap();
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return;
+                }
+                open = self.cv.wait_timeout(open, left).unwrap().0;
             }
         }
     }
