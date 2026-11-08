@@ -40,6 +40,7 @@ config-declared column map today:
 | Source time policy | `sources.toml` `source_time` | Config |
 | Dataset columns, types, keys, axes | `datasets.toml` | Config, but each document kind's `columns()` must agree (checked at source start) |
 | XML element names and nesting | Rust constants in `geode-documents` (`SLICE_VALUES`, `TAGS`, the path matchers) | Code: one module per kind |
+| `rate_curve` XML element and attribute names (`rateCurve`, `underlying`, `series`, `publishedTime`, `point` with `tenor` and `value` attributes) | Rust constants and the path matcher in `geode-documents/src/rate_curve.rs` | Code: one module per kind, like the other XML kinds |
 | Reference column names | Must equal the declared column names; `TableRows::conform` matches by `name`, not `source_name` | The shim or a database view |
 | Series identity spelling | Adapter-defined string; expression grammar limits the characters | The shim |
 | History key values and table names | Key values in `underlying_ref` spelling; `table` names the vendor table | The shim; `sources.toml` `table` |
@@ -68,7 +69,7 @@ registered separately:
 |---|---|---|---|---|
 | Line pricing | `geode_core::pricing::Pricer` ([`pricing.rs`](../../crates/geode-core/src/pricing.rs)) | `geode_data::PricerRegistry` | `app.toml` `[pricing] adapter` (default `mock`) | `geode_pricing::MockPricer` |
 | Vol surface evaluation | `geode_core::vol::VolModel` ([`vol.rs`](../../crates/geode-core/src/vol.rs)) | `geode_data::VolModelRegistry` | `app.toml` `[vol] model` (default `demo`) | `geode_pricing::DemoVolModel` |
-| Document wire format | `geode_core::document::DocumentKind` ([`document.rs`](../../crates/geode-core/src/document.rs)) | `geode_data::documents::DocumentRegistry`, filled from `geode_documents::builtin_kinds()` | `sources.toml` `document`, `panels.toml` | `CviKind`, `DividendKind`, `OptionChainKind` (real code, guessed tags) |
+| Document wire format | `geode_core::document::DocumentKind` ([`document.rs`](../../crates/geode-core/src/document.rs)) | `geode_data::documents::DocumentRegistry`, filled from `geode_documents::builtin_kinds()` | `sources.toml` `document`, `panels.toml` | `CviKind`, `DividendKind`, `OptionChainKind`, `RateCurveKind` (real code, guessed tags) |
 
 Registration is split by what a headless process needs.
 [`geode_compose::adapters`](../../crates/geode-compose/src/lib.rs) builds the

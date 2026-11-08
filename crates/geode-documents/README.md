@@ -15,6 +15,7 @@ Current behavior and rationale:
 | `cvi` | `CviKind`: the CVI parameter document (`marketData/underlying`, `cviParams/anchorDate`, `spotRef`, `nodes/node*`, `slices/slice*` with a `term`, one `forward`/`atm`/`skew` per slice and one `param` per node). |
 | `dividend` | `DividendKind`: currency, schedule date, and dividend rows carrying ex date, announced date, pay date, amount, and status. `mint_ids` derives row labels from ex date and same-date order; ids are not carried on the wire. |
 | `chain` | `OptionChainKind`: one expiry's option chain, keyed `underlying_ref, expiry` (`marketData/underlying`, `optionChain/expiry`), with `forward`, `spotRef` and `quoteTime` attributes and one `quote` per strike carrying bid, ask and mid vols and bid and ask prices. |
+| `rate_curve` | `RateCurveKind`: one rate curve (a repo, box or funding series) keyed `underlying_ref, series` (`rateCurve/underlying`, `rateCurve/series`), with a `publishedTime` attribute and one `point` per tenor carrying `tenor` and `value` as XML attributes. |
 
 The parsers walk `quick_xml` events and return columnar `DocumentRows`.
 They report ragged CVI slices with both counts and collect paths for skipped
@@ -56,6 +57,14 @@ cargo bench -p geode-documents     # document parse and write
   `YYYY-MM-DD`, a blank or padded underlying, a non-RFC 3339 quote time, no
   rows), so it emits only what the parser could have produced. `TAGS` in `src/chain.rs` pairs the quote's wire
   tags with column names; they are unverified against any desk XSD.
+- Rate-curve points are sorted by tenor at parse, and a repeated tenor is
+  refused naming it, so a curve's tenors are always strictly ascending. A
+  value is any finite number (a rate may be negative). `publishedTime` must
+  be an RFC 3339 time and is stored as its wire text. The writer refuses
+  anything the parser would never produce (tenors not strictly ascending, a
+  non-finite tenor or value, a blank or padded underlying or series, a
+  non-RFC 3339 published time, no rows). The root, child and attribute
+  names in `src/rate_curve.rs` are unverified against any desk XSD.
 - `dividend::STATUSES` is the closed status vocabulary the dividend kind
   parses and writes. The builtin dividend panel's `status` `choices`
   (`geode-marketdata`'s `core/builtin_panels.toml`) must list the same

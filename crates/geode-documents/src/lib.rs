@@ -5,10 +5,12 @@
 pub mod chain;
 pub mod cvi;
 pub mod dividend;
+pub mod rate_curve;
 
 pub use chain::OptionChainKind;
 pub use cvi::CviKind;
 pub use dividend::DividendKind;
+pub use rate_curve::RateCurveKind;
 
 use geode_core::document::DocumentKind;
 use std::sync::Arc;
@@ -22,5 +24,6 @@ pub fn builtin_kinds() -> Vec<Arc<dyn DocumentKind>> {
         Arc::new(CviKind),
         Arc::new(DividendKind),
         Arc::new(OptionChainKind),
+        Arc::new(RateCurveKind),
     ]
 }

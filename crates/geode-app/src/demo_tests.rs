@@ -349,6 +349,11 @@ mod demo_config_integration {
             setup.config.schema.dataset("option_chain").unwrap(),
         )
         .unwrap();
+        geode_core::document::check_kind_against(
+            &geode_documents::RateCurveKind,
+            setup.config.schema.dataset("rate_curve").unwrap(),
+        )
+        .unwrap();
     }
 
     /// The vol watchlist's demo member: `europe_risk` lists `EU50X`, which

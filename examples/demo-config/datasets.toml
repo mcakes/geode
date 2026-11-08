@@ -955,6 +955,32 @@ role = "attribute"
 type = "utf8"
 role = "attribute"                # RFC 3339 text: document columns cannot be timestamps
 
+# ---- Rate curves. ----
+# One document per (underlying, series): a rasterized repo or box curve the
+# calibration pipeline publishes, or a funding curve it reads, as one
+# `value` per `tenor` (in years). Nothing produces one yet.
+[rate_curve]
+family = "document"
+key = ["underlying_ref", "series"]
+axes = ["tenor"]
+
+[rate_curve.columns.underlying_ref]
+type = "utf8"
+role = "dimension"
+textual = true
+[rate_curve.columns.series]
+type = "utf8"
+role = "dimension"
+[rate_curve.columns.tenor]
+type = "f64"
+role = "axis"
+[rate_curve.columns.value]
+type = "f64"
+role = "value"
+[rate_curve.columns.published_time]
+type = "utf8"
+role = "attribute"                # RFC 3339 text: document columns cannot be timestamps
+
 # Series fetch sources share this cache, keyed by identity and source.
 # The series family defines the columns.
 [series]

@@ -18227,6 +18227,18 @@ run_mutation "vol chain kind: a duplicate strike is refused" \
   '    if let Some(w) = rows.windows(2).find(|_| false) {' \
   geode-documents a_duplicate_strike_is_refused_naming_it
 
+run_mutation "rate_curve: points are sorted by tenor" \
+  crates/geode-documents/src/rate_curve.rs \
+  '    rows.sort_by(|a, b| a.0.total_cmp(&b.0));' \
+  '    rows.sort_by(|a, b| b.0.total_cmp(&a.0));' \
+  geode-documents points_are_sorted_by_tenor_and_a_repeated_tenor_is_refused
+
+run_mutation "rate_curve: a repeated tenor is refused" \
+  crates/geode-documents/src/rate_curve.rs \
+  '    if let Some(w) = rows.windows(2).find(|w| w[0].0 == w[1].0) {' \
+  '    if let Some(w) = rows.windows(2).find(|_| false) {' \
+  geode-documents points_are_sorted_by_tenor_and_a_repeated_tenor_is_refused
+
 run_mutation "vol chain kind: a negative vol or price is refused at parse" \
   crates/geode-documents/src/chain.rs \
   '    if v < 0.0 {
