@@ -17926,6 +17926,25 @@ run_mutation "service: cancel does not reach the pricing worker" \
   '' \
   geode-data a_price_request_reaches_the_sink_as_a_price_event_and_cancel_reaches_the_worker
 
+# ---- Demo calibrator ----
+
+# Evaluate is a read of the state: a draft the user drags must not become
+# the filter's prior for the next run.
+run_mutation "demo calibrator: evaluate must not write state" \
+  crates/geode-pricing/src/demo_calibration.rs \
+  '                let fit = fit_from(series_name, knots, params, &tenors, &ys, 0.0);' \
+  '                state.filters.insert(key(&stage.name), Filter::new(params.to_vec(), INITIAL_VARIANCE));
+                let fit = fit_from(series_name, knots, params, &tenors, &ys, 0.0);' \
+  geode-pricing \
+  evaluate_returns_a_fit_for_the_given_params_and_leaves_state_unchanged
+
+run_mutation "demo calibrator: a held publish refuses" \
+  crates/geode-pricing/src/demo_calibration.rs \
+  '    if let Some(reason) = record.publish_held.as_ref() {' \
+  '    if let Some(reason) = record.publish_held.as_ref().filter(|_| false) {' \
+  geode-pricing \
+  publish_is_refused_while_the_publish_stage_is_held
+
 # ---- Vol slice door: demo model, worker and routing ----
 
 run_mutation "vol: outside the terms the end smile holds flat in vol" \

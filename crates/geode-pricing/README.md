@@ -1,9 +1,9 @@
 # geode-pricing
 
-Implementations of `geode_core::pricing::Pricer` and
-`geode_core::vol::VolModel`. This is a calculation leaf: it depends on shared
-vocabulary and is reached through requests rather than a direct call from a UI
-module.
+Implementations of `geode_core::pricing::Pricer`, `geode_core::vol::VolModel`
+and `geode_core::calibration::Calibrator`. This is a calculation leaf: it
+depends on shared vocabulary and is reached through requests rather than a
+direct call from a UI module.
 
 Current behavior and rationale:
 [`docs/current/features.md`](../../docs/current/features.md#pricing-and-the-line-pricer).
@@ -51,6 +51,31 @@ single-precision CDF would show as noise on a fine grid.
 Any other `VolModel` implementation registered by `geode-app` in
 `geode-data`'s `VolModelRegistry` is selected by name through `[vol] model`.
 
+## Calibrators
+
+`DemoForwardCalibrator` (`DEMO_CALIBRATOR`, `"demo"`) implements
+`geode_core::calibration::Calibrator` over a `calibration.toml` pipeline. It
+is a stand-in with the real engine's shape and demo arithmetic, documented
+stage by stage at the top of `demo_calibration.rs`: `parity_fit` takes each
+expiry's forward from the chain's `forward` attribute moved by a residual
+scaled from the bid-ask widths inside the strike window (the demo chain has
+no call/put split to regress), drops an expiry with fewer than `min_strikes`
+strikes in the window and names it in the summary; `implied_rates` derives
+`repo` and `box` from the forward, `spot_ref`, the dividend amounts and the
+funding curve; `kalman_fit` is a real linear Kalman update of the knot values
+(`demo_calibration/kalman.rs`), started by least squares on the first run;
+`rasterize` reads the fit on the 60-tenor `monthly_to_5y` grid; `publish`
+answers one `rate_curve` document per series. A `Run` from a middle stage, an
+`Evaluate` and a `Publish` read the last payload of every stage upstream of
+what they run; `Evaluate` writes nothing. Filter state and those payloads
+live in memory behind one mutex, keyed by pipeline, underlying and stage, and
+are lost on restart. So the held publish is reachable on demo data, the
+`monotone_df` check reports one forced violation at the second tenor on runs
+7 and 8 of every 14 for an underlying (`FORCED_VIOLATION_RUNS` and
+`FORCED_VIOLATION_CYCLE`), and `Publish` is refused while the last run's
+publish stage is held. Nothing is seeded from the clock; the same request
+sequence on a fresh engine answers the same numbers.
+
 ## Commands
 
 ```sh
@@ -64,5 +89,7 @@ cargo test -p geode-pricing
 - Invalid overrides are refused before pricing any line.
 - A result is in the requested currency or the line is refused; the mock
   never substitutes another currency.
+- The demo calibrator's `Evaluate` never writes filter state, and a `Publish`
+  is refused while the last run's publish stage is held.
 - The implementation has no dependency on the shell, data service, or a
   feature module.

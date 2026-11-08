@@ -1,18 +1,21 @@
-//! Implementations of `geode_core::pricing::Pricer`, and the stand-in
-//! `geode_core::vol::VolModel`.
+//! Implementations of `geode_core::pricing::Pricer`, and the stand-ins for
+//! `geode_core::vol::VolModel` and `geode_core::calibration::Calibrator`.
 //!
 //! This calculation leaf depends on `geode-core` and exposes implementations
-//! through its `Pricer` and `VolModel` traits. [`MockPricer`] supplies
-//! deterministic demo and test results; [`DemoVolModel`] is the smooth
-//! stand-in vol-surface evaluator `[vol] model = "demo"` selects. `geode-app`
-//! registers them in `geode-data`'s `PricerRegistry` and `VolModelRegistry`,
-//! respectively. An unknown `[pricing] adapter` produces per-line errors
+//! through its `Pricer`, `VolModel` and `Calibrator` traits. [`MockPricer`]
+//! supplies deterministic demo and test results; [`DemoVolModel`] is the
+//! smooth stand-in vol-surface evaluator `[vol] model = "demo"` selects;
+//! [`DemoForwardCalibrator`] runs a calibration pipeline with demo
+//! arithmetic and in-memory filter state. `geode-app` registers them in
+//! `geode-data`'s registries. An unknown `[pricing] adapter` produces per-line errors
 //! without preventing startup; an unknown vol model refuses each vol batch.
 
 pub mod black;
+pub mod demo_calibration;
 pub mod demo_vol;
 pub mod spline;
 
+pub use demo_calibration::{DEMO_CALIBRATOR, DemoForwardCalibrator};
 pub use demo_vol::{DEMO_VOL_MODEL, DemoVolModel};
 
 use geode_core::pricing::{
