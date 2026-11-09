@@ -374,15 +374,19 @@ key context does not opt into counts, so a bare digit is nothing), `/`
 filters stages (beating the shell's find inside the tile), `r`/`shift+r`
 run from the cursor or the whole pipeline, `p` publishes through the y/n
 bar, `c`/`x` connect and disconnect an input through a picker list under
-the cursor's card, `a` adds a stage (a kind list, then a name field) and
-`d` deletes one through the y/n bar, `shift+l` relays out the graph and
-`.` opens the action menu (the header's `⋯` opens the same one). `enter`
-is bound to the shell's own `config::calibration`, which the shell
-resolves before the tile sees the key: over a cursor on a stage of a
+the cursor's card (every edit is read by the document's reader before it
+is written, so `x` strikes only an input whose loss still reads — a
+variadic or gate input — and `d`, through the y/n bar, deletes only a stage
+of the user's own whose readers keep their required ports; a required
+input is changed in the dialog, which `enter` opens), `a` proposes a new
+stage (a kind list, then a name field) to the dialog, `shift+l` relays out
+the graph and `.` opens the action menu (the header's `⋯` opens the same
+one). `enter` is bound to the shell's own `config::calibration`, which the
+shell resolves before the tile sees the key: over a cursor on a stage of a
 valid pipeline (`config_object`) it opens the Calibration stages dialog at
 that stage's Edit screen, else on Browse (the menu's `Open stage` asks for
-the same action through `Frame::request_action`, as the add flow does for
-the stage it just queued). Under `mode == insert` (the filter field and
+the same action through `Frame::request_action`, as `a` does for the
+seeded stage it proposes). Under `mode == insert` (the filter field and
 the add picker's name field; an armed y/n bar reports `insert` too, its
 prompt holding the keyboard as a field does) it binds `enter`, `escape`
 and `up`/`down` (`calibration::list_down`/`list_up`); under `mode == menu`

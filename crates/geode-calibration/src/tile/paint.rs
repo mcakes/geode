@@ -60,6 +60,7 @@ const NORMAL_HINTS: &[(&[(&str, &str)], &str)] = &[
     (&[("calibration::run_all", "shift+r")], "run all"),
     (&[("calibration::publish", "p")], "publish"),
     (&[("calibration::connect", "c")], "connect"),
+    (&[("calibration::disconnect", "x")], "disconnect"),
     (&[("calibration::add", "a")], "add"),
     (&[("calibration::delete", "d")], "delete"),
     (&[("calibration::menu", ".")], "menu"),

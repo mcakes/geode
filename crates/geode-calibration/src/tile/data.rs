@@ -661,6 +661,12 @@ impl CalibrationTile {
         // The shell's answers to the edits this tile queued, posted on the
         // frame and announced by this notification.
         self.take_edit_notices(cx);
+        // A proposed new stage was read by the shell's observer, which runs
+        // before this one (registration order) and dispatched the request
+        // this notification carried; the proposal is served.
+        if self.pending_add.take().is_some() {
+            cx.notify();
+        }
         if self.underlying_str(cx).map(str::to_string) != self.header.underlying {
             self.refresh(cx);
             cx.notify();

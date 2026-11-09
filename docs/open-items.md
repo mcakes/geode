@@ -1203,6 +1203,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 
 ### Open work
 
+- Hiding an inherited stage needs a tombstone in the config path: a
+  whole-object `None` removes the user layer's copy and nothing below it, so
+  neither the Calibration stages dialog nor the tile's `d` can delete a
+  builtin or desk stage today; both refuse (`{stage} comes from the {layer}
+  layer — there is nothing of yours to delete`).
 - The demo calibration engine keeps its filter state (the forward filters the
   user and background lanes advance, one per pipeline and key) in process
   memory only; a restart begins every filter afresh from the next publish. The

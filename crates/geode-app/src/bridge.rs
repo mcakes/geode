@@ -244,11 +244,19 @@ pub fn calibration_config(
     egress: &[EgressSpec],
 ) -> CalibrationConfig {
     let doc = config.doc(geode_core::calibration::CALIBRATION_DOC);
-    // The stage tables ride along whole: a tile's graph edit rewrites a
-    // stage as one object, and the tile reads no `Config` itself.
+    // The stage tables ride along whole, with the pipelines table and the
+    // layer each inherited stage comes from: a tile's graph edit rewrites
+    // a stage as one object and reads the proposed document before it
+    // writes, and the tile reads no `Config` itself.
     let sources = doc
         .map(geode_calibration::content::stage_tables)
         .unwrap_or_default();
+    let pipelines_table = doc
+        .map(geode_calibration::content::pipelines_table)
+        .unwrap_or_default();
+    let inherited = geode_calibration::content::inherited_stages(
+        config.layered_docs(geode_core::calibration::CALIBRATION_DOC),
+    );
     let (pipelines, diagnostics) = match doc {
         Some(doc) => {
             let (pipelines, mut diagnostics) = geode_core::calibration::from_doc(doc);
@@ -285,6 +293,8 @@ pub fn calibration_config(
         ),
         diagnostics: Arc::new(diagnostics),
         sources: Arc::new(sources),
+        pipelines_table: Arc::new(pipelines_table),
+        inherited: Arc::new(inherited),
     }
 }
 
@@ -8851,9 +8861,13 @@ h = 480.0
             "{:?}",
             config.egress
         );
-        // Every stage's merged table rides along, for the tile's edits.
+        // Every stage's merged table rides along, for the tile's edits,
+        // with the pipelines table and the layer each stage comes from.
         assert_eq!(config.sources.len(), 11, "{:?}", config.sources.keys());
         assert_eq!(config.sources["publish"]["target"].as_str(), Some("sophis"));
+        assert!(config.pipelines_table.contains_key("implied_forwards"));
+        assert_eq!(config.inherited.len(), 11, "every builtin stage");
+        assert_eq!(config.inherited.get("publish"), Some(&Layer::Builtin));
         bridge.handle.shutdown();
     }
 
@@ -8941,6 +8955,19 @@ h = 480.0
         // a name the document holds is taken whether or not it was read.
         assert_eq!(config.sources.len(), 13, "{:?}", config.sources.keys());
         assert_eq!(config.sources["nope"]["dataset"].as_str(), Some("nope"));
+        // The user's own stages are nobody's to inherit from; the builtin's
+        // eleven are.
+        assert_eq!(config.inherited.len(), 11, "{:?}", config.inherited);
+        assert_eq!(config.inherited.get("chain2"), None);
+        assert_eq!(config.inherited.get("chain"), Some(&Layer::Builtin));
+        assert_eq!(
+            config
+                .pipelines_table
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["implied_forwards", "second", "third"]
+        );
     }
 
     /// A reload of a config without a `views` document still reaches the

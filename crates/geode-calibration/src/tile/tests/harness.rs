@@ -14,23 +14,21 @@ use geode_core::config::{LayerDoc, merge_docs};
 use geode_core::egress_config::EgressSpec;
 use geode_core::groupings::GroupingSlots;
 use geode_core::log::LogLevels;
-use geode_core::schema::SchemaSpec;
 use geode_core::scopes::SavedScopes;
 use geode_data::{DataHandle, Request};
 use geode_shell::actions::{ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::{ConfigEdit, Frame, FrameRef, TileNotice};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
-use geode_shell::module::{Delivery, ModuleFactory, ModuleRoster, TileContent};
+use geode_shell::module::{ConfigObject, Delivery, ModuleFactory, ModuleRoster, TileContent};
 use geode_shell::tiling::{TileId, WorkspaceIx};
 use gpui::{AppContext as _, Entity, Window};
 
-use crate::content::{CalibrationConfig, CalibrationFactory, stage_tables};
+use crate::content::{
+    CalibrationConfig, CalibrationFactory, inherited_stages, pipelines_table, stage_tables,
+};
+pub(super) use crate::core::testing::demo_schema;
 use crate::tile::CalibrationTile;
-
-/// The demo schema: the datasets the builtin pipeline's sources read and
-/// its publish stage writes are document datasets here.
-const DEMO_DATASETS: &str = include_str!("../../../../../examples/demo-config/datasets.toml");
 
 /// What the shell root is to a tile for keys: a focused ancestor whose
 /// listener matches each keystroke against the app's keymap under the
@@ -128,6 +126,11 @@ pub(super) struct Harness {
     pub frame: Entity<Frame>,
     pub diagnostics: Entity<Diagnostics>,
     dispatched: Rc<RefCell<Vec<String>>>,
+    /// Every seeded `config_object` the tile answered on a frame change,
+    /// read by an observer registered before the tile's own (as the
+    /// shell's is), so it sees what the shell would when it dispatches a
+    /// requested action in its frame observer.
+    seeded: Rc<RefCell<Vec<ConfigObject>>>,
 }
 
 struct Built {
@@ -136,17 +139,6 @@ struct Built {
     shell_focus: gpui::FocusHandle,
     frame: Entity<Frame>,
     diagnostics: Entity<Diagnostics>,
-}
-
-/// The demo schema, read as the app reads `datasets.toml`.
-pub(super) fn demo_schema() -> Arc<SchemaSpec> {
-    let doc = merge_docs(
-        "datasets",
-        &[LayerDoc::builtin("datasets", DEMO_DATASETS).expect("well-formed TOML")],
-    );
-    let (schema, diags) = SchemaSpec::from_doc(&doc);
-    assert!(diags.is_empty(), "{diags:?}");
-    Arc::new(schema)
 }
 
 /// The demo `sophis` target, accepting the rate curve the builtin pipeline
@@ -163,12 +155,28 @@ fn demo_egress() -> Vec<EgressSpec> {
 }
 
 /// `text` read and checked as the bridge reads a calibration document,
-/// against the demo schema and target.
+/// against the demo schema and target: one builtin layer.
 pub(super) fn config_from(text: &str) -> CalibrationConfig {
-    let doc = merge_docs(
-        CALIBRATION_DOC,
-        &[LayerDoc::builtin(CALIBRATION_DOC, text).expect("well-formed TOML")],
-    );
+    config_from_layers(&[LayerDoc::builtin(CALIBRATION_DOC, text).expect("well-formed TOML")])
+}
+
+/// The builtin document under a user layer `user`: what a trader's own
+/// `calibration.toml` adds, read as the bridge reads the merged layers.
+pub(super) fn config_with_user(user: &str) -> CalibrationConfig {
+    config_from_layers(&[
+        LayerDoc::builtin(CALIBRATION_DOC, BUILTIN_CALIBRATION).expect("well-formed TOML"),
+        LayerDoc {
+            layer: geode_core::config::Layer::User,
+            name: CALIBRATION_DOC.to_string(),
+            file: std::path::PathBuf::from("calibration.toml"),
+            table: toml::from_str(user).expect("well-formed TOML"),
+        },
+    ])
+}
+
+/// `layers` merged and read as the bridge's `calibration_config` reads them.
+fn config_from_layers(layers: &[LayerDoc]) -> CalibrationConfig {
+    let doc = merge_docs(CALIBRATION_DOC, layers);
     let (pipelines, mut diags) = from_doc(&doc);
     let schema = demo_schema();
     let egress = demo_egress();
@@ -185,6 +193,8 @@ pub(super) fn config_from(text: &str) -> CalibrationConfig {
         ),
         diagnostics: Arc::new(diags),
         sources: Arc::new(stage_tables(&doc)),
+        pipelines_table: Arc::new(pipelines_table(&doc)),
+        inherited: Arc::new(inherited_stages(layers)),
     }
 }
 
@@ -277,14 +287,34 @@ pub(super) fn open_with(
     });
     let slot: Rc<RefCell<Option<Built>>> = Rc::new(RefCell::new(None));
     let dispatched: Rc<RefCell<Vec<String>>> = Rc::default();
+    let seeded: Rc<RefCell<Vec<ConfigObject>>> = Rc::default();
+    let content_slot: Rc<RefCell<Option<Rc<dyn TileContent>>>> = Rc::default();
     let window = cx
         .update(|cx| {
             let slot = slot.clone();
             let factory = factory.clone();
             let dispatched = dispatched.clone();
+            let seeded = seeded.clone();
+            let content_slot = content_slot.clone();
             cx.open_window(gpui::WindowOptions::default(), |window, cx| {
                 let frame =
                     cx.new(|_| Frame::new(GroupingSlots::default(), SavedScopes::new(), None));
+                // The shell observes the frame before any tile does and
+                // dispatches a requested action there; this observer stands
+                // in its place and records what `config_object` answered.
+                cx.observe(&frame, {
+                    let seeded = seeded.clone();
+                    let content_slot = content_slot.clone();
+                    move |_, cx| {
+                        if let Some(content) = content_slot.borrow().as_ref()
+                            && let Some(object) = content.config_object(cx)
+                            && object.seed.is_some()
+                        {
+                            seeded.borrow_mut().push(object);
+                        }
+                    }
+                })
+                .detach();
                 let diagnostics = cx.new(|_| Diagnostics::new(LogLevels::default()));
                 let occupant = factory.create(
                     TileId(Harness::TILE),
@@ -297,6 +327,7 @@ pub(super) fn open_with(
                 assert_eq!(occupant.kind, crate::KIND);
                 let tile = occupant.view.clone().downcast::<CalibrationTile>().unwrap();
                 let content: Rc<dyn TileContent> = occupant.content.into();
+                *content_slot.borrow_mut() = Some(content.clone());
                 // The shell announces initial visibility right after create.
                 content.set_visible(true, cx);
                 let shell_focus = cx.focus_handle();
@@ -336,6 +367,7 @@ pub(super) fn open_with(
             frame: built.frame,
             diagnostics: built.diagnostics,
             dispatched,
+            seeded,
         },
         vcx,
     )
@@ -450,6 +482,12 @@ impl Harness {
     /// drained from the frame as the shell's observer drains them.
     pub(super) fn config_edits(&self, vcx: &mut gpui::VisualTestContext) -> Vec<ConfigEdit> {
         vcx.update(|_, cx| self.frame.update(cx, |f, _| f.take_pending_config_edits()))
+    }
+
+    /// The seeded configuration objects the tile answered on frame changes
+    /// so far, as the shell's frame observer would have read them.
+    pub(super) fn seeded_objects(&self) -> Vec<ConfigObject> {
+        self.seeded.borrow().clone()
     }
 
     /// What the shell tells the tile of an edit it drained: posted on the

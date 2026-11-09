@@ -58,11 +58,14 @@ model, menu rows and edits under `core/`.
   (the stage's table with `inputs` extended at the port or struck),
   `delete_edits` (`None` for the stage, then each consumer's table without
   it, in document order, with the count of edges into those consumers),
-  `add_edit` (`pipeline`, `kind` and the kind's required fields at the
-  builtin document's values, no `inputs`), `valid_new_name` (`[a-z0-9_]+`,
-  not `request`, not a name the document holds in any pipeline, since the
-  writer would replace that stage's table) and `KINDS` (the add picker's
-  rows, the reader's kind words in its order).
+  `add_table` and `add_edit` (`pipeline`, `kind` and the kind's required
+  fields at the builtin document's values, no `inputs`), `valid_new_name`
+  (`[a-z0-9_]+`, not `request`, not a name the document holds in any
+  pipeline, since the writer would replace that stage's table), `KINDS`
+  (the add picker's rows, the reader's kind words in its order) and
+  `would_read` (the reader's verdict on a batch before it is written: the
+  first diagnostic naming the pipeline or one of its stages when the
+  pipeline would be dropped).
 - `commands.rs`: the `:` line's vocabulary as data: `run [stage]`,
   `publish`, `pipeline <name>`, `layout`, with the usage line each
   refuses with, and `completions` (the verbs; stage names after `run`,
@@ -70,9 +73,13 @@ model, menu rows and edits under `core/`.
 - `content.rs`: `CalibrationConfig` (what the app pushes: the pipelines
   `from_doc` accepted and `check_against` kept, the schema the service
   serves, the egress targets with the documents each accepts, every
-  finding of both reads, and `sources`, every stage's merged table by
-  name, read or refused, which the edits rewrite whole; `stage_tables`
-  reads them off a merged document for the bridge and the tests alike),
+  finding of both reads, `sources`, every stage's merged table by name,
+  read or refused, which the edits rewrite whole, `pipelines_table`, the
+  merged `pipelines` table the pre-write read needs, and `inherited`, the
+  winning non-user layer per stage a lower layer defines, which a delete
+  refuses; `stage_tables`, `pipelines_table` and `inherited_stages` read
+  them off the merged document and its layers for the bridge and the
+  tests alike),
   `CalibrationFactory` (kind `calibration`, title
   `Calibration`, accepts `underlying_ref`, launch table `{ underlying =
   "<u>" }`, `set_config` to store a config and tell every live tile), the
@@ -162,9 +169,9 @@ Every action is bound in the fragment.
 | `r`, `shift+r` | Run from the cursor's stage (`Run { from: Some(cursor) }`), run the whole pipeline; over the documents in hand, under the next run tag |
 | `p` | Publish: asks `Publish {series} for {underlying} to {target}? y/n` on the bar; `y` sends `Publish { from: Filter }` on the user lane |
 | `c` | Connect: a list under the cursor's card of the stages that may feed it (`Connect {stage} from`; each row `{name}  {kind}`), the highlighted one previewed as a dashed edge into the stage; `enter` queues the stage's table with the pick added to `inputs`; refused `{stage} has no open input` when its ports are all taken, `nothing left to connect to {stage}` when nothing fits |
-| `x` | Disconnect: a list of the cursor's stage's inputs in port order (`Disconnect from {stage}`); `enter` queues the table without the pick; refused `{stage} has no inputs to disconnect` |
-| `a` | Add: a list of the kinds (`Add stage`, each with a line about it); a pick opens the name field (`Name the {kind}`, placeholder `stage name`); `enter` validates the name (`stage names are lowercase letters, digits and _`, `{name} is already a stage`, `request is reserved for the engine's answer`, the field staying up), queues the new stage, lands the cursor on it and asks the shell for `config::calibration`, so its Edit screen opens |
-| `d` | Delete: `Delete {stage} and its {n} edges? y/n` on the bar (`Delete {stage}? y/n` with none), `n` the edges into the stages that read it; `y` queues the removal and every reader's table without it as one batch, and the cursor goes to the stage's first input, else its first consumer, else the first card |
+| `x` | Disconnect: a list of the cursor's stage's inputs in port order (`Disconnect from {stage}`); `enter` queues the table without the pick when the reader still accepts the stage — a variadic or gate input of a publish — and refuses, in the reader's words (`calibration: stage 'parity': parity_fit takes 1 inputs (chain); 0 given`), an input whose loss leaves a fixed-arity stage short, which is changed in the dialog instead; refused `{stage} has no inputs to disconnect` with none |
+| `a` | Add: a list of the kinds (`Add stage`, each with a line about it); a pick opens the name field (`Name the {kind}`, placeholder `stage name`); `enter` validates the name (`stage names are lowercase letters, digits and _`, `{name} is already a stage`, `request is reserved for the engine's answer`, the field staying up) and writes nothing: the seeded stage (`pipeline`, `kind`, the kind's required fields at the builtin's values) is proposed through `config_object` and the shell is asked for `config::calibration`, so the dialog opens at the new stage's Edit screen on a draft from the seed, where the inputs are ticked and the save is the write; the cursor stays |
+| `d` | Delete: `Delete {stage} and its {n} edges? y/n` on the bar (`Delete {stage}? y/n` with none), `n` the edges into the stages that read it; `y` queues the removal and every reader's table without it as one batch, and the cursor goes to the stage's first input, else its first consumer, else the first other card. Refused for a stage a lower layer defines (`{stage} comes from the {layer} layer — there is nothing of yours to delete`: a user-layer removal would leave it in force) and, in the reader's words, when a reader would lose a required port |
 | `.` | Action menu (also the header's `⋯`); `j`/`k` and the arrows step its enabled rows, `enter` picks, `escape` or `.` closes, a press outside closes |
 | `escape` | Answer an armed question no, else close the picker, else close the filter field, else close the menu, else dismiss the header's notices (`calibration::cancel`) |
 
@@ -256,17 +263,35 @@ it), one reload, which pushes the new config and so the new graph. The
 tile holds no draft: until the reload the graph is the old one, and a
 picker list up when the config lands closes (its rows were about the old
 pipeline; the name field stays, checked against the document at `enter`).
-A connect writes the stage's whole table from `sources` with `inputs`
-extended at the open port; a disconnect strikes the input, an emptied
-list written as `inputs = []` (a fixed-arity stage then reads short, and
-the pipeline is dropped under its finding until it is reconnected: the
-honest result, not a guessed one). A delete queues the stage's removal
-and every reader's rewrite in ONE call, so no reload can see a reader
-naming a stage that is gone. An add seeds the kind's required fields from
-the builtin document and asks the shell for `config::calibration` in the
-same pass: the shell drains the edit before the request, and the dialog
-folds the pending batch into its rows, so the Edit screen opens on the new
-stage without waiting for the reload.
+
+Every batch is read before it is written (`core::edits::would_read`: the
+document rebuilt from the config's `sources` and `pipelines_table` with
+the edits applied, read by `from_doc` and `check_against` over the
+config's schema and targets). An edit that would drop the pipeline is
+refused as a danger notice in the reader's own words and nothing is
+queued, since a written refusal would come back one reload later as a
+dropped graph the tile could no longer edit. So a connect writes the
+stage's whole table with `inputs` extended at the open port; a disconnect
+strikes only an input whose loss still reads (a publish's second raster
+or its gate), and a required input is changed in the dialog `enter`
+opens; a delete queues the stage's removal and every reader's rewrite in
+ONE call, so no reload can see a reader naming a stage that is gone, and
+only for a stage whose readers keep their required ports. A delete is also
+refused for a stage a lower layer defines (`CalibrationConfig::inherited`,
+the winning non-user layer per stage): a whole-object `None` removes the
+user layer's copy and nothing below it, so the stage would stay in force
+with its readers stripped; hiding an inherited stage needs a tombstone the
+config path does not have (`docs/open-items.md`).
+
+An add writes nothing. The name picked seeds a table (`pipeline`, `kind`,
+the kind's required fields at the builtin document's values, no `inputs`)
+held as `pending_add`, which `config_object` answers with the `seed`, and
+the tile asks the shell for `config::calibration`; the shell reads the
+proposal in its frame observer, which runs before the tile's own, and
+opens the dialog at the new stage's Edit screen on a draft from the seed
+(`render::open_new`), where the inputs are ticked and the save is the one
+write. The tile's observer then clears the proposal, so `enter` names the
+cursor's stage again.
 
 The shell answers on the frame (`TileNotice`), read on the next frame
 change: a fork is a status notice (the shell's words, `copied '{stage}' to
@@ -320,8 +345,12 @@ drops it when it closes.
   every `calibration::*` id, except `cancel` with nothing to dismiss.
 - The edits read the live pipeline and the config's `sources` alone,
   never the configuration: a held, dropped pipeline connects, adds and
-  deletes nothing (`no pipeline`), and a candidate is offered only if the
-  reader would accept the result (type, arity, no cycle).
+  deletes nothing (`no pipeline`); a candidate is offered only if the
+  reader would accept the result (type, arity, no cycle); and no batch is
+  queued the reader would refuse (`would_read` runs before every
+  `queue_edits`), so a tile edit never drops the pipeline.
+- A delete never names a stage a lower layer defines: `None` removes the
+  user layer's copy alone.
 - One popup at a time: a picker opening closes the menu and the filter
   field; the name field is blurred before it is dropped.
 - Only the latest request of each lane is listened for: a `Run` outcome

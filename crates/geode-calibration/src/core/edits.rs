@@ -11,13 +11,23 @@
 //! be an input, and must not sit downstream of the stage, since connecting
 //! a stage to one of its own descendants closes a cycle the reader would
 //! refuse, dropping the whole pipeline.
+//!
+//! Every edit is checked before it leaves (`would_read`): the reader runs
+//! over the document as the edit would leave it, and an edit that drops
+//! the pipeline (a fixed-arity stage short of an input, a reader losing a
+//! required port) is refused with the reader's own words rather than
+//! written and reported one reload later, when the tile would hold a
+//! dropped graph it could no longer edit.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use geode_core::calibration::{
-    BUILTIN_CALIBRATION, CALIBRATION_DOC, PayloadType, Pipeline, Ports, REQUEST_STAGE, Stage,
-    StageName,
+    BUILTIN_CALIBRATION, CALIBRATION_DOC, PayloadType, Pipeline, Ports, REQUEST_STAGE, StageName,
+    check_against, from_doc,
 };
+use geode_core::config::{Diagnostic, MergedDoc, Severity};
+use geode_core::egress_config::EgressSpec;
+use geode_core::schema::SchemaSpec;
 use geode_shell::frame::ConfigEdit;
 use toml::{Table, Value};
 
@@ -87,24 +97,6 @@ pub fn open_port(pipeline: &Pipeline, stage: &str) -> Option<(usize, PayloadType
     }
 }
 
-/// The gate type a variadic stage still accepts: its `gates` payload while
-/// no input of that type is present. The picker offers one gate; further
-/// gates are a dialog edit of `inputs`.
-fn gate_open(pipeline: &Pipeline, stage: &Stage) -> Option<PayloadType> {
-    let Ports::Variadic {
-        gates: Some(gate), ..
-    } = stage.kind.ports()
-    else {
-        return None;
-    };
-    let present = stage
-        .inputs
-        .iter()
-        .filter_map(|i| pipeline.stage(i))
-        .any(|s| s.kind.output() == gate);
-    (!present).then_some(gate)
-}
-
 /// Every stage that reads `stage`, directly or through others: the stages
 /// a new input of `stage` must not come from.
 fn downstream_of(pipeline: &Pipeline, stage: &str) -> BTreeSet<StageName> {
@@ -122,8 +114,9 @@ fn downstream_of(pipeline: &Pipeline, stage: &str) -> BTreeSet<StageName> {
 
 /// The stages `stage` may take as its next input, in document order, each
 /// with its output type: of the same pipeline, not the stage itself, not
-/// already an input, emitting what the open port (or an open gate slot)
-/// takes, and not downstream of the stage, which would close a cycle.
+/// already an input, emitting what the open port takes — or, for a
+/// variadic kind, its gate type, which the reader accepts any number of
+/// — and not downstream of the stage, which would close a cycle.
 pub fn connect_candidates(pipeline: &Pipeline, stage: &str) -> Vec<(StageName, PayloadType)> {
     let Some(s) = pipeline.stage(stage) else {
         return Vec::new();
@@ -131,7 +124,10 @@ pub fn connect_candidates(pipeline: &Pipeline, stage: &str) -> Vec<(StageName, P
     let Some((_, wanted)) = open_port(pipeline, stage) else {
         return Vec::new();
     };
-    let gate = gate_open(pipeline, s);
+    let gate = match s.kind.ports() {
+        Ports::Variadic { gates, .. } => gates,
+        Ports::Fixed(_) => None,
+    };
     let downstream = downstream_of(pipeline, stage);
     pipeline
         .stages
@@ -200,9 +196,11 @@ pub fn disconnect_edit(
 /// The one batch that deletes `stage`: `None` for the stage, then each
 /// consumer's table with the stage struck from its `inputs`, in document
 /// order, so no consumer is left naming a stage that is gone. The count is
-/// the edges into those consumers, the ones the batch rewrites. A consumer
-/// `sources` lacks (the document and the pipeline disagree) is left alone
-/// rather than rewritten from a guess.
+/// the edges into those consumers, the ones the batch rewrites.
+///
+/// `None` for a stage removes the user layer's copy and nothing below it,
+/// so the tile offers a delete only for a stage no lower layer defines
+/// (`CalibrationConfig::inherited`); this function does not know layers.
 pub fn delete_edits(
     pipeline: &Pipeline,
     stage: &str,
@@ -211,7 +209,18 @@ pub fn delete_edits(
     let mut edits = vec![edit(stage, None)];
     let mut edges = 0;
     for consumer in pipeline.consumers(stage) {
+        // `sources` and `pipeline` are read off ONE merged document
+        // (`content::stage_tables` and `from_doc` in the bridge's
+        // `calibration_config`), so every stage of the pipeline has a
+        // table here; a consumer without one means the config was built
+        // from two documents, and it is left alone rather than rewritten
+        // from a guess.
         let Some(source) = sources.get(&consumer.name) else {
+            debug_assert!(
+                false,
+                "{} is a stage of {} but has no table in sources",
+                consumer.name, pipeline.name
+            );
             continue;
         };
         let inputs: Vec<StageName> = consumer
@@ -228,11 +237,19 @@ pub fn delete_edits(
     (edits, edges)
 }
 
-/// A new stage `name` of `kind` (a `KINDS` word) in `pipeline`: its
-/// `pipeline` and `kind`, then the kind's required fields at the values of
-/// the builtin document's first stage of that kind, so the stage reads
-/// clean before it is connected and the Edit screen opens on real values.
+/// A new stage `name` of `kind` (a `KINDS` word) in `pipeline` as a
+/// whole-object edit: [`add_table`] under the name.
 pub fn add_edit(pipeline: &str, name: &str, kind: &str) -> ConfigEdit {
+    edit(name, Some(add_table(pipeline, kind)))
+}
+
+/// The table a new stage of `kind` in `pipeline` starts from: its
+/// `pipeline` and `kind`, then the kind's required fields at the values of
+/// the builtin document's first stage of that kind, so the Edit screen
+/// the tile's `a` opens shows the kind's rows at real values. No `inputs`:
+/// the stage is connected in the dialog, where the reader's arity check
+/// is reported on the row.
+pub fn add_table(pipeline: &str, kind: &str) -> Table {
     let mut table = Table::new();
     table.insert("pipeline".into(), Value::String(pipeline.to_string()));
     table.insert("kind".into(), Value::String(kind.to_string()));
@@ -248,7 +265,97 @@ pub fn add_edit(pipeline: &str, name: &str, kind: &str) -> ConfigEdit {
             }
         }
     }
-    edit(name, Some(table))
+    table
+}
+
+/// Whether the reader would still accept pipeline `pipeline` with `edits`
+/// applied: the document is rebuilt from `sources` (the stage tables, each
+/// edit's `Some` replacing and `None` removing its object) and
+/// `pipelines_table`, read by `from_doc` and checked by `check_against`
+/// over `schema` and the egress targets (`egress`: name → documents, as
+/// the config carries them; the check reads names alone). `Ok` when the
+/// pipeline is in the result; else the first diagnostic that names the
+/// pipeline or one of its stages — the reader's own words, which the tile
+/// shows instead of writing an edit it would have to report one reload
+/// later.
+pub fn would_read(
+    sources: &BTreeMap<StageName, Table>,
+    pipelines_table: &Table,
+    schema: &SchemaSpec,
+    egress: &[(String, Vec<String>)],
+    pipeline: &str,
+    edits: &[ConfigEdit],
+) -> Result<(), Diagnostic> {
+    let mut stages = sources.clone();
+    for e in edits {
+        match &e.value {
+            Some(Value::Table(t)) => {
+                stages.insert(e.object.clone(), t.clone());
+            }
+            Some(_) => {}
+            None => {
+                stages.remove(&e.object);
+            }
+        }
+    }
+    let mut value = Table::new();
+    value.insert("config_version".into(), Value::Integer(1));
+    value.insert("pipelines".into(), Value::Table(pipelines_table.clone()));
+    value.insert(
+        "stages".into(),
+        Value::Table(
+            stages
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::Table(v.clone())))
+                .collect(),
+        ),
+    );
+    let doc = MergedDoc {
+        value,
+        provenance: BTreeMap::new(),
+    };
+    let (pipelines, mut diags) = from_doc(&doc);
+    let specs: Vec<EgressSpec> = egress
+        .iter()
+        .map(|(name, documents)| EgressSpec {
+            name: name.clone(),
+            adapter: String::new(),
+            documents: documents
+                .iter()
+                .map(|d| (d.clone(), String::new()))
+                .collect(),
+        })
+        .collect();
+    let (pipelines, d) = check_against(pipelines, schema, &specs);
+    diags.extend(d);
+    if pipelines.pipelines.iter().any(|p| p.name == pipeline) {
+        return Ok(());
+    }
+    let of_pipeline = |path: &str| {
+        let own = format!("pipelines.{pipeline}");
+        if path == own || path.starts_with(&format!("{own}.")) {
+            return true;
+        }
+        path.strip_prefix("stages.")
+            .map(|rest| rest.split('.').next().unwrap_or(rest))
+            .is_some_and(|stage| {
+                stages
+                    .get(stage)
+                    .and_then(|t| t.get("pipeline"))
+                    .and_then(Value::as_str)
+                    == Some(pipeline)
+            })
+    };
+    Err(diags
+        .into_iter()
+        .find(|d| d.path.as_deref().is_some_and(of_pipeline))
+        .unwrap_or_else(|| Diagnostic {
+            severity: Severity::Error,
+            layer: None,
+            file: None,
+            message: format!("calibration: pipeline '{pipeline}' would not read"),
+            path: Some(format!("pipelines.{pipeline}")),
+        }))
 }
 
 /// The builtin document's first stage table of `kind`, in document order.
@@ -287,7 +394,7 @@ pub fn valid_new_name(taken: &BTreeMap<StageName, Table>, name: &str) -> Result<
 mod tests {
     use super::*;
     use crate::core::testing::{builtin_pipeline, builtin_sources};
-    use geode_core::calibration::StageKind;
+    use geode_core::calibration::{Stage, StageKind};
 
     fn set_inputs(pipeline: &mut Pipeline, stage: &str, inputs: &[&str]) {
         let s = pipeline
@@ -312,13 +419,13 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// `repo_fit`'s one port is filled: nothing is offered. `publish` with
-    /// a gate present is offered the missing raster and nothing of `Check`
-    /// type, even with a second check in the pipeline; without a gate, the
-    /// checks are offered too. A fresh `kalman_fit` is offered the term
-    /// points, not a raster or a source. A stage downstream of the cursor's
-    /// is never offered: with `implied_rates` reading `ir2`, `ir2` may take
-    /// `parity` but not `implied_rates`.
+    /// `repo_fit`'s one port is filled: nothing is offered. `publish` is
+    /// offered the rasters and the checks it does not read yet, document
+    /// order — a gate already present excludes only itself, since the
+    /// reader takes any number of gates. A fresh `kalman_fit` is offered
+    /// the term points, not a raster or a source. A stage downstream of the
+    /// cursor's is never offered: with `implied_rates` reading `ir2`, `ir2`
+    /// may take `parity` but not `implied_rates`.
     #[test]
     fn connect_candidates_exclude_cycles_type_mismatches_and_existing_inputs() {
         let mut p = builtin_pipeline();
@@ -337,14 +444,17 @@ mod tests {
         assert_eq!(open_port(&p, "publish"), Some((2, PayloadType::Raster)));
         assert_eq!(
             connect_candidates(&p, "publish"),
-            [("box_curve".to_string(), PayloadType::Raster)],
-            "a gate is present: rasters only"
+            [
+                ("box_curve".to_string(), PayloadType::Raster),
+                ("df2".to_string(), PayloadType::Check),
+            ],
+            "the missing raster and the second gate; df_monotone is an input already"
         );
         set_inputs(&mut p, "publish", &["repo_curve"]);
         assert_eq!(
             names(&connect_candidates(&p, "publish")),
             ["df_monotone", "box_curve", "df2"],
-            "no gate yet: the checks are offered beside the raster, document order"
+            "document order"
         );
 
         let mut p = builtin_pipeline();
@@ -467,6 +577,11 @@ mod tests {
     fn add_edit_seeds_the_kinds_required_fields_and_new_names_are_validated() {
         let edit = add_edit("implied_forwards", "fit2", "kalman_fit");
         assert_eq!(edit.object, "fit2");
+        assert_eq!(
+            edit.value.as_ref().and_then(Value::as_table),
+            Some(&add_table("implied_forwards", "kalman_fit")),
+            "the edit wraps the seed table"
+        );
         let table = edit.value.as_ref().unwrap().as_table().unwrap();
         let mut keys: Vec<&str> = table.keys().map(String::as_str).collect();
         keys.sort_unstable();
@@ -520,5 +635,93 @@ mod tests {
             valid_new_name(&taken, REQUEST_STAGE),
             Err("request is reserved for the engine's answer".to_string())
         );
+    }
+
+    /// The reader's verdict on an edit before it is written: striking
+    /// `parity`'s only input leaves it short of its one port (refused with
+    /// the reader's arity message at `stages.parity.inputs`); striking the
+    /// publish's gate still reads; deleting `implied_rates` strips both
+    /// fits to no input (refused at the first fit); deleting a stage nothing
+    /// reads is fine; a source over a dataset the schema lacks is the
+    /// check's refusal; and a stage of another pipeline going wrong is not
+    /// this pipeline's problem.
+    #[test]
+    fn would_read_refuses_an_edit_that_drops_the_pipeline() {
+        let p = builtin_pipeline();
+        let sources = builtin_sources();
+        let schema = crate::core::testing::demo_schema();
+        let egress = vec![("sophis".to_string(), vec!["rate_curve".to_string()])];
+        let check = |edits: &[ConfigEdit]| {
+            would_read(
+                &sources,
+                &builtin_pipelines_table(),
+                &schema,
+                &egress,
+                "implied_forwards",
+                edits,
+            )
+        };
+        assert_eq!(check(&[]), Ok(()));
+
+        let short = disconnect_edit(&p, "parity", "chain", &sources["parity"]).unwrap();
+        let refused = check(&[short]).unwrap_err();
+        assert_eq!(refused.path.as_deref(), Some("stages.parity.inputs"));
+        assert_eq!(
+            refused.message,
+            "calibration: stage 'parity': parity_fit takes 1 inputs (chain); 0 given"
+        );
+
+        let ungated = disconnect_edit(&p, "publish", "df_monotone", &sources["publish"]).unwrap();
+        assert_eq!(check(&[ungated]), Ok(()), "a gate is optional");
+
+        let (cascade, _) = delete_edits(&p, "implied_rates", &sources);
+        let refused = check(&cascade).unwrap_err();
+        // The reader walks the stages table by name: box_fit before repo_fit.
+        assert_eq!(refused.path.as_deref(), Some("stages.box_fit.inputs"));
+        assert_eq!(
+            refused.message,
+            "calibration: stage 'box_fit': kalman_fit takes 1 inputs (points); 0 given"
+        );
+
+        let (leaf, _) = delete_edits(&p, "publish", &sources);
+        assert_eq!(check(&leaf), Ok(()));
+
+        // A source over a dataset the schema lacks (still a Curve, so the
+        // types read): the schema check's refusal.
+        let mut bad = sources["rates"].clone();
+        bad.insert("dataset".into(), Value::String("nope".into()));
+        let refused = check(&[edit("rates", Some(bad))]).unwrap_err();
+        assert_eq!(refused.path.as_deref(), Some("stages.rates.dataset"));
+        assert!(
+            refused
+                .message
+                .contains("which the schema does not declare"),
+            "{}",
+            refused.message
+        );
+
+        // Another pipeline's stage, broken: not this pipeline's problem.
+        let mut other = Table::new();
+        other.insert("pipeline".into(), Value::String("other".into()));
+        other.insert("kind".into(), Value::String("check".into()));
+        other.insert("check".into(), Value::String("monotone_df".into()));
+        let mut pipelines = builtin_pipelines_table();
+        pipelines.insert("other".into(), Value::Table(Table::new()));
+        assert_eq!(
+            would_read(
+                &sources,
+                &pipelines,
+                &schema,
+                &egress,
+                "implied_forwards",
+                &[edit("lonely", Some(other))],
+            ),
+            Ok(())
+        );
+    }
+
+    fn builtin_pipelines_table() -> Table {
+        let doc: Table = toml::from_str(BUILTIN_CALIBRATION).unwrap();
+        doc["pipelines"].as_table().unwrap().clone()
     }
 }

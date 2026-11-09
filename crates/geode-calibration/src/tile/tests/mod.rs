@@ -137,7 +137,8 @@ fn enter_dispatches_the_shell_config_action_and_config_object_is_the_cursor(
         h.config_object(&vcx),
         Some(ConfigObject {
             doc: CALIBRATION_DOC,
-            name: "repo_fit".into()
+            name: "repo_fit".into(),
+            seed: None,
         })
     );
     h.press(&mut vcx, "enter");

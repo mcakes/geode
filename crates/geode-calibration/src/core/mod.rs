@@ -14,10 +14,28 @@ pub mod model;
 pub(crate) mod testing {
     use std::collections::BTreeMap;
 
+    use std::sync::Arc;
+
     use geode_core::calibration::{
         BUILTIN_CALIBRATION, CALIBRATION_DOC, Pipeline, StageName, from_doc,
     };
     use geode_core::config::{LayerDoc, merge_docs};
+    use geode_core::schema::SchemaSpec;
+
+    /// The demo schema: the datasets the builtin pipeline's sources read
+    /// and its publish stage writes are document datasets here.
+    const DEMO_DATASETS: &str = include_str!("../../../../examples/demo-config/datasets.toml");
+
+    /// The demo schema, read as the app reads `datasets.toml`.
+    pub(crate) fn demo_schema() -> Arc<SchemaSpec> {
+        let doc = merge_docs(
+            "datasets",
+            &[LayerDoc::builtin("datasets", DEMO_DATASETS).expect("well-formed TOML")],
+        );
+        let (schema, diags) = SchemaSpec::from_doc(&doc);
+        assert!(diags.is_empty(), "{diags:?}");
+        Arc::new(schema)
+    }
 
     /// The builtin document's stage tables by name, as the bridge hands
     /// them to the tile.

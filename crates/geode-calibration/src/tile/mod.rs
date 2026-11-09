@@ -55,7 +55,8 @@ mod paint;
 mod picker;
 mod verbs;
 
-/// The key context of the tile's picker fields, where `tab` completes.
+/// The key context of the add picker's name field, where `tab` is
+/// reserved so `Root`'s focus cycling cannot take the keyboard out of it.
 pub const PICKER_CONTEXT: &str = "calibration_picker";
 
 /// The kind's spelling in the header, the palette and the picker.
@@ -129,6 +130,11 @@ pub struct CalibrationTile {
     /// The connect picker's proposal, `(from, to)`, painted as a dashed
     /// edge; the model is rebuilt when it changes.
     preview_edge: Option<(StageName, StageName)>,
+    /// A new stage the add picker named, with its seeded table, held for
+    /// the shell to read through `config_object` when it runs the
+    /// `config::calibration` the tile requested; cleared on the next frame
+    /// change, which is the one that carried the request.
+    pending_add: Option<(StageName, toml::Table)>,
     /// The source reads under the flip barrier: one tag per sequence.
     following: FollowingQuery<()>,
     fetch: Fetch,
@@ -270,6 +276,7 @@ impl CalibrationTile {
             menu_ids: menu::menu_ids(id.0),
             picker: None,
             preview_edge: None,
+            pending_add: None,
             following: FollowingQuery::new(),
             fetch: Fetch::Idle,
             last_following: None,
@@ -349,17 +356,27 @@ impl CalibrationTile {
         dropped.then(|| held.clone())
     }
 
-    /// The configuration object the tile shows: the cursor's stage, when
-    /// it is a stage of the live pipeline, so `config::calibration` opens
-    /// the dialog at its Edit screen. A held, dropped pipeline offers
-    /// none — its stages are not in the configuration the dialog edits.
+    /// The configuration object the tile shows: a new stage the add picker
+    /// just named, with its seed, while the shell is being asked to open
+    /// it; else the cursor's stage, when it is a stage of the live
+    /// pipeline, so `config::calibration` opens the dialog at its Edit
+    /// screen. A held, dropped pipeline offers none — its stages are not
+    /// in the configuration the dialog edits.
     pub(super) fn config_object(&self) -> Option<geode_shell::module::ConfigObject> {
+        if let Some((name, seed)) = &self.pending_add {
+            return Some(geode_shell::module::ConfigObject {
+                doc: geode_core::calibration::CALIBRATION_DOC,
+                name: name.clone(),
+                seed: Some(seed.clone()),
+            });
+        }
         let cursor = self.cursor.as_deref()?;
         let pipeline = self.pipeline()?;
         pipeline.stage(cursor)?;
         Some(geode_shell::module::ConfigObject {
             doc: geode_core::calibration::CALIBRATION_DOC,
             name: cursor.to_string(),
+            seed: None,
         })
     }
 

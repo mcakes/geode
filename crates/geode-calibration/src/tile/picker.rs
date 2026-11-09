@@ -8,9 +8,12 @@
 //! picks and `escape` discards. The name field holds the keys in `insert`
 //! (every bare key types), with `enter` and `escape` the tile's.
 //!
-//! A pick queues one whole-object edit through the frame
-//! (`CalibrationTile::queue_edits`); the shell writes it and the reload
-//! brings the new graph. Closing the popup drops the preview edge, and the
+//! A connect or disconnect pick queues one whole-object edit through the
+//! frame (`CalibrationTile::queue_edits`, after the reader has agreed to
+//! it); the shell writes it and the reload brings the new graph. A named
+//! add writes nothing: it proposes the seeded stage through
+//! `config_object` and asks the shell to open the dialog on it. Closing
+//! the popup drops the preview edge, and the
 //! field is blurred before it is dropped: a focused handle dropped
 //! unblurred leaves the window with no focus the shell can route keys
 //! through. One popup is up at a time: opening one closes the `.` menu
@@ -30,7 +33,7 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use super::{CalibrationTile, PICKER_CONTEXT};
-use crate::core::edits::{KINDS, add_edit, connect_candidates, open_port, valid_new_name};
+use crate::core::edits::{KINDS, add_table, connect_candidates, open_port, valid_new_name};
 use crate::core::menu::{NO_CURSOR, NO_PIPELINE, OPEN_STAGE};
 
 /// What the open popup picks.
@@ -339,10 +342,14 @@ impl CalibrationTile {
         }
     }
 
-    /// A good name queues the new stage, lands the cursor on it and asks
-    /// the shell for its Edit screen (`config::calibration`): the shell
-    /// drains the edit before the request, and the dialog folds the
-    /// pending write into its rows, so the screen opens on the new stage.
+    /// A good name writes nothing: the seeded table (`pipeline`, `kind`,
+    /// the kind's required fields at the builtin's values) is held as
+    /// `pending_add`, which `config_object` answers with the seed, and the
+    /// shell is asked for `config::calibration`, so the dialog opens at
+    /// the new stage's Edit screen on a draft from the seed — where the
+    /// inputs are ticked and the save is the one write. The shell reads
+    /// the proposal in its frame observer, before the tile's own clears it
+    /// (`on_frame_changed`). The cursor stays where it is.
     fn add_stage(
         &mut self,
         kind: &'static str,
@@ -354,10 +361,11 @@ impl CalibrationTile {
         let sources = self.sources().ok_or(NO_PIPELINE)?;
         valid_new_name(&sources, name)?;
         self.close_picker(window, cx);
-        self.queue_edits(vec![add_edit(&pipeline.name, name, kind)], cx);
-        self.set_cursor(Some(name.to_string()), cx);
+        self.verb_notice = None;
+        self.pending_add = Some((name.to_string(), add_table(&pipeline.name, kind)));
         self.frame
             .request_action(ActionId(OPEN_STAGE.to_string()), cx);
+        cx.notify();
         Ok(())
     }
 

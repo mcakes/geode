@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use geode_core::calibration::{Pipelines, StageName};
-use geode_core::config::{Diagnostic, MergedDoc};
+use geode_core::config::{Diagnostic, Layer, LayerDoc, MergedDoc};
 use geode_core::context::DimensionContext;
 use geode_core::schema::SchemaSpec;
 use geode_data::DataHandle;
@@ -164,6 +164,16 @@ pub struct CalibrationConfig {
     /// whole-object), so the tile needs the table it starts from without
     /// reading the configuration itself.
     pub sources: Arc<BTreeMap<StageName, toml::Table>>,
+    /// The merged document's `pipelines` table, passed through so the tile
+    /// can read a proposed document before it writes it
+    /// (`core::edits::would_read`).
+    pub pipelines_table: Arc<toml::Table>,
+    /// For each stage a layer below the user's defines, that layer (the
+    /// winning one of them: desk over builtin). A whole-object `None`
+    /// removes the user layer's copy and nothing below it, so the tile
+    /// refuses to delete such a stage rather than strip its readers and
+    /// leave it in force.
+    pub inherited: Arc<BTreeMap<StageName, Layer>>,
 }
 
 /// The `stages` table of a merged calibration document as stage tables by
@@ -180,6 +190,31 @@ pub fn stage_tables(doc: &MergedDoc) -> BTreeMap<StageName, toml::Table> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The merged document's `pipelines` table, empty when absent: what
+/// [`CalibrationConfig::pipelines_table`] carries.
+pub fn pipelines_table(doc: &MergedDoc) -> toml::Table {
+    doc.value
+        .get("pipelines")
+        .and_then(toml::Value::as_table)
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The stages the non-user layers of a calibration document define, each
+/// with the winning such layer (`layers` in merge order, builtin first):
+/// what [`CalibrationConfig::inherited`] carries.
+pub fn inherited_stages(layers: &[LayerDoc]) -> BTreeMap<StageName, Layer> {
+    let mut out = BTreeMap::new();
+    for doc in layers.iter().filter(|d| d.layer != Layer::User) {
+        if let Some(stages) = doc.table.get("stages").and_then(toml::Value::as_table) {
+            for name in stages.keys() {
+                out.insert(name.clone(), doc.layer);
+            }
+        }
+    }
+    out
 }
 
 /// What every tile of the factory shares: the data handle, the config last

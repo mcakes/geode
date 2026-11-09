@@ -31,10 +31,15 @@
 //! whole-object edits handed to the shell through the frame, which writes
 //! the user layer and answers on the frame (`TileNotice`), read on the
 //! next frame change into the header: a fork as a status notice, a
-//! refusal as a danger notice. `d` asks `Delete {stage} and its {n}
-//! edges? y/n` on the same bar as `p`; `y` queues the stage's removal and
-//! every consumer's rewrite as ONE batch, so no reload can see a consumer
-//! naming a stage that is gone.
+//! refusal as a danger notice. Every batch is read first (`validated`:
+//! `core::edits::would_read` over the config's stage tables): an edit the
+//! reader would refuse, dropping the pipeline, is a danger notice in the
+//! reader's words and is never written. `d` asks `Delete {stage} and its
+//! {n} edges? y/n` on the same bar as `p`, only for a stage no lower layer
+//! defines (a whole-object `None` removes the user's copy alone, so an
+//! inherited stage would stay in force with its readers stripped); `y`
+//! queues the stage's removal and every consumer's rewrite as ONE batch,
+//! so no reload can see a consumer naming a stage that is gone.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -43,6 +48,7 @@ use chrono::{DateTime, Utc};
 use geode_core::calibration::{
     Pipeline, PublishSource, RunAction, Stage, StageKind, StageName, StageStatus,
 };
+use geode_core::config::Diagnostic;
 use geode_core::document::DocumentRows;
 use geode_data::UploadParams;
 use geode_shell::frame::{ConfigEdit, TileNotice};
@@ -53,8 +59,7 @@ use gpui::{App, Context, SharedString, Window};
 
 use super::CalibrationTile;
 use super::data::{QUEUE_FULL, no_underlying};
-use crate::core::edits::{connect_edit, delete_edits, disconnect_edit};
-use crate::core::layout::nth;
+use crate::core::edits::{connect_edit, delete_edits, disconnect_edit, would_read};
 use crate::core::menu::{NO_CURSOR, NO_PIPELINE};
 
 /// What an armed y/n asks. Public only because it is the public
@@ -494,7 +499,35 @@ impl CalibrationTile {
         cx.notify();
     }
 
-    /// The connect picker's pick: `from` becomes the next input of `stage`.
+    /// Whether the reader would still accept `pipeline` with `edits`
+    /// applied (`core::edits::would_read` over the config's stage tables,
+    /// pipelines table, schema and targets). A refusal is a danger notice
+    /// in the reader's words and `false`: the caller writes nothing.
+    fn validated(&mut self, pipeline: &str, edits: &[ConfigEdit], cx: &mut Context<Self>) -> bool {
+        let Some(config) = self.shared.config.borrow().clone() else {
+            self.refuse(NO_PIPELINE, cx);
+            return false;
+        };
+        let verdict: Result<(), Diagnostic> = would_read(
+            &config.sources,
+            &config.pipelines_table,
+            &config.schema,
+            &config.egress,
+            pipeline,
+            edits,
+        );
+        match verdict {
+            Ok(()) => true,
+            Err(d) => {
+                self.verb_notice = Some(Notice::danger(d.message));
+                cx.notify();
+                false
+            }
+        }
+    }
+
+    /// The connect picker's pick: `from` becomes the next input of `stage`,
+    /// once the reader agrees.
     pub(super) fn connect(
         &mut self,
         stage: &str,
@@ -506,12 +539,16 @@ impl CalibrationTile {
         let source = sources
             .get(stage)
             .ok_or_else(|| format!("{stage} is not in the document"))?;
-        let edit = connect_edit(&pipeline, stage, from, source)?;
-        self.queue_edits(vec![edit], cx);
+        let edits = vec![connect_edit(&pipeline, stage, from, source)?];
+        if self.validated(&pipeline.name, &edits, cx) {
+            self.queue_edits(edits, cx);
+        }
         Ok(())
     }
 
-    /// The disconnect picker's pick: `input` is struck from `stage`.
+    /// The disconnect picker's pick: `input` is struck from `stage`, once
+    /// the reader agrees — a required input's loss leaves the stage short
+    /// of a port and is refused; a variadic or gate input's is not.
     pub(super) fn disconnect(
         &mut self,
         stage: &str,
@@ -523,26 +560,50 @@ impl CalibrationTile {
         let source = sources
             .get(stage)
             .ok_or_else(|| format!("{stage} is not in the document"))?;
-        let edit = disconnect_edit(&pipeline, stage, input, source)?;
-        self.queue_edits(vec![edit], cx);
+        let edits = vec![disconnect_edit(&pipeline, stage, input, source)?];
+        if self.validated(&pipeline.name, &edits, cx) {
+            self.queue_edits(edits, cx);
+        }
         Ok(())
     }
 
-    /// `d`: ask `Delete {stage} and its {n} edges? y/n` on the bar, `n`
-    /// being the edges into the stages that read it; a stage nothing reads
-    /// asks `Delete {stage}? y/n`.
-    pub(super) fn delete_verb(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    /// The live pipeline, the cursor's stage in it and the delete batch
+    /// for it, or the refusal: no pipeline, no cursor, a stage a lower
+    /// layer defines (`{stage} comes from the {layer} layer — there is
+    /// nothing of yours to delete`, the dialog's words: a `None` removes
+    /// the user's copy alone, so the stage would stay in force with its
+    /// readers stripped).
+    fn delete_plan(&self) -> Result<(Pipeline, StageName, Vec<ConfigEdit>, usize), String> {
+        let config = self.shared.config.borrow().clone().ok_or(NO_PIPELINE)?;
         let pipeline = self.pipeline().ok_or(NO_PIPELINE)?;
         let stage = self.cursor.clone().ok_or(NO_CURSOR)?;
         if pipeline.stage(&stage).is_none() {
             return Err(NO_CURSOR.to_string());
         }
-        let sources = self.sources().ok_or(NO_PIPELINE)?;
-        let (_, edges) = delete_edits(&pipeline, &stage, &sources);
+        if let Some(layer) = config.inherited.get(&stage) {
+            return Err(format!(
+                "{stage} comes from the {} layer \u{2014} there is nothing of yours to delete",
+                layer.name()
+            ));
+        }
+        let (edits, edges) = delete_edits(&pipeline, &stage, &config.sources);
+        Ok((pipeline, stage, edits, edges))
+    }
+
+    /// `d`: ask `Delete {stage} and its {n} edges? y/n` on the bar, `n`
+    /// being the edges into the stages that read it; a stage nothing reads
+    /// asks `Delete {stage}? y/n`. Refused for an inherited stage, and,
+    /// in the reader's words, for a stage whose readers would be left
+    /// short of a required port.
+    pub(super) fn delete_verb(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let (pipeline, stage, edits, edges) = self.delete_plan()?;
+        if !self.validated(&pipeline.name, &edits, cx) {
+            return Ok(());
+        }
         self.verb_notice = None;
         let prompt = match edges {
             0 => format!("Delete {stage}? y/n"),
@@ -554,35 +615,44 @@ impl CalibrationTile {
         Ok(())
     }
 
-    /// `y`: the batch is built again over the live pipeline (a reload may
-    /// have moved under the question) and queued as one; the cursor goes
-    /// to the stage's first input, else its first consumer, else the first
-    /// card in layout order, since the stage's own card is about to go.
+    /// `y`: the batch is built and read again over the live pipeline (a
+    /// reload may have moved under the question) and queued as one; the
+    /// cursor goes to the stage's first input, else its first consumer,
+    /// else the first other card in layout order, since the stage's own
+    /// card is about to go.
     fn submit_delete(&mut self, stage: StageName, cx: &mut Context<Self>) {
-        let Some(pipeline) = self.pipeline() else {
-            self.refuse(NO_PIPELINE, cx);
-            return;
+        let (pipeline, planned, edits, _) = match self.delete_plan() {
+            Ok(plan) => plan,
+            Err(reason) => {
+                self.refuse(reason, cx);
+                return;
+            }
         };
-        let Some(s) = pipeline.stage(&stage) else {
-            self.refuse(format!("unknown stage '{stage}'"), cx);
+        if planned != stage {
+            self.refuse(
+                format!("the question named {stage}; the cursor is on {planned}"),
+                cx,
+            );
             return;
-        };
-        let Some(sources) = self.sources() else {
-            self.refuse(NO_PIPELINE, cx);
+        }
+        if !self.validated(&pipeline.name, &edits, cx) {
             return;
-        };
+        }
+        let s = pipeline.stage(&stage).expect("delete_plan found it");
         let next = s
             .inputs
             .first()
             .cloned()
             .or_else(|| pipeline.consumers(&stage).first().map(|c| c.name.clone()))
             .or_else(|| {
-                self.model
-                    .as_ref()
-                    .and_then(|m| (1..=m.layout.cards.len()).find_map(|n| nth(&m.layout, n)))
-                    .filter(|first| *first != stage)
+                self.model.as_ref().and_then(|m| {
+                    m.layout
+                        .cards
+                        .iter()
+                        .map(|c| c.stage.clone())
+                        .find(|other| *other != stage)
+                })
             });
-        let (edits, _) = delete_edits(&pipeline, &stage, &sources);
         self.queue_edits(edits, cx);
         self.set_cursor(next, cx);
     }
