@@ -535,7 +535,11 @@ table of named stages, each stage naming the `pipeline` it belongs to. A
 pipeline is a DAG of stages over one underlying; its edges are the ordered
 `inputs` lists and nothing else. Stages are top-level objects rather than
 nested under their pipeline so the object dialog, provenance badges and
-layer merging treat them like every other document's objects.
+layer merging treat them like every other document's objects. The stage
+name `request` is reserved (`engine::REQUEST_STAGE`): it names the single
+synthetic stage of an outcome the engine never produced (a refused,
+missing-engine, errored or panicked request), which a tile shows as a
+notice rather than a card, so a stage of that name is refused.
 
 ```toml
 [pipelines.implied_forwards]
@@ -574,7 +578,7 @@ kind's ports by position and a variadic kind's as a list:
 `stages.<name>.inputs.<i>`) and the layer that supplied the object: a
 non-table pipeline or stage; a `run` other than `on_input` or `manual`; a
 stage without a `pipeline`, or naming one the document does not declare; a
-`kind` outside the set; a missing or mistyped field; `knots`, the noise
+stage named `request` (at `stages.request`); a `kind` outside the set; a missing or mistyped field; `knots`, the noise
 fields, `check` or `grid` outside their rules above; an input naming no
 stage, or a stage of another pipeline; a fixed kind given the wrong number
 of inputs, or an input whose output type is not the port's (a source's

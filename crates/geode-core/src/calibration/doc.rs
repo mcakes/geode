@@ -579,6 +579,21 @@ pub fn from_doc(doc: &MergedDoc) -> (Pipelines, Vec<Diagnostic>) {
             continue;
         }
         owner.insert(name.clone(), pipeline.clone());
+        // `request` is the one synthetic stage of an outcome the engine never
+        // produced (see `engine::REQUEST_STAGE`); a pipeline stage of that
+        // name would be painted as that refusal, so the name is reserved.
+        if name == super::REQUEST_STAGE {
+            diags.push(error(
+                layer,
+                format!("stages.{name}"),
+                format!(
+                    "stage '{name}': the name is reserved for the outcome of a request the \
+                     engine never ran"
+                ),
+            ));
+            failed.insert(pipeline.clone());
+            continue;
+        }
         match read_stage(name, table, layer, &mut diags) {
             Some(stage) => read.push((pipeline.clone(), stage)),
             None => {
@@ -778,6 +793,27 @@ measurement_noise = "spread"
         assert_eq!(d.layer, Some(Layer::Builtin));
         // The orphan stage touches no declared pipeline, so `p` is kept.
         assert_eq!(pipelines.pipelines.len(), 1, "{pipelines:?}");
+    }
+
+    #[test]
+    fn a_stage_named_request_is_refused() {
+        let text = format!(
+            "{PREFIX}\n[stages.request]\npipeline = \"p\"\nkind = \"check\"\n\
+             inputs = [\"parity\"]\ncheck = \"monotone_df\"\n"
+        );
+        let (pipelines, diags) = read(&text);
+        let d = error_at(&diags, "stages.request");
+        assert_eq!(
+            d.message,
+            "calibration: stage 'request': the name is reserved for the outcome of a request \
+             the engine never ran"
+        );
+        assert_eq!(d.layer, Some(Layer::Builtin));
+        assert!(pipelines.pipelines.is_empty(), "{pipelines:?}");
+        // The same stage under another name is clean: only the name is refused.
+        let (pipelines, diags) = read(&text.replace("[stages.request]", "[stages.gate]"));
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(pipelines.pipelines.len(), 1);
     }
 
     #[test]

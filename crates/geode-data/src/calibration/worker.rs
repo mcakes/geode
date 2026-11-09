@@ -15,7 +15,8 @@
 
 use super::CalibratorConfig;
 use geode_core::calibration::{
-    CalibrationOutcome, CalibrationRequest, Lane, RunAction, StagePayload, StageResult, StageStatus,
+    CalibrationOutcome, CalibrationRequest, Lane, REQUEST_STAGE, RunAction, StagePayload,
+    StageResult, StageStatus,
 };
 use geode_core::query::QueryKey;
 use std::collections::{HashMap, VecDeque};
@@ -27,9 +28,6 @@ pub type CalibrationSink = Arc<dyn Fn(CalibrationOutcome) -> bool + Send + Sync>
 
 /// Distinct `(key, lane)` slots that may wait.
 pub const CALIBRATION_BOUND: usize = 64;
-
-/// The stage a failure that never reached the engine is reported under.
-pub(crate) const REQUEST_STAGE: &str = "request";
 
 type Slot = (QueryKey, Lane);
 

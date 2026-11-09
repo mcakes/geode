@@ -2270,6 +2270,15 @@ run_mutation "calibration doc: a schema miss drops the pipeline" \
   geode-core \
   check_against_drops_a_pipeline_whose_source_dataset_or_publish_target_is_unknown
 
+# `request` names the synthetic stage of a refused request; a pipeline stage
+# of that name would be painted as that refusal.
+run_mutation "calibration doc: a stage named request is refused" \
+  crates/geode-core/src/calibration/doc.rs \
+  '        if name == super::REQUEST_STAGE {' \
+  '        if false && name == super::REQUEST_STAGE {' \
+  geode-core \
+  a_stage_named_request_is_refused
+
 run_mutation "calibration doc: a schema miss is a Warning, not an Error" \
   crates/geode-core/src/calibration/doc.rs \
   '                    diags.push(diagnostic(

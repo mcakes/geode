@@ -15,6 +15,15 @@ use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// The name of the single synthetic stage in an outcome the engine never
+/// produced: a request the queue refused, one for an engine the binary
+/// lacks, one the engine answered with an error, or one whose engine call
+/// panicked. Such an outcome has this one stage, `Failed(reason)` with no
+/// `ran_at`, so a tile recognises it by name and shows a notice rather
+/// than a stage card. No pipeline stage may use the name; `from_doc`
+/// refuses one.
+pub const REQUEST_STAGE: &str = "request";
+
 /// An engine that runs one pipeline over its source documents. `run` is
 /// calculation and never a module's to do; it holds any filter state the
 /// engine keeps between runs.
