@@ -33,7 +33,10 @@ name a verb before the tile carries it out.
   whole in `status_full`), its `Tone`, cursor, preview and filter
   dimming (`geode_shell::palette::fuzzy_match`); per edge its endpoints
   and `EdgeTone` (`Preview` over `Gate` over `Into`/`OutOf`); the
-  captions at their columns' x; and the footer line.
+  captions at their columns' x; and the footer line, which names every
+  waiting source (`waiting for a, b`, document order) before the cursor's
+  `{stage} · {status}`, since a restored cursor must not hide what blocks
+  the pipeline.
 - `content.rs`: `CalibrationConfig` (what the app pushes: the pipelines
   `from_doc` accepted and `check_against` kept, the schema the service
   serves, the egress targets with the documents each accepts, and every

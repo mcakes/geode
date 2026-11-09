@@ -88,7 +88,12 @@ pub struct GraphModel {
     pub edges: Vec<EdgeModel>,
     /// Each layer's caption at its column's x.
     pub captions: Vec<(f32, String)>,
-    /// `{cursor} · {status}`, else `waiting for {source}`, else empty.
+    /// `waiting for {a}, {b}` while any source waits (document order),
+    /// else `{cursor} · {status_full}`, else empty. The waiting sources
+    /// win over the cursor because they are the one fact blocking the
+    /// pipeline, while the cursor line only repeats the card under it; the
+    /// tile restores its cursor from the session, so a desk without feeds
+    /// would otherwise never see the missing source named.
     pub footer: SharedString,
 }
 
@@ -217,18 +222,20 @@ pub fn build(input: ModelInput<'_>) -> GraphModel {
         })
         .collect();
 
-    let footer: SharedString =
-        if let Some(at) = cursor.and_then(|c| cards.iter().find(|m| m.stage == c)) {
-            format!("{} · {}", at.stage, at.status_full).into()
-        } else if let Some(source) = layout
-            .cards
-            .iter()
-            .find(|c| waiting.contains(c.stage.as_str()))
-        {
-            format!("waiting for {}", source.stage).into()
-        } else {
-            SharedString::default()
-        };
+    // The waiting sources before the cursor: see `GraphModel::footer`.
+    let missing: Vec<&str> = pipeline
+        .stages
+        .iter()
+        .map(|s| s.name.as_str())
+        .filter(|name| waiting.contains(*name))
+        .collect();
+    let footer: SharedString = if !missing.is_empty() {
+        format!("waiting for {}", missing.join(", ")).into()
+    } else if let Some(at) = cursor.and_then(|c| cards.iter().find(|m| m.stage == c)) {
+        format!("{} · {}", at.stage, at.status_full).into()
+    } else {
+        SharedString::default()
+    };
 
     GraphModel {
         version,
@@ -553,13 +560,16 @@ mod tests {
 
         scene.cursor = None;
         scene.waiting.insert("rates".into());
-        scene.waiting.insert("dividends".into());
-        // The first waiting source in layout order.
-        assert_eq!(scene.build().footer.as_ref(), "waiting for dividends");
+        assert_eq!(scene.build().footer.as_ref(), "waiting for rates");
 
-        // The cursor's line comes first even while a source waits.
-        scene.cursor = Some("rates");
-        assert_eq!(scene.build().footer.as_ref(), "rates · waiting");
+        // Every waiting source, in document order, and before the cursor:
+        // a restored cursor must not hide what blocks the pipeline.
+        scene.waiting.insert("dividends".into());
+        scene.cursor = Some("parity");
+        assert_eq!(
+            scene.build().footer.as_ref(),
+            "waiting for dividends, rates"
+        );
 
         scene.cursor = None;
         scene.waiting.clear();
