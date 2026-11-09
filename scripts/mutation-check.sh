@@ -44061,6 +44061,25 @@ run_mutation "calibration model: a held publish paints its gate edge" \
   geode-calibration \
   cards_carry_tone_time_and_summary_from_results
 
+# ---- Calibration tile: cursor keys ----
+
+# `l` follows the first consumer in document order; the nearest card of
+# the next layer is only the fallback for a stage nothing reads. From
+# parity (centred in its band) the fallback ties between df_monotone and
+# implied_rates and takes the earlier row, where the consumer rule lands
+# on implied_rates.
+run_mutation "calibration keys: l follows the first consumer" \
+  crates/geode-calibration/src/core/layout.rs \
+  '        Move::Right => pipeline
+            .stages
+            .iter()
+            .find(|s| s.inputs.iter().any(|input| input == from) && has_card(&s.name))
+            .map(|s| s.name.clone())
+            .or_else(|| nearest(layout, here.layer + 1, here.y)),' \
+  '        Move::Right => nearest(layout, here.layer + 1, here.y),' \
+  geode-calibration \
+  hjkl_move_the_cursor_along_inputs_consumers_and_layers
+
 # ---- Calibration tile: data flow ----
 
 # A source whose read failed stays pending; without the gate the run goes
