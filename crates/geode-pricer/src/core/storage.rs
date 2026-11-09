@@ -10,12 +10,12 @@ use crate::core::sheet::{LineId, LineState, OwnShifts, Refresh, RowKind, RowReco
 use crate::core::template::Template;
 use chrono::NaiveDate;
 use geode_core::config::{LayerDoc, merge_docs};
-use geode_core::document::{Column, DocumentRows, Value};
+use geode_core::document::{Column, DocumentRows, Value, documents_from_snapshot};
 use geode_core::pricing::{
     Barrier, BarrierKind, Currency, Expiry, Instrument, MarketOverrides, OptionKind, Strike,
     Vanilla,
 };
-use geode_core::schema::{ColumnRole, ColumnType, DatasetSpec, SchemaSpec};
+use geode_core::schema::{DatasetSpec, SchemaSpec};
 use geode_core::snapshot::Snapshot;
 use geode_core::source_config::parse_duration;
 use std::sync::OnceLock;
@@ -493,91 +493,11 @@ fn declared() -> Result<&'static DatasetSpec, String> {
         .map_err(Clone::clone)
 }
 
-fn column_present(snapshot: &Snapshot, name: &str) -> Result<(), String> {
-    snapshot
-        .column_index(name)
-        .map(|_| ())
-        .ok_or_else(|| format!("column '{name}' is missing from the answer"))
-}
-
-/// One declared column over every row of the answer. The type check is
-/// the strict one (`i64_column`/`f64_column` match exactly Int64 and
-/// Float64); every cell then goes through the per-row accessor, which
-/// answers `None` for a NULL — a NULL is refused, never read as a zero.
-fn decode_column(snapshot: &Snapshot, name: &str, ty: ColumnType) -> Result<Column, String> {
-    column_present(snapshot, name)?;
-    let n = snapshot.rows();
-    let null = |row: usize| format!("column '{name}' is NULL at row {row}");
-    match ty {
-        ColumnType::Utf8 => {
-            if snapshot.str_column(name).is_none() && snapshot.dict_column(name).is_none() {
-                return Err(format!("column '{name}' is not utf8"));
-            }
-            (0..n)
-                .map(|r| {
-                    snapshot
-                        .text_value(name, r)
-                        .map(str::to_string)
-                        .ok_or_else(|| null(r))
-                })
-                .collect::<Result<_, _>>()
-                .map(Column::Utf8)
-        }
-        ColumnType::I64 => {
-            if snapshot.i64_column(name).is_none() {
-                return Err(format!("column '{name}' is not i64"));
-            }
-            (0..n)
-                .map(|r| snapshot.i64_value(name, r).ok_or_else(|| null(r)))
-                .collect::<Result<_, _>>()
-                .map(Column::I64)
-        }
-        ColumnType::F64 => {
-            if snapshot.f64_column(name).is_none() {
-                return Err(format!("column '{name}' is not f64"));
-            }
-            (0..n)
-                .map(|r| snapshot.f64_value(name, r).ok_or_else(|| null(r)))
-                .collect::<Result<_, _>>()
-                .map(Column::F64)
-        }
-        other => Err(format!(
-            "column '{name}' is declared {other:?}, which a sheet never stores"
-        )),
-    }
-}
-
-/// An attribute is repeated on every row of the answer; it is read from
-/// row 0 only after every row agrees. Rows that disagree are a store
-/// fault, and picking one would be a plausible wrong sheet.
-fn decode_attribute(snapshot: &Snapshot, name: &str, ty: ColumnType) -> Result<Value, String> {
-    let differs = || format!("attribute '{name}' differs between rows");
-    Ok(match decode_column(snapshot, name, ty)? {
-        Column::Utf8(v) => {
-            if v.iter().any(|x| *x != v[0]) {
-                return Err(differs());
-            }
-            Value::Utf8(v[0].clone())
-        }
-        Column::I64(v) => {
-            if v.iter().any(|x| *x != v[0]) {
-                return Err(differs());
-            }
-            Value::I64(v[0])
-        }
-        Column::F64(v) => {
-            if v.iter().any(|x| x.to_bits() != v[0].to_bits()) {
-                return Err(differs());
-            }
-            Value::F64(v[0])
-        }
-        Column::Date(_) => unreachable!("decode_column never yields a date"),
-    })
-}
-
 /// A document answer (`DataHandle::document` over `pricer_sheets`) back
 /// into the rows `to_rows` produced — the inverse the store's read path
-/// needs before `from_rows`.
+/// needs before `from_rows`. The decoding is
+/// `geode_core::document::documents_from_snapshot` over the declaration;
+/// this asserts the answer is exactly one document, named `name`.
 ///
 /// `Ok(None)` for a zero-row answer: no document under the name (a live
 /// read of an unknown key answers empty, not an error). Otherwise every
@@ -587,50 +507,20 @@ fn decode_attribute(snapshot: &Snapshot, name: &str, ty: ColumnType) -> Result<V
 /// answer's order (by `line`); `from_rows` orders them by `order`.
 pub fn rows_from_snapshot(name: &str, snapshot: &Snapshot) -> Result<Option<DocumentRows>, String> {
     let ds = declared()?;
-    if snapshot.rows() == 0 {
-        return Ok(None);
-    }
-    let mut out = DocumentRows {
-        key: vec![name.to_string()],
-        attributes: Vec::new(),
-        axes: Vec::new(),
-        values: Vec::new(),
+    let mut docs = documents_from_snapshot(ds, snapshot)?;
+    // A misrouted answer, or one carrying another sheet's rows beside
+    // this one's, must not install as this sheet.
+    let misrouted = || {
+        format!(
+            "column '{}' does not name sheet '{name}' on every row",
+            ds.key.first().map_or(SHEET_KEY, String::as_str)
+        )
     };
-    for spec in ds.document_columns() {
-        if ds.key.contains(&spec.name) {
-            // A misrouted answer must not install as this sheet.
-            match decode_column(snapshot, &spec.name, spec.ty)? {
-                Column::Utf8(v) if v.iter().all(|k| k == name) => continue,
-                _ => {
-                    return Err(format!(
-                        "column '{}' does not name sheet '{name}' on every row",
-                        spec.name
-                    ));
-                }
-            }
-        }
-        match spec.role {
-            ColumnRole::Attribute { .. } => out.attributes.push((
-                spec.name.clone(),
-                decode_attribute(snapshot, &spec.name, spec.ty)?,
-            )),
-            ColumnRole::Axis { .. } => out.axes.push((
-                spec.name.clone(),
-                decode_column(snapshot, &spec.name, spec.ty)?,
-            )),
-            ColumnRole::Value => out.values.push((
-                spec.name.clone(),
-                decode_column(snapshot, &spec.name, spec.ty)?,
-            )),
-            _ => {
-                return Err(format!(
-                    "column '{}' has a role a sheet document never declares",
-                    spec.name
-                ));
-            }
-        }
+    match docs.len() {
+        0 => Ok(None),
+        1 if docs[0].key == [name] => Ok(docs.pop()),
+        _ => Err(misrouted()),
     }
-    Ok(Some(out))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -698,7 +588,7 @@ pub(crate) mod tests {
     use crate::core::shorthand::parse_builtin;
     use geode_core::config::{LayerDoc, merge_docs};
     use geode_core::pricing::OptionKind;
-    use geode_core::schema::SchemaSpec;
+    use geode_core::schema::{ColumnRole, SchemaSpec};
     use std::sync::Arc;
     use std::time::Duration;
 

@@ -6,6 +6,11 @@
 use crate::schema::{ColumnRole, ColumnType, DatasetSpec};
 use chrono::NaiveDate;
 
+mod snapshot;
+pub use snapshot::documents_from_snapshot;
+#[cfg(any(test, feature = "test-support"))]
+pub use snapshot::test_support;
+
 /// Separator between parts of a stored document key. Joining and splitting
 /// preserves a nonempty key whose parts exclude this character. Validation
 /// checks the separator and key arity; loaded schemas require a nonempty key.
@@ -278,9 +283,9 @@ impl DocumentRows {
     }
 }
 
-/// One cell of an axis or value column, as a diagnostic spells it.
-/// Only ever called on an error path, so the `String` per cell costs
-/// nothing on the hot one.
+/// One cell of an axis or value column as text: a diagnostic's spelling,
+/// and a key column's (document keys are strings). Called per row only on
+/// an error path or over a key column, never over a document's values.
 fn cell_text(col: &Column, i: usize) -> String {
     match col {
         Column::F64(v) => v[i].to_string(),

@@ -9,7 +9,7 @@
 
 use crate::attribution::{Attribution, ScopeSemantics};
 use crate::tree::TreeIndex;
-use arrow::array::{Array, Float64Array, Int64Array, StringArray};
+use arrow::array::{Array, Date32Array, Float64Array, Int64Array, StringArray};
 use arrow::buffer::NullBuffer;
 use arrow::record_batch::RecordBatch;
 
@@ -345,7 +345,7 @@ fn text_in(arr: &dyn Array, row: usize) -> Option<&str> {
 /// One cell as display text, for the types no other accessor reads.
 /// Shared by [`Snapshot::display_value`] and [`Snapshot::display_at`].
 fn display_in(arr: &dyn Array, row: usize) -> Option<String> {
-    use arrow::array::{BooleanArray, Date32Array, Date64Array, TimestampMicrosecondArray};
+    use arrow::array::{BooleanArray, Date64Array, TimestampMicrosecondArray};
 
     if let Some(s) = text_in(arr, row) {
         return Some(s.to_string());
@@ -586,6 +586,24 @@ impl Snapshot {
     /// other `_at` accessor gives.
     pub fn dict_codes_at(&self, idx: usize) -> Option<(DictCodes<'_>, &StringArray)> {
         dict_column_in(self.column_at(idx)?)
+    }
+
+    /// The whole column as its Arrow array, **only when it is exactly
+    /// Date32**, the type a declared `date` document column arrives as.
+    /// `None` when absent or of any other type, so a decoder can refuse a
+    /// text column where a date is declared instead of parsing labels.
+    pub fn date_column(&self, name: &str) -> Option<&Date32Array> {
+        self.column(name)?.as_any().downcast_ref::<Date32Array>()
+    }
+
+    /// One Date32 cell as a calendar date. `None` for an absent or non-date
+    /// column, an out-of-range row, or NULL: a NULL date is never read as
+    /// the epoch.
+    pub fn date_value(&self, name: &str, row: usize) -> Option<chrono::NaiveDate> {
+        let values = self.date_column(name)?;
+        (row < values.len() && !values.is_null(row))
+            .then(|| values.value_as_date(row))
+            .flatten()
     }
 
     /// One plain-string cell without exposing an Arrow array to the caller.
