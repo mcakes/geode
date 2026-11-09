@@ -1340,4 +1340,10 @@ answers), none verifiable headlessly:
   `curve_date`, which the file does not define) and "catalog refresh: a stopped
   service is retried" (`crates/geode-app/src/bridge.rs`; the replacement passes
   `window` where the site has `&app`). Re-anchor each to a replacement that
-  compiles, or retire it.
+  compiles, or retire it. Two more in `objectdialog/apply.rs`, stale since
+  d26c4c4d gave `apply_in_memory` an `order` argument and `run_writes` a
+  `then` argument: "objectdialog: the config fan-out fires per keystroke
+  instead of riding the debounce" (the replacement calls `apply_in_memory`
+  without `order`, which is not in scope at `queue_batch`) and
+  "objectdialog: a removal bypasses the batch again" (the replacement calls
+  `run_writes` without `then`).
