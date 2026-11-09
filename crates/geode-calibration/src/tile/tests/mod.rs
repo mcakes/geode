@@ -4,6 +4,7 @@
 
 mod data;
 mod harness;
+mod keys;
 
 use geode_shell::keymap::KeyContext;
 use harness::{Harness, builtin_config, open_with, restored, warned_config};
@@ -79,7 +80,7 @@ fn a_missing_pipeline_means_the_first_configured_one(cx: &mut gpui::TestAppConte
 }
 
 /// The context the keymap resolves against: the module's own flag with
-/// `mode == normal`, and no counts (the bare digits are stage jumps).
+/// `mode == normal`, and no counts (the tile has no counted motion).
 #[gpui::test]
 fn the_key_context_is_calibration_in_normal_mode(cx: &mut gpui::TestAppContext) {
     let (h, vcx) = open_with(

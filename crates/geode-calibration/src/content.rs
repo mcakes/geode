@@ -70,10 +70,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
 /// workspace bindings, so `/` filters stages here rather than opening the
 /// shell's find.
 ///
-/// The bare digits are stage jumps. They reach these bindings only because
-/// the tile's key context does not opt into counts
-/// (`CalibrationTile::key_context`); a counting context would read a digit
-/// as a pending count and the jump would never fire.
+/// The stage jumps are `g 1` … `g 9`, spelled as the vol board spells its
+/// tab chords, so the same prefix reaches a numbered thing in every tile;
+/// `g` alone is unbound so the chords stay reachable. The tile's key
+/// context opts into no counts (`CalibrationTile::key_context`), so a
+/// bare digit is nothing here.
 pub const DEFAULT_KEYMAP: &str = r#"
 [[bindings]]
 context = "calibration && mode == normal"
@@ -88,15 +89,15 @@ context = "calibration && mode == normal"
 "up" = "calibration::cursor_up"
 "j" = "calibration::cursor_down"
 "down" = "calibration::cursor_down"
-"1" = "calibration::jump_1"
-"2" = "calibration::jump_2"
-"3" = "calibration::jump_3"
-"4" = "calibration::jump_4"
-"5" = "calibration::jump_5"
-"6" = "calibration::jump_6"
-"7" = "calibration::jump_7"
-"8" = "calibration::jump_8"
-"9" = "calibration::jump_9"
+"g 1" = "calibration::jump_1"
+"g 2" = "calibration::jump_2"
+"g 3" = "calibration::jump_3"
+"g 4" = "calibration::jump_4"
+"g 5" = "calibration::jump_5"
+"g 6" = "calibration::jump_6"
+"g 7" = "calibration::jump_7"
+"g 8" = "calibration::jump_8"
+"g 9" = "calibration::jump_9"
 "/" = "calibration::filter"
 "shift+l" = "calibration::relayout"
 "r" = "calibration::run_from"
@@ -197,6 +198,10 @@ impl TileContent for CalibrationContent {
 
     /// The tile has no rows to search; `/` is its own stage filter.
     fn find(&self, _event: FindEvent, _window: &mut Window, _cx: &mut App) {}
+
+    fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.tile.read(cx).holds_focus(window, cx)
+    }
 
     fn deliver(&self, delivery: Delivery, window: &mut Window, cx: &mut App) {
         let _ = window;

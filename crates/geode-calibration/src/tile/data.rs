@@ -17,6 +17,7 @@
 //! underlying's fit under another's name.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -34,17 +35,12 @@ use geode_tile::notice::Notice;
 use gpui::{App, Context};
 
 use super::CalibrationTile;
+use super::paint::Chrome;
 use crate::core::layout::{LayoutInput, layout};
 use crate::core::model::{ModelInput, build};
 
 /// The run refusal's notice: the data handle's calibration queue is full.
 pub const QUEUE_FULL: &str = "calibration queue full";
-
-/// The viewport the layout is placed in until paint measures the tile; the
-/// model is rebuilt with the real size when it does.
-const DEFAULT_WIDTH: f32 = 1200.0;
-const DEFAULT_HEIGHT: f32 = 600.0;
-const DEFAULT_REM: f32 = 16.0;
 
 /// The source documents in hand and what is still owed.
 #[derive(Default)]
@@ -133,7 +129,7 @@ impl CalibrationTile {
 
     /// The pipeline shown, cloned out of the shared config; `None` with no
     /// config or no pipeline of the tile's name.
-    fn pipeline(&self) -> Option<Pipeline> {
+    pub(super) fn pipeline(&self) -> Option<Pipeline> {
         let config = self.shared.config.borrow();
         config.as_ref().and_then(|c| self.pipeline_in(c)).cloned()
     }
@@ -158,32 +154,37 @@ impl CalibrationTile {
     }
 
     /// Rebuild the render model from the pipeline, the results, the
-    /// waiting sources and the cursor. Called after every change to one of
-    /// them, never in render.
+    /// waiting sources, the cursor, the filter and the viewport paint
+    /// measured. Called after every change to one of them, never in
+    /// render.
     pub(super) fn rebuild_model(&mut self, cx: &App) {
         let config = self.shared.config.borrow().clone();
         let Some(pipeline) = config.as_ref().and_then(|c| self.pipeline_in(c)) else {
             self.model = None;
+            self.chrome = Chrome::default();
             return;
         };
         self.model_version += 1;
         let placed = layout(LayoutInput {
             pipeline,
-            width: DEFAULT_WIDTH,
-            height: DEFAULT_HEIGHT,
-            rem: DEFAULT_REM,
+            width: self.viewport.width,
+            height: self.viewport.height,
+            rem: self.viewport.rem,
         });
-        self.model = Some(build(ModelInput {
+        let model = build(ModelInput {
             pipeline,
             results: &self.results,
             waiting: &self.sources.pending,
             cursor: self.cursor.as_deref(),
-            filter: None,
+            filter: self.filter.as_deref(),
+            // The connect picker's proposal, once it exists.
             preview_edge: None,
             layout: placed,
             clock: self.clock(cx),
             version: self.model_version,
-        }));
+        });
+        self.chrome = Chrome::prepare(self.id.0, &model);
+        self.model = Some(Rc::new(model));
     }
 
     pub(crate) fn requery(&mut self, cx: &mut Context<Self>) {

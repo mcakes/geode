@@ -35,7 +35,14 @@ const DEMO_DATASETS: &str = include_str!("../../../../../examples/demo-config/da
 /// What the shell root is to a tile for keys: a focused ancestor whose
 /// listener matches each keystroke against the app's keymap under the
 /// stack `[workspace, tile, <tile's context>]` and dispatches the match
-/// through the tile's `TileContent` door, as the shell does.
+/// through the tile's `TileContent` door, as the shell does. In `insert`
+/// mode it follows the shell's insert branch: a bare key resolves against
+/// the tile's context alone, so a field's `enter` and `escape` reach its
+/// verbs and typing stays text (chords in insert mode are not modelled).
+///
+/// Focus: as the shell's render does, it takes the keyboard back when no
+/// live handle holds it (a field the tile blurred on close), so the next
+/// key reaches the keymap rather than nothing.
 struct ShellStandIn {
     focus: gpui::FocusHandle,
     tile: Entity<CalibrationTile>,
@@ -48,8 +55,15 @@ struct ShellStandIn {
 }
 
 impl gpui::Render for ShellStandIn {
-    fn render(&mut self, _: &mut Window, cx: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+    fn render(
+        &mut self,
+        window: &mut Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> impl gpui::IntoElement {
         use gpui::{InteractiveElement as _, ParentElement as _, Styled as _};
+        if window.focused(cx).is_none() {
+            self.focus.focus(window, cx);
+        }
         gpui::div()
             .size_full()
             // The shell root's context, under which the app reclaims tab
@@ -62,11 +76,15 @@ impl gpui::Render for ShellStandIn {
                 else {
                     return;
                 };
-                let stack = vec![
-                    KeyContext::new("workspace"),
-                    KeyContext::new("tile"),
-                    context,
-                ];
+                let stack = match context.get("mode") {
+                    Some("insert") if !keystroke.mods.is_chord() => vec![context],
+                    Some("insert") => return,
+                    _ => vec![
+                        KeyContext::new("workspace"),
+                        KeyContext::new("tile"),
+                        context,
+                    ],
+                };
                 if let MatchResult::Matched { action, count } =
                     this.matcher.press(&this.keymap, keystroke, &stack)
                 {
@@ -329,10 +347,13 @@ impl Harness {
         vcx.run_until_parked();
     }
 
-    /// Keys as the trader types them, through the stand-in.
+    /// Keys as the trader types them, through the stand-in, then a frame:
+    /// the window redraws between a trader's keys, and a field a key
+    /// opened must be painted before the next key can reach it.
     pub(super) fn press(&self, vcx: &mut gpui::VisualTestContext, keys: &str) {
         vcx.simulate_keystrokes(keys);
         vcx.run_until_parked();
+        self.draw(vcx);
     }
 
     /// A registered action, the way the palette reaches the tile.

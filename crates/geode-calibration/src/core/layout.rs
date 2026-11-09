@@ -250,10 +250,16 @@ fn is_derive(kind: &StageKind) -> bool {
 /// it holds. Elsewhere the distinct words of the kinds present join with
 /// ` · ` in a fixed order: `stage {fit_ordinal} · fit` for a layer holding a
 /// fit (`fit_ordinal` is the 1-based count of fit layers up to this one),
-/// then `derive` (implied rates, rasterize), `check` and `publish`.
+/// then `derive` (implied rates, rasterize), `check` and `publish`. A later
+/// layer holding none of those (a source placed past the inputs by a
+/// document the reader let through) is captioned `stage`, so no column
+/// sits under a blank band.
 pub fn caption(kinds: &[&StageKind], layer: usize, fit_ordinal: usize) -> String {
     if layer == 0 {
         return "inputs".into();
+    }
+    if !kinds.iter().any(|k| !matches!(k, StageKind::Source { .. })) {
+        return "stage".into();
     }
     let has = |pred: fn(&StageKind) -> bool| kinds.iter().any(|k| pred(k));
     let mut words: Vec<String> = Vec::with_capacity(4);
@@ -476,6 +482,13 @@ mod tests {
             "derive · check · publish"
         );
         assert_eq!(caption(&[&check, &fit], 2, 3), "stage 3 · fit · check");
+        // A later layer with no word of its own is still captioned.
+        let source = StageKind::Source {
+            dataset: "option_chain".into(),
+            series: None,
+        };
+        assert_eq!(caption(&[&source], 1, 1), "stage");
+        assert_eq!(caption(&[], 1, 1), "stage");
     }
 
     /// `a` feeds `c` and `d`; `c` feeds `e`; `d` feeds nothing.

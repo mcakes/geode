@@ -16,8 +16,11 @@ use super::layout::Layout;
 
 /// The longest status line a card shows; a longer one is cut to this
 /// many characters, ending in `…`, and kept whole in `status_full` for
-/// the tooltip. A card is `CARD_W_REM` wide, which fits about this much
-/// at the card's text size.
+/// the tooltip. Sized to the card: `CARD_W_REM` (9 rem) less the card's
+/// 0.375 rem side padding and hairline borders leaves about 8.2 rem of
+/// text; at the status's `text_xs` (0.75 rem) a UI face averages about
+/// 0.39 rem a glyph, so 20 glyphs fill it and 21 would run into the
+/// edge. The typical `HH:MM:SS · 6 strikes` is exactly 20.
 pub const STATUS_CHARS: usize = 20;
 
 /// How a card paints: the stage's status, or `Waiting` for a source whose

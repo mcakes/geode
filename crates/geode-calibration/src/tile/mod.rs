@@ -8,7 +8,8 @@
 //! the config is pushed and when the followed group changes its
 //! underlying, and in the graph model (`core::model`) when the pipeline,
 //! the results, the waiting sources or the cursor change, never in render.
-//! The data flow (the source reads, the runs and their answers) is `data`.
+//! The data flow (the source reads, the runs and their answers) is `data`,
+//! the cursor keys and the filter `keys`, the body and footer `paint`.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -24,16 +25,22 @@ use geode_shell::module::{CloseHandle, StackHandle, UploadDelivery};
 use geode_shell::tiling::TileId;
 use geode_tile::following::FollowingQuery;
 use geode_tile::header::{Cluster, HealthWatch, MenuTrigger, Mode, link_chips};
+use geode_tile::motion;
 use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
 use gpui::{App, Context, ElementId, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::content::{ACTIONS, CalibrationConfig, Shared};
+use crate::core::layout::Move;
 use crate::core::model::GraphModel;
 use data::{Fetch, Sources};
+use keys::{FilterField, Viewport};
+use paint::{Chrome, Hints};
 
 mod data;
+mod keys;
+mod paint;
 
 /// The key context of the tile's picker fields, where `tab` completes.
 pub const PICKER_CONTEXT: &str = "calibration_picker";
@@ -96,9 +103,26 @@ pub struct CalibrationTile {
     last_user_tag: Option<u64>,
     /// The sources completed while hidden: the run goes out on show.
     run_due: bool,
-    /// The prepared render model; `None` with no pipeline.
-    model: Option<GraphModel>,
+    /// The prepared render model; `None` with no pipeline. Shared with
+    /// the edge canvas's paint closure, which clones the handle.
+    model: Option<Rc<GraphModel>>,
     model_version: u64,
+    /// The element names and caption texts paint reads, rebuilt with the
+    /// model.
+    chrome: Chrome,
+    /// The viewport the layout was last placed in: paint's measurement.
+    viewport: Viewport,
+    /// The graph's scroll offset, in window pixels; the tile owns it so a
+    /// cursor move can bring its card into view.
+    scroll: (f32, f32),
+    /// The stage filter in force; `None` lights every card.
+    filter: Option<String>,
+    /// The filter field while `/` has it up: the keys are its.
+    filter_field: Option<FilterField>,
+    /// The footer's hint rows, resolved against the live keymap.
+    hints: Hints,
+    /// The `⋯` button's debug selector, formatted once.
+    menu_selector: SharedString,
     /// The notices the trader dismissed, each hidden while the config
     /// keeps reporting it; pruned in `refresh`.
     dismissed: Dismissals,
@@ -163,6 +187,13 @@ impl CalibrationTile {
             }
         })
         .detach();
+        // The footer names live chords: re-resolved on a keymap reload,
+        // never per frame.
+        cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
+            this.hints = Hints::resolve(cx);
+            cx.notify();
+        })
+        .detach();
         let mut tile = CalibrationTile {
             id,
             frame,
@@ -189,6 +220,13 @@ impl CalibrationTile {
             run_due: false,
             model: None,
             model_version: 0,
+            chrome: Chrome::default(),
+            viewport: Viewport::default(),
+            scroll: (0.0, 0.0),
+            filter: None,
+            filter_field: None,
+            hints: Hints::resolve(cx),
+            menu_selector: format!("calibration-menu-button-{}", id.0).into(),
             dismissed: Dismissals::default(),
             header: Header::default(),
             #[cfg(test)]
@@ -290,20 +328,26 @@ impl CalibrationTile {
         cx.notify();
     }
 
-    /// `normal` until a field or a list holds the keys.
+    /// `insert` while the filter field holds the keys, else `normal`.
     fn mode(&self) -> &'static str {
-        "normal"
+        if self.filter_field.is_some() {
+            "insert"
+        } else {
+            "normal"
+        }
     }
 
-    /// No `.counts()`: the bare digits are stage jumps, and a counting
-    /// context would make the matcher swallow them as a pending count.
+    /// No `.counts()`: the tile has no counted motion, and the stage
+    /// jumps are `g N` chords, so a bare digit is nothing here.
     pub fn key_context(&self) -> KeyContext {
         KeyContext::new(crate::KIND).pair("mode", self.mode())
     }
 
     /// `true` for this module's own registered actions, which the tile
     /// owns whether or not it carries them out yet: a bound key is never
-    /// the shell's. Anything else falls through to the shell.
+    /// the shell's. The shell's shared `motion::*` steps are taken as the
+    /// cursor keys, so the palette's motions move the cursor too.
+    /// Anything else falls through to the shell.
     pub fn dispatch(
         &mut self,
         action: &ActionId,
@@ -311,39 +355,78 @@ impl CalibrationTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let _ = (count, window);
+        if let Some(m) = motion::parse(action, count) {
+            let step = match m {
+                motion::Motion::Cols(n) if n < 0 => Move::Left,
+                motion::Motion::Cols(_) => Move::Right,
+                motion::Motion::Rows { by, .. } if by < 0 => Move::Up,
+                motion::Motion::Rows { .. } => Move::Down,
+                _ => return false,
+            };
+            self.move_cursor(step, cx);
+            return true;
+        }
         let verb = match action.0.as_str() {
             id if ACTIONS.iter().any(|(a, _)| *a == id) => &id["calibration::".len()..],
             _ => return false,
         };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
-        // Only `cancel` acts so far: last in line, with nothing else to
-        // cancel, `escape` dismisses the header's notices, and is handled
-        // only when it did. The cursor, the runs, the menu and the edits
-        // take their verbs as the graph, the data flow and the editors
-        // arrive.
-        if verb == "cancel" {
-            if !self.dismissed.dismiss_all(&self.all_notices()) {
-                return false;
+        match verb {
+            "cursor_left" => self.move_cursor(Move::Left, cx),
+            "cursor_right" => self.move_cursor(Move::Right, cx),
+            "cursor_up" => self.move_cursor(Move::Up, cx),
+            "cursor_down" => self.move_cursor(Move::Down, cx),
+            "filter" => self.open_filter(window, cx),
+            "commit" => self.commit_filter(window, cx),
+            "relayout" => self.relayout(cx),
+            // `escape` peels: the filter field first; last in line, with
+            // nothing else to cancel, it dismisses the header's notices,
+            // and is handled only when it did.
+            "cancel" => {
+                if self.cancel_filter(window, cx) {
+                    return true;
+                }
+                if !self.dismissed.dismiss_all(&self.all_notices()) {
+                    return false;
+                }
+                cx.notify();
             }
-            cx.notify();
+            jump if jump.starts_with("jump_") => {
+                if let Ok(n) = jump["jump_".len()..].parse::<usize>() {
+                    self.jump(n, cx);
+                }
+            }
+            // The runs, the menu and the edits take their verbs as the
+            // data flow's verbs and the editors arrive.
+            _ => {}
         }
         true
     }
 
-    /// The `:` line. No command is read yet; every line is refused.
+    /// The `:` line: `layout` places the graph again from the home
+    /// scroll. Every other line is refused.
     pub fn command(
         &mut self,
         line: &str,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        Err(format!("unknown command: {line}"))
+        match line.trim() {
+            "layout" => {
+                self.relayout(cx);
+                Ok(())
+            }
+            _ => Err(format!("unknown command: {line}")),
+        }
     }
 
-    pub fn completions(&self, _line: &str, _cursor: usize) -> Vec<String> {
-        Vec::new()
+    pub fn completions(&self, line: &str, _cursor: usize) -> Vec<String> {
+        ["layout"]
+            .into_iter()
+            .filter(|c| c.starts_with(line.trim_start()))
+            .map(str::to_string)
+            .collect()
     }
 
     /// A publish's echo. No publish is asked yet.
@@ -413,14 +496,32 @@ impl CalibrationTile {
             .collect()
     }
 
-    /// The prepared render model, `None` with no pipeline. Paint reads it
-    /// once the graph is drawn; until then the tests do.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "paint reads the model once the graph is drawn")
-    )]
+    /// The prepared render model, `None` with no pipeline.
+    #[cfg(test)]
     pub(crate) fn model(&self) -> Option<&GraphModel> {
-        self.model.as_ref()
+        self.model.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cursor(&self) -> Option<&str> {
+        self.cursor.as_deref()
+    }
+
+    /// The stage filter in force.
+    #[cfg(test)]
+    pub(crate) fn filter(&self) -> Option<&str> {
+        self.filter.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn scroll(&self) -> (f32, f32) {
+        self.scroll
+    }
+
+    /// `(width, height, rem)` the layout was last placed in.
+    #[cfg(test)]
+    pub(crate) fn viewport(&self) -> (f32, f32, f32) {
+        (self.viewport.width, self.viewport.height, self.viewport.rem)
     }
 
     /// The stages holding a result, by name.
@@ -431,7 +532,7 @@ impl CalibrationTile {
 }
 
 impl Render for CalibrationTile {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id.0;
         let tile = cx.entity();
         let links = link_chips(&self.frame, cx);
@@ -469,7 +570,7 @@ impl Render for CalibrationTile {
         cluster.close = self.close.clone();
         cluster.menu = Some(MenuTrigger {
             id: ElementId::NamedInteger(SharedString::new_static("calibration-menu-button"), id),
-            selector: format!("calibration-menu-button-{id}").into(),
+            selector: self.menu_selector.clone(),
             tip_selector: SharedString::new_static("tip-calibration-menu"),
             action: "calibration::menu",
             open: false,
@@ -485,13 +586,8 @@ impl Render for CalibrationTile {
             theme,
         )
         .debug_selector(move || format!("calibration-header-{id}"));
-        let body = if self.header.counts.is_some() {
-            // The graph's surface: empty until the layout paints into it.
-            div()
-                .flex_1()
-                .min_h_0()
-                .w_full()
-                .debug_selector(move || format!("calibration-graph-{id}"))
+        let body = if let Some(model) = &self.model {
+            self.render_graph(&tile, model, theme, window)
         } else {
             v_flex()
                 .flex_1()
@@ -505,17 +601,7 @@ impl Render for CalibrationTile {
                         .child(NO_PIPELINE),
                 )
         };
-        // The footer row: the key hints and the run's notices take it.
-        let footer = h_flex()
-            .w_full()
-            .flex_none()
-            .px_2()
-            .py_1()
-            .text_xs()
-            .text_color(muted)
-            .border_t_1()
-            .border_color(theme.border)
-            .debug_selector(move || format!("calibration-footer-{id}"));
+        let footer = self.render_footer(self.model.as_deref(), theme);
         v_flex()
             .size_full()
             .bg(theme.background)
