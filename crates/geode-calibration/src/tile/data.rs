@@ -15,6 +15,11 @@
 //! naming another underlying clears the results and the documents at once,
 //! before the new underlying's arrive: a card must never show one
 //! underlying's fit under another's name.
+//!
+//! A config push (`config_changed`) keeps the results and the documents:
+//! a stage whose definition changed, and every stage downstream of it,
+//! paints stale until its next outcome, and only a source stage's change
+//! asks the documents again.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::rc::Rc;
@@ -22,7 +27,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use geode_core::calibration::{
-    CalibrationOutcome, CalibrationRequest, Pipeline, REQUEST_STAGE, RunAction, RunMode,
+    CalibrationOutcome, CalibrationRequest, Pipeline, REQUEST_STAGE, RunAction, RunMode, Stage,
     StageInput, StageKind, StageName, StageStatus,
 };
 use geode_core::clock::Clock;
@@ -36,7 +41,7 @@ use gpui::{App, Context};
 
 use super::CalibrationTile;
 use super::paint::Chrome;
-use crate::core::layout::{LayoutInput, layout};
+use crate::core::layout::{LayoutInput, layout, nth};
 use crate::core::model::{ModelInput, build};
 
 /// The run refusal's notice: the data handle's calibration queue is full.
@@ -92,6 +97,56 @@ fn source_stages(pipeline: &Pipeline) -> Vec<(StageName, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// What a new definition of the shown pipeline means for the results in
+/// hand, read against the old one (`None` when the results belong to no
+/// pipeline of this name: every stage is then new).
+struct Reconciled {
+    /// The stages whose definition changed (their merged table, or their
+    /// kind or inputs) or that are new, and every stage downstream of one
+    /// in the new pipeline: a result they hold is stale.
+    stale: BTreeSet<StageName>,
+    /// The source stages added or whose dataset or series changed: the
+    /// documents in hand are not theirs.
+    sources_changed: BTreeSet<StageName>,
+}
+
+fn reconcile(
+    old: Option<(&Pipeline, &BTreeMap<StageName, toml::Table>)>,
+    new: &Pipeline,
+    new_tables: &BTreeMap<StageName, toml::Table>,
+) -> Reconciled {
+    let before = |s: &Stage| old.and_then(|(p, _)| p.stage(&s.name));
+    let changed: Vec<&Stage> = new
+        .stages
+        .iter()
+        .filter(|s| match (before(s), old) {
+            (Some(was), Some((_, tables))) => {
+                was != *s || tables.get(&s.name) != new_tables.get(&s.name)
+            }
+            _ => true,
+        })
+        .collect();
+    // Every stage a changed one feeds, transitively, over the new edges.
+    let mut stale = BTreeSet::new();
+    let mut frontier: Vec<&str> = changed.iter().map(|s| s.name.as_str()).collect();
+    while let Some(name) = frontier.pop() {
+        if !stale.insert(name.to_string()) {
+            continue;
+        }
+        frontier.extend(new.consumers(name).iter().map(|c| c.name.as_str()));
+    }
+    let sources_changed = changed
+        .iter()
+        .filter(|s| matches!(s.kind, StageKind::Source { .. }))
+        .filter(|s| before(s).is_none_or(|was| was.kind != s.kind))
+        .map(|s| s.name.clone())
+        .collect();
+    Reconciled {
+        stale,
+        sources_changed,
+    }
 }
 
 /// The notice while no underlying is set: the group's, when following.
@@ -198,6 +253,90 @@ impl CalibrationTile {
         self.refresh_menu(cx);
     }
 
+    /// The factory stored a new config (the bridge's startup push or a
+    /// reload). The pipeline is read again by name and compared, stage by
+    /// stage, with the definition the results in hand were computed over
+    /// (`last_pipeline` and `definition`, `reconcile`): a stage whose
+    /// table, kind or inputs changed, and every stage downstream of it in
+    /// the new pipeline, has its result marked `Stale` — its time and
+    /// summary kept, so the card still says what ran — until the next
+    /// outcome replaces it; a stage the new pipeline lacks loses its
+    /// result; a new stage has none. Nothing else is reset: the cursor
+    /// stays (moving to the first card in layout order only when its stage
+    /// is gone), as do the filter, the scroll and the documents in hand.
+    /// The documents are asked again only when a source stage's dataset or
+    /// series changed or a source was added, since the documents in hand
+    /// are the old source's: at once when shown, else on the next show.
+    /// The push itself submits no run; the next publication or `r` runs.
+    ///
+    /// A pipeline the reader dropped compares nothing: the held graph and
+    /// its results stand under the finding's notice (`graph_pipeline`),
+    /// and the baseline waits for the document to be fixed, so a change
+    /// made while it was dropped is still found. An open picker list
+    /// (about the old pipeline) closes. The model is rebuilt once.
+    pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
+        self.drop_stale_picker(cx);
+        let mut ask = false;
+        if let Some(new) = self.pipeline() {
+            let tables = {
+                let config = self.shared.config.borrow();
+                config
+                    .as_ref()
+                    .map(|c| Arc::clone(&c.sources))
+                    .unwrap_or_default()
+            };
+            let old = self
+                .last_pipeline
+                .as_ref()
+                .filter(|p| p.name == new.name)
+                .map(|p| (p, &self.definition));
+            let found = reconcile(old, &new, &tables);
+            self.results.retain(|name, _| new.stage(name).is_some());
+            for name in &found.stale {
+                if let Some(result) = self.results.get_mut(name) {
+                    result.status = StageStatus::Stale;
+                }
+            }
+            // A source gone takes its documents and its wait with it: a
+            // wait on a stage the pipeline lacks would hold every run.
+            let sources: BTreeSet<StageName> = source_stages(&new)
+                .into_iter()
+                .map(|(stage, _)| stage)
+                .collect();
+            self.sources.rows.retain(|s, _| sources.contains(s));
+            self.sources.pending.retain(|s| sources.contains(s));
+            self.sources.asked.retain(|s, _| sources.contains(s));
+            // A changed source's documents in hand are the old source's:
+            // they go and the source waits, so no run reads them.
+            for stage in &found.sources_changed {
+                self.sources.rows.remove(stage);
+                self.sources.pending.insert(stage.clone());
+            }
+            ask = !found.sources_changed.is_empty();
+            if self
+                .cursor
+                .as_deref()
+                .is_some_and(|c| new.stage(c).is_none())
+            {
+                let placed = layout(LayoutInput {
+                    pipeline: &new,
+                    width: self.viewport.width,
+                    height: self.viewport.height,
+                    rem: self.viewport.rem,
+                });
+                self.cursor = nth(&placed, 1);
+            }
+        }
+        self.refresh_chrome(cx);
+        if ask && self.visible {
+            self.requery(cx);
+        } else {
+            self.requery_due |= ask;
+            self.rebuild_model(cx);
+        }
+        cx.notify();
+    }
+
     pub(crate) fn requery(&mut self, cx: &mut Context<Self>) {
         self.requery_with(Arrival::Now, cx);
     }
@@ -222,6 +361,7 @@ impl CalibrationTile {
         self.last_user_tag = None;
         self.run_notice = None;
         self.run_due = false;
+        self.requery_due = false;
         self.fetch = Fetch::Idle;
         self.publishing = None;
         self.uploads.clear();
@@ -371,6 +511,7 @@ impl CalibrationTile {
         let tag = self.following.begin(versions, submitted);
         self.read_notices.clear();
         self.run_due = false;
+        self.requery_due = false;
         {
             let frame = self.frame.read(cx);
             for (stage, _) in &stages {
@@ -738,8 +879,9 @@ impl CalibrationTile {
     }
 
     /// Showing asks again when a counter the documents follow moved while
-    /// hidden, or the underlying changed, or nothing was ever asked; else
-    /// it submits the run that completed while hidden, if one is owed.
+    /// hidden, or the underlying changed, or nothing was ever asked, or a
+    /// source stage changed while hidden; else it submits the run that
+    /// completed while hidden, if one is owed.
     /// Hiding keeps the reads in flight; their answers land when they come,
     /// and no run goes out until the tile is shown. An arrival made here is
     /// deferred: the shell calls this while it draws.
@@ -753,6 +895,7 @@ impl CalibrationTile {
             let now = self.versions(cx);
             let following = self.is_following(cx);
             if changed
+                || self.requery_due
                 || self.following.follows_changed(now, differs(following))
                 || self.loaded_for != self.underlying(cx)
             {

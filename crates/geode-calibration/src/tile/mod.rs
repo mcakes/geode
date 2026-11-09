@@ -86,6 +86,11 @@ pub struct CalibrationTile {
     /// graph stays painted while a reload that dropped it (a stage the
     /// reader refused) is being fixed; `graph_pipeline` has the rule.
     last_pipeline: Option<Pipeline>,
+    /// Each stage's merged table beside `last_pipeline`: the definition
+    /// the results in hand were computed over, which the next config push
+    /// is compared with, stage by stage, to find what went stale
+    /// (`config_changed`).
+    definition: BTreeMap<StageName, toml::Table>,
     cursor: Option<StageName>,
     /// Whether the shell last showed the tile; a hidden tile asks nothing
     /// until it is next shown.
@@ -164,6 +169,9 @@ pub struct CalibrationTile {
     last_user_tag: Option<u64>,
     /// The sources completed while hidden: the run goes out on show.
     run_due: bool,
+    /// A source stage changed while hidden: the documents are asked again
+    /// on show, as a counter that moved while hidden is.
+    requery_due: bool,
     /// The prepared render model; `None` with no pipeline. Shared with
     /// the edge canvas's paint closure, which clones the handle.
     model: Option<Rc<GraphModel>>,
@@ -276,6 +284,7 @@ impl CalibrationTile {
             underlying: key(UNDERLYING_KEY),
             pipeline_name: key(PIPELINE_KEY),
             last_pipeline: None,
+            definition: BTreeMap::new(),
             cursor: key(CURSOR_KEY),
             visible: false,
             stack: None,
@@ -308,6 +317,7 @@ impl CalibrationTile {
             last_run_tag: None,
             last_user_tag: None,
             run_due: false,
+            requery_due: false,
             model: None,
             model_pipeline: None,
             drop_targets: None,
@@ -405,13 +415,33 @@ impl CalibrationTile {
     }
 
     /// Rebuild what paint reads from the config and the underlying: the
-    /// title, the counts, the health question and the notices. Runs when
-    /// the tile is built, when a config is pushed and when the followed
-    /// group's underlying changes, never in render.
+    /// title, the counts, the health question, the notices and the graph
+    /// model. Runs when the tile is built, when a config is pushed and
+    /// when the followed group's underlying changes, never in render.
     fn refresh(&mut self, cx: &App) {
+        self.refresh_chrome(cx);
+        self.rebuild_model(cx);
+    }
+
+    /// `refresh` short of the model: the header and the notices, and the
+    /// held pipeline and its definition when the config holds the shown
+    /// pipeline valid. `config_changed` rebuilds the model itself, once,
+    /// after it has decided whether to ask the sources again.
+    fn refresh_chrome(&mut self, cx: &App) {
         let config = self.shared.config.borrow().clone();
         let underlying = self.underlying_str(cx).map(str::to_string);
         if let Some(live) = config.as_ref().and_then(|c| self.pipeline_in(c)) {
+            self.definition = live
+                .stages
+                .iter()
+                .filter_map(|s| {
+                    config
+                        .as_ref()?
+                        .sources
+                        .get(&s.name)
+                        .map(|t| (s.name.clone(), t.clone()))
+                })
+                .collect();
             self.last_pipeline = Some(live.clone());
         }
         let graph = self.graph_pipeline();
@@ -463,7 +493,6 @@ impl CalibrationTile {
         let all = self.all_notices();
         self.dismissed.prune(&all);
         self.prune_stages(&all);
-        self.rebuild_model(cx);
     }
 
     /// Every notice the header reports, the config's first, then the
@@ -479,19 +508,6 @@ impl CalibrationTile {
             .chain(&self.edit_notices)
             .cloned()
             .collect()
-    }
-
-    /// The factory stored a new config: the pipeline is read again by name,
-    /// the header follows it, an open picker list (about the old pipeline)
-    /// closes, and a shown tile asks its sources again, since the
-    /// pipeline's source stages may have changed.
-    pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
-        self.drop_stale_picker(cx);
-        self.refresh(cx);
-        if self.visible {
-            self.requery(cx);
-        }
-        cx.notify();
     }
 
     /// `insert` while the filter field, the picker's name field or an

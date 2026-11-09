@@ -44134,6 +44134,56 @@ run_mutation "calibration data: a stale outcome is dropped" \
   geode-calibration \
   a_stale_or_foreign_calibration_outcome_is_ignored
 
+# ---- Calibration tile: config push ----
+
+# A config push compares the new pipeline with the definition the results
+# were computed over; a changed stage's result must paint stale, not as
+# if it had run under the new definition.
+run_mutation "calibration reload: a changed stage's result goes stale" \
+  crates/geode-calibration/src/tile/data.rs \
+  '                    result.status = StageStatus::Stale;' \
+  '                    result.status = StageStatus::Ok;' \
+  geode-calibration \
+  a_config_push_with_a_changed_stage_marks_it_stale_and_keeps_the_rest
+
+# Staleness flows downstream: a raster over a changed fit is as stale as
+# the fit. Marking the changed stage alone leaves its consumers painting a
+# result computed over the old definition.
+run_mutation "calibration reload: staleness reaches every consumer" \
+  crates/geode-calibration/src/tile/data.rs \
+  '        frontier.extend(new.consumers(name).iter().map(|c| c.name.as_str()));' \
+  '        let _ = new.consumers(name);' \
+  geode-calibration \
+  a_config_push_with_a_changed_stage_marks_it_stale_and_keeps_the_rest
+
+# Only a source stage's change asks the documents again; asking on every
+# push throws the documents in hand away for a fit's parameter change.
+run_mutation "calibration reload: only a source change asks again" \
+  crates/geode-calibration/src/tile/data.rs \
+  '            ask = !found.sources_changed.is_empty();' \
+  '            ask = true;' \
+  geode-calibration \
+  a_config_push_that_changes_a_source_requeries_only_then
+
+# A push that drops the pipeline asks nothing: the requery's no-pipeline
+# branch would clear the results the held graph is still painting.
+run_mutation "calibration reload: a dropped pipeline keeps its results" \
+  crates/geode-calibration/src/tile/data.rs \
+  '        if ask && self.visible {' \
+  '        if self.visible {' \
+  geode-calibration \
+  a_config_push_that_drops_the_pipeline_keeps_the_last_graph_with_a_notice
+
+# A cursor on a stage the new pipeline lacks moves to the first card, so
+# the next key acts on a card; dropping it leaves `enter` and `r` on
+# nothing.
+run_mutation "calibration reload: a lost cursor lands on the first card" \
+  crates/geode-calibration/src/tile/data.rs \
+  '                self.cursor = nth(&placed, 1);' \
+  '                self.cursor = None;' \
+  geode-calibration \
+  a_config_push_never_resets_the_cursor
+
 # ---- Calibration tile: publish ----
 
 # A held publish stage is the check that refused its gate; `p` must say

@@ -258,7 +258,7 @@ impl Harness {
     }
 
     /// `answer_all`, beginning with a batch already taken from the channel.
-    fn answer_all_from(
+    pub(super) fn answer_all_from(
         &self,
         vcx: &mut gpui::VisualTestContext,
         reqs: Vec<Request>,
@@ -330,7 +330,7 @@ impl Harness {
         self.tile.read_with(vcx, |t, _| t.result_names())
     }
 
-    fn set_visible(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
+    pub(super) fn set_visible(&self, vcx: &mut gpui::VisualTestContext, visible: bool) {
         vcx.update(|_, cx| self.content.set_visible(visible, cx));
         vcx.run_until_parked();
     }
