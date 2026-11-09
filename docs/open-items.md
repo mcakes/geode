@@ -1199,6 +1199,27 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - The `spx` text filter under as-of stayed ~150 ms because an extra scan filter
   flips DuckDB's decorrelation of the membership probes *(unverified)*.
 
+## Calibration
+
+### Open work
+
+- The demo calibration engine keeps its filter state (the forward filters the
+  user and background lanes advance, one per pipeline and key) in process
+  memory only; a restart begins every filter afresh from the next publish. The
+  real engine upstream owns its own state, so this is a stand-in limitation,
+  not a persistence gap for Geode to fill.
+- The `rate_curve` wire element names are guessed: a `rateCurve` root with
+  `underlying`, `series` and `publishedTime` children and `point` elements
+  carrying `tenor` and `value` attributes. Check every name against the real
+  feed before an adapter reads it.
+- Deferred design follow-ups: the `calibration.toml` reader reads only the
+  stage and pipeline fields it knows and ignores the rest without a diagnostic
+  (only an unknown top-level key warns), so a misspelled field, and the shipped
+  `basis = "knots"` which nothing reads, pass silently; and the demo rate-curve
+  producer's continuation from its own publishes (the last curve interpolated,
+  plus a shift and a tilt) has no band, so a long run can drift to implausible
+  levels, where its fresh-start path clamps its wander.
+
 ## Tooling, tests and the mutation harness
 
 ### Open work
