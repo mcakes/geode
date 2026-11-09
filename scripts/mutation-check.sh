@@ -18084,6 +18084,12 @@ run_mutation "vol restart: a [vol] model change requires a restart" \
   '            if false && new_config.get("app", "vol.model").cloned() != self.vol_baseline {' \
   geode-shell a_vol_model_change_requires_a_restart_and_a_revert_clears_it
 
+run_mutation "calibration engine restart: a [calibration] engine change requires a restart" \
+  crates/geode-shell/src/shell/hot_reload.rs \
+  '            if new_config.get("app", "calibration.engine").cloned() != self.calibration_baseline {' \
+  '            if false && new_config.get("app", "calibration.engine").cloned() != self.calibration_baseline {' \
+  geode-shell a_calibration_engine_change_requires_a_restart_and_a_revert_clears_it
+
 run_mutation "vol worker: a replacement for a queued key takes its slot" \
   crates/geode-data/src/vol/worker.rs \
   '        if let Some(slot) = q.pending.get_mut(&key) {

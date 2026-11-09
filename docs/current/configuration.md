@@ -850,7 +850,7 @@ Accepted candidates update runtime state according to their inputs:
 | Views, either presentation document, dimensions, colors, value colors, watchlists, scopes, or expressions | Emit `ConfigReloaded` for the app bridge |
 | `app` | Emit `AppSettingsReloaded`; the bridge hands `blotter.stale_after` to the blotter, panel and scenario factories |
 | `app.volwatch` (`refresh`, `vega`, `stale_after`) or `vol_views` | The VolMonitor's own revision observer re-reads `[volwatch]` and `vol_views.toml`, resolves the tabs against the startup schema and pushes the settings whole to the factory; an unchanged key or document neither pushes nor repeats a warning |
-| Sources, datasets, egress, positions, panels, scenarios, `app.pricing.adapter`, or `app.vol.model` differing from startup | Mark restart required; return to the startup inputs to clear it |
+| Sources, datasets, egress, positions, panels, scenarios, `app.pricing.adapter`, `app.vol.model`, or `app.calibration.engine` differing from startup | Mark restart required; return to the startup inputs to clear it |
 
 Document-change checks compare the original per-layer documents, including
 their paths, rather than just merged values. Source and dataset changes can
@@ -1112,12 +1112,12 @@ calibration requests run on. `engine` names an engine the binary
 registers; the default and the only one in every build is `demo`, the
 forward calibrator simulator, which is not a financial model. A name the
 binary lacks warns at startup and every calibration answers with that
-reason. The key is read at startup only; a change takes effect at the
-next start. The pipelines themselves come from `calibration.toml`
-(`CALIBRATION_DOC`), read and checked against the schema and the egress
-targets at startup: a stage naming a dataset that is not a document
-dataset, or a publish naming a target `egress.toml` lacks, drops its
-pipeline with an Error that names the layer which supplied the stage.
+reason. The key is read at startup only: changing `engine` marks restart
+required, as `[vol] model` does. The pipelines themselves come from
+`calibration.toml` (`CALIBRATION_DOC`), read and checked against the schema
+and the egress targets at startup: a stage naming a dataset that is not a
+document dataset, or a publish naming a target `egress.toml` lacks, drops
+its pipeline with an Error that names the layer which supplied the stage.
 
 ## VolMonitor
 

@@ -447,13 +447,17 @@ impl ShellApp {
             .filter(|(name, baseline)| !docs_equal(new_config.layered_docs(name), baseline))
             .map(|(name, _)| name)
             .collect::<Vec<_>>();
-            // The pricing adapter and the vol model are fixed at startup, so each
-            // requires restart when it differs; `refresh` is a live setting.
+            // The pricing adapter, the vol model and the calibration engine are
+            // fixed at startup, so each requires restart when it differs;
+            // `refresh` is a live setting.
             if new_config.get("app", "pricing.adapter").cloned() != self.pricing_baseline {
                 restart.push("pricing");
             }
             if new_config.get("app", "vol.model").cloned() != self.vol_baseline {
                 restart.push("vol");
+            }
+            if new_config.get("app", "calibration.engine").cloned() != self.calibration_baseline {
+                restart.push("calibration");
             }
 
             // Apply log levels without persisting them again: the candidate already

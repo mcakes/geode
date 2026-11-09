@@ -280,6 +280,10 @@ pub struct ShellApp {
     /// The startup `[vol] model` value used to build the data engine's vol
     /// worker, compared on reload exactly as `pricing_baseline` is.
     pub(super) vol_baseline: Option<toml::Value>,
+    /// The startup `[calibration] engine` value used to build the data
+    /// engine's calibration worker, compared on reload exactly as
+    /// `vol_baseline` is.
+    pub(super) calibration_baseline: Option<toml::Value>,
     /// Tile records no window holds an occupant for: the restored
     /// session's until a window takes them, and the records a window parks
     /// when a workspace it hosted leaves for another window
@@ -561,6 +565,9 @@ impl ShellApp {
         let pricing_baseline = config.get("app", "pricing.adapter").cloned();
         // And for the `[vol] model` key — see `vol_baseline`'s field doc.
         let vol_baseline = config.get("app", "vol.model").cloned();
+        // And for the `[calibration] engine` key — see
+        // `calibration_baseline`'s field doc.
+        let calibration_baseline = config.get("app", "calibration.engine").cloned();
 
         let mut app = Self {
             services,
@@ -594,6 +601,7 @@ impl ShellApp {
             scenarios_baseline,
             pricing_baseline,
             vol_baseline,
+            calibration_baseline,
             parked_tiles,
             parked_pages,
             restored_windows,

@@ -1696,8 +1696,71 @@ fn a_vol_model_change_requires_a_restart_and_a_revert_clears_it(cx: &mut gpui::T
     assert!(shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().is_none()));
 }
 
+/// The calibration engine is selected at startup exactly as the vol model
+/// is. Changing `[calibration] engine` requires restart; reverting to the
+/// startup baseline clears that message.
+#[gpui::test]
+fn a_calibration_engine_change_requires_a_restart_and_a_revert_clears_it(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (services, _log) = services_with_recorder();
+    let (window, mut cx) = open_shell(cx, services);
+    let shell = shell_of(&window, &mut cx);
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(
+            &shell.read(cx).app().clone(),
+            move |_, event: &ShellEvent, _| sink.borrow_mut().push(event.clone()),
+        )
+        .detach();
+    });
+
+    let mut with_engine = Config::load(&ConfigSources {
+        builtin: vec![
+            LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap(),
+            LayerDoc::builtin("app", "[calibration]\nengine = \"vendor\"\n").unwrap(),
+        ],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut with_engine), cx)
+        })
+    });
+    assert!(
+        events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(m) if m.contains("calibration"))),
+        "{:?}",
+        events.borrow()
+    );
+
+    events.borrow_mut().clear();
+    let mut reverted = Config::load(&ConfigSources {
+        builtin: vec![LayerDoc::builtin("keymap", BUILTIN_KEYMAP).unwrap()],
+        ..ConfigSources::default()
+    });
+    shell.update(&mut cx, |s, cx| {
+        s.app().update(cx, |a, cx| {
+            a.apply_reload(std::mem::take(&mut reverted), cx)
+        })
+    });
+    assert!(
+        !events
+            .borrow()
+            .iter()
+            .any(|e| matches!(e, ShellEvent::RestartRequired(_))),
+        "back at the baseline: {:?}",
+        events.borrow()
+    );
+    assert!(shell.read_with(&cx, |s, cx| s.app().read(cx).restart_required().is_none()));
+}
+
 /// Of `[pricing]`, only `adapter` belongs to the restart baseline (beside
-/// `[vol] model`). Changes to the live `refresh` setting must not request restart.
+/// `[vol] model` and `[calibration] engine`). Changes to the live `refresh`
+/// setting must not request restart.
 #[gpui::test]
 fn a_pricing_refresh_change_needs_no_restart(cx: &mut gpui::TestAppContext) {
     let (services, _log) = services_with_recorder();
