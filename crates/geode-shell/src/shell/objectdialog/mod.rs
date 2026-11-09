@@ -12,7 +12,7 @@
 //! focus seam.
 
 pub mod apply;
-mod calibration;
+pub mod calibration;
 mod colours;
 mod dataset_columns;
 pub mod grouping_list;

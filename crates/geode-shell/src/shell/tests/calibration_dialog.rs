@@ -85,6 +85,96 @@ fn config_calibration_opens_the_focused_tiles_stage_in_edit(cx: &mut gpui::TestA
     );
 }
 
+/// A stage's `kind` cannot change on any route: `space` (the step) and `i`
+/// (the typeahead, which `Kind`'s seven options would otherwise open) are
+/// both refused with the one message, no field opens, and the draft keeps
+/// its kind and its rows.
+#[gpui::test]
+fn a_stage_kind_is_refused_on_the_step_and_typeahead_routes(cx: &mut gpui::TestAppContext) {
+    let (shell, mut cx) = dialog_test_shell_over_a_tile(
+        cx,
+        calibration_services(recorder_showing(stage("repo_fit"))),
+        "config::calibration",
+    );
+    // The cursor settles on `Kind`: `Pipeline` has one option and is no stop.
+    let selected_key = edit_draft(&shell, &cx, |d| match d.selected_row() {
+        Some(crate::shell::objectdialog::EditRow::Field(i)) => d.fields[i].key.clone(),
+        other => panic!("{other:?}"),
+    });
+    assert_eq!(selected_key, "kind");
+    let refusal = crate::shell::objectdialog::calibration::KIND_REFUSAL;
+    let keys_before = edit_draft(&shell, &cx, |d| {
+        d.fields.iter().map(|f| f.key.clone()).collect::<Vec<_>>()
+    });
+
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some(refusal)
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        crate::dialogmode::DialogMode::Normal,
+        "no field opened"
+    );
+    assert!(
+        edit_draft(&shell, &cx, |d| d.text_entry.is_none() && !d.choice_entry()),
+        "no typeahead is up"
+    );
+    // Typing and Enter reach nothing: the kind stays, and so do its rows.
+    cx.simulate_input("publish");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("kind").map(str::to_string)).as_deref(),
+        Some("kalman_fit")
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d
+            .fields
+            .iter()
+            .map(|f| f.key.clone())
+            .collect::<Vec<_>>()),
+        keys_before
+    );
+
+    cx.simulate_keystrokes("space");
+    cx.run_until_parked();
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.notice.clone()).as_deref(),
+        Some(refusal)
+    );
+    assert_eq!(
+        edit_draft(&shell, &cx, |d| d.choice("kind").map(str::to_string)).as_deref(),
+        Some("kalman_fit")
+    );
+    // Another choice row still opens its typeahead: the gate is the kind's.
+    cx.simulate_keystrokes("shift-g"); // measurement_noise, the last row
+    cx.simulate_keystrokes("k");
+    cx.simulate_keystrokes("k");
+    cx.simulate_keystrokes("k"); // series
+    cx.run_until_parked();
+    let selected_key = edit_draft(&shell, &cx, |d| match d.selected_row() {
+        Some(crate::shell::objectdialog::EditRow::Field(i)) => d.fields[i].key.clone(),
+        other => panic!("{other:?}"),
+    });
+    assert_eq!(selected_key, "series");
+    cx.simulate_keystrokes("i");
+    cx.run_until_parked();
+    assert!(
+        edit_draft(&shell, &cx, |d| d.choice_entry()),
+        "the series typeahead opens"
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| s.mode),
+        crate::dialogmode::DialogMode::Filter
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(edit_draft(&shell, &cx, |d| !d.choice_entry()));
+}
+
 #[gpui::test]
 fn config_calibration_over_a_tile_showing_nothing_opens_on_browse(cx: &mut gpui::TestAppContext) {
     let (shell, cx) = dialog_test_shell_over_a_tile(

@@ -431,11 +431,15 @@ committed, and the writer spells what parsed as numbers (`knots = [0.5, 1.0,
 schema no longer declares) is added as the row's own option rather than read
 as the first one. The writer starts from the stage's table and keeps keys it
 does not model (`basis`); it clears every kind's parameter keys before
-writing the current kind's, so a table holds one kind's parameters. Stepping
-`Kind` is refused before the draft takes it (`Domain::step_refusal`: `delete
+writing the current kind's, so a table holds one kind's parameters. Changing
+`Kind` is refused before the draft takes it on every route — `space`'s
+step, `i`'s typeahead (which its seven options would otherwise open) and a
+click on an option — with the one message (`Domain::step_refusal`: `delete
 and re-add the stage to change its kind`): the parameter rows were derived
 from the kind when the stage opened, so a change would leave rows of the old
-kind under the new one. A new stage from the dialog's own naming prompt
+kind under the new one, and the writer would then clear them and write none
+of the new kind's, a stage the reader refuses. The row still reads its kind
+among the real options. A new stage from the dialog's own naming prompt
 opens as a `source` of the first pipeline over the first document dataset,
 with the pipeline's stages unticked.
 

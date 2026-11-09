@@ -194,7 +194,7 @@ fn edit(shell: &mut ShellView, kind: Option<RowKind>, cx: &mut Context<ShellView
 /// from the list.
 fn open_slot_chain(shell: &mut ShellView, n: u8, cx: &mut Context<ShellView>) {
     render::enter_edit_stage(shell, &n.to_string(), None, cx);
-    render::open_field(shell);
+    render::open_chain_field(shell);
     mark_chain_from_list(shell);
 }
 
@@ -245,7 +245,7 @@ pub(super) fn finish_list_chain(
     if let Some(refusal) = super::apply::blocking_diagnostic(shell) {
         // Refused in place, as a typed unknown name is: the field reopens on
         // the same chain, so the fix is an edit, not a retype from the list.
-        render::open_field(shell);
+        render::open_chain_field(shell);
         mark_chain_from_list(shell);
         render::set_notice(shell, refusal);
         return;
@@ -312,7 +312,7 @@ pub(super) fn open_ad_hoc_chain(
     cx: &mut Context<ShellView>,
 ) {
     enter_ad_hoc_stage(shell, seed, cx);
-    render::open_field(shell);
+    render::open_chain_field(shell);
     mark_chain_from_list(shell);
 }
 
@@ -567,7 +567,7 @@ pub(super) fn save_from_field(shell: &mut ShellView, cx: &mut Context<ShellView>
 /// Reopen the open draft's chain field, as opened from the list: its text is
 /// the draft's chain, and its `enter`/`escape` are the list-opened ones.
 fn reopen_list_field(shell: &mut ShellView) {
-    render::open_field(shell);
+    render::open_chain_field(shell);
     mark_chain_from_list(shell);
 }
 

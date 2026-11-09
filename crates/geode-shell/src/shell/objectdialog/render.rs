@@ -1532,7 +1532,7 @@ fn handle_edit_key_inner(
             }
         }
         // Use the same field-opening route as the `i` action button.
-        NormalCommand::EditText => open_field(shell),
+        NormalCommand::EditText => open_field(shell, cx),
         NormalCommand::Commit => commit_selected_row(shell, cx),
         // from one slot's edit stage a digit jumps straight to another's. On any other
         // domain it is named like an unbound letter would be — the edit stage's rule
@@ -1650,17 +1650,25 @@ pub(crate) fn scroll_to_choice(shell: &ShellView) {
     }
 }
 
-/// Shared `i` route for keyboard and action buttons. Groupings opens its whole chain
-/// field; other domains open the selected row's permitted value editor.
-pub(super) fn open_field(shell: &mut ShellView) {
+/// Shared `i` route for keyboard, action buttons and the value row's
+/// double-click. Groupings opens its whole chain field; other domains open
+/// the selected row's permitted value editor.
+pub(super) fn open_field(shell: &mut ShellView, cx: &App) {
     let groupings = shell
         .object_dialog
         .as_ref()
         .is_some_and(|state| state.domain == Domain::Groupings);
-    if !groupings {
-        open_text_field(shell);
-        return;
+    if groupings {
+        open_chain_field(shell);
+    } else {
+        open_text_field(shell, cx);
     }
+}
+
+/// Groupings' `i`: open the draft's whole chain field. Also the door the
+/// Grouping list's own paths take (a slot's chain, the ad hoc chain, a
+/// refused save reopening the field), which never reach another domain.
+pub(super) fn open_chain_field(shell: &mut ShellView) {
     if let Some(state) = shell.object_dialog.as_mut()
         && let Some(draft) = state.draft.as_mut()
     {
@@ -1683,11 +1691,31 @@ pub(super) fn open_field(shell: &mut ShellView) {
 /// Open numeric entry, permitted text entry, or multi-option choice typeahead.
 /// Read-only text and one-option choices receive a notice. The same row capability
 /// rules drive the footer and value buttons.
-fn open_text_field(shell: &mut ShellView) {
+///
+/// The adapter's own refusal (`Domain::step_refusal`) gates a `Choice` row
+/// here as it gates `space`: the typeahead is a second route to the same
+/// value change, so a row the adapter refuses to step (a calibration stage's
+/// `kind`) is refused with the same words before any field opens, and the
+/// draft stays as it was.
+fn open_text_field(shell: &mut ShellView, cx: &App) {
     let Some(state) = shell.object_dialog.as_ref() else {
         return;
     };
     let domain = state.domain;
+    let Some(draft) = state.draft.as_ref() else {
+        return;
+    };
+    if matches!(
+        draft.selected_row(),
+        Some(EditRow::Field(i)) if matches!(draft.fields[i].kind, FieldKind::Choice { .. })
+    ) && let Some(reason) = domain.step_refusal(draft, &shell.services(cx).config)
+    {
+        set_notice(shell, reason);
+        return;
+    }
+    let Some(state) = shell.object_dialog.as_ref() else {
+        return;
+    };
     let Some(draft) = state.draft.as_ref() else {
         return;
     };
@@ -4651,7 +4679,7 @@ fn press_verb(shell: &mut ShellView, key: &str, window: &mut Window, cx: &mut Co
         }
         "d" => arm_delete(shell),
         "r" => arm_revert(shell),
-        "i" => open_field(shell),
+        "i" => open_field(shell, cx),
         "s" => super::grouping_list::arm_save(shell, cx),
         _ => {}
     }
@@ -4738,7 +4766,7 @@ fn on_edit_row_clicked(
             .as_ref()
             .is_some_and(|state| state.domain.writable(&state.stage));
         if writable {
-            open_field(shell);
+            open_field(shell, cx);
         } else {
             set_notice(shell, READ_ONLY_NOTICE.to_string());
         }
@@ -4890,13 +4918,24 @@ fn on_completion_clicked(
 }
 
 /// A choice-row click completes that option as Tab does, then synchronizes input.
+/// Gated on the adapter's refusal as `open_text_field` is: the list this
+/// click lands on cannot open for a refused row, so the gate here is the
+/// guard that keeps the two routes saying the same thing should another
+/// door to the list arrive.
 fn on_choice_row_clicked(
     shell: &mut ShellView,
     row: usize,
     window: &mut Window,
     cx: &mut Context<ShellView>,
 ) {
-    if let Some(draft) = draft_mut(shell) {
+    let refused = shell.object_dialog.as_ref().and_then(|state| {
+        state
+            .domain
+            .step_refusal(state.draft.as_ref()?, &shell.services(cx).config)
+    });
+    if let Some(reason) = refused {
+        set_notice(shell, reason);
+    } else if let Some(draft) = draft_mut(shell) {
         draft.choice_click(row);
     }
     shell.refresh_dialog_rows(cx);
