@@ -22,6 +22,9 @@ gpui-component.workspace = true
 toml = "1.1.4"
 
 [dev-dependencies]
+# Tests build `ran_at` instants; the crate itself reads times only through
+# `geode_core::clock::Clock`.
+chrono = "0.4.42"
 geode-core = { workspace = true, features = ["test-support"] }
 geode-shell = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }

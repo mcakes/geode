@@ -5,17 +5,35 @@ one underlying, drawn as a DAG of stages. The tile computes no fit itself:
 every run goes through the data tier's calibration door
 (`DataHandle::calibrate`) and comes back as a `Delivery::Calibration`.
 
-This crate is at its first slice: the factory, the config push, the header
-and a placeholder body. The graph layout, the data flow, the stage
-painting, the verbs and the edits follow in later slices; the keys and
-actions below are registered and bound now so a binding, a menu row or a
-footer hint can name a verb before the tile carries it out.
+This crate is at its early slices: the factory, the config push, the
+header, a placeholder body, and the pure layout and render model under
+`core/`, which nothing paints yet. The data flow, the stage painting, the
+verbs and the edits follow in later slices; the keys and actions below are
+registered and bound now so a binding, a menu row or a footer hint can
+name a verb before the tile carries it out.
 
 ## Module map
 
 - `lib.rs`: `KIND` (`calibration`) and `init`, which reserves `tab` and
   `shift-tab` in the picker fields' context (`tile::PICKER_CONTEXT`) for
   completion.
+- `core/`: the GPUI-free core, computed once per change and never per
+  frame. `layout.rs` places a pipeline as a layered DAG in design pixels:
+  a stage's layer is the longest path from a source, a layer orders by the
+  barycentre of its inputs' rows then its consumers' rows (two sweeps,
+  ties by document order), columns and rows spread evenly to the viewport
+  down to `MIN_GAP_REM` and past that `content_w`/`content_h` exceed it so
+  the tile scrolls; `caption` names each layer (`inputs`, `stage {n} ·
+  fit`, `derive`, `check`, `publish`, joined with ` · ` when a layer
+  mixes kinds), `neighbour` steps a cursor by `Move` (first input or
+  consumer, else the nearest card of the adjacent layer; up and down
+  within a layer, no wrap) and `nth` indexes layout order. `model.rs`
+  builds the `GraphModel` paint reads: per card the title, `{kind} ·
+  {detail}`, the `{HH:MM:SS} · {summary}` status (cut to `STATUS_CHARS`,
+  whole in `status_full`), its `Tone`, cursor, preview and filter
+  dimming (`geode_shell::palette::fuzzy_match`); per edge its endpoints
+  and `EdgeTone` (`Preview` over `Gate` over `Into`/`OutOf`); the
+  captions at their columns' x; and the footer line.
 - `content.rs`: `CalibrationConfig` (what the app pushes: the pipelines
   `from_doc` accepted and `check_against` kept, the schema the service
   serves, the egress targets with the documents each accepts, and every

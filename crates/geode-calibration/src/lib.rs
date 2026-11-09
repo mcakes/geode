@@ -6,6 +6,7 @@
 //! delivery.
 
 pub mod content;
+pub mod core;
 pub mod tile;
 
 pub use content::{ACTIONS, CalibrationConfig, CalibrationFactory, DEFAULT_KEYMAP};
