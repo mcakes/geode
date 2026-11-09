@@ -44095,10 +44095,31 @@ run_mutation "calibration data: a run waits for every source" \
 # was submitted lets an older run's answer paint the cards.
 run_mutation "calibration data: a stale outcome is dropped" \
   crates/geode-calibration/src/tile/data.rs \
-  '        if outcome.key != self.key() || expected != Some(outcome.tag) {' \
-  '        if outcome.key != self.key() || expected.is_none() {' \
+  '        if key != self.key() || expected != Some(tag) {' \
+  '        if key != self.key() || expected.is_none() {' \
   geode-calibration \
   a_stale_or_foreign_calibration_outcome_is_ignored
+
+# ---- Calibration tile: publish ----
+
+# A held publish stage is the check that refused its gate; `p` must say
+# so rather than ask. Reading the hold as a failure lets the question arm
+# over a held stage.
+run_mutation "calibration publish: a held publish stage refuses p" \
+  crates/geode-calibration/src/tile/verbs.rs \
+  '        if let Some(StageStatus::Held(reason)) = self.results.get(&publish.name).map(|r| &r.status)' \
+  '        if let Some(StageStatus::Failed(reason)) = self.results.get(&publish.name).map(|r| &r.status)' \
+  geode-calibration \
+  p_is_refused_while_publish_is_held_or_in_flight_or_absent
+
+# `y` is the one route to the publish request; a confirm that drops the
+# submission leaves the bar answered and nothing sent.
+run_mutation "calibration publish: y sends the publish action" \
+  crates/geode-calibration/src/tile/verbs.rs \
+  '            Pending::Publish { target, document } => self.submit_publish(target, document, cx),' \
+  '            Pending::Publish { .. } => {}' \
+  geode-calibration \
+  p_arms_the_confirm_bar_and_y_publishes_from_the_filter
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
