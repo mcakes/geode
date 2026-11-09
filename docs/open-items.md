@@ -1227,6 +1227,10 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Duplicate entries in a variadic `inputs` list are accepted, which would
   publish a series twice.
 - The `strike_window` and `min_strikes` refusals have no tests of their own.
+- The document query seam cannot tell "never published" from "published
+  empty": both answer zero rows. The calibration tile treats both as a
+  source still waiting (its card `waiting`, a status notice naming the
+  dataset, no run) until the dataset's next publication re-reads it.
 - `implied_rates` indexes the forward series by the parity tenor count without
   a bounds check, so a malformed `TermPoints` from a non-demo engine fails the
   request through panic containment rather than with a named error.

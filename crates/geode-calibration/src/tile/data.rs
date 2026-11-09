@@ -73,8 +73,9 @@ pub(super) enum Fetch {
         out: (StageName, String),
         /// The reads still to make, in pipeline order.
         queue: VecDeque<(StageName, String)>,
-        /// Each failed read's notice text, kept until the sequence ends.
-        errors: Vec<String>,
+        /// The notices the reads so far earned (a failed read, an empty
+        /// answer), kept until the sequence ends.
+        notices: Vec<Notice>,
     },
 }
 
@@ -310,7 +311,7 @@ impl CalibrationTile {
                     underlying: u,
                     out: first,
                     queue,
-                    errors: Vec::new(),
+                    notices: Vec::new(),
                 }
             }
             Err(refusal) => {
@@ -348,7 +349,12 @@ impl CalibrationTile {
     /// filled, the next read goes out under the same tag, and the last
     /// answer completes the set, which is the tile's one arrival. A failed
     /// or unreadable answer leaves its stage pending with a notice; the
-    /// sequence continues, so the other sources still arrive.
+    /// sequence continues, so the other sources still arrive. So does an
+    /// empty answer: a live read of a key no document was ever published
+    /// under answers zero rows, not an error, and the query seam cannot
+    /// tell that from a document published empty, so both mean "not yet
+    /// published" here and the source waits for the dataset's next
+    /// publication, which asks it again.
     pub fn deliver_query(&mut self, outcome: QueryOutcome, cx: &mut Context<Self>) {
         let Fetch::Reading { tag, .. } = &self.fetch else {
             return;
@@ -361,7 +367,7 @@ impl CalibrationTile {
             underlying,
             out: (stage, dataset),
             mut queue,
-            mut errors,
+            mut notices,
         } = std::mem::replace(&mut self.fetch, Fetch::Idle)
         else {
             return;
@@ -378,13 +384,22 @@ impl CalibrationTile {
             documents_from_snapshot(ds, &s)
         });
         match decoded {
+            // Nothing published under the key: the source is still owed.
+            // Whatever it held before is gone too, so a run can never read
+            // a document the store no longer has.
+            Ok(docs) if docs.is_empty() => {
+                self.sources.rows.remove(&stage);
+                notices.push(Notice::status(format!(
+                    "{dataset} has no document for {underlying}"
+                )));
+            }
             Ok(docs) => {
                 self.sources
                     .rows
                     .insert(stage.clone(), docs.into_iter().map(Arc::new).collect());
                 self.sources.pending.remove(&stage);
             }
-            Err(e) => errors.push(format!("{stage}: {e}")),
+            Err(e) => notices.push(Notice::danger(format!("{stage}: {e}"))),
         }
         if let Some(next) = queue.pop_front() {
             match self.ask(&underlying, &next.1, tag, cx) {
@@ -394,27 +409,30 @@ impl CalibrationTile {
                         underlying,
                         out: next,
                         queue,
-                        errors,
+                        notices,
                     }
                 }
                 Err(refusal) => {
-                    errors.push(format!("{}: document request refused: {refusal}", next.0));
-                    self.finish(tag, errors, cx);
+                    notices.push(Notice::danger(format!(
+                        "{}: document request refused: {refusal}",
+                        next.0
+                    )));
+                    self.finish(tag, notices, cx);
                 }
             }
         } else {
-            self.finish(tag, errors, cx);
+            self.finish(tag, notices, cx);
         }
         self.rebuild_model(cx);
         cx.notify();
     }
 
-    /// The sequence has ended: hand the set to the barrier. Failed reads
-    /// are notices, and their stages stay pending, which is what keeps the
-    /// run from going out; the set still arrives, so one broken read never
-    /// holds every other tile to the deadline.
-    fn finish(&mut self, tag: u64, errors: Vec<String>, cx: &mut Context<Self>) {
-        self.read_notices = errors.iter().map(Notice::danger).collect();
+    /// The sequence has ended: hand the set to the barrier. Failed and
+    /// empty reads are notices, and their stages stay pending, which is
+    /// what keeps the run from going out; the set still arrives, so one
+    /// broken read never holds every other tile to the deadline.
+    fn finish(&mut self, tag: u64, notices: Vec<Notice>, cx: &mut Context<Self>) {
+        self.read_notices = notices;
         let now = self.versions(cx);
         let following = self.is_following(cx);
         let key = self.key();

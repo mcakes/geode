@@ -728,6 +728,48 @@ fn manual_run_mode_waits_for_the_verb(cx: &mut gpui::TestAppContext) {
     assert_eq!(h.card_status(&vcx, "rates"), "not run");
 }
 
+/// A dataset that has never published answers zero rows, not an error.
+/// That source is still owed: its card waits, the footer names it, a
+/// status notice says which dataset has nothing for the underlying, and
+/// no run goes out with its input empty. The dataset's next publication
+/// asks it again.
+#[gpui::test]
+fn an_empty_document_answer_leaves_its_source_waiting(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_spx(cx);
+    h.answer_next(&mut vcx, "SPX").0.expect("the chain");
+    let reqs = h.requests();
+    let dividends = docs(&reqs)[0];
+    assert_eq!(dividends.dataset, "dividend_schedule");
+    let schema = demo_schema();
+    let empty = snapshot_of_documents(schema.dataset("dividend_schedule").unwrap(), &[], |_| {});
+    assert_eq!(empty.rows(), 0);
+    h.answer_doc(&mut vcx, dividends.tag, empty);
+    let (asked, after) = h.answer_all(&mut vcx, "SPX");
+    assert_eq!(asked.len(), 1, "the rates read still goes out: {asked:?}");
+    assert!(
+        calibrates(&after).is_empty(),
+        "no run with an empty input: {after:?}"
+    );
+    assert_eq!(h.card_status(&vcx, "dividends"), "waiting");
+    assert_eq!(h.card_tone(&vcx, "dividends"), Tone::Waiting);
+    assert_eq!(h.card_status(&vcx, "chain"), "not run");
+    assert_eq!(h.card_status(&vcx, "rates"), "not run");
+    assert_eq!(h.footer(&vcx), "waiting for dividends");
+    assert_eq!(
+        h.notices(&vcx),
+        vec!["dividend_schedule has no document for SPX".to_string()]
+    );
+    // The dataset publishes: the source is asked again and, answered, the
+    // run goes out.
+    h.publish(&mut vcx, "dividend_schedule", &["SPX"]);
+    let (asked, after) = h.answer_all(&mut vcx, "SPX");
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert_eq!(asked[0].0, "dividend_schedule");
+    assert_eq!(calibrates(&after).len(), 1, "{after:?}");
+    assert!(h.notices(&vcx).is_empty(), "the notice is gone");
+    assert_eq!(h.footer(&vcx), "");
+}
+
 /// A read that fails leaves its source waiting with the failure as a
 /// notice; the other reads still go out, and no run is submitted with a
 /// source missing. The flip is still answered: one broken read must not
