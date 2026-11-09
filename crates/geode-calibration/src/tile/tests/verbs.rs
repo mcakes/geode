@@ -12,8 +12,10 @@ use geode_core::calibration::{
 use geode_core::document::DocumentRows;
 use geode_core::query::QueryKey;
 use geode_data::{Request, UploadParams};
+use geode_shell::actions::ActionId;
 use geode_shell::keymap::{KeyContext, Keystroke, Modifiers, parse_binding};
 use geode_shell::module::{Delivery, UploadDelivery};
+use geode_shell::tiling::TileId;
 use geode_tile::menu::Lane;
 use gpui::Modifiers as MouseModifiers;
 
@@ -626,8 +628,12 @@ fn the_menu_lists_the_verbs_with_live_chords_and_picks_dispatch(cx: &mut gpui::T
         Some(Lane::Keys(keys("shift+r")))
     );
     assert_eq!(h.menu_reason(&vcx, "calibration::run_from"), None);
+    assert_eq!(
+        h.menu_reason(&vcx, OPEN_STAGE),
+        None,
+        "the cursor is on a stage of a valid pipeline"
+    );
     for id in [
-        OPEN_STAGE,
         "calibration::connect",
         "calibration::disconnect",
         "calibration::add",
@@ -680,12 +686,24 @@ fn the_menu_lists_the_verbs_with_live_chords_and_picks_dispatch(cx: &mut gpui::T
     );
 
     // The header's `⋯` opens the same menu; a press on a disabled row
-    // gives its reason and keeps the menu.
+    // (row 6, `Connect…`; rows count the separators) gives its reason and
+    // keeps the menu.
     h.click(&mut vcx, "calibration-menu-button-7");
     assert!(h.menu_open(&vcx).is_some(), "the trigger opens it");
-    h.click(&mut vcx, "calibration-menu-row-7-5");
+    h.click(&mut vcx, "calibration-menu-row-7-6");
     assert!(h.menu_open(&vcx).is_some(), "a refused pick keeps the menu");
     assert_eq!(h.notices(&vcx), vec![NEXT_CHANGE.to_string()]);
+    // `Open stage` (row 5) is the shell's action: a pick closes the menu
+    // and asks the shell through the frame rather than the tile's own
+    // dispatch, which does not carry it.
+    assert!(h.requested_actions(&mut vcx).is_empty());
+    h.click(&mut vcx, "calibration-menu-row-7-5");
+    assert_eq!(h.menu_open(&vcx), None, "an enabled pick closes the menu");
+    assert_eq!(
+        h.requested_actions(&mut vcx),
+        vec![(TileId(Harness::TILE), ActionId(OPEN_STAGE.to_string()))]
+    );
+    h.press(&mut vcx, ".");
     h.press(&mut vcx, "escape");
 
     // The rows follow the results: a held publish disables its row with

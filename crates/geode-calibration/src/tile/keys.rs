@@ -55,7 +55,9 @@ impl CalibrationTile {
         let Some(model) = self.model.as_ref() else {
             return;
         };
-        let Some(pipeline) = self.pipeline() else {
+        // The pipeline the model was built from, held or live: the cursor
+        // walks what is painted.
+        let Some(pipeline) = self.graph_pipeline() else {
             return;
         };
         let next = match &self.cursor {

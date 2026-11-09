@@ -375,7 +375,12 @@ filters stages (beating the shell's find inside the tile), `r`/`shift+r`
 run from the cursor or the whole pipeline, `p` publishes through the y/n
 bar, `c`/`shift+c` connect and disconnect an input, `a`/`d` add and delete
 a stage, `shift+l` relays out the graph and `.` opens the action menu (the
-header's `⋯` opens the same one). Under `mode == insert` (the filter and
+header's `⋯` opens the same one). `enter` is bound to the shell's own
+`config::calibration`, which the shell resolves before the tile sees the
+key: over a cursor on a stage of a valid pipeline (`config_object`) it opens
+the Calibration stages dialog at that stage's Edit screen, else on Browse
+(the menu's `Open stage` asks for the same action through
+`Frame::request_action`). Under `mode == insert` (the filter and
 the picker fields; an armed y/n bar reports `insert` too, its prompt
 holding the keyboard as a field does) it binds `enter`, `escape` and
 `up`/`down` (`calibration::list_down`/`list_up`); under `mode == menu`

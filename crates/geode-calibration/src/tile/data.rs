@@ -158,12 +158,14 @@ impl CalibrationTile {
     /// measured. Called after every change to one of them, never in
     /// render.
     pub(super) fn rebuild_model(&mut self, cx: &App) {
-        let config = self.shared.config.borrow().clone();
-        let Some(pipeline) = config.as_ref().and_then(|c| self.pipeline_in(c)) else {
+        // The live pipeline, or the held one while the config has dropped
+        // it (`graph_pipeline`): the graph stays under the finding.
+        let Some(pipeline) = self.graph_pipeline() else {
             self.model = None;
             self.chrome = Chrome::default();
             return;
         };
+        let pipeline = &pipeline;
         self.model_version += 1;
         let placed = layout(LayoutInput {
             pipeline,
@@ -247,6 +249,8 @@ impl CalibrationTile {
             return Ok(());
         }
         self.pipeline_name = Some(name);
+        // The hold was the old pipeline's; the new one is live, or nothing.
+        self.last_pipeline = None;
         self.clear_loaded(cx);
         self.loaded_for = None;
         self.sources.watches.clear();

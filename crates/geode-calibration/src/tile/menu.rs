@@ -34,7 +34,9 @@ impl CalibrationTile {
     fn menu_rows(&self, cx: &App) -> Vec<Row<ActionId>> {
         menu::rows(&MenuInputs {
             cursor: self.cursor.as_deref(),
-            pipeline: self.model.is_some(),
+            // The live pipeline, not the painted one: a held, dropped
+            // pipeline runs nothing, and the rows say so.
+            pipeline: self.pipeline().is_some(),
             publish: self.publish_check(cx),
         })
     }
@@ -172,7 +174,10 @@ impl MenuHost for CalibrationTile {
 
     /// `enter` on the highlighted row, or a click on any row. A disabled
     /// row's reason becomes the notice and the menu stays; an enabled one
-    /// closes the menu and dispatches its action.
+    /// closes the menu and dispatches its action — or, for the shell's own
+    /// `Open stage`, which the tile's dispatch does not carry, asks the
+    /// shell through the frame (`FrameRef::request_action`), which runs it
+    /// for the focused tile as a bound `enter` would.
     fn menu_pick(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         let Some(m) = &self.menu else {
             return;
@@ -180,7 +185,11 @@ impl MenuHost for CalibrationTile {
         match m.menu.pick(index) {
             Some(Ok(id)) => {
                 self.close_menu(cx);
-                self.dispatch(&id, None, window, cx);
+                if id.0 == menu::OPEN_STAGE {
+                    self.frame.request_action(id, cx);
+                } else {
+                    self.dispatch(&id, None, window, cx);
+                }
             }
             Some(Err(reason)) => self.refuse(reason, cx),
             None => {}

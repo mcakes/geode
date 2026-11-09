@@ -10,8 +10,9 @@ use geode_tile::menu::{ActionRow, Hint, Row};
 use gpui::SharedString;
 
 /// The shell action that opens the cursor's stage in the object dialog's
-/// Edit screen: the `Open stage` row's pick, once that route reaches the
-/// tile.
+/// Edit screen: `enter`'s binding and the `Open stage` row's pick, which
+/// the tile hands to the shell through the frame since the action is the
+/// shell's, not the tile's.
 pub const OPEN_STAGE: &str = "config::calibration";
 
 /// The reason on a row whose verb the tile does not carry yet: the row is
@@ -54,7 +55,7 @@ pub fn rows(i: &MenuInputs) -> Vec<Row<ActionId>> {
     };
     let later = || Err(SharedString::new_static(NEXT_CHANGE));
     vec![
-        Row::Action(row("calibration::run_from", "Run from here").enabled(from_here)),
+        Row::Action(row("calibration::run_from", "Run from here").enabled(from_here.clone())),
         Row::Action(row("calibration::run_all", "Run all").enabled(pipeline)),
         Row::Separator,
         Row::Action(
@@ -62,7 +63,8 @@ pub fn rows(i: &MenuInputs) -> Vec<Row<ActionId>> {
                 .enabled(i.publish.clone().map_err(SharedString::from)),
         ),
         Row::Separator,
-        Row::Action(row(OPEN_STAGE, "Open stage").enabled(later())),
+        // The same condition as `Run from here`: a stage under the cursor.
+        Row::Action(row(OPEN_STAGE, "Open stage").enabled(from_here)),
         Row::Action(row("calibration::connect", "Connect\u{2026}").enabled(later())),
         Row::Action(row("calibration::disconnect", "Disconnect\u{2026}").enabled(later())),
         Row::Action(row("calibration::add", "Add stage\u{2026}").enabled(later())),
@@ -119,11 +121,11 @@ mod tests {
             "calibration::run_from",
             "calibration::run_all",
             "calibration::publish",
+            OPEN_STAGE,
         ] {
             assert!(find(&rows, id).is_enabled(), "{id}");
         }
         for id in [
-            OPEN_STAGE,
             "calibration::connect",
             "calibration::disconnect",
             "calibration::add",
@@ -158,6 +160,11 @@ mod tests {
                 .map(|r| r.as_ref()),
             Some(NO_CURSOR)
         );
+        assert_eq!(
+            find(&rows, OPEN_STAGE).reason().map(|r| r.as_ref()),
+            Some(NO_CURSOR),
+            "no stage to open without a cursor"
+        );
         assert!(find(&rows, "calibration::run_all").is_enabled());
         assert_eq!(
             find(&rows, "calibration::publish")
@@ -174,6 +181,7 @@ mod tests {
             "calibration::run_from",
             "calibration::run_all",
             "calibration::publish",
+            OPEN_STAGE,
         ] {
             assert_eq!(
                 find(&none, id).reason().map(|r| r.as_ref()),

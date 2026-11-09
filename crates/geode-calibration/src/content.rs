@@ -17,7 +17,8 @@ use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{
-    CloseHandle, Delivery, FindEvent, ModuleFactory, StackHandle, TileContent, TileOccupant,
+    CloseHandle, ConfigObject, Delivery, FindEvent, ModuleFactory, StackHandle, TileContent,
+    TileOccupant,
 };
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
@@ -108,6 +109,10 @@ context = "calibration && mode == normal"
 "a" = "calibration::add"
 "d" = "calibration::delete"
 "." = "calibration::menu"
+# The shell's own action: the shell resolves it before the tile sees the
+# key, and `config_object` names the cursor's stage, so the dialog opens
+# at that stage's Edit screen (the `⋯` menu's `Open stage` asks the same).
+"enter" = "config::calibration"
 # Last in line: with nothing else to cancel, `escape` dismisses the
 # header's warning and danger notices.
 "escape" = "calibration::cancel"
@@ -263,6 +268,12 @@ impl TileContent for CalibrationContent {
     fn follows(&self) -> bool {
         true
     }
+
+    /// The cursor's stage, when it is a stage of a pipeline the config
+    /// holds, so `config::calibration` opens the dialog at its Edit screen.
+    fn config_object(&self, cx: &App) -> Option<ConfigObject> {
+        self.tile.read(cx).config_object()
+    }
 }
 
 /// Creates calibration tiles sharing the app's data handle and the config
@@ -382,11 +393,17 @@ mod tests {
         for b in bindings {
             for (key, action) in b["keys"].as_table().unwrap() {
                 let action = action.as_str().unwrap();
-                assert!(ids.contains(&action), "{key} = {action} is not registered");
+                // `config::calibration` is the shell's own, bound here so
+                // `enter` opens the editor on the cursor's stage; the
+                // registry check below is what proves it is registered.
+                assert!(
+                    ids.contains(&action) || action == crate::core::menu::OPEN_STAGE,
+                    "{key} = {action} is not registered"
+                );
                 bound += 1;
             }
         }
-        assert_eq!(bound, 37);
+        assert_eq!(bound, 38);
         // Every registered action has a key somewhere in the fragment.
         for id in &ids {
             assert!(

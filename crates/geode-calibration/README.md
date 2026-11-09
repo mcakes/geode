@@ -44,7 +44,10 @@ name a verb before the tile carries it out.
   `Disconnect…`, `Add stage…`, `Delete stage`), each carrying the reason
   it cannot be picked now: no cursor, no pipeline, the publish refusal
   `p` would give, or `arrives with the next change` for a verb a later
-  slice carries.
+  slice carries. `Open stage` is the shell's `config::calibration`
+  (`OPEN_STAGE`): its pick asks the shell through
+  `FrameRef::request_action`, since the tile's dispatch does not carry a
+  shell action.
 - `commands.rs`: the `:` line's vocabulary as data: `run [stage]`,
   `publish`, `pipeline <name>`, `layout`, with the usage line each
   refuses with, and `completions` (the verbs; stage names after `run`,
@@ -122,11 +125,12 @@ is unbound.
 ## Keys
 
 Every action is bound in the fragment; the cursor, the jumps, the filter,
-the relayout, the runs, the publish and the menu act, the editors consume
-their key and change nothing yet.
+the relayout, the runs, the publish, the menu and `enter` act, the editors
+consume their key and change nothing yet.
 
 | Key | Action |
 |---|---|
+| `enter` | The shell's `config::calibration`: open the cursor's stage in the Calibration stages dialog at its Edit screen; with no stage under the cursor (none, one the pipeline lacks, or a pipeline the reader dropped) the dialog opens on Browse. `config_object` names the stage; also the `⋯` menu's `Open stage` |
 | `h` / `left`, `l` / `right` | Cursor to the first input (port order), to the first consumer (document order); else the nearest card of the adjacent layer |
 | `k` / `up`, `j` / `down` | Cursor up and down among the stages of one depth, no wrap |
 | `g 1`..`g 9` | Cursor to the Nth stage in layout order (layer-major, barycentre rows) |
@@ -216,6 +220,13 @@ once the tile knows which that is it saves the name. The launch table
 
 - `no pipeline` in the body: the config holds no pipeline of the tile's
   name, or none has been pushed.
+- The last valid graph, under the finding's notice, when a reload dropped
+  the shown pipeline (`graph_pipeline`: the name is absent from the config
+  and a finding names one of the held pipeline's stages or the pipeline).
+  The cursor still walks it; the runs, the publish and `enter` read the
+  live pipeline alone, so they refuse (`no pipeline`) or open the dialog on
+  Browse until the document is fixed. A pipeline absent for any other
+  reason (renamed, never declared) is `no pipeline`.
 - A header notice per config finding, in the message the diagnostics page
   shows (`calibration: pipeline 'p' dropped: …`); a click or `escape`
   dismisses it, and it shows again when the finding leaves and returns.

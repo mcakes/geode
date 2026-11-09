@@ -7,8 +7,10 @@ mod harness;
 mod keys;
 mod verbs;
 
+use geode_core::calibration::CALIBRATION_DOC;
 use geode_shell::keymap::KeyContext;
-use harness::{Harness, builtin_config, open_with, restored, warned_config};
+use geode_shell::module::ConfigObject;
+use harness::{Harness, builtin_config, dropped_config, open_with, restored, warned_config};
 
 /// A launched or restored tile names its underlying in the title and the
 /// configured pipeline's size in the header: eleven stages, two Kalman
@@ -115,4 +117,96 @@ fn a_config_finding_is_a_header_notice_that_escape_dismisses(cx: &mut gpui::Test
     h.press(&mut vcx, "escape");
     assert_eq!(h.dispatched(), vec!["calibration::cancel".to_string()]);
     assert!(h.notices(&vcx).is_empty(), "dismissed");
+}
+
+/// `enter` resolves to the shell's `config::calibration` through the
+/// tile's keymap and the tile does not take it (the shell opens the
+/// dialog); `config_object` names the cursor's stage so the dialog lands on
+/// it.
+#[gpui::test]
+fn enter_dispatches_the_shell_config_action_and_config_object_is_the_cursor(
+    cx: &mut gpui::TestAppContext,
+) {
+    let (h, mut vcx) = open_with(
+        cx,
+        Some(builtin_config()),
+        Some(restored(Some("SPX"), None, Some("repo_fit"))),
+    );
+    assert_eq!(
+        h.config_object(&vcx),
+        Some(ConfigObject {
+            doc: CALIBRATION_DOC,
+            name: "repo_fit".into()
+        })
+    );
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.dispatched(), vec!["config::calibration".to_string()]);
+    assert!(
+        !h.act(&mut vcx, "config::calibration"),
+        "the shell's action, not the tile's"
+    );
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("repo_fit"), "nothing moved");
+}
+
+/// Without a cursor on a stage there is nothing to open: a restored cursor
+/// the shown pipeline lacks names no object until a jump lands on a card.
+#[gpui::test]
+fn config_object_is_none_without_a_cursor_on_a_stage(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        Some(builtin_config()),
+        Some(restored(Some("SPX"), None, Some("gone"))),
+    );
+    assert_eq!(h.config_object(&vcx), None);
+    h.press(&mut vcx, "g 1");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("chain"), "the first card");
+    assert_eq!(
+        h.config_object(&vcx).map(|o| o.name),
+        Some("chain".to_string())
+    );
+}
+
+/// A reload that drops the shown pipeline (a stage the reader refuses)
+/// keeps the last valid graph on screen with the first finding as a header
+/// notice; `config_object` is `None`, so `enter` reaches the shell's action
+/// and opens nothing of this pipeline; the cursor still walks the held
+/// graph, and a run is refused since nothing valid is there to run.
+#[gpui::test]
+fn a_dropped_pipeline_keeps_the_last_graph_and_enter_opens_nothing(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(
+        cx,
+        Some(builtin_config()),
+        Some(restored(Some("SPX"), None, Some("repo_fit"))),
+    );
+    assert_eq!(h.counts(&vcx).as_deref(), Some("11 stages \u{b7} 2 fits"));
+    h.set_config(&mut vcx, dropped_config());
+    assert_eq!(
+        h.counts(&vcx).as_deref(),
+        Some("11 stages \u{b7} 2 fits"),
+        "the last valid graph stays"
+    );
+    assert!(
+        h.tile.read_with(&vcx, |t, _| t.model().is_some()),
+        "the graph is still painted"
+    );
+    assert_eq!(
+        h.notices(&vcx).first().map(String::as_str),
+        Some("calibration: stage 'repo_fit': knots is two or more strictly ascending numbers")
+    );
+    assert_eq!(h.config_object(&vcx), None);
+    h.press(&mut vcx, "enter");
+    assert_eq!(h.dispatched(), vec!["config::calibration".to_string()]);
+    h.press(&mut vcx, "l");
+    assert_eq!(h.cursor(&vcx).as_deref(), Some("repo_curve"));
+    assert_eq!(
+        h.command(&mut vcx, "run"),
+        Err(crate::core::menu::NO_PIPELINE.to_string())
+    );
+    // A valid document again: the live pipeline is back and the cursor's
+    // stage is an object once more.
+    h.set_config(&mut vcx, builtin_config());
+    assert_eq!(
+        h.config_object(&vcx).map(|o| o.name),
+        Some("repo_curve".to_string())
+    );
 }

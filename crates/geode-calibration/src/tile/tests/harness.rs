@@ -195,6 +195,29 @@ pub(super) fn builtin_config() -> CalibrationConfig {
     config
 }
 
+/// The builtin document with both Kalman fits' `knots` reduced to one
+/// value, which `from_doc` refuses: `implied_forwards` is dropped whole,
+/// the first finding at `stages.repo_fit.knots`, and no pipeline is kept.
+pub(super) fn dropped_config() -> CalibrationConfig {
+    let text = BUILTIN_CALIBRATION.replace(
+        "knots             = [0.25, 0.5, 1.0, 2.0, 3.0, 5.0]",
+        "knots             = [1.0]",
+    );
+    assert_ne!(text, BUILTIN_CALIBRATION, "the fixture edits the knots");
+    let config = config_from(&text);
+    assert!(
+        config.pipelines.pipelines.is_empty(),
+        "the pipeline is dropped"
+    );
+    assert_eq!(
+        config.diagnostics[0].path.as_deref(),
+        Some("stages.repo_fit.knots"),
+        "{:?}",
+        config.diagnostics
+    );
+    config
+}
+
 /// The builtin document plus a pipeline `check_against` drops with a
 /// warning: one finding, one pipeline kept.
 pub(super) fn warned_config() -> CalibrationConfig {
@@ -403,5 +426,22 @@ impl Harness {
     /// The header notices that show (dismissed ones left out).
     pub(super) fn notices(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
         self.tile.read_with(vcx, |t, _| t.notice_texts())
+    }
+
+    /// The configuration object the tile shows, through the shell's door.
+    pub(super) fn config_object(
+        &self,
+        vcx: &gpui::VisualTestContext,
+    ) -> Option<geode_shell::module::ConfigObject> {
+        vcx.read(|cx| self.content.config_object(cx))
+    }
+
+    /// The actions the tile asked the shell to run since the last call,
+    /// drained from the frame as the shell's observer drains them.
+    pub(super) fn requested_actions(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+    ) -> Vec<(TileId, ActionId)> {
+        vcx.update(|_, cx| self.frame.update(cx, |f, _| f.take_requested_actions()))
     }
 }

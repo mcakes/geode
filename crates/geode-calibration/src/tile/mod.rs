@@ -75,6 +75,10 @@ pub struct CalibrationTile {
     underlying: Option<String>,
     /// The pipeline shown; `None` means the config's first.
     pipeline_name: Option<String>,
+    /// The shown pipeline as the config last held it valid, kept so the
+    /// graph stays painted while a reload that dropped it (a stage the
+    /// reader refused) is being fixed; `graph_pipeline` has the rule.
+    last_pipeline: Option<Pipeline>,
     cursor: Option<StageName>,
     /// Whether the shell last showed the tile; a hidden tile asks nothing
     /// until it is next shown.
@@ -234,6 +238,7 @@ impl CalibrationTile {
             shared,
             underlying: key(UNDERLYING_KEY),
             pipeline_name: key(PIPELINE_KEY),
+            last_pipeline: None,
             cursor: key(CURSOR_KEY),
             visible: false,
             stack: None,
@@ -299,6 +304,51 @@ impl CalibrationTile {
         }
     }
 
+    /// The pipeline the graph is drawn from: the config's, or when the
+    /// config dropped it — the name is absent from `pipelines` and a
+    /// finding names one of its stages (`stages.<stage>…`) or the pipeline
+    /// itself (`pipelines.<name>…`) — the last valid one, held so the
+    /// graph stays on screen under the finding's notice while the document
+    /// is fixed. A pipeline absent for any other reason (renamed, never
+    /// declared) is no graph. The verbs read the live pipeline alone
+    /// (`pipeline`): a dropped pipeline runs, publishes and edits nothing.
+    pub(super) fn graph_pipeline(&self) -> Option<Pipeline> {
+        if let Some(live) = self.pipeline() {
+            return Some(live);
+        }
+        let held = self.last_pipeline.as_ref()?;
+        let config = self.shared.config.borrow();
+        let config = config.as_ref()?;
+        let names_held = |path: &str| {
+            let pipeline = format!("pipelines.{}", held.name);
+            path == pipeline
+                || path.starts_with(&format!("{pipeline}."))
+                || held.stages.iter().any(|s| {
+                    let stage = format!("stages.{}", s.name);
+                    path == stage || path.starts_with(&format!("{stage}."))
+                })
+        };
+        let dropped = config
+            .diagnostics
+            .iter()
+            .any(|d| d.path.as_deref().is_some_and(names_held));
+        dropped.then(|| held.clone())
+    }
+
+    /// The configuration object the tile shows: the cursor's stage, when
+    /// it is a stage of the live pipeline, so `config::calibration` opens
+    /// the dialog at its Edit screen. A held, dropped pipeline offers
+    /// none — its stages are not in the configuration the dialog edits.
+    pub(super) fn config_object(&self) -> Option<geode_shell::module::ConfigObject> {
+        let cursor = self.cursor.as_deref()?;
+        let pipeline = self.pipeline()?;
+        pipeline.stage(cursor)?;
+        Some(geode_shell::module::ConfigObject {
+            doc: geode_core::calibration::CALIBRATION_DOC,
+            name: cursor.to_string(),
+        })
+    }
+
     /// Rebuild what paint reads from the config and the underlying: the
     /// title, the counts, the health question and the notices. Runs when
     /// the tile is built, when a config is pushed and when the followed
@@ -306,7 +356,11 @@ impl CalibrationTile {
     fn refresh(&mut self, cx: &App) {
         let config = self.shared.config.borrow().clone();
         let underlying = self.underlying_str(cx).map(str::to_string);
-        let pipeline = config.as_ref().and_then(|c| self.pipeline_in(c));
+        if let Some(live) = config.as_ref().and_then(|c| self.pipeline_in(c)) {
+            self.last_pipeline = Some(live.clone());
+        }
+        let graph = self.graph_pipeline();
+        let pipeline = graph.as_ref();
         self.header.title = match &underlying {
             Some(u) => format!("{TITLE} \u{b7} {u}").into(),
             None => SharedString::new_static(TITLE),
