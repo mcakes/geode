@@ -2,6 +2,7 @@
 //! keys resolved through the app's keymap and answers through the
 //! content's `deliver`.
 
+mod data;
 mod harness;
 
 use geode_shell::keymap::KeyContext;

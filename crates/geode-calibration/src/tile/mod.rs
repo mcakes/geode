@@ -6,19 +6,23 @@
 //!
 //! What paint reads is prepared in `Header` when the tile is built, when
 //! the config is pushed and when the followed group changes its
-//! underlying, never in render.
+//! underlying, and in the graph model (`core::model`) when the pipeline,
+//! the results, the waiting sources or the cursor change, never in render.
+//! The data flow (the source reads, the runs and their answers) is `data`.
 
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use geode_core::calibration::{CalibrationOutcome, Pipeline, StageKind, StageName};
+use geode_core::calibration::{Pipeline, StageKind, StageName, StageResult};
 use geode_core::config::{Diagnostic, Severity};
-use geode_core::query::QueryOutcome;
+use geode_core::link::Group;
 use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
 use geode_shell::module::{CloseHandle, StackHandle, UploadDelivery};
 use geode_shell::tiling::TileId;
+use geode_tile::following::FollowingQuery;
 use geode_tile::header::{Cluster, HealthWatch, MenuTrigger, Mode, link_chips};
 use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
@@ -26,6 +30,10 @@ use gpui::{App, Context, ElementId, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::content::{ACTIONS, CalibrationConfig, Shared};
+use crate::core::model::GraphModel;
+use data::{Fetch, Sources};
+
+mod data;
 
 /// The key context of the tile's picker fields, where `tab` completes.
 pub const PICKER_CONTEXT: &str = "calibration_picker";
@@ -61,6 +69,36 @@ pub struct CalibrationTile {
     health: HealthWatch,
     /// The config's findings, as header notices.
     notices: Vec<Notice>,
+    /// The data flow's notices: a failed or refused read, or the
+    /// underlying missing. Replaced on each ask.
+    read_notices: Vec<Notice>,
+    /// The last run's refusal or request failure; cleared by the next run
+    /// that goes out or answers.
+    run_notice: Option<Notice>,
+    /// The source reads under the flip barrier: one tag per sequence.
+    following: FollowingQuery<()>,
+    fetch: Fetch,
+    /// The followed group as of the last frame notification, so a change
+    /// that moves no counter is still noticed.
+    last_following: Option<Group>,
+    sources: Sources,
+    /// The underlying the documents and results in hand belong to.
+    loaded_for: Option<String>,
+    /// Each stage's last result, by name; stages an outcome did not touch
+    /// keep theirs.
+    results: BTreeMap<StageName, StageResult>,
+    /// The tag of the last calibration request of any lane; every request
+    /// takes the next value.
+    run_tag: u64,
+    /// The tag of the last `Run` submitted and of the last user action,
+    /// kept apart so a late run is never read as a publish answer.
+    last_run_tag: Option<u64>,
+    last_user_tag: Option<u64>,
+    /// The sources completed while hidden: the run goes out on show.
+    run_due: bool,
+    /// The prepared render model; `None` with no pipeline.
+    model: Option<GraphModel>,
+    model_version: u64,
     /// The notices the trader dismissed, each hidden while the config
     /// keeps reporting it; pruned in `refresh`.
     dismissed: Dismissals,
@@ -111,15 +149,10 @@ impl CalibrationTile {
                 .and_then(toml::Value::as_str)
                 .map(str::to_string)
         };
-        // The followed group's underlying is the frame's: a change there
-        // renames the header.
-        cx.observe(frame.entity(), |this, _, cx| {
-            if this.underlying_str(cx).map(str::to_string) != this.header.underlying {
-                this.refresh(cx);
-                cx.notify();
-            }
-        })
-        .detach();
+        // The followed group's underlying is the frame's, and the frame's
+        // counters say when the documents must be asked again.
+        cx.observe(frame.entity(), |this, _, cx| this.on_frame_changed(cx))
+            .detach();
         cx.observe(&diagnostics, |this, _, cx| {
             let datasets: Vec<&str> = this.header.datasets.iter().map(String::as_str).collect();
             if this
@@ -142,11 +175,26 @@ impl CalibrationTile {
             stack: None,
             close: None,
             notices: Vec::new(),
+            read_notices: Vec::new(),
+            run_notice: None,
+            following: FollowingQuery::new(),
+            fetch: Fetch::Idle,
+            last_following: None,
+            sources: Sources::default(),
+            loaded_for: None,
+            results: BTreeMap::new(),
+            run_tag: 0,
+            last_run_tag: None,
+            last_user_tag: None,
+            run_due: false,
+            model: None,
+            model_version: 0,
             dismissed: Dismissals::default(),
             header: Header::default(),
             #[cfg(test)]
             dispatch_log: Vec::new(),
         };
+        tile.last_following = tile.frame.read(cx).following();
         tile.refresh(cx);
         tile
     }
@@ -215,13 +263,30 @@ impl CalibrationTile {
             .unwrap_or_default();
         // A dismissal lasts while the finding is reported: one the config
         // stopped reporting shows again when it returns.
-        self.dismissed.prune(&self.notices);
+        let all = self.all_notices();
+        self.dismissed.prune(&all);
+        self.rebuild_model(cx);
     }
 
-    /// The factory stored a new config: the pipeline is read again by name
-    /// and the header follows it.
+    /// Every notice the header reports, the config's first: what paint
+    /// filters through the dismissals and what `escape` dismisses.
+    fn all_notices(&self) -> Vec<Notice> {
+        self.notices
+            .iter()
+            .chain(&self.read_notices)
+            .chain(&self.run_notice)
+            .cloned()
+            .collect()
+    }
+
+    /// The factory stored a new config: the pipeline is read again by name,
+    /// the header follows it, and a shown tile asks its sources again, since
+    /// the pipeline's source stages may have changed.
     pub(crate) fn config_changed(&mut self, cx: &mut Context<Self>) {
         self.refresh(cx);
+        if self.visible {
+            self.requery(cx);
+        }
         cx.notify();
     }
 
@@ -259,7 +324,7 @@ impl CalibrationTile {
         // take their verbs as the graph, the data flow and the editors
         // arrive.
         if verb == "cancel" {
-            if !self.dismissed.dismiss_all(&self.notices) {
+            if !self.dismissed.dismiss_all(&self.all_notices()) {
                 return false;
             }
             cx.notify();
@@ -281,26 +346,9 @@ impl CalibrationTile {
         Vec::new()
     }
 
-    /// A document read's answer. Nothing is asked yet, so nothing is
-    /// installed; an answer that arrives was not this tile's.
-    pub fn deliver_query(&mut self, outcome: QueryOutcome, _cx: &mut Context<Self>) {
-        let _ = outcome;
-    }
-
-    /// A run's answer. No run is asked yet.
-    pub fn deliver_calibration(&mut self, outcome: CalibrationOutcome, _cx: &mut Context<Self>) {
-        let _ = outcome;
-    }
-
     /// A publish's echo. No publish is asked yet.
     pub fn deliver_upload(&mut self, outcome: UploadDelivery, _cx: &mut Context<Self>) {
         let _ = outcome;
-    }
-
-    /// The shell's word on whether the tile is on screen, given from its
-    /// render, where a notify would be dropped: stored, nothing asked.
-    pub fn set_visible(&mut self, visible: bool, _cx: &mut Context<Self>) {
-        self.visible = visible;
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -359,10 +407,26 @@ impl CalibrationTile {
     #[cfg(test)]
     pub(crate) fn notice_texts(&self) -> Vec<String> {
         self.dismissed
-            .visible(self.notices.iter().cloned())
+            .visible(self.all_notices())
             .iter()
             .map(|n| n.text().to_string())
             .collect()
+    }
+
+    /// The prepared render model, `None` with no pipeline. Paint reads it
+    /// once the graph is drawn; until then the tests do.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "paint reads the model once the graph is drawn")
+    )]
+    pub(crate) fn model(&self) -> Option<&GraphModel> {
+        self.model.as_ref()
+    }
+
+    /// The stages holding a result, by name.
+    #[cfg(test)]
+    pub(crate) fn result_names(&self) -> Vec<String> {
+        self.results.keys().cloned().collect()
     }
 }
 
@@ -396,7 +460,7 @@ impl Render for CalibrationTile {
             });
         let mut cluster = Cluster::new(self.id);
         cluster.mode = Mode::from_key_mode(self.mode());
-        cluster.notices = self.dismissed.visible(self.notices.iter().cloned());
+        cluster.notices = self.dismissed.visible(self.all_notices());
         cluster.on_dismiss = Some(notice::on_dismiss(&tile, |t: &mut CalibrationTile| {
             &mut t.dismissed
         }));

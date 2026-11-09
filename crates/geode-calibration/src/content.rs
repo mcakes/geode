@@ -162,10 +162,6 @@ pub struct CalibrationConfig {
 pub(crate) struct Shared {
     /// The tile's door to the data tier: document reads, runs and
     /// publishes go through it.
-    #[expect(
-        dead_code,
-        reason = "read once the tile asks for its documents and runs"
-    )]
     pub(crate) data: DataHandle,
     pub(crate) config: RefCell<Option<CalibrationConfig>>,
     tiles: RefCell<Vec<WeakEntity<CalibrationTile>>>,
@@ -231,6 +227,12 @@ impl TileContent for CalibrationContent {
 
     fn set_visible(&self, visible: bool, cx: &mut App) {
         self.tile.update(cx, |t, cx| t.set_visible(visible, cx))
+    }
+
+    /// The tile is being removed: its reads are cancelled and any flip
+    /// waiting on it answered.
+    fn closed(&self, cx: &mut App) {
+        self.tile.update(cx, |t, cx| t.closed(cx))
     }
 
     fn set_stack(&self, stack: Option<StackHandle>, cx: &mut App) {
