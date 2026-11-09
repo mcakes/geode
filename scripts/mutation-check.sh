@@ -44173,6 +44173,29 @@ run_mutation "calibration tile: a dropped pipeline offers no config object" \
   geode-calibration \
   a_dropped_pipeline_keeps_the_last_graph_and_enter_opens_nothing
 
+# ---- Calibration tile: graph edits ----
+
+# A stage downstream of the cursor's reads it already; connecting it as an
+# input closes a cycle the reader refuses by dropping the whole pipeline.
+# Without the exclusion the picker offers implied_rates to the stage that
+# feeds it.
+run_mutation "calibration edits: a cycle is never offered" \
+  crates/geode-calibration/src/core/edits.rs \
+  '        .filter(|c| !downstream.contains(&c.name))' \
+  '        .filter(|c| c.name != stage)' \
+  geode-calibration \
+  connect_candidates_exclude_cycles_type_mismatches_and_existing_inputs
+
+# A delete must rewrite every reader in the same batch as the removal, or
+# a reload sees a stage naming an input that is gone and drops the
+# pipeline. Dropping the rewrites leaves the removal alone.
+run_mutation "calibration edits: delete strips consumers" \
+  crates/geode-calibration/src/core/edits.rs \
+  '        edits.push(edit(&consumer.name, Some(table)));' \
+  '        let _ = table;' \
+  geode-calibration \
+  delete_edits_remove_the_stage_and_strip_every_consumer_in_one_batch
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
