@@ -8,11 +8,13 @@
 //! on the empty body, `.` for the cursor as it stands. The wheel moves the
 //! tile's own scroll offset, clamped to the content on both axes. A port
 //! dragged off a card's right edge and dropped on a card is `c` + `enter`
-//! with the pick made by hand: `core::edits::can_feed` (the connect
-//! picker's `connect_candidates`, one name at a time) decides what a card
-//! may take, both in the card's `can_drop` and in the drop itself, and
-//! the drop calls the same validated `connect`, so a drop the reader would
-//! refuse shows the same danger notice and queues nothing. A press on a
+//! with the pick made by hand: the cards a drag may land on are computed
+//! once when it passes gpui's threshold (`core::edits::drop_targets`, the
+//! connect picker's `connect_candidates` asked one name at a time through
+//! `can_feed`) and each card's `can_drop` reads that set through a handle;
+//! the drop asks `can_feed` again and calls the same validated `connect`,
+//! so a drop the reader would refuse shows the same danger notice and
+//! queues nothing. A press on a
 //! header notice dismisses it and, when the notice names a stage of the
 //! painted graph (a finding or the reader's refusal at `stages.<name>…`,
 //! kept beside the notice when it was made), lands the cursor on the card.

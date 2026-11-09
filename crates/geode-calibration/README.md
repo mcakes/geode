@@ -52,9 +52,10 @@ model, menu rows and edits under `core/`.
   which is the port at `inputs.len()` since inputs match fixed ports by
   position, or a variadic kind's slot, never filled), `connect_candidates`
   (same pipeline, not the stage, not an input already, emitting what the
-  open port takes or, for a variadic kind with no gate yet, its gate type,
-  and not downstream of the stage, which would close a cycle the reader
-  refuses by dropping the pipeline), `connect_edit` and `disconnect_edit`
+  open port takes or, for a variadic kind, its gate type, which the reader
+  accepts any number of, and not downstream of the stage, which would close
+  a cycle the reader refuses by dropping the pipeline), `connect_edit` and
+  `disconnect_edit`
   (the stage's table with `inputs` extended at the port or struck),
   `delete_edits` (`None` for the stage, then each consumer's table without
   it, in document order, with the count of edges into those consumers),
@@ -87,8 +88,8 @@ model, menu rows and edits under `core/`.
   `DEFAULT_KEYMAP` fragment.
 - `tile/`: the hosted entity and its tests. `mod.rs` holds the state,
   `dispatch`, the `:` line's routing and `Render`; `data.rs` the data flow
-  (source reads, the request builder, runs, outcomes, the pipeline switch)
-  and `rebuild_model`; `keys.rs` the cursor moves, the `g N` jumps, the
+  (source reads, the request builder, runs, outcomes, the pipeline switch,
+  the config push's reconciliation) and `rebuild_model`; `keys.rs` the cursor moves, the `g N` jumps, the
   filter field's lifecycle, the scroll that keeps the cursor's card in
   view and the viewport measurement; `verbs.rs` the run, publish and
   delete verbs, the `ConfirmHost` (the y/n bar's payload
@@ -157,8 +158,8 @@ the model once at the real viewport; nothing is laid out per frame.
 The footer: the model's line (`waiting for a, b`, else `{cursor} ·
 {status}`) at the left, or the filter field while `/` has it up; at the
 right a hint row (`h j k l` move, `/` filter, `r` run, `shift+r` run all,
-`p` publish, `c` connect, `a` add, `d` delete, `.` menu; `enter`
-keep and `escape` revert while the field is up), each chord resolved
+`p` publish, `c` connect, `x` disconnect, `a` add, `d` delete, `.`
+menu; `enter` keep and `escape` revert while the field is up), each chord resolved
 against the live keymap on a `Chords` change and omitted while its verb
 is unbound.
 
@@ -330,6 +331,32 @@ The connect picker previews the highlighted candidate as a dashed edge
 into the stage (`preview_edge`, rebuilt on a highlight change only) and
 drops it when it closes.
 
+## Config push
+
+The app pushes `CalibrationConfig` whole to the factory at startup and on
+every reload (`set_config`), and every live tile's `config_changed` reads
+the shown pipeline again by name and compares it, stage by stage, with the
+definition the results in hand were computed over: `last_pipeline` beside
+`definition`, each stage's merged table from `sources` (`reconcile`). A
+stage whose table, kind or inputs changed, and every stage downstream of
+it in the new pipeline, keeps its result with its status set to `Stale`
+(time and summary kept, so the card still says what ran, muted and italic)
+until the next outcome replaces it; a stage the new pipeline lacks loses
+its result; a new stage has none (`not run`). The cursor, the filter, the
+scroll and the documents in hand stand; a cursor on a stage that is gone
+moves to the first card in layout order. The sources are asked again only
+when a source stage's dataset or series changed or a source was added,
+since the documents in hand are the old source's: at once when the tile is
+shown, on the next show when hidden (`requery_due`), the changed source
+waiting meanwhile so no run reads its old documents; a source stage gone
+takes its documents and its wait with it. The push itself submits no run;
+the next publication or `r` does. A push that drops the shown pipeline
+compares nothing: the held graph and its results stand under the finding's
+notice, and the baseline waits for the fix, so a change made while the
+pipeline was dropped is still found when it reads again. A connect,
+disconnect or kind list up when the push lands closes; the name field
+stays. The model is rebuilt once per push.
+
 ## Failure states
 
 - `no pipeline` in the body: the config holds no pipeline of the tile's
@@ -337,9 +364,10 @@ drops it when it closes.
 - The last valid graph, under the finding's notice, when a reload dropped
   the shown pipeline (`graph_pipeline`: the name is absent from the config
   and a finding names one of the held pipeline's stages or the pipeline).
-  The cursor still walks it; the runs, the publish and `enter` read the
-  live pipeline alone, so they refuse (`no pipeline`) or open the dialog on
-  Browse until the document is fixed. A pipeline absent for any other
+  Its results and the cursor stand, nothing marked stale, and the cursor
+  still walks it; the runs, the publish and `enter` read the live pipeline
+  alone, so they refuse (`no pipeline`) or open the dialog on Browse until
+  the document is fixed. A pipeline absent for any other
   reason (renamed, never declared) is `no pipeline`.
 - A header notice per config finding, in the message the diagnostics page
   shows (`calibration: pipeline 'p' dropped: …`); a click or `escape`
@@ -369,6 +397,11 @@ drops it when it closes.
   configuration.
 - A `set_config` push prunes closed tiles and holds no borrow across a
   tile's update; the tile reads the config just stored.
+- A config push resets nothing a reload need not: the results, the
+  cursor, the filter, the scroll and the documents in hand stand, a result
+  going `Stale` only where its stage's definition or an upstream one
+  changed, and the sources are asked again only when a source stage
+  changed (`config_changed`). Only an outcome clears a stale mark.
 - Paint formats nothing: the title, the counts, the health question and
   the notices are prepared when the tile is built, when a config is pushed
   and when the followed group's underlying changes.

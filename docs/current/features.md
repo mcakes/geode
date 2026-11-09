@@ -4208,6 +4208,288 @@ Known limitations:
 See the [crate guide](../../crates/geode-volwatch/README.md) for the
 module map.
 
+## Calibration
+
+`geode-calibration` shows one pipeline of the `calibration` document
+([configuration](configuration.md#calibration),
+[typed documents](typed-documents.md#calibration)) over one underlying as a
+graph of stages: the source documents on the left, the fits, checks and
+rasters they feed, the publish on the right. The tile computes no fit
+itself. Every run goes through the data tier's calibration door
+(`DataHandle::calibrate`, [the calibration worker](data-path.md#the-calibration-worker))
+and comes back as a `Delivery::Calibration` whose per-stage results the
+cards show; the engine behind the door is `[calibration] engine` in
+`app.toml` (restart-required).
+
+**Kinds.** One kind, `calibration`, titled `Calibration`. It opens from the
+tile picker and from an `underlying_ref` row through the launch context
+(`tile::open_with`; the launch table `{ underlying = "<u>" }` is read as a
+session record is), and it follows a link group: the followed group's single underlying
+is the tile's, else its own. The header reads `Calibration · <underlying>`
+and, while a pipeline is shown, a muted `<n> stages · <k> fits`, then the
+shared cluster (the mode icon, the config's findings as notices, link chips,
+the health chip for the source stages' datasets, `⋯` and ×). The pipeline
+shown is the session's `pipeline`, else the document's first; `:pipeline
+<name>` switches (`unknown pipeline '<name>'` otherwise), dropping the old
+pipeline's results, documents and watches and a cursor the new one lacks.
+
+**Graph.** The body is a clipped surface the tile scrolls by its own offset.
+Stages are laid out as a layered DAG computed once per change, never per
+frame: a stage's layer is the longest path from a source, a layer orders
+its stages by the barycentre of their inputs' rows then their consumers'
+(ties by document order), and columns and rows spread evenly to the
+viewport down to a minimum gap, past which the content exceeds the
+viewport and scrolls. A caption names each layer above its column
+(`inputs`, `stage 1 · fit`, `derive`, `check`, `publish`, joined with ` · `
+when a layer mixes kinds). Each card shows the stage name, `<kind> ·
+<detail>` (the dataset of a source, the series of a fit, the check, the
+grid, the publish target) and a status line: `HH:MM:SS · <summary>` from
+the stage's last result (`not run` with none, `waiting` for a source whose
+document has not arrived), cut to twenty characters with the whole line in
+a tooltip. The tone colors the border and the status: a `Failed` stage
+danger, a `Held` publish warning, a waiting source info, a `Stale` result
+muted and italic. The cursor's card takes the ring and the active fill, and
+a card failing the `/` filter paints at reduced opacity. A canvas under the
+cards strokes every edge as a cubic Bézier from the input's right middle to
+the reader's left middle, ending in a disc: edges into the cursor's stage
+take the foreground, edges out of it the ring, the check into a held
+publish the warning color dashed (the gate that explains the hold), a
+proposed edge the ring dashed. A strip down a card's right edge, with a dot
+at its middle, is the port a connect drag starts from. The footer names
+every source still waiting (`waiting for chain, rates`, document order)
+before the cursor's `<stage> · <status>` — a restored cursor must not hide
+what blocks the pipeline — or shows the filter field while `/` has it up,
+and hints the keys that matter (`h j k l`, `/`, `r`, `shift+r`, `p`, `c`,
+`x`, `a`, `d`, `.`; `enter` and `escape` while a field is up), each
+resolved against the live keymap and omitted while unbound.
+
+**Following the underlying.** Every source stage's dataset is read by the
+underlying's key prefix, so a two-part-key dataset (a chain per expiry, a
+curve per series) answers every document of the underlying in one
+snapshot. The reads go out in sequence under one tag — the query pool keeps
+one request per key — and the set is the tile's one arrival under the flip
+barrier. Each source is watched for publications under the underlying: a
+publish asks that source again and no other, and the run goes out again
+once the set is complete. A followed group's scope naming another
+underlying clears the results and the documents at once, before the new
+underlying's arrive, so no card shows one underlying's fit under another's
+name; a question armed over the old underlying is withdrawn, never
+answered. A read that fails, or a dataset with no document for the
+underlying (the query seam answers zero rows for "never published" and
+"published empty" alike), leaves its source waiting with a notice naming
+it, and no run goes out while any source waits: a run with a source missing
+would fit whatever the engine made of the gap.
+
+**Running.** A pipeline with `run = "on_input"` runs when every source is
+in and after each publication re-read; `run = "manual"` waits for the verb.
+`r` runs from the cursor's stage (`Run { from }`: the stage and everything
+downstream), `shift+r` and `:run` the whole pipeline, `:run <stage>` from a
+named stage (`unknown stage '<s>'` otherwise). Runs go on the worker's
+background lane, where a newer run replaces one still waiting; `p`'s
+publish goes on the user lane, which queues and never replaces, so a second
+publish is refused while one is in flight rather than run twice. A run is
+refused with a warning notice while no underlying is loaded (`no
+underlying`, or `no underlying in A` when following), while a source is owed
+(`waiting for a, b`), with no cursor for `r` (`no stage under the cursor`)
+and when the data handle's queue is full (`calibration queue full`; the
+documents stay, so the next change retries). Only the latest request of
+each lane is listened for: a `Run` outcome must carry the last run's tag, a
+publish the last user action's, so a late run is never read as a publish
+answer, and another tile's outcome is dropped. The stages an outcome
+delivers replace their results; every other card stands. The engine's
+statuses: `Ok`; `Failed(reason)`, the card in the danger tone with the
+reason and every stage downstream of it in the same action `Skipped`
+(`skipped` on the card); `Held(reason)`, a publish whose check refused its
+gate, the card in the warning tone with the gate edge dashed and `p`
+refused `publish is held: <reason>`; `Stale`, a result the current
+definition did not produce (below). A refused or failed request comes back
+as the synthetic `request` stage and is a header notice, never a card.
+
+**Publishing.** `p` (and `:publish`, and the menu's `Publish`) is refused
+when the pipeline has no publish stage (`no publish stage in <pipeline>`),
+when its last result is held, while a publish is in flight, and for the
+run's reasons above; otherwise the y/n bar under the header asks `Publish
+<series> for <underlying> to <target>? y/n`, the series being those of the
+fits behind the publish stage's rasters in port order (`repo, box` for the
+builtin). `y` checks again and submits `Publish { from: Filter }`; the
+outcome merges its stages as a run's does and sends its rows on, one upload
+per document to the stage's target through the egress door
+([market-data egress](#market-data-documents)). Each upload answers as a
+notice (`uploaded <document> <key> to <target> HH:MM:SS`, the key's parts
+joined with `/`, or `upload … failed: <reason>` in the danger tone); once every document has landed the
+publish card's status ends `· uploaded HH:MM:SS`. An upload never rewrites
+the stage's result — only an outcome does — so a publish the engine has
+since held stays held. The question is armed over one underlying, document
+and target, all three checked again at `y`, and a change of underlying or
+pipeline withdraws it.
+
+**Reload.** The app pushes the document whole to the tile's factory at
+startup and on every reload (`CalibrationConfig`: the pipelines the reader
+accepted, the schema, the egress targets, every finding, each stage's
+merged table and which stages a lower layer defines); the tile never reads
+`Config` itself, so it never sees a half-updated document. A push compares
+the shown pipeline, stage by stage, with the definition the results in
+hand were computed over: a stage whose table, kind or inputs changed, and
+every stage downstream of it, keeps its result marked `Stale` (its time and
+summary still shown, muted and italic) until its next outcome; a stage the
+new pipeline lacks loses its result; a new stage has none. The cursor, the
+filter, the scroll and the documents in hand stand — a cursor on a stage
+that is gone moves to the first card in layout order — and the sources are
+asked again only when a source stage's dataset or series changed or a
+source was added, at once when shown and on the next show when hidden,
+the changed source waiting meanwhile. The push itself submits no run; the
+next publication or `r` does. A push that drops the shown pipeline (a stage
+the reader refused) keeps the last valid graph and its results on screen
+under the finding's notice, the cursor still walking it, while the runs, the
+publish and the edits read the live pipeline alone and so refuse (`no
+pipeline`) until the document is fixed; a pipeline absent for any other
+reason (renamed, never declared) shows `no pipeline`. An open connect,
+disconnect or kind list closes on a push, since its rows were about the old
+pipeline; the name field stays and is checked at `enter`.
+
+**Keys.** Normal mode: `h`/`left` and `l`/`right` move the cursor to the
+first input (port order) or the first consumer (document order), else the
+nearest card of the adjacent layer; `k`/`up` and `j`/`down` move among the
+stages of one depth without wrapping; `g 1`–`g 9` jump to the Nth card in
+layout order (the tile's key context takes no counts, so a bare digit is
+nothing); the shared `motion::*` steps move the cursor as `h j k l` do,
+and with no cursor the first move lands on the first card. `/` filters
+stages by fuzzy match as it is typed, `enter` keeping the filter and
+landing the cursor on the first lit card, `escape` restoring the filter in
+force when `/` was pressed (the shell's dialog-filter rule). `shift+l` (and
+`:layout`) places the graph again from the home scroll. `r`, `shift+r` and
+`p` are above. `c` opens the connect list under the cursor's card (`Connect
+<stage> from`, the stages that may feed its open port, the highlighted one
+previewed as a dashed edge), `x` the disconnect list (`Disconnect from
+<stage>`, its inputs in port order), `a` the kind list (`Add stage`) then a
+name field (`Name the <kind>`), `d` asks `Delete <stage> and its <n> edges?
+y/n` on the bar, `.` opens the action menu (`Run from here`, `Run all`,
+`Publish`, `Open stage`, `Connect…`, `Disconnect…`, `Add stage…`, `Delete
+stage`, each carrying the reason it cannot be picked now; `⋯` opens the
+same one) and `enter` is the shell's own `config::calibration`, which opens
+the Calibration stages dialog at the cursor's stage's Edit screen (see
+Editing). `escape` peels: a live port drag, an armed question (answered
+no), a picker, the filter field, the menu, then the header's notices. While
+a field or an armed question holds the keys (`mode == insert`) `enter`
+commits, `escape` cancels and `up`/`down` step a list; while the menu or a
+list is up (`mode == menu`) `enter` picks, `escape` closes, the shared
+`tilelist` steps move and `.` toggles the menu. Every verb reaching the tile
+past an armed question answers it no; a verb other than a popup's own
+closes the popup first. The `:` line reads `run [stage]`, `publish`,
+`pipeline <name>` and `layout`, with completion over the verbs, the
+pipeline's stages after `run` and the document's pipelines after
+`pipeline`; a refusal the key would show as a notice is the line's answer.
+
+**Pointer.** Every pointer action is a key's twin and goes through the
+key's own function, so the two cannot disagree. A left press on a card is
+the cursor; a double press is `enter` (the shell is asked for
+`config::calibration` through the frame and runs it for the focused tile,
+which the press focused); a right press on a card is the cursor then `.`,
+the menu hung from the pointer rather than the header (on the empty body,
+`.` for the cursor as it stands); a press on a menu or list row picks it, a
+press outside closes the popup, and a press anywhere answers an armed
+question no. The wheel scrolls the tile's own offset, clamped to the
+content on each axis (a horizontal delta, or a vertical one with shift,
+scrolls x). Dragging a card's port onto another card is `c` + `enter` with
+the pick made by hand: when the drag passes gpui's threshold the cards it
+may land on are computed once (every stage the connect picker would offer
+for the dragged stage) and an eligible card previews the dashed edge; the
+drop runs the same validated connect, so a drop the reader would refuse
+shows the reader's notice and queues nothing, and an ineligible card never
+takes the drop. A drop anywhere, a release off the tile or `escape` ends
+the drag. A left press on a header notice dismisses it and, when the notice
+names a stage of the painted graph, lands the cursor on its card. A plain
+left press propagates so the shell's tile-focus press still arrives; a
+modified press is the shell's. There is no add by pointer.
+
+**Editing.** The graph's edits are whole-object edits of the `calibration`
+document through the shell's config path (`FrameRef::queue_config_edits`,
+drained on the shell's frame observer into the object dialogs' pending
+batch: one debounce, one user-layer write, one reload, which pushes the new
+graph). The tile holds no draft: until the reload the graph is the old one.
+Every batch is read before it is written (the document rebuilt from the
+pushed tables with the edits applied, read by `from_doc` and
+`check_against`), and an edit that would drop the pipeline is refused as a
+danger notice in the reader's own words with nothing queued — a written
+refusal would come back a reload later as a dropped graph the tile could no
+longer edit. So a connect writes the stage's table with `inputs` extended
+at its open port (the first unfilled fixed port, or a variadic kind's slot;
+candidates are stages of the same pipeline, not an input already, emitting
+what the port takes or a gate the kind accepts, and not downstream of the
+stage, which would close a cycle), refused `<stage> has no open input` or
+`nothing left to connect to <stage>`; a disconnect strikes only an input
+whose loss still reads (a publish's second raster or its gate) and refuses,
+in the reader's words, one that leaves a fixed-arity stage short, which is
+changed in the dialog instead; a delete queues the stage's removal and
+every reader's table without it in one batch (`Delete <stage> and its <n>
+edges?`, `n` the edges into its readers), the cursor going to the stage's
+first input, else its first consumer, else the first other card. A delete
+is refused for a stage a lower layer defines (`<stage> comes from the
+builtin layer — there is nothing of yours to delete`): a user-layer removal
+would leave it in force with its readers stripped. An add writes nothing:
+the kind and name picked (`[a-z0-9_]+`, not `request`, not a name the
+document holds) seed a table — `pipeline`, `kind`, the kind's required
+fields at the builtin's values, no `inputs` — which the tile proposes
+through `config_object` while asking the shell for `config::calibration`,
+so the Calibration stages dialog opens at the new stage's Edit screen on a
+draft from the seed, where the inputs are ticked and the save is the one
+write ([configuration dialogs](configuration-dialogs.md#the-calibration-stages-dialog)).
+`enter` on any stage, a `kalman_fit` included, opens the same dialog at
+that stage's Edit screen; with no stage under the cursor (none, one the
+pipeline lacks, a held dropped pipeline) it opens on Browse. Changing a
+stage's kind is refused in the dialog on every route: delete and re-add.
+The shell answers an edit on the frame: a fork of an inherited stage is a
+status notice in the shell's words (`copied 'publish' to your config — r
+restores …`), a refusal (no writable user directory) a danger notice
+`escape` dismisses.
+
+**Session.** The table saves `underlying`, `pipeline` and `cursor`, each
+while set. A record without `pipeline` means the document's first pipeline,
+and once the tile knows which that is it saves the name.
+
+**Failures.** An edit the reader would refuse is refused before it is
+written, as a danger notice naming the first diagnostic; the dialog shows
+the same finding on the field. A reload whose document the reader refuses
+keeps the last valid graph under the finding's notice (above). An engine
+`Failed` is the card's danger tone with the reason and its downstream in
+the same action `Skipped`, a publish among them; the next run that
+succeeds replaces both. A `Held` publish is the warning tone, the dashed gate edge and `p`
+refused with the reason. A full queue is a status notice and nothing is
+lost: the documents stay and the next publication, `r` or reload retries.
+A hidden tile keeps its reads (their answers land) and submits no run; a
+run that completed while hidden goes out once on show, and a source
+changed while hidden is asked on show. A restart begins the demo engine's
+filters afresh (its state is process memory; the real engine owns its
+own) and restores the tile from the session; the first run re-initialises.
+
+Known limitations:
+
+- The fit view (a stage's filter state and a draft of its parameters,
+  `Evaluate` and `Seed`) arrives in Part 3; `enter` on a `kalman_fit` stage
+  opens its fields in the Calibration stages dialog, as it does for every
+  other kind.
+- The document query seam cannot tell "never published" from "published
+  empty": both answer zero rows, and the tile treats both as a source still
+  waiting until the dataset's next publication re-reads it.
+- An inherited (builtin or desk) stage cannot be hidden: a whole-object
+  removal takes only the user layer's copy, so `d` and the dialog both
+  refuse until the config path has a tombstone.
+- A header notice is one pressable element: a press on a notice that names
+  a stage both lands the cursor there and dismisses it; a two-target notice
+  is a `geode-tile` change.
+- The demo calibration engine keeps its filter state in process memory
+  only; a restart begins every filter afresh from the next publish.
+- A stage's `kind` cannot be changed in place; the dialog refuses and the
+  stage is deleted and re-added.
+- Add has no pointer route; `a` and the menu's `Add stage…` are its routes.
+- A `Stale` mark compares each stage's merged table, so a change to a key
+  the reader ignores (`basis`) marks the stage stale too; the next outcome
+  clears it.
+- The graph has no zoom: a wide pipeline scrolls.
+
+See the [crate guide](../../crates/geode-calibration/README.md) for the
+module map, the element names and the invariants.
+
 ## Demo and application composition
 
 `geode-demo-data` generates deterministic risk batches and market-data

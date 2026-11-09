@@ -395,9 +395,9 @@ with `popup == actions` `enter` picks the highlighted row
 `popup == list` (the fieldless connect, disconnect and kind lists) `enter`
 picks (`calibration::commit`) and `escape` discards, the steps being the
 shared ones under `tilelist`. Its normal-mode `escape` is
-`calibration::cancel`, which answers an armed question no, closes the
-picker, the filter field or the menu, and last dismisses the header's
-notices, handled only when it did one of these.
+`calibration::cancel`, which ends a live port drag, answers an armed
+question no, closes the picker, the filter field or the menu, and last
+dismisses the header's notices, handled only when it did one of these.
 The classifications fragment binds its label verbs under `mode == normal`
 (`i`/`enter` edit with the caret at the end, `shift+i` edit with the label
 selected, `x`/`d d` clear, `o`/`shift+o` add a value, `s` cycle the label

@@ -1246,6 +1246,60 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   paints a notice as one pressable element whose only press is the dismiss;
   a two-target notice (a text press that navigates, a × that dismisses) is
   a `geode-tile` change.
+- Part 3 (fit view) reroutes Enter on `kalman_fit` stages to the fit view;
+  today Enter opens its fields in the dialog.
+- A config push marks a stage stale by comparing its merged table, so a
+  change to a key the reader ignores (`basis`) marks it and its consumers
+  stale too; comparing the typed stage alone would miss nothing the engine
+  reads, but the table is what the dialog writes.
+- A port drag's eligible set is computed when the drag starts and is not
+  recomputed when a config push rebuilds the model mid-drag; the drop asks
+  `can_feed` again over the pipeline as it then stands, so a drop onto a
+  card the reload made ineligible queues nothing and says nothing.
+
+### Display checks
+
+Owed in a real window (`cargo run -p geode-app -- --demo 1000`, a
+Calibration tile on `SPX` from the tile picker, `--demo` so the demo engine
+answers), none verifiable headlessly:
+
+- The graph at three tile widths: wide (every column at its even spread),
+  narrow enough that the columns close to the minimum gap, and narrower
+  still so the content exceeds the viewport and the body scrolls (wheel and
+  the cursor keys keeping the card in view; `shift+l` returning to the home
+  scroll).
+- The held publish state after a run whose check fails: the publish card
+  dashed in the warning tone, the `df_monotone → publish` gate edge dashed
+  in the warning color, `p` refused with the reason, the question not
+  armed.
+- The connect picker's preview edge under the cursor's card (`c` on
+  `publish` in the open-publish fixture): the dashed ring-colored edge
+  from the highlighted candidate into the stage, leaving with the list.
+- The port dot at the middle of a card's right strip, the grab cursor over
+  it, the hover fill, and the drag ghost while a port is dragged, with the
+  preview edge over an eligible card and nothing over an ineligible one.
+- The right-press menu hung by its top-left corner from the pointer in the
+  body (and the `⋯`/`.` menu from the header's right edge), closing on a
+  press outside.
+- The refusal notices in the header: `{stage} has no open input`, `nothing
+  left to connect to {stage}`, the reader's own words on a refused
+  disconnect, `{stage} comes from the builtin layer — there is nothing of
+  yours to delete`, `calibration queue full`, `waiting for a, b`; each
+  replaced by the next verb's and dismissed by `escape` or a press.
+- `a`: the kind list, then the name field (`Name the kalman_fit`,
+  placeholder `stage name`), then the Calibration stages dialog opening at
+  the new stage's Edit screen on the seeded draft with `inputs` empty.
+- The cursor's `border_2` ring: whether the 1 px border change shifts the
+  card's text against its neighbours' when the cursor lands on a card.
+- Dimmed cards under `/`: the cards failing the filter at the reduced
+  opacity, the lit ones unchanged, the field in the footer.
+- A status cut to twenty characters at the 9 rem card width (`09:30:15 ·
+  held by df_mono…`), the ellipsis inside the card and the whole line in
+  the tooltip on hover.
+- A stale card after a reload that changes a fit's `process_noise` in
+  `calibration.toml`: the changed fit, its raster and the publish muted and
+  italic with their old time and summary, the rest unchanged, and the next
+  `r` clearing the marks.
 
 ## Tooling, tests and the mutation harness
 
