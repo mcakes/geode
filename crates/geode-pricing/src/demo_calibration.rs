@@ -236,10 +236,11 @@ impl Calibrator for DemoForwardCalibrator {
             run_index: record.count,
             chain: chain_reference(pipeline, &request.inputs),
         };
-        let mut results: Vec<StageResult> = Vec::with_capacity(pipeline.stages.len());
+        let mut results: Vec<StageResult> = Vec::with_capacity(selected.len());
         for stage in pipeline.topological() {
+            // A stage the action did not select is absent from the outcome,
+            // not `Skipped`: its last card stands.
             if !selected.contains(&stage.name) {
-                results.push(skipped(stage));
                 continue;
             }
             let mut inputs: Vec<&StagePayload> = Vec::with_capacity(stage.inputs.len());
@@ -1089,24 +1090,15 @@ fn evaluate(
             StagePayload::None,
         ),
     };
-    let stages = pipeline
-        .topological()
-        .into_iter()
-        .map(|s| {
-            if s.name == stage.name {
-                StageResult {
-                    name: s.name.clone(),
-                    status: result.0.clone(),
-                    ran_at: Some(Utc::now()),
-                    elapsed: started.elapsed(),
-                    summary: result.1.clone(),
-                    payload: result.2.clone(),
-                }
-            } else {
-                skipped(s)
-            }
-        })
-        .collect();
+    // The evaluated stage alone: nothing else was touched.
+    let stages = vec![StageResult {
+        name: stage.name.clone(),
+        status: result.0,
+        ran_at: Some(Utc::now()),
+        elapsed: started.elapsed(),
+        summary: result.1,
+        payload: result.2,
+    }];
     Ok(CalibrationOutcome {
         key: request.key,
         tag: request.tag,
@@ -1233,13 +1225,15 @@ fn publish(
     let StageKind::Publish { target, .. } = &publish.kind else {
         unreachable!("found by kind");
     };
+    // The rasters read and the publish stage, in pipeline order; every
+    // other stage was not touched and is absent.
     let stages = pipeline
         .topological()
         .into_iter()
-        .map(|s| {
+        .filter_map(|s| {
             if let Some(raster) = rasters.get(&s.name) {
                 let (lo, hi) = range(&raster.values);
-                StageResult {
+                Some(StageResult {
                     name: s.name.clone(),
                     status: StageStatus::Ok,
                     ran_at: Some(Utc::now()),
@@ -1251,18 +1245,18 @@ fn publish(
                         pct(hi)
                     ),
                     payload: StagePayload::Raster(raster.clone()),
-                }
+                })
             } else if s.name == publish.name {
-                StageResult {
+                Some(StageResult {
                     name: s.name.clone(),
                     status: StageStatus::Ok,
                     ran_at: Some(Utc::now()),
                     elapsed: started.elapsed(),
                     summary: format!("{} series → {target}", rows.len()),
                     payload: StagePayload::PublishReady,
-                }
+                })
             } else {
-                skipped(s)
+                None
             }
         })
         .collect();
@@ -1503,6 +1497,15 @@ mod tests {
         "",
     ];
 
+    /// The stage names of an outcome in the order reported.
+    fn names(outcome: &CalibrationOutcome) -> Vec<&str> {
+        outcome.stages.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    /// Every `ok` stage is `Ok`, every `skipped` stage is `Skipped` with no
+    /// payload and no `ran_at`, and no stage outside the two lists is in
+    /// the outcome unless it `Failed`: an outcome lists only the stages
+    /// the action touched, so a caller asserts absence by omission.
     fn assert_statuses(outcome: &CalibrationOutcome, ok: &[&str], skipped: &[&str]) {
         for name in ok {
             assert_eq!(stage(outcome, name).status, StageStatus::Ok, "{name}");
@@ -1515,6 +1518,17 @@ mod tests {
                 "{name} has a payload"
             );
             assert!(s.ran_at.is_none(), "{name} has a ran_at");
+        }
+        for s in &outcome.stages {
+            let name = s.name.as_str();
+            if ok.contains(&name) || skipped.contains(&name) {
+                continue;
+            }
+            assert!(
+                matches!(s.status, StageStatus::Failed(_)),
+                "{name} is in the outcome as {:?} but the action did not touch it",
+                s.status
+            );
         }
     }
 
@@ -1653,6 +1667,20 @@ mod tests {
                 from: Some("implied_rates".into()),
             },
         );
+        // The stage and its transitive consumers, in pipeline order; the
+        // sources, parity and the check that reads parity are not in the
+        // outcome at all, so their cards stand.
+        assert_eq!(
+            names(&outcome),
+            vec![
+                "implied_rates",
+                "repo_fit",
+                "box_fit",
+                "repo_curve",
+                "box_curve",
+                "publish",
+            ]
+        );
         assert_statuses(
             &outcome,
             &[
@@ -1663,15 +1691,22 @@ mod tests {
                 "box_curve",
                 "publish",
             ],
-            &["chain", "dividends", "rates", "parity", "df_monotone"],
+            &[],
         );
+        for name in ["chain", "dividends", "rates", "parity", "df_monotone"] {
+            assert!(
+                !names(&outcome).contains(&name),
+                "{name} was not touched and must be absent"
+            );
+        }
         assert!(matches!(
             stage(&outcome, "implied_rates").payload,
             StagePayload::TermPoints(_)
         ));
 
         // From a middle stage before anything ran: the upstream payload is
-        // missing, so the stage fails by name and its consumers are skipped.
+        // missing, so the stage fails by name and its consumers in this
+        // action are skipped. Stages outside the action stay absent.
         let fresh = DemoForwardCalibrator::new();
         let outcome = run(
             &fresh,
@@ -1679,22 +1714,12 @@ mod tests {
                 from: Some("repo_fit".into()),
             },
         );
+        assert_eq!(names(&outcome), vec!["repo_fit", "repo_curve", "publish"]);
         assert_eq!(
             stage(&outcome, "repo_fit").status,
             StageStatus::Failed("input implied_rates has not run".into())
         );
-        assert_statuses(
-            &outcome,
-            &[],
-            &[
-                "chain",
-                "parity",
-                "implied_rates",
-                "box_fit",
-                "repo_curve",
-                "publish",
-            ],
-        );
+        assert_statuses(&outcome, &[], &["repo_curve", "publish"]);
         assert!(matches!(
             fresh.run(&request(
                 RunAction::Run {
@@ -1753,19 +1778,9 @@ mod tests {
         assert!((fit_at(draft, 1.0) - 0.012).abs() < 1e-12);
         assert!((fit_at(draft, 2.5) - 0.0135).abs() < 1e-12);
         assert!(draft.stats.rmse > 0.0, "the draft is far from the points");
-        assert_statuses(
-            &outcome,
-            &["repo_fit"],
-            &[
-                "chain",
-                "parity",
-                "implied_rates",
-                "df_monotone",
-                "box_fit",
-                "repo_curve",
-                "publish",
-            ],
-        );
+        // The evaluated stage alone: an evaluate blanks no other card.
+        assert_eq!(names(&outcome), vec!["repo_fit"]);
+        assert_statuses(&outcome, &["repo_fit"], &[]);
         // The next run answers exactly what an engine that never evaluated
         // answers.
         let after = engine.run(&request(full(), chain(1.002))).unwrap();
@@ -1808,20 +1823,10 @@ mod tests {
                 params: seed.clone(),
             },
         );
-        assert_statuses(
-            &outcome,
-            &["repo_fit", "repo_curve", "publish"],
-            &[
-                "chain",
-                "dividends",
-                "rates",
-                "parity",
-                "implied_rates",
-                "df_monotone",
-                "box_fit",
-                "box_curve",
-            ],
-        );
+        // The seeded stage and its consumers; `box_fit` and its raster are
+        // not touched and are absent.
+        assert_eq!(names(&outcome), vec!["repo_fit", "repo_curve", "publish"]);
+        assert_statuses(&outcome, &["repo_fit", "repo_curve", "publish"], &[]);
         let unseeded = run(&plain, full());
         let after_seed = fit(&outcome, "repo_fit");
         let after_plain = fit(&unseeded, "repo_fit");
@@ -1887,18 +1892,10 @@ mod tests {
             fit(&ran, "box_fit").values,
             "box comes from the filter"
         );
-        assert_statuses(
-            &outcome,
-            &["repo_curve", "box_curve", "publish"],
-            &[
-                "chain",
-                "parity",
-                "implied_rates",
-                "df_monotone",
-                "repo_fit",
-                "box_fit",
-            ],
-        );
+        // The rasters read and the publish stage; the fits the rasters were
+        // built from were read, not run, and are absent with the rest.
+        assert_eq!(names(&outcome), vec!["repo_curve", "box_curve", "publish"]);
+        assert_statuses(&outcome, &["repo_curve", "box_curve", "publish"], &[]);
         // From the filter: both series as they stand.
         let filter = run(
             &engine,
@@ -1968,6 +1965,73 @@ mod tests {
                 assert_eq!(publish.status, StageStatus::Ok, "run {run_index}");
                 assert_eq!(check.summary, "passed · 14 tenors", "run {run_index}");
             }
+        }
+    }
+
+    /// The `CalibrationOutcome::stages` contract: one entry per stage the
+    /// action touched, in pipeline order, and no other. A tile that paints
+    /// each delivered stage relies on an untouched stage being absent
+    /// rather than `Skipped`.
+    #[test]
+    fn an_outcome_lists_only_the_stages_the_action_touched() {
+        let engine = DemoForwardCalibrator::new();
+        let full_run = run(&engine, full());
+        assert_eq!(names(&full_run), ALL[..11].to_vec(), "Run from None");
+
+        let from = run(
+            &engine,
+            RunAction::Run {
+                from: Some("repo_fit".into()),
+            },
+        );
+        assert_eq!(
+            names(&from),
+            vec!["repo_fit", "repo_curve", "publish"],
+            "Run from a stage"
+        );
+
+        let evaluate = run(
+            &engine,
+            RunAction::Evaluate {
+                stage: "box_fit".into(),
+                params: vec![0.01; 6],
+            },
+        );
+        assert_eq!(names(&evaluate), vec!["box_fit"], "Evaluate");
+
+        let seed = run(
+            &engine,
+            RunAction::Seed {
+                stage: "box_fit".into(),
+                params: vec![0.01; 6],
+            },
+        );
+        assert_eq!(
+            names(&seed),
+            vec!["box_fit", "box_curve", "publish"],
+            "Seed"
+        );
+
+        let publish = run(
+            &engine,
+            RunAction::Publish {
+                from: PublishSource::Filter,
+            },
+        );
+        assert_eq!(
+            names(&publish),
+            vec!["repo_curve", "box_curve", "publish"],
+            "Publish"
+        );
+        for outcome in [&full_run, &from, &evaluate, &seed, &publish] {
+            assert!(
+                outcome
+                    .stages
+                    .iter()
+                    .all(|s| s.status != StageStatus::Skipped),
+                "{:?}: nothing failed, so nothing is Skipped",
+                outcome.action
+            );
         }
     }
 

@@ -17945,6 +17945,20 @@ run_mutation "demo calibrator: a held publish refuses" \
   geode-pricing \
   publish_is_refused_while_the_publish_stage_is_held
 
+# An outcome lists only the stages the action touched; a stage the action
+# did not select reported as Skipped would blank its card on every evaluate.
+run_mutation "demo calibrator: an untouched stage is absent, not Skipped" \
+  crates/geode-pricing/src/demo_calibration.rs \
+  '            if !selected.contains(&stage.name) {
+                continue;
+            }' \
+  '            if !selected.contains(&stage.name) {
+                results.push(skipped(stage));
+                continue;
+            }' \
+  geode-pricing \
+  an_outcome_lists_only_the_stages_the_action_touched
+
 # ---- Vol slice door: demo model, worker and routing ----
 
 run_mutation "vol: outside the terms the end smile holds flat in vol" \

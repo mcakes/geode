@@ -96,7 +96,14 @@ impl RunAction {
     }
 }
 
-/// The answer to one request, one entry per stage the run touched.
+/// The answer to one request. `stages` holds one entry per stage the
+/// action touched and no other: `Run { from: None }` reports every stage
+/// of the pipeline; `Run { from: Some(s) }` and `Seed { stage: s, .. }`
+/// report `s` and its transitive consumers; `Evaluate` reports the
+/// evaluated stage alone; `Publish` reports the rasterize stages it read
+/// and the publish stage. A stage absent from the list was not touched and
+/// its last card stands, so a tile painting each delivered stage never
+/// blanks a card the action did not reach.
 #[derive(Debug, Clone)]
 pub struct CalibrationOutcome {
     pub key: QueryKey,
@@ -122,8 +129,12 @@ pub struct StageResult {
     pub payload: StagePayload,
 }
 
-/// How a stage ended. `Held` is a check that refused to pass its gate;
-/// `Skipped` an upstream failure; `Stale` a stage the run did not reach.
+/// How a stage ended. `Held` is a check that refused to pass its gate.
+/// `Skipped` is a stage the action selected but did not run because a
+/// stage upstream of it in the same action `Failed` (or was itself
+/// skipped for that reason); a stage the action did not select is absent
+/// from [`CalibrationOutcome::stages`], never `Skipped`. `Stale` is a
+/// stage the run did not reach.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StageStatus {
     Ok,
