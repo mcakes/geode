@@ -16,6 +16,7 @@ use crate::keymap::KeyContext;
 use crate::keymap::fragments;
 use crate::shell::control::{self, PointerStates as _};
 use crate::tiling::TileId;
+use geode_core::calibration::CalibrationOutcome;
 use geode_core::config::{Diagnostic, LayerDoc};
 use geode_core::context::DimensionContext;
 use geode_core::pricing::PriceOutcome;
@@ -77,6 +78,8 @@ pub enum Delivery {
     VolBoard(VolBoardOutcome),
     /// A history key listing's answer, routed by tile key.
     HistoryKeys(HistoryKeysOutcome),
+    /// A calibration run's answer, routed by tile key like a `Price`.
+    Calibration(CalibrationOutcome),
 }
 
 /// [`Delivery::Upload`]'s fields, mirroring `geode_data::egress::
@@ -109,6 +112,7 @@ impl Delivery {
             Delivery::TextFile(o) => Some(o.key),
             Delivery::VolBoard(outcome) => Some(outcome.key),
             Delivery::HistoryKeys(outcome) => Some(outcome.key),
+            Delivery::Calibration(outcome) => Some(outcome.key),
         }
     }
 }
@@ -1090,6 +1094,8 @@ pub mod placeholder {
                 Delivery::TextFile(_) => {}
                 Delivery::VolBoard(_) => {}
                 Delivery::HistoryKeys(_) => {}
+                // This tile has no module; nothing is ever addressed here.
+                Delivery::Calibration(_) => {}
             }
         }
         fn set_visible(&self, _: bool, _: &mut App) {}
@@ -1185,6 +1191,8 @@ pub mod recording {
         Boarded(TileId, u64),
         /// A keyed [`Delivery::HistoryKeys`] this tile was handed, with its tag.
         HistoryKeyed(TileId, u64),
+        /// A keyed [`Delivery::Calibration`] this tile was handed, with its tag.
+        Calibrated(TileId, u64),
         /// A key-less [`Delivery::SeriesFetched`] this tile was handed,
         /// as `"{identity}@{source}"` — the pair spelled the way a
         /// timeseries slot names it, so a broadcast test can assert on
@@ -1709,6 +1717,11 @@ pub mod recording {
                     self.log
                         .borrow_mut()
                         .push(Recorded::HistoryKeyed(self.tile, outcome.tag));
+                }
+                Delivery::Calibration(outcome) => {
+                    self.log
+                        .borrow_mut()
+                        .push(Recorded::Calibrated(self.tile, outcome.tag));
                 }
             }
         }

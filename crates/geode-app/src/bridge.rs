@@ -2301,14 +2301,9 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
                     DataEvent::VolSlices(outcome) => {
                         ShellApp::deliver(&app, Delivery::VolSlices(outcome), cx);
                     }
-                    // No tile submits a calibration request yet; the shell gains
-                    // its delivery with the calibration tile.
+                    // Route calibration to the keyed occupant; the shell discards absent recipients.
                     DataEvent::Calibration(outcome) => {
-                        tracing::debug!(
-                            target: "geode::calibration",
-                            "calibration outcome for key {} tag {} has no recipient yet",
-                            outcome.key.0, outcome.tag
-                        );
+                        ShellApp::deliver(&app, Delivery::Calibration(outcome), cx);
                     }
                     // Each list's lane keeps `WatchlistGlobal`; see `WatchlistCache`.
                     DataEvent::Watchlist(outcome) if is_watchlist_key(outcome.key) => {
@@ -9015,6 +9010,39 @@ h = 480.0
         assert!(
             fixture.log.borrow().contains(&Recorded::VolSliced(tile, 6)),
             "the VolSlices delivery must reach the tile's occupant: {:?}",
+            fixture.log.borrow()
+        );
+    }
+
+    /// A calibration outcome takes the same keyed route as a vol slice
+    /// batch: the drain must hand it to the shell as
+    /// `Delivery::Calibration` and the occupant under that key must see it.
+    #[gpui::test]
+    fn a_calibration_event_is_delivered_to_the_shell_as_delivery_calibration(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let fixture = recording_tile_with_bridge(cx);
+        let tile = fixture.tile;
+        fixture
+            .events
+            .try_send(DataEvent::Calibration(
+                geode_core::calibration::CalibrationOutcome {
+                    key: QueryKey(tile.0),
+                    tag: 7,
+                    submitted: std::time::Instant::now(),
+                    action: geode_core::calibration::RunAction::Run { from: None },
+                    stages: Vec::new(),
+                    publish_rows: None,
+                },
+            ))
+            .unwrap();
+        fixture.vcx.run_until_parked();
+        assert!(
+            fixture
+                .log
+                .borrow()
+                .contains(&Recorded::Calibrated(tile, 7)),
+            "the Calibration delivery must reach the tile's occupant: {:?}",
             fixture.log.borrow()
         );
     }

@@ -252,7 +252,8 @@ impl ShellView {
             | Delivery::Distinct(_)
             | Delivery::TextFile(_)
             | Delivery::VolBoard(_)
-            | Delivery::HistoryKeys(_)) => {
+            | Delivery::HistoryKeys(_)
+            | Delivery::Calibration(_)) => {
                 if let Some(key) = keyed.key()
                     && let Some(o) = self.occupants.get(&TileId(key.0))
                 {

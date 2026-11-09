@@ -208,6 +208,8 @@ impl TileContent for VolsliceContent {
             Delivery::TextFile(_) => {}
             Delivery::VolBoard(_) => {}
             Delivery::HistoryKeys(_) => {}
+            // This tile calibrates nothing.
+            Delivery::Calibration(_) => {}
         }
     }
 

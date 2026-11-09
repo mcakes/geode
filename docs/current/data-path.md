@@ -1889,7 +1889,9 @@ itself, the underlying, the source documents (each an `Arc`) and the
 `RunAction`. The calibration worker (`geode-calibration`) runs the
 configured engine ([`[calibration] engine`](configuration.md#calibration))
 one request at a time and answers `DataEvent::Calibration` with a
-`CalibrationOutcome` under the request's key, tag and action. The engine
+`CalibrationOutcome` under the request's key, tag and action. The app
+bridge hands it to the shell as `Delivery::Calibration`, routed by tile key
+like a `VolSlices` answer; one for a key no tile holds is dropped. The engine
 call is a containment boundary: a panic fails that request alone with
 `calibrator panicked: <message>` and the worker continues; an engine
 error fails it with the engine's message; an engine the binary lacks fails

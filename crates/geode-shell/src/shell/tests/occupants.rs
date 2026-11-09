@@ -76,6 +76,8 @@ mod watching {
                 Delivery::TextFile(_) => {}
                 Delivery::VolBoard(_) => {}
                 Delivery::HistoryKeys(_) => {}
+                // This tile calibrates nothing — nothing addressed here.
+                Delivery::Calibration(_) => {}
             }
         }
         fn set_visible(&self, visible: bool, cx: &mut App) {

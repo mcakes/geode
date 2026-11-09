@@ -279,6 +279,8 @@ impl TileContent for ScenarioContent {
             Delivery::TextFile(_) => {}
             Delivery::VolBoard(_) => {}
             Delivery::HistoryKeys(_) => {}
+            // This tile calibrates nothing.
+            Delivery::Calibration(_) => {}
         }
     }
 

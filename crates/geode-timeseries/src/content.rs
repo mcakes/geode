@@ -217,6 +217,8 @@ impl TileContent for TimeseriesContent {
             Delivery::TextFile(_) => {}
             Delivery::VolBoard(_) => {}
             Delivery::HistoryKeys(_) => {}
+            // This tile calibrates nothing; an outcome addressed here is a routing bug.
+            Delivery::Calibration(_) => {}
         }
         let _ = window;
     }

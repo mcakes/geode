@@ -255,6 +255,7 @@ impl TileContent for ClassificationsContent {
             Delivery::VolSlices(_) => {}
             Delivery::VolBoard(_) => {}
             Delivery::HistoryKeys(_) => {}
+            Delivery::Calibration(_) => {}
         }
     }
 

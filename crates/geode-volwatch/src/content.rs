@@ -263,6 +263,8 @@ impl TileContent for VolwatchContent {
             Delivery::Upload(_) => {}
             Delivery::Distinct(_) => {}
             Delivery::TextFile(_) => {}
+            // This tile calibrates nothing.
+            Delivery::Calibration(_) => {}
         }
     }
 

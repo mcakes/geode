@@ -429,6 +429,8 @@ impl TileContent for PricerContent {
             Delivery::TextFile(_) => {}
             Delivery::VolBoard(_) => {}
             Delivery::HistoryKeys(_) => {}
+            // The pricer calibrates nothing.
+            Delivery::Calibration(_) => {}
         }
     }
 

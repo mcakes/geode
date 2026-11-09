@@ -120,7 +120,8 @@ impl TileContent for GuideContent {
             | Delivery::Distinct(_)
             | Delivery::TextFile(_)
             | Delivery::VolBoard(_)
-            | Delivery::HistoryKeys(_) => {}
+            | Delivery::HistoryKeys(_)
+            | Delivery::Calibration(_) => {}
         }
     }
     fn set_visible(&self, visible: bool, cx: &mut App) {

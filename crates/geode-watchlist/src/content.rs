@@ -209,6 +209,7 @@ impl TileContent for WatchlistContent {
             Delivery::TextFile(_) => {}
             Delivery::VolBoard(_) => {}
             Delivery::HistoryKeys(_) => {}
+            Delivery::Calibration(_) => {}
         }
     }
 
