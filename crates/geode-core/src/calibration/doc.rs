@@ -27,14 +27,23 @@ const KINDS: &[&str] = &[
 const CHECKS: &[&str] = &["monotone_df"];
 const GRIDS: &[&str] = &["monthly_to_5y"];
 
-fn error(layer: Option<Layer>, path: String, message: String) -> Diagnostic {
+fn diagnostic(
+    severity: Severity,
+    layer: Option<Layer>,
+    path: String,
+    message: String,
+) -> Diagnostic {
     Diagnostic {
-        severity: Severity::Error,
+        severity,
         layer,
         file: None,
         message: format!("calibration: {message}"),
         path: Some(path),
     }
+}
+
+fn error(layer: Option<Layer>, path: String, message: String) -> Diagnostic {
+    diagnostic(Severity::Error, layer, path, message)
 }
 
 /// The layer that supplied a whole object of `table` (`pipelines` or
@@ -596,45 +605,64 @@ pub fn from_doc(doc: &MergedDoc) -> (Pipelines, Vec<Diagnostic>) {
 /// whose dataset is not a document-family dataset, a `publish` whose
 /// `document` is not one or whose `target` is not an egress target. A
 /// target's own document list is not consulted here; the upload path
-/// answers that at publish time. Errors drop the pipeline from the returned
-/// set, as `from_doc`'s do. Separate from `from_doc` because the reader
-/// has no schema in hand; a caller runs both.
+/// answers that at publish time. Each miss is a Warning, not an Error,
+/// and drops the pipeline from the returned set: the builtin pipeline
+/// ships in every build while its datasets and target exist only where a
+/// desk declares them, so a desk without those feeds must start clean
+/// with the pipeline absent rather than with permanent Errors, as a
+/// `vol_views` problem does. Every message says the pipeline was dropped
+/// and why. `from_doc`'s structural problems stay Errors. Separate from
+/// `from_doc` because the reader has no schema in hand; a caller runs both.
 pub fn check_against(
     pipelines: Pipelines,
     schema: &SchemaSpec,
     egress: &[EgressSpec],
 ) -> (Pipelines, Vec<Diagnostic>) {
     let mut diags = Vec::new();
-    let is_document = |name: &str| schema.dataset(name).is_some_and(|d| d.is_document());
+    // Why a dataset name fails the document test, for the message.
+    let dataset_problem = |name: &str| match schema.dataset(name) {
+        None => Some("which the schema does not declare"),
+        Some(d) if !d.is_document() => Some("which is not a document dataset"),
+        Some(_) => None,
+    };
     let kept = pipelines
         .pipelines
         .into_iter()
         .filter(|pipeline| {
             let mut ok = true;
             for stage in &pipeline.stages {
-                let mut err = |field: &str, message: String| {
-                    diags.push(error(
+                let mut dropped = |field: &str, message: String| {
+                    diags.push(diagnostic(
+                        Severity::Warning,
                         None,
                         format!("stages.{}.{field}", stage.name),
-                        format!("stage '{}': {message}", stage.name),
+                        format!(
+                            "pipeline '{}' dropped: stage '{}' {message}",
+                            pipeline.name, stage.name
+                        ),
                     ));
                     ok = false;
                 };
                 match &stage.kind {
                     StageKind::Source { dataset, .. } => {
-                        if !is_document(dataset) {
-                            err("dataset", format!("'{dataset}' names no document dataset"));
+                        if let Some(why) = dataset_problem(dataset) {
+                            dropped("dataset", format!("reads dataset '{dataset}', {why}"));
                         }
                     }
                     StageKind::Publish { document, target } => {
-                        if !is_document(document) {
-                            err(
+                        if let Some(why) = dataset_problem(document) {
+                            dropped(
                                 "document",
-                                format!("'{document}' names no document dataset"),
+                                format!("publishes document '{document}', {why}"),
                             );
                         }
                         if !egress.iter().any(|e| e.name == *target) {
-                            err("target", format!("'{target}' names no egress target"));
+                            dropped(
+                                "target",
+                                format!(
+                                    "publishes to target '{target}', which egress.toml does not declare"
+                                ),
+                            );
                         }
                     }
                     _ => {}
@@ -1191,6 +1219,21 @@ role = "value"
         }]
     }
 
+    /// The one Warning at `path`; a miss of `check_against` is never an
+    /// Error, since the builtin pipeline ships to desks without its feeds.
+    fn warning_at<'a>(diags: &'a [Diagnostic], path: &str) -> &'a Diagnostic {
+        assert!(
+            errors(diags).is_empty(),
+            "check_against reports no Errors: {diags:?}"
+        );
+        let found: Vec<&Diagnostic> = diags
+            .iter()
+            .filter(|d| d.severity == Severity::Warning && d.path.as_deref() == Some(path))
+            .collect();
+        assert_eq!(found.len(), 1, "one warning at {path}: {diags:?}");
+        found[0]
+    }
+
     #[test]
     fn check_against_drops_a_pipeline_whose_source_dataset_or_publish_target_is_unknown() {
         let (pipelines, diags) = read(BUILTIN_CALIBRATION);
@@ -1207,9 +1250,13 @@ role = "value"
         let (pipelines, diags) = read(&text);
         assert!(diags.is_empty(), "{diags:?}");
         let (kept, diags) = check_against(pipelines, &schema(), &sophis());
-        let d = error_at(&diags, "stages.rates.dataset");
-        assert!(d.message.contains("nope"), "{}", d.message);
-        assert!(kept.pipelines.is_empty());
+        let d = warning_at(&diags, "stages.rates.dataset");
+        assert_eq!(
+            d.message,
+            "calibration: pipeline 'implied_forwards' dropped: stage 'rates' reads dataset \
+             'nope', which the schema does not declare"
+        );
+        assert!(kept.pipelines.is_empty(), "the pipeline is dropped");
 
         let text =
             BUILTIN_CALIBRATION.replace(r#"dataset  = "option_chain""#, r#"dataset = "nope""#);
@@ -1218,12 +1265,30 @@ role = "value"
         let d = error_at(&diags, "stages.parity.inputs.0");
         assert!(d.message.contains("'nope'"), "{}", d.message);
 
+        // A declared dataset of another family is named as such.
+        let text = BUILTIN_CALIBRATION
+            .replace(r#"dataset  = "rate_curve""#, r#"dataset = "risk_snapshot""#);
+        let (pipelines, _) = read(&text);
+        let (kept, diags) = check_against(pipelines, &schema(), &sophis());
+        let d = warning_at(&diags, "stages.rates.dataset");
+        assert!(
+            d.message
+                .ends_with("reads dataset 'risk_snapshot', which is not a document dataset"),
+            "{}",
+            d.message
+        );
+        assert!(kept.pipelines.is_empty());
+
         let text = BUILTIN_CALIBRATION.replace(r#"target   = "sophis""#, r#"target = "prod""#);
         let (pipelines, _) = read(&text);
         let (kept, diags) = check_against(pipelines, &schema(), &sophis());
-        let d = error_at(&diags, "stages.publish.target");
-        assert!(d.message.contains("prod"), "{}", d.message);
-        assert!(kept.pipelines.is_empty());
+        let d = warning_at(&diags, "stages.publish.target");
+        assert_eq!(
+            d.message,
+            "calibration: pipeline 'implied_forwards' dropped: stage 'publish' publishes to \
+             target 'prod', which egress.toml does not declare"
+        );
+        assert!(kept.pipelines.is_empty(), "the pipeline is dropped");
 
         let text =
             BUILTIN_CALIBRATION.replace(r#"document = "rate_curve""#, r#"document = "cvi_params""#);
@@ -1238,8 +1303,13 @@ role = "value"
         );
         let (pipelines, _) = read(&text);
         let (kept, diags) = check_against(pipelines, &schema(), &sophis());
-        let d = error_at(&diags, "stages.publish.document");
-        assert!(d.message.contains("risk_snapshot"), "{}", d.message);
-        assert!(kept.pipelines.is_empty());
+        let d = warning_at(&diags, "stages.publish.document");
+        assert!(
+            d.message
+                .ends_with("publishes document 'risk_snapshot', which is not a document dataset"),
+            "{}",
+            d.message
+        );
+        assert!(kept.pipelines.is_empty(), "the pipeline is dropped");
     }
 }

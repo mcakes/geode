@@ -2254,6 +2254,31 @@ run_mutation "calibration doc: a cycle drops the pipeline" \
   geode-core \
   an_input_cycle_drops_the_pipeline_whole
 
+# A schema or egress miss is a Warning that drops the pipeline: the builtin
+# pipeline ships to desks without its feeds, so an Error here would be a
+# permanent startup Error there, and a kept pipeline would run against a
+# dataset nothing delivers.
+run_mutation "calibration doc: a schema miss drops the pipeline" \
+  crates/geode-core/src/calibration/doc.rs \
+  '                    ));
+                    ok = false;
+                };
+                match &stage.kind {' \
+  '                    ));
+                };
+                match &stage.kind {' \
+  geode-core \
+  check_against_drops_a_pipeline_whose_source_dataset_or_publish_target_is_unknown
+
+run_mutation "calibration doc: a schema miss is a Warning, not an Error" \
+  crates/geode-core/src/calibration/doc.rs \
+  '                    diags.push(diagnostic(
+                        Severity::Warning,' \
+  '                    diags.push(diagnostic(
+                        Severity::Error,' \
+  geode-core \
+  check_against_drops_a_pipeline_whose_source_dataset_or_publish_target_is_unknown
+
 # ---- egress workers
 
 run_mutation "egress: a write error answers Err" \

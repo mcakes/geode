@@ -1117,7 +1117,12 @@ required, as `[vol] model` does. The pipelines themselves come from
 `calibration.toml` (`CALIBRATION_DOC`), read and checked against the schema
 and the egress targets at startup: a stage naming a dataset that is not a
 document dataset, or a publish naming a target `egress.toml` lacks, drops
-its pipeline with an Error that names the layer which supplied the stage.
+its pipeline with a Warning that says which pipeline was dropped and why,
+and names the layer which supplied the stage. The builtin pipeline ships in
+every build while its datasets and its `sophis` target exist only where a
+desk declares them, so a desk whose schema lacks them sees that pipeline
+dropped with a warning at startup and either declares the feeds or
+overrides or removes its `source` and `publish` stages in its own layer.
 
 ## VolMonitor
 

@@ -8724,7 +8724,12 @@ h = 480.0
             .iter()
             .find(|d| d.path.as_deref() == Some("stages.src.dataset"))
             .expect("the source stage's dataset is refused");
-        assert_eq!(d.severity, Severity::Error);
+        assert_eq!(
+            d.severity,
+            Severity::Warning,
+            "a missing feed drops the pipeline with a warning, not an error"
+        );
+        assert!(d.message.contains("pipeline 'p' dropped"), "{}", d.message);
         assert_eq!(
             d.layer,
             Some(Layer::Desk),

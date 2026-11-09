@@ -586,12 +586,19 @@ stage naming an undeclared pipeline belongs to none and drops nothing. An
 unknown top-level key warns and is ignored.
 
 `check_against(pipelines, schema, egress)` adds the checks that need the
-schema and the egress targets, dropping a pipeline the same way: a `source`
-whose dataset is not a document-family dataset, a `publish` whose
-`document` is not one or whose `target` names no egress target. The
-target's own document list is not consulted; the upload answers that when
-it runs. The two passes are separate because the reader has no schema in
-hand; a consumer runs both.
+schema and the egress targets: a `source` whose dataset is not a
+document-family dataset, a `publish` whose `document` is not one or whose
+`target` names no egress target. Each miss is a Warning at the stage's
+field path whose message says the pipeline was dropped and why (for
+example `pipeline 'implied_forwards' dropped: stage 'chain' reads dataset
+'option_chain', which the schema does not declare`), and the pipeline is
+dropped from the returned set; the severity is a Warning because the
+builtin pipeline ships in every build, so a desk whose schema lacks its
+datasets or egress target sees that pipeline dropped with a warning at
+startup and either declares the feeds or overrides or removes its `source`
+and `publish` stages in its own layer. The target's own document list is
+not consulted; the upload answers that when it runs. The two passes are
+separate because the reader has no schema in hand; a consumer runs both.
 
 `Pipeline::topological` orders the stages so each follows all of its
 inputs: every stage with none first, then every stage whose inputs are all
