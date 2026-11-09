@@ -270,6 +270,13 @@ impl CalibrationTile {
                 .map(|i| (candidates[i].clone(), stage.clone())),
             _ => None,
         };
+        self.set_preview(next, cx);
+    }
+
+    /// The preview edge, `(from, to)`, from the picker's highlight or a
+    /// port drag over an eligible card; the model is rebuilt only when it
+    /// changed.
+    pub(super) fn set_preview(&mut self, next: Option<(StageName, StageName)>, cx: &App) {
         if self.preview_edge != next {
             self.preview_edge = next;
             self.rebuild_model(cx);

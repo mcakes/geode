@@ -142,6 +142,25 @@ pub fn connect_candidates(pipeline: &Pipeline, stage: &str) -> Vec<(StageName, P
         .collect()
 }
 
+/// Whether `from` may be connected as the next input of `stage`: it is a
+/// candidate of `connect_candidates`. The one question a port drop asks,
+/// so the drop target's `can_drop` and the drop itself agree with what
+/// `c` offers.
+pub fn can_feed(pipeline: &Pipeline, from: &str, stage: &str) -> bool {
+    connect_candidates(pipeline, stage)
+        .iter()
+        .any(|(name, _)| name == from)
+}
+
+/// The stage a reader finding is about, from its key path: `stages.<name>`
+/// and `stages.<name>.<key>…` name `<name>`; a document- or pipeline-level
+/// path names none. The tile keeps the stage beside the notice it paints,
+/// so a press on the notice can land the cursor on the card.
+pub fn stage_of_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("stages.")?;
+    rest.split('.').next().filter(|n| !n.is_empty())
+}
+
 /// `stage`'s table (`source`, as the document holds it) with `from` added
 /// to `inputs` at the open port's position. `Err` when `from` is not a
 /// candidate (`connect_candidates`), so a stale picker can write nothing
@@ -645,6 +664,31 @@ mod tests {
     /// reads is fine; a source over a dataset the schema lacks is the
     /// check's refusal; and a stage of another pipeline going wrong is not
     /// this pipeline's problem.
+    /// `can_feed` is `connect_candidates` asked one name at a time, and
+    /// a finding's stage is the second segment of a `stages.` path alone.
+    #[test]
+    fn can_feed_follows_the_candidates_and_a_path_names_its_stage() {
+        let mut p = builtin_pipeline();
+        set_inputs(&mut p, "publish", &["repo_curve"]);
+        assert!(can_feed(&p, "box_curve", "publish"));
+        assert!(can_feed(&p, "df_monotone", "publish"));
+        assert!(
+            !can_feed(&p, "chain", "publish"),
+            "a source emits documents"
+        );
+        assert!(!can_feed(&p, "repo_curve", "publish"), "an input already");
+        assert!(!can_feed(&p, "implied_rates", "repo_fit"), "no open port");
+        assert!(!can_feed(&p, "publish", "publish"));
+        assert!(!can_feed(&p, "box_curve", "nope"));
+
+        assert_eq!(stage_of_path("stages.repo_fit.knots"), Some("repo_fit"));
+        assert_eq!(stage_of_path("stages.parity.inputs.0"), Some("parity"));
+        assert_eq!(stage_of_path("stages.parity"), Some("parity"));
+        assert_eq!(stage_of_path("stages."), None);
+        assert_eq!(stage_of_path("pipelines.p"), None);
+        assert_eq!(stage_of_path("config_version"), None);
+    }
+
     #[test]
     fn would_read_refuses_an_edit_that_drops_the_pipeline() {
         let p = builtin_pipeline();

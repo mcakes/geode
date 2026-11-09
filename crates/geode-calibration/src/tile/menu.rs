@@ -11,7 +11,7 @@
 
 use geode_shell::actions::ActionId;
 use geode_tile::menu::{Menu, MenuHost, MenuIds, Row, live_bindings, render_menu};
-use gpui::{Anchor, App, Context, Deferred, Entity, Window};
+use gpui::{Anchor, App, Context, Deferred, Entity, Pixels, Point, Window};
 
 use super::CalibrationTile;
 use crate::core::menu::{self, MenuInputs};
@@ -19,6 +19,10 @@ use crate::core::menu::{self, MenuInputs};
 /// The open menu.
 pub(super) struct MenuState {
     pub(super) menu: Menu<ActionId>,
+    /// Where a right press opened it, in window pixels: the menu hangs
+    /// from that point in the body. `None` for `.` and the `⋯` button,
+    /// whose menu hangs from the header's right edge.
+    pub(super) at: Option<Point<Pixels>>,
 }
 
 /// The menu's element names for tile `id`.
@@ -46,12 +50,20 @@ impl CalibrationTile {
         if self.menu.is_some() {
             self.close_menu(cx);
         } else {
-            let rows = self.menu_rows(cx);
-            self.menu = Some(MenuState {
-                menu: Menu::new(rows, &live_bindings(cx)),
-            });
-            cx.notify();
+            self.open_menu(None, cx);
         }
+    }
+
+    /// Open the menu over the tile as it is now, hung from `at` (a right
+    /// press) or from the header (`None`); one already up is replaced, so
+    /// a second right press moves it.
+    pub(super) fn open_menu(&mut self, at: Option<Point<Pixels>>, cx: &mut Context<Self>) {
+        let rows = self.menu_rows(cx);
+        self.menu = Some(MenuState {
+            menu: Menu::new(rows, &live_bindings(cx)),
+            at,
+        });
+        cx.notify();
     }
 
     /// Close the menu. `true` when one was up.
@@ -101,20 +113,38 @@ impl CalibrationTile {
         }
     }
 
-    /// The open menu, painted to hang by its top-right corner from the
-    /// point the caller places it at; `None` with none up.
+    /// The open header menu, painted to hang by its top-right corner from
+    /// the point the caller places it at; `None` with none up or with the
+    /// menu hung from a pointer press (`render_pointer_menu`).
     pub(super) fn render_menu(&self, tile: &Entity<Self>, cx: &App) -> Option<Deferred> {
+        let m = self.menu.as_ref().filter(|m| m.at.is_none())?;
+        Some(self.paint_menu(m, Anchor::TopRight, tile, cx))
+    }
+
+    /// The open menu a right press hung from the pointer, by its top-left
+    /// corner, with the point it hangs from; `None` with none up or with
+    /// the header's menu.
+    pub(super) fn render_pointer_menu(
+        &self,
+        tile: &Entity<Self>,
+        cx: &App,
+    ) -> Option<(Point<Pixels>, Deferred)> {
         let m = self.menu.as_ref()?;
-        Some(render_menu(
+        let at = m.at?;
+        Some((at, self.paint_menu(m, Anchor::TopLeft, tile, cx)))
+    }
+
+    fn paint_menu(&self, m: &MenuState, corner: Anchor, tile: &Entity<Self>, cx: &App) -> Deferred {
+        render_menu(
             &m.menu,
             &self.menu_ids,
-            Anchor::TopRight,
+            corner,
             tile,
             |t: &mut CalibrationTile, _window, cx| {
                 t.close_menu(cx);
             },
             cx,
-        ))
+        )
     }
 
     /// The open menu's rows by action id and its highlight, `None` with no

@@ -6,6 +6,7 @@ mod data;
 mod edits;
 mod harness;
 mod keys;
+mod pointer;
 mod verbs;
 
 use geode_core::calibration::CALIBRATION_DOC;

@@ -162,10 +162,13 @@ impl CalibrationTile {
         // it (`graph_pipeline`): the graph stays under the finding.
         let Some(pipeline) = self.graph_pipeline() else {
             self.model = None;
+            self.model_pipeline = None;
             self.chrome = Chrome::default();
             return;
         };
-        let pipeline = &pipeline;
+        let pipeline = Rc::new(pipeline);
+        self.model_pipeline = Some(Rc::clone(&pipeline));
+        let pipeline = &*pipeline;
         self.model_version += 1;
         let placed = layout(LayoutInput {
             pipeline,

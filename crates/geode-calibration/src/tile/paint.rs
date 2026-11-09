@@ -12,22 +12,34 @@
 //! canvas's prepaint is also where the body's size is measured: a changed
 //! size is handed to the tile after the draw (`cx.defer`), which rebuilds
 //! the model at the real viewport once rather than per frame.
+//!
+//! The pointer routes are attached here and handled in `pointer`: a card
+//! takes a left and a right press and is a drop target for a port drag;
+//! its right edge carries the port that starts one; the body takes the
+//! wheel, a right press off the cards, the drag's moves and a drop off
+//! the cards; a right-press menu is hung from the pointer in the body.
 
+use std::rc::Rc;
+
+use geode_core::calibration::Pipeline;
+use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{
-    App, Div, ElementId, Entity, Hsla, PathBuilder, Pixels, SharedString, Stateful, WeakEntity,
-    Window, canvas, div, point, px,
+    App, Div, DragMoveEvent, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, PathBuilder,
+    Pixels, ScrollWheelEvent, SharedString, Stateful, WeakEntity, Window, canvas, div, point, px,
 };
 use gpui_component::input::Input;
 use gpui_component::theme::Theme;
 use gpui_component::{h_flex, v_flex};
 
 use geode_shell::keymap::{Keystroke, Modifiers, parse_binding};
+use geode_shell::shell::control::{self, PointerStates as _};
 use geode_shell::shell::{kbd, scale};
 use geode_shell::tips::{self, Chords, chord_for_preferring};
 
 use super::CalibrationTile;
 use super::keys::Viewport;
+use super::pointer::{PortDrag, eligible};
 use crate::core::model::{EdgeModel, EdgeTone, GraphModel, Tone};
 
 /// The opacity of a card that fails the filter.
@@ -40,6 +52,11 @@ const DISC_RADIUS: f32 = 2.5;
 const DASH: f32 = 4.0;
 /// The end disc as a polygon: enough sides to read as round at its size.
 const DISC_SIDES: usize = 12;
+/// The port strip down a card's right edge, in pixels at the design rem:
+/// wide enough to grab, narrow enough to leave the status line whole; and
+/// the dot that marks it at rest, the size of an edge's end disc.
+const PORT_W: f32 = 10.0;
+const PORT_DOT: f32 = 5.0;
 
 /// The footer hints, each verb's chords then its word, in the fixed order
 /// the row reads: what the graph does first, the verbs after. A verb the
@@ -143,6 +160,12 @@ pub(super) struct CardIds {
     pub(super) id: ElementId,
     pub(super) selector: SharedString,
     pub(super) tip_selector: SharedString,
+    /// The port element on the card's right edge, and its selector.
+    pub(super) port: ElementId,
+    pub(super) port_selector: SharedString,
+    /// The stage name as the pointer handlers and the drag payload carry
+    /// it: a handle clone per frame, never a new string.
+    pub(super) stage: SharedString,
 }
 
 /// The per-card names and the caption texts, rebuilt with the model.
@@ -162,6 +185,9 @@ impl Chrome {
                     id: ElementId::Name(format!("calibration-card-{tile}-{}", c.stage).into()),
                     selector: format!("calibration-card-{tile}-{}", c.stage).into(),
                     tip_selector: format!("tip-calibration-card-{tile}-{}", c.stage).into(),
+                    port: ElementId::Name(format!("calibration-port-{tile}-{}", c.stage).into()),
+                    port_selector: format!("calibration-port-{tile}-{}", c.stage).into(),
+                    stage: SharedString::from(c.stage.clone()),
                 })
                 .collect(),
             captions: model
@@ -308,9 +334,12 @@ impl CalibrationTile {
         let known = self.viewport;
         let weak: WeakEntity<Self> = tile.downgrade();
         let ink = EdgeInk::of(theme);
-        let edges = std::rc::Rc::clone(model);
+        let edges = Rc::clone(model);
+        let origin_cell = Rc::clone(&self.body_origin);
         let canvas = canvas(
             move |bounds, window, cx| {
+                // Where the body is, for the pointer routes; no notify.
+                origin_cell.set(Some(bounds.origin));
                 let measured = Viewport {
                     width: bounds.size.width.as_f32(),
                     height: bounds.size.height.as_f32(),
@@ -337,6 +366,40 @@ impl CalibrationTile {
             .min_h_0()
             .w_full()
             .debug_selector(move || format!("calibration-graph-{id}"))
+            // The wheel is the tile's own scroll; a right press off the
+            // cards is `.` for the cursor, hung from the pointer.
+            .on_scroll_wheel({
+                let tile = tile.clone();
+                move |event: &ScrollWheelEvent, window, cx| {
+                    tile.update(cx, |t, cx| t.wheel(event, window, cx));
+                }
+            })
+            .on_mouse_down(MouseButton::Right, {
+                let tile = tile.clone();
+                move |event: &MouseDownEvent, _, cx| {
+                    tile.update(cx, |t, cx| t.body_right_pressed(event, cx));
+                }
+            })
+            // A live port drag: every move previews the edge into the card
+            // under the pointer when it may take it; a drop off the cards
+            // and a buttonless move after a cancelled drag drop the
+            // preview.
+            .on_drag_move({
+                let tile = tile.clone();
+                move |event: &DragMoveEvent<PortDrag>, _, cx| {
+                    let drag = event.drag(cx).clone();
+                    let (position, bounds) = (event.event.position, event.bounds);
+                    tile.update(cx, |t, cx| t.drag_moved(&drag, position, bounds, cx));
+                }
+            })
+            .on_drop({
+                let tile = tile.clone();
+                move |_: &PortDrag, _, cx| tile.update(cx, |t, cx| t.drag_ended(cx))
+            })
+            .on_mouse_move({
+                let tile = tile.clone();
+                move |_, _, cx| tile.update(cx, |t, cx| t.pointer_moved(cx))
+            })
             .child(canvas);
         for ((x, _), text) in model.captions.iter().zip(&self.chrome.captions) {
             body = body.child(
@@ -355,7 +418,32 @@ impl CalibrationTile {
             );
         }
         for (card, ids) in model.cards.iter().zip(&self.chrome.cards) {
-            body = body.child(render_card(card, ids, layout, (sx, sy), theme));
+            body = body.child(render_card(
+                card,
+                ids,
+                layout,
+                (sx, sy),
+                theme,
+                CardHooks {
+                    tile,
+                    tile_id: self.id,
+                    pipeline: self.model_pipeline.as_ref().map(Rc::clone),
+                    rem,
+                },
+            ));
+        }
+        // A menu a right press opened hangs by its top-left corner from
+        // the pointer (the deferred anchor lifts it over the body's clip).
+        if let Some((at, menu)) = self.render_pointer_menu(tile, cx)
+            && let Some(origin) = self.body_origin.get()
+        {
+            body = body.child(
+                div()
+                    .absolute()
+                    .left(at.x - origin.x)
+                    .top(at.y - origin.y)
+                    .child(menu),
+            );
         }
         // The picker hangs by its top-left corner from the cursor card's
         // bottom-left (the deferred anchor lifts it over the body's clip);
@@ -444,21 +532,41 @@ impl CalibrationTile {
     }
 }
 
+/// What a card's pointer routes need: the tile they update, its id (a
+/// drag from another tile is never a drop here), the pipeline the card's
+/// drop test reads and the rem the port is sized at.
+struct CardHooks<'a> {
+    tile: &'a Entity<CalibrationTile>,
+    tile_id: TileId,
+    pipeline: Option<Rc<Pipeline>>,
+    rem: Pixels,
+}
+
 /// One card at its place less the scroll: the stage name, its kind and
 /// detail, its status line (the whole line in a tooltip when it was
 /// cut). The tone colors the border and the status; the cursor's card
 /// takes the ring and the list's active fill; a preview end a dashed
-/// ring; a card failing the filter paints dimmed.
+/// ring; a card failing the filter paints dimmed. A left press is the
+/// cursor (a second, `enter`), a right press the menu at the pointer; the
+/// card takes a port drop it is eligible for; its right edge is the port
+/// a drag starts from.
 fn render_card(
     card: &crate::core::model::CardModel,
     ids: &CardIds,
     layout: &crate::core::layout::Layout,
     scroll: (f32, f32),
     theme: &Theme,
+    hooks: CardHooks<'_>,
 ) -> Stateful<Div> {
     let (border, status) = card_ink(card.tone, theme);
     let selector = ids.selector.clone();
     let cut = card.status != card.status_full;
+    let CardHooks {
+        tile,
+        tile_id,
+        pipeline,
+        rem,
+    } = hooks;
     v_flex()
         .id(ids.id.clone())
         .absolute()
@@ -490,6 +598,40 @@ fn render_card(
                 None,
             ))
         })
+        // The left press propagates: the shell's tile-focus press beneath
+        // still arrives. The right press stops here, or the body would
+        // open a second menu for the same press.
+        .on_mouse_down(MouseButton::Left, {
+            let tile = tile.clone();
+            let stage = ids.stage.clone();
+            move |event: &MouseDownEvent, _, cx| {
+                tile.update(cx, |t, cx| t.card_pressed(&stage, event, cx));
+            }
+        })
+        .on_mouse_down(MouseButton::Right, {
+            let tile = tile.clone();
+            let stage = ids.stage.clone();
+            move |event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                tile.update(cx, |t, cx| t.card_right_pressed(&stage, event, cx));
+            }
+        })
+        .can_drop({
+            let stage = ids.stage.clone();
+            move |value, _, _| {
+                value
+                    .downcast_ref::<PortDrag>()
+                    .is_some_and(|d| eligible(pipeline.as_deref(), tile_id, d, &stage))
+            }
+        })
+        .on_drop({
+            let tile = tile.clone();
+            let stage = ids.stage.clone();
+            move |drag: &PortDrag, _, cx| {
+                tile.update(cx, |t, cx| t.port_dropped(&stage, drag, cx));
+            }
+        })
+        .child(render_port(ids, tile, tile_id, rem, theme))
         .child(
             div()
                 .text_sm()
@@ -511,6 +653,61 @@ fn render_card(
                 .when(card.tone == Tone::Stale, |el| el.italic())
                 .truncate()
                 .child(card.status.clone()),
+        )
+}
+
+/// The port down a card's right edge: a strip marked by a dot at the
+/// card's middle (where its edges leave), the grab cursor and the bare
+/// control's hover and pressed fills. A drag off it carries the stage;
+/// the popups leave when it passes gpui's threshold, and the ghost is the
+/// `PortDrag` itself.
+fn render_port(
+    ids: &CardIds,
+    tile: &Entity<CalibrationTile>,
+    tile_id: TileId,
+    rem: Pixels,
+    theme: &Theme,
+) -> Stateful<Div> {
+    let port_selector = ids.port_selector.clone();
+    let dot = px(scale::design_px(PORT_DOT, rem));
+    div()
+        .id(ids.port.clone())
+        .absolute()
+        .right_0()
+        .top_0()
+        .bottom_0()
+        .w(px(scale::design_px(PORT_W, rem)))
+        .flex()
+        .items_center()
+        .justify_center()
+        .cursor_grab()
+        .pointer_states(control::paint(
+            theme,
+            control::Rest::Bare,
+            theme.background,
+            theme.muted_foreground,
+        ))
+        .debug_selector(move || port_selector.to_string())
+        .on_drag(
+            PortDrag {
+                tile: tile_id,
+                stage: ids.stage.clone(),
+            },
+            {
+                let tile = tile.clone();
+                move |drag, _, window, cx| {
+                    cx.stop_propagation();
+                    tile.update(cx, |t, cx| t.drag_started(window, cx));
+                    cx.new(|_| drag.clone())
+                }
+            },
+        )
+        .child(
+            div()
+                .w(dot)
+                .h(dot)
+                .rounded_full()
+                .bg(theme.muted_foreground),
         )
 }
 

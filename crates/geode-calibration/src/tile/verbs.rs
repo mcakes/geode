@@ -519,7 +519,11 @@ impl CalibrationTile {
         match verdict {
             Ok(()) => true,
             Err(d) => {
-                self.verb_notice = Some(Notice::danger(d.message));
+                let notice = Notice::danger(d.message);
+                // The refusal names its stage by path: a press on the
+                // notice lands the cursor there.
+                self.note_stage(notice.clone(), d.path.as_deref());
+                self.verb_notice = Some(notice);
                 cx.notify();
                 false
             }

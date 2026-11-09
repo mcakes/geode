@@ -43,7 +43,7 @@ fn list() -> KeyContext {
 /// The builtin document with the publish stage reading one raster and no
 /// gate: valid (a publish takes at least one raster), with `box_curve`
 /// and `df_monotone` left to connect.
-fn open_publish_config() -> CalibrationConfig {
+pub(super) fn open_publish_config() -> CalibrationConfig {
     let text = BUILTIN_CALIBRATION.replace(
         r#"inputs   = ["repo_curve", "box_curve", "df_monotone"]"#,
         r#"inputs   = ["repo_curve"]"#,
@@ -96,7 +96,7 @@ fn user_config() -> CalibrationConfig {
     config
 }
 
-fn inputs_of(edit: &ConfigEdit) -> Vec<String> {
+pub(super) fn inputs_of(edit: &ConfigEdit) -> Vec<String> {
     edit.value
         .as_ref()
         .and_then(Value::as_table)

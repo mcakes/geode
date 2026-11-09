@@ -97,10 +97,14 @@ model, menu rows and edits under `core/`.
   edit leaves through; `take_edit_notices`, the shell's answers read off
   the frame); `picker.rs` the edit pickers (the connect and disconnect
   lists, the kind list and the name field) and their popup; `menu.rs` the
-  action menu's lifecycle and `MenuHost`; `paint.rs` the body (the edge
-  canvas, the captions, the cards, the picker under the cursor's card) and
-  the footer (the model's line or the filter field, the hint row for
-  whatever holds the keys). `tile/tests/harness.rs` hosts the tile as the
+  action menu's lifecycle and `MenuHost`; `pointer.rs` the pointer routes
+  (a card's presses, the wheel, the port drag with its `PortDrag` payload
+  and eligibility, the notice press), each going through its key's own
+  function; `paint.rs` the body (the edge canvas, the captions, the cards
+  with their ports and drop targets, the picker under the cursor's card,
+  a right-press menu at the pointer) and the footer (the model's line or
+  the filter field, the hint row for whatever holds the keys).
+  `tile/tests/harness.rs` hosts the tile as the
   shell does: built by the factory, keys resolved through the app's keymap
   with the module's fragment spliced in (bare keys against the tile's
   context alone in `insert`), deliveries through `TileContent::deliver`,
@@ -124,7 +128,8 @@ cluster: the mode icon, the config's findings as notices (a dropped
 pipeline is a warning, a structural error danger), link chips, the health
 chip for the source stages' datasets, the `⋯` trigger (which opens the
 action menu, as `.` does) and the shell's ×. The menu hangs from the
-header's right edge; an armed y/n question asks on its own bar under the
+header's right edge (one a right press opened hangs from the pointer in
+the body instead); an armed y/n question asks on its own bar under the
 header, whole at any tile width, with Yes and No buttons.
 
 The body: the graph while a pipeline is shown, or `no pipeline` when the
@@ -141,8 +146,11 @@ the status line; the `Tone` colors the border and the status (failed
 danger, held warning, waiting info, stale muted and italic); the cursor's
 card takes the ring and the list's active fill; a card failing the filter
 paints at reduced opacity; a status cut to `STATUS_CHARS` carries the
-whole line in a tooltip. The layer captions sit above the first row at
-each column's x. The body's size is measured in the canvas's prepaint
+whole line in a tooltip; a strip down the card's right edge, marked by a
+dot at its middle where its edges leave, is the port a connect drag
+starts from (`calibration-port-{tile}-{stage}`), with the grab cursor and
+the bare control's hover fill. The layer captions sit above the first row
+at each column's x. The body's size is measured in the canvas's prepaint
 and, when it changed, handed to the tile after the draw, which rebuilds
 the model once at the real viewport; nothing is laid out per frame.
 
@@ -193,6 +201,27 @@ shell's dialog-filter rule: `escape`
 restores the filter in force when `/` was pressed; `enter` keeps the typed
 filter (an emptied field clears it) and lands the cursor on the first lit
 card in layout order, or leaves it when nothing matches.
+
+## Pointer
+
+Every pointer action is a key's twin and goes through the key's own
+function (`tile/pointer.rs`), so the two cannot disagree. A plain left
+press is left to propagate, so the shell's tile-focus press beneath still
+arrives; a press with any modifier is the shell's (its tile drag and
+fullscreen) and does nothing here.
+
+| Pointer | Key | What happens |
+|---|---|---|
+| Left press on a card | `h j k l` | The cursor (`set_cursor`) |
+| Double press on a card | `enter` | The cursor, then the shell is asked for `config::calibration` through the frame (`FrameRef::request_action`), the route a bound `enter` takes; the shell runs it for the focused tile, which the press focused |
+| Right press on a card | `.` | The cursor, then the action menu hung by its top-left corner from the pointer in the body rather than from the header; the press stops at the card. A right press on the body off every card opens the menu for the cursor as it stands. `escape`, `.`, a pick or a press outside close it as they close the keyboard's |
+| Wheel over the body | — | The tile's own scroll offset moves against the pixel delta (`ScrollDelta::pixel_delta` at the window's line height, so a line-wise mouse wheel and a trackpad agree) and clamps to `content - viewport` on each axis, never below zero. A horizontal delta scrolls x; so does a vertical one with shift held |
+| Drag a card's port onto a card | `c` + `enter` | The port on the dragged card's right edge carries `PortDrag { tile, stage }`; every card is a drop target whose `can_drop` is `core::edits::can_feed` (the connect picker's `connect_candidates`, one name at a time) over the painted pipeline, and a drag from another tile is never eligible. Over an eligible card the dashed preview edge paints as the picker's does; the drop target is the consumer and the dragged stage the input, and the drop calls the same validated `connect`, so a drop the reader would refuse shows the reader's danger notice and queues nothing. An ineligible card never takes the drop: nothing previews, nothing is queued and nothing is said, since the drop was never offered. The press that starts the drag is a press on its card: the cursor is on the dragged card. A drag passing gpui's threshold closes the picker and the menu; the preview leaves with the drag (a drop anywhere, a release off the tile, `escape`) |
+| Left press on a header notice | `escape` | Dismisses the notice as a press always has and, when the notice names a stage (a config finding or the reader's refusal at `stages.<name>…`, kept beside the notice when it was made, never read off the painted text) whose card the painted graph has, lands the cursor on it |
+
+There is no add by pointer: `a` stays the keyboard's and the menu's. A
+card whose status was cut still shows the whole line in its tooltip;
+hovering starts no drag, since a drag needs a press and a move.
 
 ## Commands and session
 
@@ -314,7 +343,9 @@ drops it when it closes.
   reason (renamed, never declared) is `no pipeline`.
 - A header notice per config finding, in the message the diagnostics page
   shows (`calibration: pipeline 'p' dropped: …`); a click or `escape`
-  dismisses it, and it shows again when the finding leaves and returns.
+  dismisses it, and it shows again when the finding leaves and returns. A
+  click on a notice whose finding is at `stages.<name>…` also lands the
+  cursor on that card when the painted graph has it (see Pointer).
 - A verb's refusal as a warning notice (see Run and publish); an upload
   failure as a danger notice. A menu row that cannot act says why in its
   lane, and a pick on it gives that reason as the notice and keeps the

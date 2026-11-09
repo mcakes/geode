@@ -11,9 +11,11 @@
 //! The data flow (the source reads, the runs and their answers) is `data`,
 //! the cursor keys and the filter `keys`, the body and footer `paint`,
 //! the run, publish and delete verbs with the y/n bar and the edit queue
-//! `verbs`, the edit pickers `picker`, the `.` action menu `menu`, and
-//! the `:` line's vocabulary `crate::commands`.
+//! `verbs`, the edit pickers `picker`, the `.` action menu `menu`, the
+//! pointer routes (each a key's twin) `pointer`, and the `:` line's
+//! vocabulary `crate::commands`.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -34,7 +36,7 @@ use geode_tile::menu::MenuIds;
 use geode_tile::motion;
 use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
-use gpui::{App, Context, ElementId, SharedString, Window, div};
+use gpui::{App, Context, ElementId, Pixels, Point, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
 use crate::commands::{self, Command};
@@ -53,6 +55,7 @@ mod keys;
 mod menu;
 mod paint;
 mod picker;
+mod pointer;
 mod verbs;
 
 /// The key context of the add picker's name field, where `tab` is
@@ -108,6 +111,11 @@ pub struct CalibrationTile {
     /// The shell's answers to the edits this tile queued (a fork, a
     /// refusal), read off the frame; `escape` dismisses them.
     edit_notices: Vec<Notice>,
+    /// The stage each notice that names one is about (a finding or the
+    /// reader's refusal at `stages.<name>…`), kept beside the notice so a
+    /// press on it lands the cursor there without reading the painted
+    /// text; pruned to the notices reported.
+    notice_stages: Vec<(Notice, StageName)>,
     /// The armed y/n question: a publish or a delete.
     confirm: Option<Confirm<Pending>>,
     /// The publish out now, with where its rows go; `None` between.
@@ -159,12 +167,19 @@ pub struct CalibrationTile {
     /// The prepared render model; `None` with no pipeline. Shared with
     /// the edge canvas's paint closure, which clones the handle.
     model: Option<Rc<GraphModel>>,
+    /// The pipeline the model was built from (live or held), shared with
+    /// each card's drop test so a frame clones a handle, not a pipeline.
+    model_pipeline: Option<Rc<Pipeline>>,
     model_version: u64,
     /// The element names and caption texts paint reads, rebuilt with the
     /// model.
     chrome: Chrome,
     /// The viewport the layout was last placed in: paint's measurement.
     viewport: Viewport,
+    /// Where the body was last painted, in window pixels, recorded by the
+    /// edge canvas's prepaint without a notify: the pointer routes read it
+    /// to place a right-press menu and to find the card under a drag.
+    body_origin: Rc<Cell<Option<Point<Pixels>>>>,
     /// The graph's scroll offset, in window pixels; the tile owns it so a
     /// cursor move can bring its card into view.
     scroll: (f32, f32),
@@ -266,6 +281,7 @@ impl CalibrationTile {
             verb_notice: None,
             upload_notices: Vec::new(),
             edit_notices: Vec::new(),
+            notice_stages: Vec::new(),
             confirm: None,
             publishing: None,
             upload_tag: 0,
@@ -288,9 +304,11 @@ impl CalibrationTile {
             last_user_tag: None,
             run_due: false,
             model: None,
+            model_pipeline: None,
             model_version: 0,
             chrome: Chrome::default(),
             viewport: Viewport::default(),
+            body_origin: Rc::new(Cell::new(None)),
             scroll: (0.0, 0.0),
             filter: None,
             filter_field: None,
@@ -427,10 +445,18 @@ impl CalibrationTile {
             .as_ref()
             .map(|c| c.diagnostics.iter().map(notice_of).collect())
             .unwrap_or_default();
+        // A finding at `stages.<name>…` is about that stage: a press on
+        // its notice lands the cursor there.
+        if let Some(config) = config.as_ref() {
+            for d in config.diagnostics.iter() {
+                self.note_stage(notice_of(d), d.path.as_deref());
+            }
+        }
         // A dismissal lasts while the finding is reported: one the config
         // stopped reporting shows again when it returns.
         let all = self.all_notices();
         self.dismissed.prune(&all);
+        self.prune_stages(&all);
         self.rebuild_model(cx);
     }
 
@@ -802,9 +828,12 @@ impl Render for CalibrationTile {
         let mut cluster = Cluster::new(self.id);
         cluster.mode = Mode::from_key_mode(self.mode());
         cluster.notices = self.dismissed.visible(self.all_notices());
-        cluster.on_dismiss = Some(notice::on_dismiss(&tile, |t: &mut CalibrationTile| {
-            &mut t.dismissed
-        }));
+        // A press on a notice dismisses it and, when it names a stage of
+        // the painted graph, lands the cursor there (`pointer`).
+        cluster.on_dismiss = Some(notice::on_dismiss_with(
+            &tile,
+            |t: &mut CalibrationTile, notice, cx| t.notice_pressed(notice, cx),
+        ));
         cluster.links = links;
         cluster.health = self.health.chip();
         cluster.close = self.close.clone();
@@ -828,8 +857,10 @@ impl Render for CalibrationTile {
             theme,
         )
         .debug_selector(move || format!("calibration-header-{id}"));
-        // The menu hangs from the header's right edge; the question asks
-        // on its own bar under the header, whole at any tile width.
+        // The menu hangs from the header's right edge (one a right press
+        // opened hangs from the pointer, painted in the body instead); the
+        // question asks on its own bar under the header, whole at any tile
+        // width.
         let menu = self.render_menu(&tile, cx);
         let question = self
             .confirm
