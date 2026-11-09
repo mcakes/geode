@@ -135,6 +135,15 @@ pub fn new_fields(config: &Config, name: &str) -> Vec<Field> {
     fields_of(config, &stages_of(config), name, &toml::Table::new())
 }
 
+/// The fields a new stage seeded with `table` opens with (a tile's `a`:
+/// `pipeline`, `kind` and the kind's parameters): the kind's rows at the
+/// seeded values. The stage is not in the document, so the inputs list
+/// is the seeded pipeline's stages, every one unticked, and no name need
+/// be left out.
+pub fn fields_from_table(config: &Config, table: &toml::Table) -> Vec<Field> {
+    fields_of(config, &stages_of(config), "", table)
+}
+
 fn text(key: &str, label: &str, value: String) -> Field {
     super::views::text_row(key, label, value, Destination::Doc)
 }

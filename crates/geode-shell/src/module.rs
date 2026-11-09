@@ -303,10 +303,16 @@ impl std::fmt::Debug for CloseHandle {
 /// (`geode_core::config::VOL_VIEWS_DOC` for a vol tile's tab) and its
 /// name there — so an editor opened from the tile can land on it. See
 /// [`TileContent::config_object`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// With a `seed`, the object does not exist yet: the tile proposes a new
+/// one of that name with the seed as its table (the calibration tile's
+/// `a`), and the editor opens on a draft built from it rather than on a
+/// row of the document. `None` for every object the document holds.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ConfigObject {
     pub doc: &'static str,
     pub name: String,
+    pub seed: Option<toml::Table>,
 }
 
 /// What the shell asks of a tile's occupant and tells it.

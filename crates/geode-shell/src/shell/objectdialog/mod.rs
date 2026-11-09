@@ -3067,20 +3067,22 @@ impl Domain {
     }
 
     /// The fields a seeded object opens with, built straight from the table
-    /// `create_from_name` was handed rather than from a named object `config` has a
-    /// row for yet — the object has not been written when this runs. Only Colors
-    /// (seeded with a definition by the value-color list's `New named color…`) needs
-    /// the real answer: every other domain falls back to `self.fields(config, None)`,
-    /// its own empty-object shape, since nothing else can reach this door.
+    /// `create_from_name` or `render::open_new` was handed rather than from a named
+    /// object `config` has a row for yet — the object has not been written when this
+    /// runs. Colors (seeded with a definition by the value-color list's `New named
+    /// color…`) and Calibration (a new stage the tile's `a` seeds with its kind and
+    /// the kind's parameters, so the kind's rows appear) need the real answer: every
+    /// other domain falls back to `self.fields(config, None)`, its own empty-object
+    /// shape, since nothing else can reach this door.
     pub fn fields_from_source(self, config: &Config, table: &toml::Table) -> Vec<Field> {
         match self {
             Domain::Colors => colours::fields_from_table(Some(table)),
+            Domain::Calibration => calibration::fields_from_table(config, table),
             Domain::Views
             | Domain::Groupings
             | Domain::Schema
             | Domain::Sources
-            | Domain::VolViews
-            | Domain::Calibration => self.fields(config, None),
+            | Domain::VolViews => self.fields(config, None),
         }
     }
 

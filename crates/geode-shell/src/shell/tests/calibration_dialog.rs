@@ -46,7 +46,79 @@ fn stage(name: &str) -> Option<ConfigObject> {
     Some(ConfigObject {
         doc: CALIBRATION_DOC,
         name: name.to_string(),
+        seed: None,
     })
+}
+
+/// A tile proposing a new stage `name` with `table` as its seed (the
+/// calibration tile's `a`).
+fn seeded(name: &str, table: &str) -> Option<ConfigObject> {
+    Some(ConfigObject {
+        doc: CALIBRATION_DOC,
+        name: name.to_string(),
+        seed: Some(toml::from_str(table).expect("well-formed TOML")),
+    })
+}
+
+/// Over a tile proposing a new `kalman_fit` named `fit2`, the dialog opens
+/// at `fit2`'s Edit screen on a draft built from the seed: the kind's rows
+/// at the seeded values, `inputs` empty, nothing written until the draft
+/// is saved. The stage is new to the document, so no browse row names it.
+#[gpui::test]
+fn config_calibration_over_a_seeded_tile_opens_the_new_stage_in_edit(
+    cx: &mut gpui::TestAppContext,
+) {
+    let seed = "pipeline = \"implied_forwards\"\nkind = \"kalman_fit\"\nseries = \"repo\"\n\
+                knots = [0.25, 0.5, 1.0, 2.0, 3.0, 5.0]\nprocess_noise = 1.0e-4\n\
+                measurement_noise = \"spread\"\n";
+    let (shell, cx) = dialog_test_shell_over_a_tile(
+        cx,
+        calibration_services(recorder_showing(seeded("fit2", seed))),
+        "config::calibration",
+    );
+    assert_eq!(
+        dialog_state(&shell, &cx, |s| (s.domain, s.stage.clone())),
+        (
+            Domain::Calibration,
+            Stage::Edit {
+                object: "fit2".into()
+            }
+        )
+    );
+    assert!(
+        dialog_state(&shell, &cx, |s| s
+            .rows
+            .position(|row| row.name == "fit2")
+            .is_none()),
+        "the document has no such row yet"
+    );
+    let (is_new, keys, kind, series) = edit_draft(&shell, &cx, |d| {
+        (
+            d.is_new,
+            d.fields.iter().map(|f| f.key.clone()).collect::<Vec<_>>(),
+            d.choice("kind").map(str::to_string),
+            d.source
+                .get("series")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+        )
+    });
+    assert!(is_new, "a draft of an object nothing defines yet");
+    assert_eq!(
+        keys,
+        [
+            "pipeline",
+            "kind",
+            "inputs",
+            "series",
+            "knots",
+            "process_noise",
+            "measurement_noise"
+        ],
+        "the seeded kind's rows"
+    );
+    assert_eq!(kind.as_deref(), Some("kalman_fit"));
+    assert_eq!(series.as_deref(), Some("repo"));
 }
 
 /// Over a tile showing `repo_fit`, `config::calibration` opens straight on

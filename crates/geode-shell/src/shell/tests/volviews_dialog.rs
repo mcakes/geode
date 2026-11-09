@@ -797,6 +797,7 @@ fn services_with_vol_views_and_a_tile_showing(tab: &str) -> ShellServices {
     *rec.config_object.borrow_mut() = Some(ConfigObject {
         doc: "vol_views",
         name: tab.to_string(),
+        seed: None,
     });
     let mut services = services_with_recorders(vec![rec]);
     let vol = services_with_vol_views();
@@ -858,6 +859,7 @@ fn a_tile_showing_another_documents_object_leaves_the_first_row_selected(
     *rec.config_object.borrow_mut() = Some(ConfigObject {
         doc: "views",
         name: "skew".to_string(),
+        seed: None,
     });
     let mut services = services_with_recorders(vec![rec]);
     let vol = services_with_vol_views();

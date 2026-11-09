@@ -579,6 +579,7 @@ impl VolwatchTile {
         self.shown_view().map(|view| ConfigObject {
             doc: geode_core::config::VOL_VIEWS_DOC,
             name: view.name,
+            seed: None,
         })
     }
 

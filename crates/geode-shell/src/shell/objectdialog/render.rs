@@ -841,6 +841,49 @@ pub fn open_edit(
     cx.notify();
 }
 
+/// Open the dialog on `domain` at the Edit screen of a NEW object `name`
+/// whose draft is built from `seed` (a tile's proposal through
+/// `TileContent::config_object`: the calibration tile's `a` seeds a stage's
+/// `pipeline`, `kind` and the kind's parameters, so the kind's rows appear
+/// as they would for a stage the document held). Nothing is written until
+/// the draft is saved, as with the dialog's own `n`; a name the document
+/// already holds opens that object instead, since a seeded draft over it
+/// would shadow a row the user can see. Nothing happens when `open` itself
+/// did nothing (the domain's dialog is already open underneath).
+pub fn open_new(
+    view: &mut ShellView,
+    domain: Domain,
+    name: &str,
+    seed: toml::Table,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    open(view, domain, window, cx);
+    let Some(state) = view.object_dialog.as_ref() else {
+        return;
+    };
+    if state.domain != domain || state.stage != Stage::Browse {
+        return;
+    }
+    if state.rows.position(|row| row.name == name).is_some() {
+        enter_edit_stage(view, name, None, cx);
+    } else {
+        // The seed is read through the domain's own fields, as the
+        // value-color list's seed is (`create_from_name`), over the config
+        // with the pending batch folded in.
+        let folded = apply::config_with_pending(view, cx);
+        let config = folded.as_ref().unwrap_or(&view.services(cx).config);
+        let mut draft = domain.new_draft(config, name);
+        draft.fields = domain.fields_from_source(config, &seed);
+        draft.source = seed;
+        draft.diagnostics = domain.validate(&draft, config);
+        enter_edit_stage(view, name, Some(draft), cx);
+    }
+    view.refresh_dialog_rows(cx);
+    dialog::sync_dialog_text(view, window, cx);
+    cx.notify();
+}
+
 /// the dataset of the browse row under the cursor, for `n` on Sources — `None` on every
 /// other domain, or with no row (an empty list, or a keystroke racing the modal
 /// closing).

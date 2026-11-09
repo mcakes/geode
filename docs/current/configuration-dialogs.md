@@ -405,6 +405,19 @@ The tile asks for the action through `Frame::request_action` (see
 [shell](shell.md#the-config-door)), the one route a tile has to a shell
 action; the shell runs it only for the focused tile.
 
+A tile can also propose a stage the document does not hold yet: the
+Calibration tile's `a` (a kind, then a name) answers `config_object` with a
+`seed`, the new stage's table (`pipeline`, `kind` and the kind's required
+fields at the builtin's values), and asks for the same action. The dialog
+then opens at the new name's Edit screen (`render::open_new`) on a draft
+built from the seed through the domain's `fields_from_source`, so the kind's
+rows appear at the seeded values with `inputs` empty, as the dialog's own
+`n` would show them; nothing is written until the draft is saved, and a
+seed naming a stage the document already holds opens that stage instead.
+The tile's proposal is read in the shell's frame observer, which runs before
+the tile's own; the tile's observer then clears it, so a later `enter` names
+the cursor's stage again.
+
 The rows are the stage's `Pipeline` (a choice over the document's
 pipelines), its `Kind` (a choice over the seven kinds) and its `Inputs`, then
 the kind's parameters. `Inputs` is one ordered list of the pipeline's other

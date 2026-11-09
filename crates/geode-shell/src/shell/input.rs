@@ -12,6 +12,7 @@ use gpui_component::WindowExt as _;
 use crate::actions::ActionId;
 use crate::commandline::Prompt;
 use crate::keymap::{Binding, KeyContext, MatchResult, UNBOUND_ACTION};
+use crate::module::ConfigObject;
 use crate::tiling::{Direction, Orientation, Switch, apply_workspace_action};
 use crate::vimfind;
 use crate::{fontsize, theme};
@@ -475,7 +476,9 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::VolViews, window, cx);
         } else if action.0 == "config::calibration" {
             // Over a calibration tile whose cursor is on a stage, open at
-            // that stage's Edit screen; otherwise browse the stages.
+            // that stage's Edit screen; over one proposing a new stage (its
+            // `a`, a seeded object), at the new stage's Edit screen on a
+            // draft from the seed; otherwise browse the stages.
             let shown = self
                 .workspace(cx)
                 .focused_tile()
@@ -483,6 +486,18 @@ impl ShellView {
                 .and_then(|o| o.content.config_object(cx))
                 .filter(|object| object.doc == geode_core::calibration::CALIBRATION_DOC);
             match shown {
+                Some(ConfigObject {
+                    name,
+                    seed: Some(seed),
+                    ..
+                }) => objectdialog::render::open_new(
+                    self,
+                    objectdialog::Domain::Calibration,
+                    &name,
+                    seed,
+                    window,
+                    cx,
+                ),
                 Some(object) => objectdialog::render::open_edit(
                     self,
                     objectdialog::Domain::Calibration,
