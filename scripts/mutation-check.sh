@@ -44276,6 +44276,57 @@ run_mutation "calibration pointer: an ineligible drop queues nothing" \
   geode-calibration \
   an_ineligible_card_refuses_the_drop
 
+# ---- Calibration tile: final-review contracts ----
+
+# `d` refuses a stage a lower layer defines: a whole-object `None` removes
+# the user's copy alone, so the builtin stage would stay in force with
+# its readers stripped. Blinding the lookup lets `d` ask over
+# implied_rates and queue the strip.
+run_mutation "calibration verbs: d refuses an inherited stage" \
+  crates/geode-calibration/src/tile/verbs.rs \
+  '        if let Some(layer) = config.inherited.get(&stage) {' \
+  '        if let Some(layer) = config.inherited.get(&stage).filter(|_| false) {' \
+  geode-calibration \
+  d_confirms_and_deletes_with_its_edges_in_one_batch
+
+# A requested shell action acts on the focused tile, so a request from an
+# unfocused tile would open the dialog on the wrong tile's object. Running
+# every request drops the gate.
+run_mutation "shell: a requested action runs only for the focused tile" \
+  crates/geode-shell/src/shell/mod.rs \
+  '                if Some(tile) == focused {' \
+  '                if true || Some(tile) == focused {' \
+  geode-shell \
+  a_requested_action_opens_the_dialog_only_from_the_focused_tile
+
+# The footer names every waiting source before the cursor's line: a
+# restored cursor must not hide what blocks the pipeline. Letting the
+# cursor win inverts the precedence.
+run_mutation "calibration model: waiting sources win the footer over the cursor" \
+  crates/geode-calibration/src/core/model.rs \
+  '    let footer: SharedString = if !missing.is_empty() {
+        format!("waiting for {}", missing.join(", ")).into()
+    } else if let Some(at) = cursor.and_then(|c| cards.iter().find(|m| m.stage == c)) {
+        format!("{} · {}", at.stage, at.status_full).into()
+    } else {' \
+  '    let footer: SharedString = if let Some(at) = cursor.and_then(|c| cards.iter().find(|m| m.stage == c)) {
+        format!("{} · {}", at.stage, at.status_full).into()
+    } else if !missing.is_empty() {
+        format!("waiting for {}", missing.join(", ")).into()
+    } else {' \
+  geode-calibration \
+  the_footer_names_the_cursor_or_the_missing_source
+
+# A zero-row document answer means "not yet published": the source stays
+# waiting and no run goes out with an empty input. Without the guard the
+# empty answer fills the source and the run is submitted over nothing.
+run_mutation "calibration data: an empty document answer leaves the source waiting" \
+  crates/geode-calibration/src/tile/data.rs \
+  '            Ok(docs) if docs.is_empty() => {' \
+  '            Ok(docs) if docs.is_empty() && false => {' \
+  geode-calibration \
+  an_empty_document_answer_leaves_its_source_waiting
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
