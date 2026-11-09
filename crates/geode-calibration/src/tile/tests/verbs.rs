@@ -489,6 +489,23 @@ fn an_upload_result_is_a_notice_and_updates_the_publish_card(cx: &mut gpui::Test
         "the long line is cut for the card and whole in the tooltip"
     );
     assert_eq!(h.result_names(&vcx), vec!["publish"], "no result was added");
+
+    // A third publish: its answer drops the last publish's time from the
+    // card, and with one of its documents down the time never returns.
+    let ups = h.publish_two(&mut vcx);
+    assert_eq!(
+        h.card_status_full(&vcx, "publish"),
+        "09:30:15 · 2 series",
+        "the last publish's time went with its answer"
+    );
+    h.deliver(&mut vcx, upload_answer(ups[0], Err("sophis is down")));
+    h.deliver(&mut vcx, upload_answer(ups[1], Ok(())));
+    assert_eq!(
+        h.card_status_full(&vcx, "publish"),
+        "09:30:15 · 2 series",
+        "one document down: no time on the card"
+    );
+    assert_eq!(h.notices(&vcx).len(), 2);
 }
 
 /// A late upload success never lifts a hold. After the publish answers

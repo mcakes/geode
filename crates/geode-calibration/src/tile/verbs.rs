@@ -361,6 +361,10 @@ impl CalibrationTile {
             expected: rows.len(),
             ..Uploading::default()
         };
+        // The last publish's time is the last publish's: the card drops it
+        // with this answer (the caller rebuilds the model) and earns it
+        // again only when every one of these documents lands.
+        self.uploaded_at = None;
         for rows in rows {
             self.upload_tag += 1;
             let tag = self.upload_tag;
@@ -423,6 +427,10 @@ impl CalibrationTile {
             }
             Err(e) => {
                 self.uploading.failed += 1;
+                // A publish with a document down never reads `uploaded`.
+                if self.uploaded_at.take().is_some() {
+                    self.rebuild_model(cx);
+                }
                 self.upload_notices.push(Notice::danger(format!(
                     "upload {} {} to {} failed: {e}",
                     sent.document, sent.key, u.target

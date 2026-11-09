@@ -112,7 +112,9 @@ pub struct ModelInput<'a> {
     pub preview_edge: Option<(&'a str, &'a str)>,
     /// When the last publish's every document landed at its target: the
     /// publish card's status line ends `· uploaded HH:MM:SS`. `None` until
-    /// one did, after a failed upload, or after a flip. An upload never
+    /// the last publish's final document lands; a new publish's answer, a
+    /// failed or refused upload of it, and a flip each set it `None`, so
+    /// the time on the card is always the current publish's. An upload never
     /// rewrites the engine's result: only an outcome changes a stage's
     /// result, so a held publish stays held, uploaded or not.
     pub uploaded_at: Option<DateTime<Utc>>,
