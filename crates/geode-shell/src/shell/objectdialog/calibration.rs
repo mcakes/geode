@@ -20,6 +20,8 @@
 //! this draft's table in the stage's place and keeps what it says about
 //! this stage, so the dialog agrees with the tile's bridge on every rule.
 
+use std::collections::BTreeSet;
+
 use geode_core::calibration::doc::{CHECKS, GRIDS, KINDS};
 use geode_core::calibration::{CALIBRATION_DOC, check_against, from_doc};
 use geode_core::config::{Config, Diagnostic, MergedDoc};
@@ -480,8 +482,35 @@ pub fn to_table(draft: &Draft, dest: Destination) -> toml_edit::Item {
 /// the stage's place, keeping the findings whose path is the stage's
 /// (`stages.<name>` or under it). The other stages' findings are theirs,
 /// not this draft's; the pipeline's drop that a bad stage causes is said at
-/// the stage's own field.
+/// the stage's own field. Checked against the live `datasets` document;
+/// the dialog's own drafts go through [`validate_with`].
 pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
+    validate_against(draft, config, None)
+}
+
+/// [`validate`] against the schema the data engine was built over:
+/// `startup` is the set of datasets declared at launch
+/// (`ObjectDialogState::startup_datasets`), and the live schema is cut to
+/// it before `check_against` runs. The bridge reads the pipeline against
+/// that startup schema, so a stage reading or publishing a dataset a
+/// reload has since added would be dropped at the bridge with the
+/// reader's warning; the dialog refuses it in the same words rather than
+/// let the save drop the pipeline. VolMonitor views warn and offer the
+/// column instead, because a column that cannot paint until a restart
+/// harms nothing; a dropped pipeline takes every stage with it.
+pub fn validate_with(
+    draft: &Draft,
+    config: &Config,
+    startup: &BTreeSet<String>,
+) -> Vec<Diagnostic> {
+    validate_against(draft, config, Some(startup))
+}
+
+fn validate_against(
+    draft: &Draft,
+    config: &Config,
+    startup: Option<&BTreeSet<String>>,
+) -> Vec<Diagnostic> {
     let text = super::object_text(&draft.name, to_table(draft, Destination::Doc));
     let stage = text
         .parse::<toml::Table>()
@@ -491,10 +520,13 @@ pub fn validate(draft: &Draft, config: &Config) -> Vec<Diagnostic> {
     let mut doc: MergedDoc = config.doc(DOC).cloned().unwrap_or_default();
     super::objects_in_mut(&mut doc.value, DOC).insert(draft.name.clone(), stage);
     let (pipelines, mut diags) = from_doc(&doc);
-    let schema = config
+    let mut schema = config
         .doc("datasets")
         .map(|d| SchemaSpec::from_doc(d).0)
         .unwrap_or_default();
+    if let Some(startup) = startup {
+        schema.datasets.retain(|d| startup.contains(&d.name));
+    }
     let egress: Vec<EgressSpec> = targets_of(config)
         .into_iter()
         .map(|name| EgressSpec {
@@ -797,6 +829,42 @@ mod tests {
         // the path.
         let row = draft.row_for_path(DOC, "stages.repo_fit.knots");
         assert_eq!(row, Some(EditRow::Field(knots)));
+    }
+
+    /// A source over a dataset the live `datasets` document declares but
+    /// the startup schema lacks is refused in the reader's words at its
+    /// `dataset` field, as the bridge's startup read would drop it; against
+    /// a startup set that has the dataset, or with no startup set (a draft
+    /// built outside a dialog), the live document decides and nothing is
+    /// said. `Domain::validate` reads the set the dialog hands the draft.
+    #[test]
+    fn a_dataset_only_the_live_schema_declares_is_refused_by_the_dialog() {
+        let config = config_with(BUILTIN_CALIBRATION);
+        let mut draft = Domain::Calibration.draft(&config, "rates");
+        assert!(draft.diagnostics.is_empty(), "{:?}", draft.diagnostics);
+        assert_eq!(choice_of(&draft.fields, "dataset").1, "rate_curve");
+        assert!(validate(&draft, &config).is_empty());
+
+        let restart = |diags: &[Diagnostic]| {
+            diags
+                .iter()
+                .find(|d| d.message.ends_with("which the schema does not declare"))
+                .map(|d| (d.severity, d.path.clone()))
+        };
+        let lacking: BTreeSet<String> = ["option_chain".to_string()].into();
+        let with = validate_with(&draft, &config, &lacking);
+        assert_eq!(
+            restart(&with),
+            Some((Severity::Warning, Some("stages.rates.dataset".into()))),
+            "{with:?}"
+        );
+        let having: BTreeSet<String> = ["rate_curve".to_string()].into();
+        assert_eq!(restart(&validate_with(&draft, &config, &having)), None);
+
+        draft.startup_datasets = Some(lacking);
+        assert!(restart(&Domain::Calibration.validate(&draft, &config)).is_some());
+        draft.startup_datasets = None;
+        assert!(restart(&Domain::Calibration.validate(&draft, &config)).is_none());
     }
 
     #[test]

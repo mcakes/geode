@@ -3200,7 +3200,14 @@ impl Domain {
                 Some(startup) => volviews::validate_with(draft, config, startup),
                 None => volviews::validate(draft, config),
             },
-            Domain::Calibration => calibration::validate(draft, config),
+            // Likewise, and a refusal rather than a warning: the bridge
+            // reads the pipeline against the startup schema, so a stage
+            // over a dataset only the live document declares would drop
+            // the pipeline (`calibration::validate_with`).
+            Domain::Calibration => match &draft.startup_datasets {
+                Some(startup) => calibration::validate_with(draft, config, startup),
+                None => calibration::validate(draft, config),
+            },
         }
     }
 }
@@ -3225,7 +3232,11 @@ impl Domain {
 /// (`geode_core::config::object_table`) under that table, created
 /// implicit when the file lacks it so the write prints `[stages.<name>]`
 /// and no bare `[stages]` header. A stage written at the top level would
-/// be a key the reader ignores.
+/// be a key the reader ignores. A container the file spells inline
+/// (`stages = { a = {…}, b = {…} }`) is converted to a standard table
+/// first, keeping every object it holds: replacing it would drop the
+/// trader's other stages with the one write. Only a container that is no
+/// table at all (`stages = 1`) is replaced.
 pub(super) fn set_object(
     document: &mut toml_edit::DocumentMut,
     doc: &str,
@@ -3242,29 +3253,38 @@ pub(super) fn set_object(
                 table.set_implicit(true);
                 toml_edit::Item::Table(table)
             });
-            if holder.as_table_mut().is_none() {
-                let mut table = toml_edit::Table::new();
-                table.set_implicit(true);
-                *holder = toml_edit::Item::Table(table);
-            }
+            // `into_table` converts a standard or an inline table, keeping
+            // its entries; anything else is not a holder of objects.
+            let table = match std::mem::replace(holder, toml_edit::Item::None).into_table() {
+                Ok(table) => table,
+                Err(_) => {
+                    let mut table = toml_edit::Table::new();
+                    table.set_implicit(true);
+                    table
+                }
+            };
+            *holder = toml_edit::Item::Table(table);
             holder
                 .as_table_mut()
-                .expect("a non-table container was replaced just above")
+                .expect("the holder was set to a table just above")
                 .insert(name, item);
         }
     }
 }
 
 /// Remove `name` from `document`, the counterpart of [`set_object`]: from
-/// the top level, or from the table that holds `doc`'s objects. A removal
-/// never creates the container.
+/// the top level, or from the table that holds `doc`'s objects, spelled as
+/// a standard or an inline table. A removal never creates the container.
 pub(super) fn remove_object(document: &mut toml_edit::DocumentMut, doc: &str, name: &str) {
     match geode_core::config::object_table(doc) {
         None => {
             document.remove(name);
         }
         Some(container) => {
-            if let Some(holder) = document.get_mut(container).and_then(|h| h.as_table_mut()) {
+            if let Some(holder) = document
+                .get_mut(container)
+                .and_then(|h| h.as_table_like_mut())
+            {
                 holder.remove(name);
             }
         }
@@ -7051,6 +7071,49 @@ mod tests {
         state.set_query("np".to_string());
         assert!(state.abandon_for_back(), "a kept query is cleared too");
         assert_eq!(state.effective_query(), "");
+    }
+
+    /// A user file may spell the stages holder inline. A write into it
+    /// keeps every stage it held (the holder becomes a standard table), and
+    /// a removal finds the stage there; replacing the holder would have
+    /// dropped the trader's other stages with one write.
+    #[test]
+    fn set_and_remove_object_keep_an_inline_stages_holder_whole() {
+        let doc = geode_core::calibration::CALIBRATION_DOC;
+        let mut document: toml_edit::DocumentMut =
+            "config_version = 1\nstages = { a = { kind = \"source\" }, b = { kind = \"check\" } }\n"
+                .parse()
+                .unwrap();
+        let mut c = toml_edit::Table::new();
+        c["kind"] = toml_edit::value("publish");
+        set_object(&mut document, doc, "c", toml_edit::Item::Table(c));
+        let stages = |document: &toml_edit::DocumentMut| -> Vec<String> {
+            document["stages"]
+                .as_table_like()
+                .expect("a table-like holder")
+                .iter()
+                .map(|(k, _)| k.to_string())
+                .collect()
+        };
+        assert_eq!(stages(&document), ["a", "b", "c"]);
+        assert_eq!(
+            document["stages"]["a"]["kind"].as_str(),
+            Some("source"),
+            "the other stages keep their fields"
+        );
+        remove_object(&mut document, doc, "a");
+        assert_eq!(stages(&document), ["b", "c"]);
+        // Removal alone never converts or creates the holder.
+        let mut inline: toml_edit::DocumentMut =
+            "stages = { a = { kind = \"source\" }, b = { kind = \"check\" } }\n"
+                .parse()
+                .unwrap();
+        remove_object(&mut inline, doc, "a");
+        assert_eq!(stages(&inline), ["b"]);
+        assert!(inline["stages"].is_inline_table(), "still inline");
+        let mut empty = toml_edit::DocumentMut::new();
+        remove_object(&mut empty, doc, "a");
+        assert!(empty.get("stages").is_none());
     }
 
     /// A pending confirmation refuses the back step and changes nothing; browse has no
