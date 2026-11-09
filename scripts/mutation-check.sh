@@ -16840,7 +16840,7 @@ run_mutation "objectdialog: an edit-row click is dropped while a confirm is arme
 # arm leaves a visible but inert button.
 run_mutation "objectdialog: the i button opens the field its key opens (spec §20.3)" \
   crates/geode-shell/src/shell/objectdialog/render.rs \
-  '        "i" => open_field(shell),' \
+  '        "i" => open_field(shell, cx),' \
   '        "i" => {}' \
   geode-shell \
   i_and_n_have_buttons_that_do_what_their_keys_do
