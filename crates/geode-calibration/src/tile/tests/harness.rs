@@ -19,13 +19,13 @@ use geode_core::scopes::SavedScopes;
 use geode_data::{DataHandle, Request};
 use geode_shell::actions::{ActionId, ActionRegistry};
 use geode_shell::diagnostics::Diagnostics;
-use geode_shell::frame::{Frame, FrameRef};
+use geode_shell::frame::{ConfigEdit, Frame, FrameRef, TileNotice};
 use geode_shell::keymap::{KeyContext, Keymap, MatchResult, Matcher, build_keymap};
 use geode_shell::module::{Delivery, ModuleFactory, ModuleRoster, TileContent};
 use geode_shell::tiling::{TileId, WorkspaceIx};
 use gpui::{AppContext as _, Entity, Window};
 
-use crate::content::{CalibrationConfig, CalibrationFactory};
+use crate::content::{CalibrationConfig, CalibrationFactory, stage_tables};
 use crate::tile::CalibrationTile;
 
 /// The demo schema: the datasets the builtin pipeline's sources read and
@@ -184,6 +184,7 @@ pub(super) fn config_from(text: &str) -> CalibrationConfig {
                 .collect(),
         ),
         diagnostics: Arc::new(diags),
+        sources: Arc::new(stage_tables(&doc)),
     }
 }
 
@@ -443,5 +444,23 @@ impl Harness {
         vcx: &mut gpui::VisualTestContext,
     ) -> Vec<(TileId, ActionId)> {
         vcx.update(|_, cx| self.frame.update(cx, |f, _| f.take_requested_actions()))
+    }
+
+    /// The whole-object config edits the tile queued since the last call,
+    /// drained from the frame as the shell's observer drains them.
+    pub(super) fn config_edits(&self, vcx: &mut gpui::VisualTestContext) -> Vec<ConfigEdit> {
+        vcx.update(|_, cx| self.frame.update(cx, |f, _| f.take_pending_config_edits()))
+    }
+
+    /// What the shell tells the tile of an edit it drained: posted on the
+    /// frame and notified, as the shell's deferred post does.
+    pub(super) fn post_notice(&self, vcx: &mut gpui::VisualTestContext, notice: TileNotice) {
+        vcx.update(|_, cx| {
+            self.frame.update(cx, |f, cx| {
+                f.post_tile_notice_for_test(TileId(Harness::TILE), notice);
+                cx.notify();
+            })
+        });
+        vcx.run_until_parked();
     }
 }

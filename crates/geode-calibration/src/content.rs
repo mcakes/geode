@@ -4,11 +4,12 @@
 //! deliveries.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use geode_core::calibration::Pipelines;
-use geode_core::config::Diagnostic;
+use geode_core::calibration::{Pipelines, StageName};
+use geode_core::config::{Diagnostic, MergedDoc};
 use geode_core::context::DimensionContext;
 use geode_core::schema::SchemaSpec;
 use geode_data::DataHandle;
@@ -28,10 +29,7 @@ use crate::KIND;
 use crate::tile::{CalibrationTile, TITLE};
 
 /// Registered actions and their palette titles. Every one is bound in
-/// [`DEFAULT_KEYMAP`]; the palette lists them all. The ids are fixed here
-/// so a binding, a menu row and a footer hint can name a verb before it
-/// does anything: a verb the tile does not yet carry out (the editors)
-/// consumes its key and changes nothing.
+/// [`DEFAULT_KEYMAP`]; the palette lists them all.
 pub const ACTIONS: &[(&str, &str)] = &[
     ("calibration::cursor_left", "Cursor to an input"),
     ("calibration::cursor_right", "Cursor to a consumer"),
@@ -55,8 +53,8 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("calibration::publish", "Publish"),
     ("calibration::menu", "Actions menu"),
     ("calibration::menu_pick", "Pick menu row"),
-    // The picker fields' row steps. A field types every bare key, so the
-    // shared `j`/`k` list steps cannot reach it; the arrows can.
+    // The picker lists' row steps: the arrows in a field, beside the
+    // shared `j`/`k` steps a fieldless list takes under `tilelist`.
     ("calibration::list_down", "Next row"),
     ("calibration::list_up", "Previous row"),
     ("calibration::connect", "Connect an input"),
@@ -105,7 +103,7 @@ context = "calibration && mode == normal"
 "shift+r" = "calibration::run_all"
 "p" = "calibration::publish"
 "c" = "calibration::connect"
-"shift+c" = "calibration::disconnect"
+"x" = "calibration::disconnect"
 "a" = "calibration::add"
 "d" = "calibration::delete"
 "." = "calibration::menu"
@@ -117,8 +115,8 @@ context = "calibration && mode == normal"
 # header's warning and danger notices.
 "escape" = "calibration::cancel"
 
-# The filter and the picker fields: a field, so only these keys are
-# claimed and every other bare key types.
+# The filter and the add picker's name field: a field, so only these keys
+# are claimed and every other bare key types.
 [[bindings]]
 context = "calibration && mode == insert"
 [bindings.keys]
@@ -137,8 +135,8 @@ context = "calibration && mode == menu && popup == actions"
 "escape" = "calibration::cancel"
 "." = "calibration::menu"
 
-# A fieldless chooser (a stage to connect, a kind to add): the shared
-# steps move it, `enter` applies and `escape` discards.
+# A fieldless chooser (a stage to connect or disconnect, a kind to add):
+# the shared steps move it, `enter` applies and `escape` discards.
 [[bindings]]
 context = "calibration && mode == menu && popup == list"
 [bindings.keys]
@@ -161,6 +159,27 @@ pub struct CalibrationConfig {
     /// Every `from_doc` and `check_against` finding, for the header
     /// notice: a dropped pipeline is said in the tile, not only in the log.
     pub diagnostics: Arc<Vec<Diagnostic>>,
+    /// Every stage's table as the merged document holds it, by name, read
+    /// or refused: a graph edit rewrites a stage whole (`ConfigEdit` is
+    /// whole-object), so the tile needs the table it starts from without
+    /// reading the configuration itself.
+    pub sources: Arc<BTreeMap<StageName, toml::Table>>,
+}
+
+/// The `stages` table of a merged calibration document as stage tables by
+/// name: what [`CalibrationConfig::sources`] carries. An entry that is not
+/// a table is no stage (the reader reports it) and is left out.
+pub fn stage_tables(doc: &MergedDoc) -> BTreeMap<StageName, toml::Table> {
+    doc.value
+        .get("stages")
+        .and_then(toml::Value::as_table)
+        .map(|stages| {
+            stages
+                .iter()
+                .filter_map(|(name, v)| v.as_table().map(|t| (name.clone(), t.clone())))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// What every tile of the factory shares: the data handle, the config last

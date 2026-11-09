@@ -71,6 +71,26 @@ const INSERT_HINTS: &[(&[(&str, &str)], &str)] = &[
     (&[("calibration::cancel", "escape")], "revert"),
 ];
 
+/// The hints while a picker list is up: the shared steps are the shell's
+/// (`tilelist`), named by their motion ids.
+const LIST_HINTS: &[(&[(&str, &str)], &str)] = &[
+    (
+        &[
+            (geode_tile::motion::MENU_DOWN, "j"),
+            (geode_tile::motion::MENU_UP, "k"),
+        ],
+        "move",
+    ),
+    (&[("calibration::commit", "enter")], "pick"),
+    (&[("calibration::cancel", "escape")], "close"),
+];
+
+/// The hints while the add picker's name field is up.
+const NAME_HINTS: &[(&[(&str, &str)], &str)] = &[
+    (&[("calibration::commit", "enter")], "add"),
+    (&[("calibration::cancel", "escape")], "cancel"),
+];
+
 /// One footer hint: its chords, then its word.
 pub(super) type FooterHint = (Vec<Vec<Keystroke>>, SharedString);
 
@@ -80,6 +100,8 @@ pub(super) type FooterHint = (Vec<Vec<Keystroke>>, SharedString);
 pub(super) struct Hints {
     pub(super) normal: Vec<FooterHint>,
     pub(super) insert: Vec<FooterHint>,
+    pub(super) list: Vec<FooterHint>,
+    pub(super) name: Vec<FooterHint>,
 }
 
 impl Hints {
@@ -108,6 +130,8 @@ impl Hints {
         Hints {
             normal: row(NORMAL_HINTS),
             insert: row(INSERT_HINTS),
+            list: row(LIST_HINTS),
+            name: row(NAME_HINTS),
         }
     }
 }
@@ -265,13 +289,15 @@ fn card_ink(tone: Tone, theme: &Theme) -> (Hsla, Hsla) {
 
 impl CalibrationTile {
     /// The graph: the clipped, scrolled surface with the edge canvas, the
-    /// captions and the cards.
+    /// captions and the cards, and the edit picker hung under the cursor's
+    /// card while one is up.
     pub(super) fn render_graph(
         &self,
         tile: &Entity<Self>,
         model: &std::rc::Rc<GraphModel>,
         theme: &Theme,
         window: &Window,
+        cx: &App,
     ) -> Div {
         let id = self.id.0;
         let (sx, sy) = self.scroll;
@@ -330,17 +356,42 @@ impl CalibrationTile {
         for (card, ids) in model.cards.iter().zip(&self.chrome.cards) {
             body = body.child(render_card(card, ids, layout, (sx, sy), theme));
         }
+        // The picker hangs by its top-left corner from the cursor card's
+        // bottom-left (the deferred anchor lifts it over the body's clip);
+        // with no cursor's card (an add on an empty cursor) from the first
+        // row's top-left.
+        if let Some(picker) = self.render_picker(tile, cx) {
+            let at = self
+                .cursor
+                .as_deref()
+                .and_then(|c| layout.cards.iter().find(|k| k.stage == c))
+                .map(|k| (k.x, k.y + layout.card_h))
+                .unwrap_or((0.0, caption_h));
+            body = body.child(
+                div()
+                    .absolute()
+                    .left(px(at.0 - sx))
+                    .top(px(at.1 - sy))
+                    .child(picker),
+            );
+        }
         body
     }
 
     /// The footer: the filter field while it is up, else the model's
-    /// line; the hint row at the right either way.
+    /// line; the hint row at the right either way, for whatever holds the
+    /// keys (the filter, a picker list, the name field, else the graph).
     pub(super) fn render_footer(&self, model: Option<&GraphModel>, theme: &Theme) -> Div {
         let id = self.id.0;
         let muted = theme.muted_foreground;
-        let hints = match &self.filter_field {
-            Some(_) => &self.hints.insert,
-            None => &self.hints.normal,
+        let hints = if self.filter_field.is_some() {
+            &self.hints.insert
+        } else if self.picker_field_up() {
+            &self.hints.name
+        } else if self.picker_list_up() {
+            &self.hints.list
+        } else {
+            &self.hints.normal
         };
         let left: gpui::AnyElement = match &self.filter_field {
             Some(field) => h_flex()

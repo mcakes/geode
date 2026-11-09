@@ -179,8 +179,11 @@ impl CalibrationTile {
             waiting: &self.sources.pending,
             cursor: self.cursor.as_deref(),
             filter: self.filter.as_deref(),
-            // The connect picker's proposal, once it exists.
-            preview_edge: None,
+            // The connect picker's highlighted candidate into its stage.
+            preview_edge: self
+                .preview_edge
+                .as_ref()
+                .map(|(from, to)| (from.as_str(), to.as_str())),
             uploaded_at: self.uploaded_at,
             layout: placed,
             clock: self.clock(cx),
@@ -655,6 +658,9 @@ impl CalibrationTile {
     /// The frame observer. The header follows the underlying; the data
     /// flow follows the counters the documents depend on.
     pub(super) fn on_frame_changed(&mut self, cx: &mut Context<Self>) {
+        // The shell's answers to the edits this tile queued, posted on the
+        // frame and announced by this notification.
+        self.take_edit_notices(cx);
         if self.underlying_str(cx).map(str::to_string) != self.header.underlying {
             self.refresh(cx);
             cx.notify();

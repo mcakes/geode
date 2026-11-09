@@ -3,6 +3,7 @@
 //! content's `deliver`.
 
 mod data;
+mod edits;
 mod harness;
 mod keys;
 mod verbs;

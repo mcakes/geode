@@ -243,7 +243,13 @@ pub fn calibration_config(
     schema: &Arc<SchemaSpec>,
     egress: &[EgressSpec],
 ) -> CalibrationConfig {
-    let (pipelines, diagnostics) = match config.doc(geode_core::calibration::CALIBRATION_DOC) {
+    let doc = config.doc(geode_core::calibration::CALIBRATION_DOC);
+    // The stage tables ride along whole: a tile's graph edit rewrites a
+    // stage as one object, and the tile reads no `Config` itself.
+    let sources = doc
+        .map(geode_calibration::content::stage_tables)
+        .unwrap_or_default();
+    let (pipelines, diagnostics) = match doc {
         Some(doc) => {
             let (pipelines, mut diagnostics) = geode_core::calibration::from_doc(doc);
             let (pipelines, mut d) =
@@ -278,6 +284,7 @@ pub fn calibration_config(
                 .collect(),
         ),
         diagnostics: Arc::new(diagnostics),
+        sources: Arc::new(sources),
     }
 }
 
@@ -8844,6 +8851,9 @@ h = 480.0
             "{:?}",
             config.egress
         );
+        // Every stage's merged table rides along, for the tile's edits.
+        assert_eq!(config.sources.len(), 11, "{:?}", config.sources.keys());
+        assert_eq!(config.sources["publish"]["target"].as_str(), Some("sophis"));
         bridge.handle.shutdown();
     }
 
@@ -8927,6 +8937,10 @@ h = 480.0
             "{:?}",
             config.egress
         );
+        // The merged document's stage tables, the dropped pipeline's too:
+        // a name the document holds is taken whether or not it was read.
+        assert_eq!(config.sources.len(), 13, "{:?}", config.sources.keys());
+        assert_eq!(config.sources["nope"]["dataset"].as_str(), Some("nope"));
     }
 
     /// A reload of a config without a `views` document still reaches the

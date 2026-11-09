@@ -22,7 +22,7 @@ use gpui::Modifiers as MouseModifiers;
 use super::data::{KEY, calibrates, docs, rates_doc, result, run_outcome};
 use super::harness::{Harness, builtin_config, config_from, open_with, restored};
 use crate::content::CalibrationConfig;
-use crate::core::menu::{NEXT_CHANGE, OPEN_STAGE};
+use crate::core::menu::OPEN_STAGE;
 use crate::core::model::{EdgeTone, Tone};
 use crate::tile::data::QUEUE_FULL;
 
@@ -137,7 +137,7 @@ fn is_hms(s: &str) -> bool {
 }
 
 impl Harness {
-    fn confirm_text(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+    pub(super) fn confirm_text(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
         self.tile.read_with(vcx, |t, _| t.confirm_text())
     }
 
@@ -639,11 +639,7 @@ fn the_menu_lists_the_verbs_with_live_chords_and_picks_dispatch(cx: &mut gpui::T
         "calibration::add",
         "calibration::delete",
     ] {
-        assert_eq!(
-            h.menu_reason(&vcx, id).as_deref(),
-            Some(NEXT_CHANGE),
-            "{id}"
-        );
+        assert_eq!(h.menu_reason(&vcx, id), None, "{id}: live");
     }
     h.draw(&mut vcx);
     assert!(
@@ -685,17 +681,21 @@ fn the_menu_lists_the_verbs_with_live_chords_and_picks_dispatch(cx: &mut gpui::T
         Some("calibration::cancel")
     );
 
-    // The header's `⋯` opens the same menu; a press on a disabled row
-    // (row 6, `Connect…`; rows count the separators) gives its reason and
-    // keeps the menu.
+    // The header's `⋯` opens the same menu; a press on `Connect…` (row 6;
+    // rows count the separators) closes it and runs the verb, which on
+    // parity (its one port filled) is the connect refusal as a notice.
     h.click(&mut vcx, "calibration-menu-button-7");
     assert!(h.menu_open(&vcx).is_some(), "the trigger opens it");
     h.click(&mut vcx, "calibration-menu-row-7-6");
-    assert!(h.menu_open(&vcx).is_some(), "a refused pick keeps the menu");
-    assert_eq!(h.notices(&vcx), vec![NEXT_CHANGE.to_string()]);
+    assert_eq!(h.menu_open(&vcx), None, "an enabled pick closes the menu");
+    assert_eq!(
+        h.notices(&vcx),
+        vec!["parity has no open input".to_string()]
+    );
     // `Open stage` (row 5) is the shell's action: a pick closes the menu
     // and asks the shell through the frame rather than the tile's own
     // dispatch, which does not carry it.
+    h.click(&mut vcx, "calibration-menu-button-7");
     assert!(h.requested_actions(&mut vcx).is_empty());
     h.click(&mut vcx, "calibration-menu-row-7-5");
     assert_eq!(h.menu_open(&vcx), None, "an enabled pick closes the menu");

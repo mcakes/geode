@@ -15,12 +15,8 @@ use gpui::SharedString;
 /// shell's, not the tile's.
 pub const OPEN_STAGE: &str = "config::calibration";
 
-/// The reason on a row whose verb the tile does not carry yet: the row is
-/// in its place so the menu reads whole, and says honestly that a pick
-/// does nothing until the verb lands.
-pub const NEXT_CHANGE: &str = "arrives with the next change";
-
-/// `Run from here` with no cursor: there is no stage to run from.
+/// `Run from here`, `Open stage`, `Connect…`, `Disconnect…` and `Delete
+/// stage` with no cursor: there is no stage to act on.
 pub const NO_CURSOR: &str = "no stage under the cursor";
 
 /// Any run or publish with no pipeline shown.
@@ -53,10 +49,9 @@ pub fn rows(i: &MenuInputs) -> Vec<Row<ActionId>> {
         (true, None) => Err(SharedString::new_static(NO_CURSOR)),
         (true, Some(_)) => Ok(()),
     };
-    let later = || Err(SharedString::new_static(NEXT_CHANGE));
     vec![
         Row::Action(row("calibration::run_from", "Run from here").enabled(from_here.clone())),
-        Row::Action(row("calibration::run_all", "Run all").enabled(pipeline)),
+        Row::Action(row("calibration::run_all", "Run all").enabled(pipeline.clone())),
         Row::Separator,
         Row::Action(
             row("calibration::publish", "Publish")
@@ -64,11 +59,16 @@ pub fn rows(i: &MenuInputs) -> Vec<Row<ActionId>> {
         ),
         Row::Separator,
         // The same condition as `Run from here`: a stage under the cursor.
-        Row::Action(row(OPEN_STAGE, "Open stage").enabled(from_here)),
-        Row::Action(row("calibration::connect", "Connect\u{2026}").enabled(later())),
-        Row::Action(row("calibration::disconnect", "Disconnect\u{2026}").enabled(later())),
-        Row::Action(row("calibration::add", "Add stage\u{2026}").enabled(later())),
-        Row::Action(row("calibration::delete", "Delete stage").enabled(later())),
+        // The picker a row opens says, as a notice, when that stage has
+        // nothing to connect or disconnect.
+        Row::Action(row(OPEN_STAGE, "Open stage").enabled(from_here.clone())),
+        Row::Action(row("calibration::connect", "Connect\u{2026}").enabled(from_here.clone())),
+        Row::Action(
+            row("calibration::disconnect", "Disconnect\u{2026}").enabled(from_here.clone()),
+        ),
+        // A new stage needs only a pipeline to belong to.
+        Row::Action(row("calibration::add", "Add stage\u{2026}").enabled(pipeline)),
+        Row::Action(row("calibration::delete", "Delete stage").enabled(from_here)),
     ]
 }
 
@@ -122,20 +122,12 @@ mod tests {
             "calibration::run_all",
             "calibration::publish",
             OPEN_STAGE,
-        ] {
-            assert!(find(&rows, id).is_enabled(), "{id}");
-        }
-        for id in [
             "calibration::connect",
             "calibration::disconnect",
             "calibration::add",
             "calibration::delete",
         ] {
-            assert_eq!(
-                find(&rows, id).reason().map(|r| r.as_ref()),
-                Some(NEXT_CHANGE),
-                "{id}"
-            );
+            assert!(find(&rows, id).is_enabled(), "{id}");
         }
         assert_eq!(
             find(&rows, "calibration::connect").title().as_ref(),
@@ -160,11 +152,21 @@ mod tests {
                 .map(|r| r.as_ref()),
             Some(NO_CURSOR)
         );
-        assert_eq!(
-            find(&rows, OPEN_STAGE).reason().map(|r| r.as_ref()),
-            Some(NO_CURSOR),
-            "no stage to open without a cursor"
-        );
+        // The editors acting on the cursor's stage need one; a new stage
+        // needs only the pipeline.
+        for id in [
+            OPEN_STAGE,
+            "calibration::connect",
+            "calibration::disconnect",
+            "calibration::delete",
+        ] {
+            assert_eq!(
+                find(&rows, id).reason().map(|r| r.as_ref()),
+                Some(NO_CURSOR),
+                "{id}"
+            );
+        }
+        assert!(find(&rows, "calibration::add").is_enabled());
         assert!(find(&rows, "calibration::run_all").is_enabled());
         assert_eq!(
             find(&rows, "calibration::publish")
@@ -182,6 +184,10 @@ mod tests {
             "calibration::run_all",
             "calibration::publish",
             OPEN_STAGE,
+            "calibration::connect",
+            "calibration::disconnect",
+            "calibration::add",
+            "calibration::delete",
         ] {
             assert_eq!(
                 find(&none, id).reason().map(|r| r.as_ref()),

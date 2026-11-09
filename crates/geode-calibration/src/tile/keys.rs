@@ -210,13 +210,20 @@ impl CalibrationTile {
         cx.notify();
     }
 
-    /// Whether the filter field or an armed question holds window focus:
-    /// the shell's insert branch routes bare keys to it only while one
-    /// does.
+    /// Whether the filter field, the picker's name field or an armed
+    /// question holds window focus: the shell's insert branch routes bare
+    /// keys to it only while one does.
     pub fn holds_focus(&self, window: &Window, cx: &gpui::App) -> bool {
+        let field_focused =
+            |input: &Entity<InputState>| input.read(cx).focus_handle(cx).is_focused(window);
         self.filter_field
             .as_ref()
-            .is_some_and(|f| f.input.read(cx).focus_handle(cx).is_focused(window))
+            .is_some_and(|f| field_focused(&f.input))
+            || self
+                .picker
+                .as_ref()
+                .and_then(|p| p.field())
+                .is_some_and(field_focused)
             || self.confirm.as_ref().is_some_and(|c| c.holds_focus(window))
     }
 }

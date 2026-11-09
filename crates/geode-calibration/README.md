@@ -5,20 +5,19 @@ one underlying, drawn as a DAG of stages. The tile computes no fit itself:
 every run goes through the data tier's calibration door
 (`DataHandle::calibrate`) and comes back as a `Delivery::Calibration`.
 
-This crate is at its middle slices: the factory, the config push, the
-header, the data flow, the painted graph with its cursor keys and filter,
-the run and publish verbs with the y/n bar, the `.` action menu, the `:`
-line, and the pure layout, render model and menu rows under `core/`. The
-edits (connect, disconnect, add, delete, open a stage) follow in later
-slices; their keys and actions are registered and bound now, and their
-menu rows are in place, so a binding, a menu row or a footer hint can
-name a verb before the tile carries it out.
+The crate holds the factory, the config push, the header, the data flow,
+the painted graph with its cursor keys and filter, the run and publish
+verbs with the y/n bar, the graph edits (connect, disconnect, add and
+delete a stage, each a whole-object edit of the `calibration` document
+through the shell's config path; `enter` opens a stage in the shell's
+dialog), the `.` action menu, the `:` line, and the pure layout, render
+model, menu rows and edits under `core/`.
 
 ## Module map
 
 - `lib.rs`: `KIND` (`calibration`) and `init`, which reserves `tab` and
-  `shift-tab` in the picker fields' context (`tile::PICKER_CONTEXT`) for
-  completion.
+  `shift-tab` in the picker field's context (`tile::PICKER_CONTEXT`), so
+  `Root`'s focus cycling cannot take the keyboard out of the name field.
 - `core/`: the GPUI-free core, computed once per change and never per
   frame. `layout.rs` places a pipeline as a layered DAG in design pixels:
   a stage's layer is the longest path from a source, a layer orders by the
@@ -42,20 +41,39 @@ name a verb before the tile carries it out.
   `menu.rs` builds the `.` action menu's rows over action ids (`Run from
   here`, `Run all`, `Publish`, then `Open stage`, `Connect…`,
   `Disconnect…`, `Add stage…`, `Delete stage`), each carrying the reason
-  it cannot be picked now: no cursor, no pipeline, the publish refusal
-  `p` would give, or `arrives with the next change` for a verb a later
-  slice carries. `Open stage` is the shell's `config::calibration`
-  (`OPEN_STAGE`): its pick asks the shell through
+  it cannot be picked now: no cursor (every row acting on the cursor's
+  stage), no pipeline (`Run all`, `Add stage…` and the rest), or the
+  publish refusal `p` would give. `Open stage` is the shell's
+  `config::calibration` (`OPEN_STAGE`): its pick asks the shell through
   `FrameRef::request_action`, since the tile's dispatch does not carry a
   shell action.
+  `edits.rs` is the graph edits as whole-object `ConfigEdit`s over the
+  pipeline's typed ports: `open_port` (the first unfilled fixed port,
+  which is the port at `inputs.len()` since inputs match fixed ports by
+  position, or a variadic kind's slot, never filled), `connect_candidates`
+  (same pipeline, not the stage, not an input already, emitting what the
+  open port takes or, for a variadic kind with no gate yet, its gate type,
+  and not downstream of the stage, which would close a cycle the reader
+  refuses by dropping the pipeline), `connect_edit` and `disconnect_edit`
+  (the stage's table with `inputs` extended at the port or struck),
+  `delete_edits` (`None` for the stage, then each consumer's table without
+  it, in document order, with the count of edges into those consumers),
+  `add_edit` (`pipeline`, `kind` and the kind's required fields at the
+  builtin document's values, no `inputs`), `valid_new_name` (`[a-z0-9_]+`,
+  not `request`, not a name the document holds in any pipeline, since the
+  writer would replace that stage's table) and `KINDS` (the add picker's
+  rows, the reader's kind words in its order).
 - `commands.rs`: the `:` line's vocabulary as data: `run [stage]`,
   `publish`, `pipeline <name>`, `layout`, with the usage line each
   refuses with, and `completions` (the verbs; stage names after `run`,
   pipeline names after `pipeline`).
 - `content.rs`: `CalibrationConfig` (what the app pushes: the pipelines
   `from_doc` accepted and `check_against` kept, the schema the service
-  serves, the egress targets with the documents each accepts, and every
-  finding of both reads), `CalibrationFactory` (kind `calibration`, title
+  serves, the egress targets with the documents each accepts, every
+  finding of both reads, and `sources`, every stage's merged table by
+  name, read or refused, which the edits rewrite whole; `stage_tables`
+  reads them off a merged document for the bridge and the tests alike),
+  `CalibrationFactory` (kind `calibration`, title
   `Calibration`, accepts `underlying_ref`, launch table `{ underlying =
   "<u>" }`, `set_config` to store a config and tell every live tile), the
   tile's `TileContent` door (`follows()` is `true`), `ACTIONS` and the
@@ -65,17 +83,24 @@ name a verb before the tile carries it out.
   (source reads, the request builder, runs, outcomes, the pipeline switch)
   and `rebuild_model`; `keys.rs` the cursor moves, the `g N` jumps, the
   filter field's lifecycle, the scroll that keeps the cursor's card in
-  view and the viewport measurement; `verbs.rs` the run and publish verbs,
-  the `ConfirmHost` (the y/n bar's payload `Pending::{Publish, Delete}`),
-  the publish answer's uploads and their answers; `menu.rs` the action
-  menu's lifecycle and `MenuHost`; `paint.rs` the body (the edge canvas,
-  the captions, the cards) and the footer (the model's line or the filter
-  field, the hint row). `tile/tests/harness.rs` hosts
-  the tile as the shell does: built by the factory, keys resolved through
-  the app's keymap with the module's fragment spliced in (bare keys
-  against the tile's context alone in `insert`), deliveries through
-  `TileContent::deliver`, config through the factory, a frame drawn after
-  every key.
+  view and the viewport measurement; `verbs.rs` the run, publish and
+  delete verbs, the `ConfirmHost` (the y/n bar's payload
+  `Pending::{Publish, Delete}`), the publish answer's uploads and their
+  answers, and the edit queue (`queue_edits`, the one door every graph
+  edit leaves through; `take_edit_notices`, the shell's answers read off
+  the frame); `picker.rs` the edit pickers (the connect and disconnect
+  lists, the kind list and the name field) and their popup; `menu.rs` the
+  action menu's lifecycle and `MenuHost`; `paint.rs` the body (the edge
+  canvas, the captions, the cards, the picker under the cursor's card) and
+  the footer (the model's line or the filter field, the hint row for
+  whatever holds the keys). `tile/tests/harness.rs` hosts the tile as the
+  shell does: built by the factory, keys resolved through the app's keymap
+  with the module's fragment spliced in (bare keys against the tile's
+  context alone in `insert`), deliveries through `TileContent::deliver`,
+  config through the factory, a frame drawn after every key; the edits a
+  tile queues and the actions it requests are read off the stand-in frame
+  as the shell's observer reads them, and the shell's answers are posted
+  on it (`post_tile_notice_for_test`).
 
 ## Commands
 
@@ -124,9 +149,7 @@ is unbound.
 
 ## Keys
 
-Every action is bound in the fragment; the cursor, the jumps, the filter,
-the relayout, the runs, the publish, the menu and `enter` act, the editors
-consume their key and change nothing yet.
+Every action is bound in the fragment.
 
 | Key | Action |
 |---|---|
@@ -138,22 +161,28 @@ consume their key and change nothing yet.
 | `shift+l` | Relayout the graph from the home scroll (also `:layout`) |
 | `r`, `shift+r` | Run from the cursor's stage (`Run { from: Some(cursor) }`), run the whole pipeline; over the documents in hand, under the next run tag |
 | `p` | Publish: asks `Publish {series} for {underlying} to {target}? y/n` on the bar; `y` sends `Publish { from: Filter }` on the user lane |
-| `c`, `shift+c` | Connect, disconnect an input |
-| `a`, `d` | Add, delete a stage |
+| `c` | Connect: a list under the cursor's card of the stages that may feed it (`Connect {stage} from`; each row `{name}  {kind}`), the highlighted one previewed as a dashed edge into the stage; `enter` queues the stage's table with the pick added to `inputs`; refused `{stage} has no open input` when its ports are all taken, `nothing left to connect to {stage}` when nothing fits |
+| `x` | Disconnect: a list of the cursor's stage's inputs in port order (`Disconnect from {stage}`); `enter` queues the table without the pick; refused `{stage} has no inputs to disconnect` |
+| `a` | Add: a list of the kinds (`Add stage`, each with a line about it); a pick opens the name field (`Name the {kind}`, placeholder `stage name`); `enter` validates the name (`stage names are lowercase letters, digits and _`, `{name} is already a stage`, `request is reserved for the engine's answer`, the field staying up), queues the new stage, lands the cursor on it and asks the shell for `config::calibration`, so its Edit screen opens |
+| `d` | Delete: `Delete {stage} and its {n} edges? y/n` on the bar (`Delete {stage}? y/n` with none), `n` the edges into the stages that read it; `y` queues the removal and every reader's table without it as one batch, and the cursor goes to the stage's first input, else its first consumer, else the first card |
 | `.` | Action menu (also the header's `⋯`); `j`/`k` and the arrows step its enabled rows, `enter` picks, `escape` or `.` closes, a press outside closes |
-| `escape` | Answer an armed question no, else close the filter field, else close the menu, else dismiss the header's notices (`calibration::cancel`) |
+| `escape` | Answer an armed question no, else close the picker, else close the filter field, else close the menu, else dismiss the header's notices (`calibration::cancel`) |
 
 The shell's shared `motion::*` ids (the palette's steps) move the cursor
 as `h j k l` do. With no cursor, the first move lands on the first card in
 layout order. Every move writes the session's `cursor` and scrolls the
 graph the least that shows the card whole.
 
-Under `mode == insert` (the filter field; an armed question, whose prompt
-holds the keyboard as a field does; later the picker fields) `enter`
+Under `mode == insert` (the filter field; the add picker's name field; an
+armed question, whose prompt holds the keyboard as a field does) `enter`
 commits, `escape` cancels and `up`/`down` step; under `mode == menu` with
 `popup == actions` `enter` picks, `escape` closes and `.` toggles; with
-`popup == list` `enter` applies and `escape` discards, the steps being the
-shared ones. The filter follows the shell's dialog-filter rule: `escape`
+`popup == list` (the connect, disconnect and kind lists, fieldless) `enter`
+picks and `escape` discards, the steps being the shared `tilelist` ones
+(`j`/`k` and the arrows), and `.` is not bound there: a verb reaching the
+tile by the palette closes the list before it runs. A pointer press on a
+row picks it, a press outside closes the popup. The filter follows the
+shell's dialog-filter rule: `escape`
 restores the filter in force when `/` was pressed; `enter` keeps the typed
 filter (an emptied field clears it) and lands the cursor on the first lit
 card in layout order, or leaves it when nothing matches.
@@ -216,6 +245,37 @@ set. A record without `pipeline` means the config's first pipeline, and
 once the tile knows which that is it saves the name. The launch table
 `{ underlying = "<u>" }` restores through the same reader.
 
+## Graph edits
+
+Every edit is a whole-object `ConfigEdit` on the `calibration` document
+(`doc`, the bare stage name as `object`, `Some(table)` or `None`), queued
+through `FrameRef::queue_config_edits`, which the shell drains on its
+frame observer into the object dialogs' pending batch: one debounce, one
+user-layer write (an inherited stage is forked, as a dialog edit forks
+it), one reload, which pushes the new config and so the new graph. The
+tile holds no draft: until the reload the graph is the old one, and a
+picker list up when the config lands closes (its rows were about the old
+pipeline; the name field stays, checked against the document at `enter`).
+A connect writes the stage's whole table from `sources` with `inputs`
+extended at the open port; a disconnect strikes the input, an emptied
+list written as `inputs = []` (a fixed-arity stage then reads short, and
+the pipeline is dropped under its finding until it is reconnected: the
+honest result, not a guessed one). A delete queues the stage's removal
+and every reader's rewrite in ONE call, so no reload can see a reader
+naming a stage that is gone. An add seeds the kind's required fields from
+the builtin document and asks the shell for `config::calibration` in the
+same pass: the shell drains the edit before the request, and the dialog
+folds the pending batch into its rows, so the Edit screen opens on the new
+stage without waiting for the reload.
+
+The shell answers on the frame (`TileNotice`), read on the next frame
+change: a fork is a status notice (the shell's words, `copied '{stage}' to
+your config — r restores …`), kept until the next edit goes out; a
+refusal (no writable user directory) a danger notice `escape` dismisses.
+The connect picker previews the highlighted candidate as a dashed edge
+into the stage (`preview_edge`, rebuilt on a highlight change only) and
+drops it when it closes.
+
 ## Failure states
 
 - `no pipeline` in the body: the config holds no pipeline of the tile's
@@ -256,9 +316,14 @@ once the tile knows which that is it saves the name. The launch table
 - Paint formats nothing: the title, the counts, the health question and
   the notices are prepared when the tile is built, when a config is pushed
   and when the followed group's underlying changes.
-- A registered action's key is the tile's whether or not the verb acts
-  yet: `dispatch` answers `true` for every `calibration::*` id, except
-  `cancel` with nothing to dismiss.
+- A registered action's key is the tile's: `dispatch` answers `true` for
+  every `calibration::*` id, except `cancel` with nothing to dismiss.
+- The edits read the live pipeline and the config's `sources` alone,
+  never the configuration: a held, dropped pipeline connects, adds and
+  deletes nothing (`no pipeline`), and a candidate is offered only if the
+  reader would accept the result (type, arity, no cycle).
+- One popup at a time: a picker opening closes the menu and the filter
+  field; the name field is blurred before it is dropped.
 - Only the latest request of each lane is listened for: a `Run` outcome
   must carry the last run's tag, a publish the last user action's, so a
   late run is never read as a publish answer; `publish_rows` are read only

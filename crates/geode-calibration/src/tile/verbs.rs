@@ -26,8 +26,18 @@
 //! refusing `p`): the tile counts the uploads of the last publish and,
 //! once every one landed, hands the time to the model, which trails it on
 //! the publish card after the engine's words.
+//!
+//! The graph edits (`core::edits`) leave through one door, `queue_edits`:
+//! whole-object edits handed to the shell through the frame, which writes
+//! the user layer and answers on the frame (`TileNotice`), read on the
+//! next frame change into the header: a fork as a status notice, a
+//! refusal as a danger notice. `d` asks `Delete {stage} and its {n}
+//! edges? y/n` on the same bar as `p`; `y` queues the stage's removal and
+//! every consumer's rewrite as ONE batch, so no reload can see a consumer
+//! naming a stage that is gone.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use geode_core::calibration::{
@@ -35,6 +45,7 @@ use geode_core::calibration::{
 };
 use geode_core::document::DocumentRows;
 use geode_data::UploadParams;
+use geode_shell::frame::{ConfigEdit, TileNotice};
 use geode_shell::module::UploadDelivery;
 use geode_tile::confirm::{self, Confirm, ConfirmHost};
 use geode_tile::notice::Notice;
@@ -42,6 +53,8 @@ use gpui::{App, Context, SharedString, Window};
 
 use super::CalibrationTile;
 use super::data::{QUEUE_FULL, no_underlying};
+use crate::core::edits::{connect_edit, delete_edits, disconnect_edit};
+use crate::core::layout::nth;
 use crate::core::menu::{NO_CURSOR, NO_PIPELINE};
 
 /// What an armed y/n asks. Public only because it is the public
@@ -54,9 +67,9 @@ pub enum Pending {
         document: String,
         underlying: String,
     },
-    /// `Delete {stage} and its {n} edges?`; armed by the delete verb.
-    #[allow(dead_code, reason = "the delete verb arms it")]
-    Delete { stage: StageName, edges: usize },
+    /// `Delete {stage} and its {n} edges?`: the stage the question named;
+    /// the edits are computed again at `y` over the live pipeline.
+    Delete { stage: StageName },
 }
 
 /// The publish out now: where its rows go when the answer comes.
@@ -440,6 +453,140 @@ impl CalibrationTile {
         cx.notify();
     }
 
+    /// The document's stage tables, as the config carries them.
+    pub(super) fn sources(&self) -> Option<Arc<BTreeMap<StageName, toml::Table>>> {
+        self.shared
+            .config
+            .borrow()
+            .as_ref()
+            .map(|c| c.sources.clone())
+    }
+
+    /// The one door the graph edits leave through: the batch goes to the
+    /// shell as it stands, the last verb's refusal and the last edit's
+    /// answers leave with it, and the shell's answer is read off the frame
+    /// on the next frame change.
+    pub(super) fn queue_edits(&mut self, edits: Vec<ConfigEdit>, cx: &mut Context<Self>) {
+        self.frame.queue_config_edits(edits, cx);
+        self.verb_notice = None;
+        self.edit_notices.clear();
+        cx.notify();
+    }
+
+    /// The shell's answers to the edits this tile queued, taken off the
+    /// frame when it notifies: a fork is status (muted, kept until the
+    /// next edit goes out), a refusal danger (`escape` dismisses it).
+    pub(super) fn take_edit_notices(&mut self, cx: &mut Context<Self>) {
+        let id = self.id;
+        let notices = self
+            .frame
+            .entity()
+            .update(cx, |f, _| f.take_tile_notices(id));
+        if notices.is_empty() {
+            return;
+        }
+        for n in notices {
+            self.edit_notices.push(match n {
+                TileNotice::Forked(text) => Notice::status(text),
+                TileNotice::Refused(text) => Notice::danger(text),
+            });
+        }
+        cx.notify();
+    }
+
+    /// The connect picker's pick: `from` becomes the next input of `stage`.
+    pub(super) fn connect(
+        &mut self,
+        stage: &str,
+        from: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let pipeline = self.pipeline().ok_or(NO_PIPELINE)?;
+        let sources = self.sources().ok_or(NO_PIPELINE)?;
+        let source = sources
+            .get(stage)
+            .ok_or_else(|| format!("{stage} is not in the document"))?;
+        let edit = connect_edit(&pipeline, stage, from, source)?;
+        self.queue_edits(vec![edit], cx);
+        Ok(())
+    }
+
+    /// The disconnect picker's pick: `input` is struck from `stage`.
+    pub(super) fn disconnect(
+        &mut self,
+        stage: &str,
+        input: &str,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let pipeline = self.pipeline().ok_or(NO_PIPELINE)?;
+        let sources = self.sources().ok_or(NO_PIPELINE)?;
+        let source = sources
+            .get(stage)
+            .ok_or_else(|| format!("{stage} is not in the document"))?;
+        let edit = disconnect_edit(&pipeline, stage, input, source)?;
+        self.queue_edits(vec![edit], cx);
+        Ok(())
+    }
+
+    /// `d`: ask `Delete {stage} and its {n} edges? y/n` on the bar, `n`
+    /// being the edges into the stages that read it; a stage nothing reads
+    /// asks `Delete {stage}? y/n`.
+    pub(super) fn delete_verb(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let pipeline = self.pipeline().ok_or(NO_PIPELINE)?;
+        let stage = self.cursor.clone().ok_or(NO_CURSOR)?;
+        if pipeline.stage(&stage).is_none() {
+            return Err(NO_CURSOR.to_string());
+        }
+        let sources = self.sources().ok_or(NO_PIPELINE)?;
+        let (_, edges) = delete_edits(&pipeline, &stage, &sources);
+        self.verb_notice = None;
+        let prompt = match edges {
+            0 => format!("Delete {stage}? y/n"),
+            1 => format!("Delete {stage} and its 1 edge? y/n"),
+            n => format!("Delete {stage} and its {n} edges? y/n"),
+        };
+        confirm::arm(self, Pending::Delete { stage }, prompt, window, cx);
+        cx.notify();
+        Ok(())
+    }
+
+    /// `y`: the batch is built again over the live pipeline (a reload may
+    /// have moved under the question) and queued as one; the cursor goes
+    /// to the stage's first input, else its first consumer, else the first
+    /// card in layout order, since the stage's own card is about to go.
+    fn submit_delete(&mut self, stage: StageName, cx: &mut Context<Self>) {
+        let Some(pipeline) = self.pipeline() else {
+            self.refuse(NO_PIPELINE, cx);
+            return;
+        };
+        let Some(s) = pipeline.stage(&stage) else {
+            self.refuse(format!("unknown stage '{stage}'"), cx);
+            return;
+        };
+        let Some(sources) = self.sources() else {
+            self.refuse(NO_PIPELINE, cx);
+            return;
+        };
+        let next = s
+            .inputs
+            .first()
+            .cloned()
+            .or_else(|| pipeline.consumers(&stage).first().map(|c| c.name.clone()))
+            .or_else(|| {
+                self.model
+                    .as_ref()
+                    .and_then(|m| (1..=m.layout.cards.len()).find_map(|n| nth(&m.layout, n)))
+                    .filter(|first| *first != stage)
+            });
+        let (edits, _) = delete_edits(&pipeline, &stage, &sources);
+        self.queue_edits(edits, cx);
+        self.set_cursor(next, cx);
+    }
+
     /// The armed question's text, `None` with none armed.
     #[cfg(test)]
     pub(crate) fn confirm_text(&self) -> Option<String> {
@@ -461,8 +608,7 @@ impl ConfirmHost for CalibrationTile {
                 document,
                 underlying,
             } => self.submit_publish(target, document, underlying, cx),
-            // The delete verb arrives with the editors.
-            Pending::Delete { .. } => {}
+            Pending::Delete { stage } => self.submit_delete(stage, cx),
         }
         cx.notify();
     }
