@@ -11,7 +11,7 @@
 pub mod channel;
 pub mod topic;
 
-pub use channel::{ChannelAdapter, ChannelFeed};
+pub use channel::{ChannelAdapter, ChannelFeed, PublishObserver};
 pub use topic::topic_matches;
 
 use chrono::{DateTime, Utc};

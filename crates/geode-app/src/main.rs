@@ -145,9 +145,9 @@ fn main() {
             );
 
             // Start document producers after the service installs its subscriptions.
-            // The three producers (`demo_bus::demo_producers`: CVI, dividend, chain)
-            // share the risk generator's underlyings. Keep the bus alive until the
-            // quit hook stops its thread.
+            // The four producers (`demo_bus::demo_producers`: CVI, dividend, chain,
+            // rate curves) share the risk generator's underlyings. Keep the bus
+            // alive until the quit hook stops its thread.
             let mut demo_bus = demo_feed.map(|feed| {
                 // Seed synthetic document dates from the configured application clock.
                 let today = geode_core::clock::Clock::from_config(&services.config)

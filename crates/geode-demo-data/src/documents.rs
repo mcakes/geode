@@ -1546,3 +1546,365 @@ pub mod chain {
         }
     }
 }
+
+/// Seeded repo, box and funding curves on the calibration grid, as the
+/// prod pipeline would publish them. Values are rates as decimals (0.005
+/// is 50 bp), the convention the demo calibrator reads.
+pub mod rate_curve {
+    use super::fnv1a;
+    use chrono::{DateTime, NaiveDate, Utc};
+    use geode_core::document::{Column, DocumentRows, Value};
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
+    use std::collections::HashMap;
+    use std::ops::RangeInclusive;
+
+    /// The three series published for every underlying.
+    pub const SERIES: [&str; 3] = ["repo", "box", "funding"];
+    /// The `monthly_to_5y` grid: `GRID_TENORS` tenors at k/12 years.
+    pub const GRID_TENORS: usize = 60;
+    /// One drift step: the most any tenor's value moves per publish, in
+    /// basis points, and the same as a rate (`DRIFT`).
+    pub const DRIFT_BP: f64 = 1.0;
+    pub const DRIFT: f64 = DRIFT_BP / 10_000.0;
+    /// How far the generator's own level may wander from its base curve
+    /// when it is not continuing from a document.
+    const WANDER_BOUND: f64 = 0.0025;
+    /// Per-pair level bands and the slope over five years.
+    const REPO_LEVEL: RangeInclusive<f64> = 0.003..=0.008;
+    const BOX_LEVEL: RangeInclusive<f64> = 0.042..=0.05;
+    const FUNDING_LEVEL: RangeInclusive<f64> = 0.04..=0.048;
+    const SLOPE_5Y: RangeInclusive<f64> = -0.002..=0.002;
+
+    /// The grid's tenors in years, 1/12 through 5.0.
+    pub fn grid() -> Vec<f64> {
+        (1..=GRID_TENORS).map(|k| k as f64 / 12.0).collect()
+    }
+
+    /// One (underlying, series) pair's publish count and own walk.
+    struct State {
+        step: u64,
+        wander: f64,
+    }
+
+    pub struct RateCurveGenerator {
+        seed: u64,
+        underlyings: Vec<String>,
+        anchor: NaiveDate,
+        state: HashMap<(String, String), State>,
+    }
+
+    /// The `tenor`/`value` pairs of a rate-curve document, sorted by
+    /// tenor, or `None` when the document is not shaped like one (no
+    /// such columns, unequal lengths, or empty): a continuation then
+    /// falls back to the generator's own level rather than panicking on
+    /// a document that came off the bus.
+    fn points_of(doc: &DocumentRows) -> Option<Vec<(f64, f64)>> {
+        let f64s = |cols: &[(String, Column)], name: &str| {
+            cols.iter().find_map(|(n, c)| match c {
+                Column::F64(v) if n == name => Some(v.clone()),
+                _ => None,
+            })
+        };
+        let tenors = f64s(&doc.axes, "tenor")?;
+        let values = f64s(&doc.values, "value")?;
+        if tenors.is_empty() || tenors.len() != values.len() {
+            return None;
+        }
+        let mut points: Vec<(f64, f64)> = tenors.into_iter().zip(values).collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        Some(points)
+    }
+
+    /// Linear between knots, flat beyond either end.
+    fn interpolate(points: &[(f64, f64)], t: f64) -> f64 {
+        let (first, last) = (points[0], points[points.len() - 1]);
+        if t <= first.0 {
+            return first.1;
+        }
+        if t >= last.0 {
+            return last.1;
+        }
+        let i = points.partition_point(|p| p.0 <= t);
+        let (t0, v0) = points[i - 1];
+        let (t1, v1) = points[i];
+        if t1 == t0 {
+            return v1;
+        }
+        v0 + (v1 - v0) * (t - t0) / (t1 - t0)
+    }
+
+    impl RateCurveGenerator {
+        pub fn new(seed: u64, underlyings: Vec<String>, anchor: NaiveDate) -> RateCurveGenerator {
+            RateCurveGenerator {
+                seed,
+                underlyings,
+                anchor,
+                state: HashMap::new(),
+            }
+        }
+
+        pub fn underlyings(&self) -> &[String] {
+            &self.underlyings
+        }
+
+        /// Every underlying paired with every series as `<underlying>/<series>`,
+        /// underlying-major: the keys a bus producer publishes under, one
+        /// topic level each.
+        pub fn keys(&self) -> Vec<String> {
+            self.underlyings
+                .iter()
+                .flat_map(|u| SERIES.iter().map(move |s| format!("{u}/{s}")))
+                .collect()
+        }
+
+        /// The pair's identity across processes: seed, anchor day,
+        /// underlying and series.
+        fn pair_seed(&self, underlying: &str, series: &str) -> u64 {
+            self.seed
+                ^ fnv1a(underlying)
+                ^ fnv1a(series).rotate_left(21)
+                ^ fnv1a(&self.anchor.to_string()).rotate_left(42)
+        }
+
+        /// The pair's base curve, `level + slope × t / 5`.
+        fn base(&self, underlying: &str, series: &str) -> (f64, f64) {
+            let mut rng = StdRng::seed_from_u64(self.pair_seed(underlying, series) ^ 0xBA5E);
+            let band = match series {
+                "repo" => REPO_LEVEL,
+                "box" => BOX_LEVEL,
+                _ => FUNDING_LEVEL,
+            };
+            (rng.random_range(band), rng.random_range(SLOPE_5Y))
+        }
+
+        /// The pair's next curve. With `from`, every tenor's value is
+        /// `from` interpolated onto the grid plus a move within one drift
+        /// step (a parallel shift and a tilt, each at most half of it);
+        /// without, the base curve plus the pair's own bounded walk. Both
+        /// the walk's and the move's draws are a pure function of (seed,
+        /// anchor, underlying, series, publish count), so two generators
+        /// built alike publish alike.
+        pub fn next_document(
+            &mut self,
+            underlying: &str,
+            series: &str,
+            from: Option<&DocumentRows>,
+            now: DateTime<Utc>,
+        ) -> DocumentRows {
+            let pair_seed = self.pair_seed(underlying, series);
+            let (level, slope) = self.base(underlying, series);
+            let state = self
+                .state
+                .entry((underlying.to_string(), series.to_string()))
+                .or_insert_with(|| State {
+                    step: 0,
+                    wander: 0.0,
+                });
+            let step = state.step;
+            state.step += 1;
+            let mut rng = StdRng::seed_from_u64(
+                pair_seed ^ step.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(7),
+            );
+            let shift = rng.random_range(-DRIFT / 2.0..=DRIFT / 2.0);
+            let tilt = rng.random_range(-DRIFT / 2.0..=DRIFT / 2.0);
+            let tenors = grid();
+            let values: Vec<f64> = match from.and_then(points_of) {
+                Some(points) => tenors
+                    .iter()
+                    .map(|&t| interpolate(&points, t) + shift + tilt * t / 5.0)
+                    .collect(),
+                None => {
+                    state.wander = (state.wander + shift).clamp(-WANDER_BOUND, WANDER_BOUND);
+                    let wander = state.wander;
+                    tenors
+                        .iter()
+                        .map(|&t| level + slope * t / 5.0 + wander)
+                        .collect()
+                }
+            };
+            DocumentRows {
+                key: vec![underlying.to_string(), series.to_string()],
+                attributes: vec![(
+                    "published_time".into(),
+                    Value::Utf8(now.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+                )],
+                axes: vec![("tenor".into(), Column::F64(tenors))],
+                values: vec![("value".into(), Column::F64(values))],
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use chrono::TimeZone;
+
+        fn anchor() -> NaiveDate {
+            NaiveDate::from_ymd_opt(2026, 9, 12).unwrap()
+        }
+        fn now() -> DateTime<Utc> {
+            Utc.with_ymd_and_hms(2026, 9, 12, 14, 0, 0).unwrap()
+        }
+        fn f64s(rows: &DocumentRows, name: &str) -> Vec<f64> {
+            let col = rows
+                .values
+                .iter()
+                .chain(rows.axes.iter())
+                .find(|(n, _)| n == name)
+                .map(|(_, c)| c)
+                .unwrap();
+            let Column::F64(v) = col else {
+                panic!("{name} is f64")
+            };
+            v.clone()
+        }
+        /// `doc` with every value moved by `by`.
+        fn shifted(doc: &DocumentRows, by: f64) -> DocumentRows {
+            let mut out = doc.clone();
+            for (_, c) in out.values.iter_mut() {
+                if let Column::F64(v) = c {
+                    for x in v.iter_mut() {
+                        *x += by;
+                    }
+                }
+            }
+            out
+        }
+
+        #[test]
+        fn series_use_the_monthly_to_5y_grid_of_sixty_tenors() {
+            let mut g = RateCurveGenerator::new(42, vec!["SPX".into()], anchor());
+            for series in SERIES {
+                let doc = g.next_document("SPX", series, None, now());
+                assert_eq!(doc.key, vec!["SPX".to_string(), series.to_string()]);
+                let tenors = f64s(&doc, "tenor");
+                assert_eq!(tenors.len(), GRID_TENORS);
+                assert_eq!(tenors, grid());
+                assert!((tenors[0] - 1.0 / 12.0).abs() < 1e-12);
+                assert!((tenors[59] - 5.0).abs() < 1e-12);
+                let values = f64s(&doc, "value");
+                assert_eq!(values.len(), GRID_TENORS);
+                assert!(values.iter().all(|v| v.is_finite()));
+                assert_eq!(
+                    doc.attributes,
+                    vec![(
+                        "published_time".to_string(),
+                        Value::Utf8("2026-09-12T14:00:00Z".to_string())
+                    )]
+                );
+            }
+        }
+
+        #[test]
+        fn levels_sit_in_a_plausible_band_and_repeat_for_a_seed() {
+            let underlyings = vec!["SPX".to_string(), "NDX".to_string()];
+            let mut a = RateCurveGenerator::new(42, underlyings.clone(), anchor());
+            let mut b = RateCurveGenerator::new(42, underlyings, anchor());
+            for u in ["SPX", "NDX"] {
+                for series in SERIES {
+                    let first = a.next_document(u, series, None, now());
+                    let again = a.next_document(u, series, None, now());
+                    assert_eq!(
+                        first,
+                        b.next_document(u, series, None, now()),
+                        "{u}/{series}"
+                    );
+                    assert_ne!(first, again, "{u}/{series} walks between publishes");
+                    let band = if series == "repo" {
+                        0.0..=0.012
+                    } else {
+                        0.035..=0.055
+                    };
+                    for v in f64s(&first, "value") {
+                        assert!(
+                            band.contains(&v),
+                            "{u}/{series} value {v} is outside {band:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn a_curve_continued_from_a_document_moves_one_drift_step_from_it() {
+            // An upload far from any level this generator would choose on
+            // its own: a continuation must follow it, not the seed.
+            let upload = shifted(
+                &RateCurveGenerator::new(7, vec!["SPX".into()], anchor()).next_document(
+                    "SPX",
+                    "repo",
+                    None,
+                    now(),
+                ),
+                0.01,
+            );
+            let mut g = RateCurveGenerator::new(42, vec!["SPX".into()], anchor());
+            let own = g.next_document("SPX", "repo", None, now());
+            let continued = g.next_document("SPX", "repo", Some(&upload), now());
+            let from = f64s(&upload, "value");
+            let next = f64s(&continued, "value");
+            assert_eq!(f64s(&continued, "tenor"), grid());
+            let mut moved = 0.0f64;
+            for (f, n) in from.iter().zip(&next) {
+                assert!(
+                    (n - f).abs() <= DRIFT + 1e-12,
+                    "{n} is more than a drift step from {f}"
+                );
+                moved = moved.max((n - f).abs());
+            }
+            assert!(moved > 0.0, "a continuation still moves");
+            assert!(
+                f64s(&own, "value")
+                    .iter()
+                    .zip(&from)
+                    .all(|(o, f)| (o - f).abs() > DRIFT),
+                "the generator's own level is far from the upload, so following it is observable"
+            );
+        }
+
+        #[test]
+        fn a_continued_curve_is_interpolated_onto_the_grid() {
+            let coarse = DocumentRows {
+                key: vec!["SPX".into(), "funding".into()],
+                attributes: vec![(
+                    "published_time".into(),
+                    Value::Utf8("2026-09-12T13:00:00Z".into()),
+                )],
+                axes: vec![("tenor".into(), Column::F64(vec![1.0, 5.0]))],
+                values: vec![("value".into(), Column::F64(vec![0.01, 0.02]))],
+            };
+            let mut g = RateCurveGenerator::new(42, vec!["SPX".into()], anchor());
+            let doc = g.next_document("SPX", "funding", Some(&coarse), now());
+            let tenors = f64s(&doc, "tenor");
+            let values = f64s(&doc, "value");
+            assert_eq!(tenors.len(), GRID_TENORS);
+            let at = |t: f64| values[tenors.iter().position(|x| (x - t).abs() < 1e-9).unwrap()];
+            assert!(
+                (at(3.0) - 0.015).abs() <= DRIFT + 1e-12,
+                "between knots: linear"
+            );
+            assert!(
+                (at(1.0 / 12.0) - 0.01).abs() <= DRIFT + 1e-12,
+                "before the first knot: flat"
+            );
+            assert!((at(5.0) - 0.02).abs() <= DRIFT + 1e-12, "at the last knot");
+        }
+
+        #[test]
+        fn keys_pair_every_underlying_with_every_series() {
+            let g = RateCurveGenerator::new(42, vec!["SPX".into(), "NDX".into()], anchor());
+            assert_eq!(
+                g.keys(),
+                vec![
+                    "SPX/repo",
+                    "SPX/box",
+                    "SPX/funding",
+                    "NDX/repo",
+                    "NDX/box",
+                    "NDX/funding"
+                ]
+            );
+        }
+    }
+}

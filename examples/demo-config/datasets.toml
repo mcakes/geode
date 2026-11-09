@@ -958,7 +958,10 @@ role = "attribute"                # RFC 3339 text: document columns cannot be ti
 # ---- Rate curves. ----
 # One document per (underlying, series): a rasterized repo or box curve the
 # calibration pipeline publishes, or a funding curve it reads, as one
-# `value` per `tenor` (in years). Nothing produces one yet.
+# `value` per `tenor` (in years, the monthly_to_5y grid). The demo bus
+# publishes `repo`, `box` and `funding` for every underlying through the
+# generated `[ratecurve_sim]` source, standing in for the prod pipeline; a
+# `rate_curve` upload to the `sophis` target echoes back through it.
 [rate_curve]
 family = "document"
 key = ["underlying_ref", "series"]

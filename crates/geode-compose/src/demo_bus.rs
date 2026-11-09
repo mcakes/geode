@@ -7,10 +7,11 @@
 
 use chrono::NaiveDate;
 use geode_core::document::{DocumentKind, DocumentRows};
-use geode_data::adapter::ChannelFeed;
+use geode_data::adapter::{ChannelFeed, PublishObserver, topic_matches};
 use geode_demo_data::documents::chain::ChainGenerator;
 use geode_demo_data::documents::cvi::CviGenerator;
 use geode_demo_data::documents::dividend::DividendGenerator;
+use geode_demo_data::documents::rate_curve::RateCurveGenerator;
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::HashMap;
@@ -26,6 +27,18 @@ const STOP_POLL: Duration = Duration::from_millis(20);
 
 /// A producer's generator: the next document for a key, or `None` to skip.
 pub type NextDocument = dyn FnMut(&str) -> Option<DocumentRows> + Send;
+
+/// The newest rate curve seen on the bus per (underlying, series), whether
+/// the demo producer published it or an upload echoed it. The producer
+/// continues from it ([`rate_curve_next`]); [`rate_curve_observer`] fills it.
+pub type LatestRateCurves = Arc<Mutex<HashMap<(String, String), DocumentRows>>>;
+
+/// The rate-curve producer's topic prefix: a key is `<underlying>/<series>`,
+/// so the topic is `marketdata/ratecurve/<underlying>/<series>/NOTIFY`, two
+/// levels the demo source's `*/*` pattern and the egress `{key}` both render.
+pub const RATE_CURVE_PREFIX: &str = "marketdata/ratecurve/";
+/// Every rate-curve NOTIFY topic, as the demo source subscribes to it.
+pub const RATE_CURVE_PATTERN: &str = "marketdata/ratecurve/*/*/NOTIFY";
 
 /// A document generator and its destination topics.
 ///
@@ -107,12 +120,20 @@ pub fn spawn(
     }
 }
 
-/// The `--demo` bus both binaries run: the three [`demo_producers`] over
+/// The `--demo` bus both binaries run: the four [`demo_producers`] over
 /// the risk generator's underlyings, publishing every 5 s with 2 s of
 /// jitter from seed 42. Each process runs its own (the bus is in-process);
-/// only the one holding the store ingests what it publishes.
+/// only the one holding the store ingests what it publishes. The feed
+/// gets the rate-curve observer, so a `rate_curve` upload echoed through
+/// the `sophis` target seeds the producer's next curve for that pair.
 pub fn spawn_default(feed: ChannelFeed, today: NaiveDate) -> DemoBus {
-    let producers = demo_producers(geode_demo_data::demo_underlyings(), today);
+    let latest_rate_curve: LatestRateCurves = Arc::default();
+    feed.on_publish(rate_curve_observer(Arc::clone(&latest_rate_curve)));
+    let producers = demo_producers_over(
+        geode_demo_data::demo_underlyings(),
+        today,
+        latest_rate_curve,
+    );
     spawn(
         feed,
         producers,
@@ -216,8 +237,61 @@ pub fn chain_next(
     Some(chain.next_document(key, &cvi, chrono::Utc::now()))
 }
 
-/// The `--demo` producers, in publish order: CVI, dividend, then option
-/// chain, each over `underlyings` and seeded with 42.
+/// The bus tap that keeps [`LatestRateCurves`] current: a message on a
+/// rate-curve NOTIFY topic that parses as a `rate_curve` document is
+/// stored under the document's own (underlying, series). Anything else,
+/// another kind's topic or bytes that do not parse, is ignored in
+/// silence: the subscribed source reports a bad document through its own
+/// health, and a tap must never panic or log per message. The producer's
+/// own publishes pass through here too, storing what was just produced.
+pub fn rate_curve_observer(latest: LatestRateCurves) -> PublishObserver {
+    Arc::new(move |topic, bytes| {
+        if !topic_matches(RATE_CURVE_PATTERN, topic) {
+            return;
+        }
+        let Ok(parsed) = geode_documents::RateCurveKind.parse(bytes) else {
+            return;
+        };
+        let rows = parsed.rows;
+        let [underlying, series] = rows.key.as_slice() else {
+            return;
+        };
+        latest
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert((underlying.clone(), series.clone()), rows);
+    })
+}
+
+/// The rate-curve producer's body: the pair's next curve, continued from
+/// the newest curve the bus has seen for it (its own last publish, or an
+/// echoed upload) when there is one. `key` is `<underlying>/<series>`.
+/// Always publishes; a key without the separator is a whole underlying
+/// with an empty series, which the writer refuses and the bus logs.
+pub fn rate_curve_next(
+    latest: &Mutex<HashMap<(String, String), DocumentRows>>,
+    generator: &mut RateCurveGenerator,
+    key: &str,
+) -> Option<DocumentRows> {
+    let (underlying, series) = key.split_once('/').unwrap_or((key, ""));
+    let from = latest
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&(underlying.to_string(), series.to_string()))
+        .cloned();
+    Some(generator.next_document(underlying, series, from.as_ref(), chrono::Utc::now()))
+}
+
+/// [`demo_producers_over`] with a fresh, unobserved rate-curve store: the
+/// producer then continues only from its own publishes. Tests and the
+/// app's recovery test use it; the running demo goes through
+/// [`spawn_default`], which shares the store with the feed's observer.
+pub fn demo_producers(underlyings: Vec<String>, today: NaiveDate) -> Vec<Producer> {
+    demo_producers_over(underlyings, today, Arc::default())
+}
+
+/// The `--demo` producers, in publish order: CVI, dividend, option chain,
+/// then rate curves, each over `underlyings` and seeded with 42.
 ///
 /// The chain producer prices off the CVI producer's latest document for
 /// its underlying (the shared store [`cvi_next`] fills and [`chain_next`]
@@ -226,10 +300,21 @@ pub fn chain_next(
 /// cadence recovers, but slowly). One anchor (`today`) serves both CVI
 /// and chain: the chain clamps its curve date to the CVI's terms, and a
 /// shared anchor keeps its expiries inside them.
-pub fn demo_producers(underlyings: Vec<String>, today: NaiveDate) -> Vec<Producer> {
+///
+/// The rate-curve producer has one key per (underlying, series) pair,
+/// `repo`, `box` and `funding` for every underlying, and continues each
+/// pair from `latest_rate_curve` ([`rate_curve_next`]); the caller that
+/// wants echoed uploads to count registers [`rate_curve_observer`] over
+/// the same store on the feed.
+pub fn demo_producers_over(
+    underlyings: Vec<String>,
+    today: NaiveDate,
+    latest_rate_curve: LatestRateCurves,
+) -> Vec<Producer> {
     let mut cvi_generator = CviGenerator::new(42, underlyings.clone(), today);
     let mut dividend_generator = DividendGenerator::new(42, underlyings.clone(), today);
     let mut chain_generator = ChainGenerator::new(42, underlyings.clone(), today);
+    let mut rate_curve_generator = RateCurveGenerator::new(42, underlyings.clone(), today);
     let latest_cvi: Arc<Mutex<HashMap<String, DocumentRows>>> = Arc::default();
     vec![
         Producer {
@@ -255,6 +340,15 @@ pub fn demo_producers(underlyings: Vec<String>, today: NaiveDate) -> Vec<Produce
             keys: underlyings,
             startup_repeats: geode_demo_data::documents::chain::EXPIRIES,
             next: Box::new(move |key| chain_next(&latest_cvi, &mut chain_generator, key)),
+        },
+        Producer {
+            kind: Arc::new(geode_documents::RateCurveKind),
+            topic_prefix: RATE_CURVE_PREFIX,
+            keys: rate_curve_generator.keys(),
+            startup_repeats: 1,
+            next: Box::new(move |key| {
+                rate_curve_next(&latest_rate_curve, &mut rate_curve_generator, key)
+            }),
         },
     ]
 }
@@ -387,9 +481,10 @@ mod tests {
     /// The production list must keep CVI ahead of chain: the chain prices
     /// off the latest CVI its producer stored, and the startup burst runs
     /// producers in list order, so a chain placed first finds no curve and
-    /// skips its whole burst.
+    /// skips its whole burst. The rate-curve producer comes last, keyed by
+    /// (underlying, series) pair so each pair has its own topic.
     #[test]
-    fn the_demo_producers_run_cvi_then_dividend_then_chain() {
+    fn the_demo_producers_run_cvi_then_dividend_then_chain_then_rate_curves() {
         use geode_demo_data::documents::chain::EXPIRIES;
         let underlyings = vec!["SPX".to_string(), "NDX".to_string()];
         let today = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
@@ -399,7 +494,8 @@ mod tests {
             vec![
                 "marketdata/cvi/",
                 "marketdata/dividend/",
-                "marketdata/chain/"
+                "marketdata/chain/",
+                "marketdata/ratecurve/",
             ]
         );
         assert_eq!(
@@ -407,9 +503,115 @@ mod tests {
                 .iter()
                 .map(|p| p.startup_repeats)
                 .collect::<Vec<_>>(),
-            vec![1, 1, EXPIRIES]
+            vec![1, 1, EXPIRIES, 1]
         );
-        assert!(producers.iter().all(|p| p.keys == underlyings));
+        assert!(producers[..3].iter().all(|p| p.keys == underlyings));
+        assert_eq!(
+            producers[3].keys,
+            vec![
+                "SPX/repo",
+                "SPX/box",
+                "SPX/funding",
+                "NDX/repo",
+                "NDX/box",
+                "NDX/funding"
+            ],
+            "one composite key per (underlying, series), so an echoed upload \
+             lands on exactly the topic the producer uses for that pair"
+        );
+    }
+
+    /// The echo contract: an upload of a `rate_curve` document arrives on
+    /// the bus through the egress door, the observer stores it, and the
+    /// producer's next document for that (underlying, series) starts from
+    /// it rather than from its seed. No subscription and no wait: the
+    /// observer fires on admission, on the uploader's thread.
+    #[test]
+    fn the_rate_curve_producer_continues_from_an_echoed_upload() {
+        use geode_demo_data::documents::rate_curve::{DRIFT, RateCurveGenerator};
+        use geode_documents::RateCurveKind;
+        let (adapter, feed) = ChannelAdapter::new("demo_bus");
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let latest: LatestRateCurves = Arc::default();
+        feed.on_publish(rate_curve_observer(Arc::clone(&latest)));
+        let mut producer = demo_producers_over(vec!["SPX".to_string()], anchor, latest)
+            .into_iter()
+            .find(|p| p.topic_prefix == "marketdata/ratecurve/")
+            .expect("the demo publishes rate curves");
+
+        // An upload far from any level the seeded generator would choose:
+        // another seed's curve, a whole percent higher.
+        let mut upload = RateCurveGenerator::new(7, vec!["SPX".to_string()], anchor).next_document(
+            "SPX",
+            "repo",
+            None,
+            chrono::Utc::now(),
+        );
+        let values = |doc: &DocumentRows| -> Vec<f64> {
+            let geode_core::document::Column::F64(v) = &doc.values[0].1 else {
+                panic!("rate-curve values are f64")
+            };
+            v.clone()
+        };
+        for (_, c) in upload.values.iter_mut() {
+            if let geode_core::document::Column::F64(v) = c {
+                v.iter_mut().for_each(|x| *x += 0.01);
+            }
+        }
+        let bytes = RateCurveKind.write(&upload).expect("a well-formed curve");
+        adapter
+            .egress()
+            .expect("the channel adapter uploads")
+            .upload("marketdata/ratecurve/SPX/repo/NOTIFY", bytes)
+            .expect("the bus admits the upload");
+
+        let next = (producer.next)("SPX/repo").expect("the producer always publishes");
+        assert_eq!(next.key, vec!["SPX".to_string(), "repo".to_string()]);
+        for (f, n) in values(&upload).iter().zip(values(&next)) {
+            assert!(
+                (n - f).abs() <= DRIFT + 1e-12,
+                "{n} is more than one drift step from the echoed {f}"
+            );
+        }
+        // Another pair is untouched by SPX/repo's echo: it publishes its
+        // own level, nowhere near the upload.
+        let other = (producer.next)("SPX/box").expect("the producer always publishes");
+        assert_eq!(other.key, vec!["SPX".to_string(), "box".to_string()]);
+        assert!(
+            values(&upload)
+                .iter()
+                .zip(values(&other))
+                .all(|(f, o)| (o - f).abs() > DRIFT),
+            "the box curve did not follow the repo upload"
+        );
+    }
+
+    /// The observer keeps only what parses as a rate curve on a rate-curve
+    /// topic, keyed by the document's own (underlying, series); anything
+    /// else on the bus is ignored without a panic.
+    #[test]
+    fn the_rate_curve_observer_stores_parsed_curves_and_ignores_the_rest() {
+        use geode_demo_data::documents::rate_curve::RateCurveGenerator;
+        use geode_documents::RateCurveKind;
+        let anchor = NaiveDate::from_ymd_opt(2026, 9, 12).unwrap();
+        let latest: LatestRateCurves = Arc::default();
+        let observer = rate_curve_observer(Arc::clone(&latest));
+        let doc = RateCurveGenerator::new(42, vec!["NDX".to_string()], anchor).next_document(
+            "NDX",
+            "funding",
+            None,
+            chrono::Utc::now(),
+        );
+        let bytes = RateCurveKind.write(&doc).unwrap();
+        observer("marketdata/ratecurve/NDX/funding/NOTIFY", &bytes);
+        observer("marketdata/ratecurve/NDX/box/NOTIFY", b"<not a curve>");
+        observer("marketdata/cvi/NDX/NOTIFY", &bytes);
+        let store = latest.lock().unwrap();
+        assert_eq!(
+            store.keys().collect::<Vec<_>>(),
+            vec![&("NDX".to_string(), "funding".to_string())]
+        );
+        assert_eq!(store.values().next(), Some(&doc));
     }
 
     #[test]

@@ -25,6 +25,11 @@
 //! Connection reports are synchronous notifications via ChannelFeed::set_state,
 //! not retained state or delivery gates. New subscriptions report Connected.
 //! Closing the inbound channel does not emit Lost or remove registrations.
+//!
+//! `ChannelFeed::on_publish` registers a bus-wide tap called on the
+//! publisher's thread after each admission, from any feed or egress handle.
+//! It is a demo-transport affordance (the demo bus watches for echoed
+//! uploads through it) and takes no part in delivery.
 
 use super::{
     Adapter, AdapterError, ConnectionState, Egress, HealthSink, MESSAGE_BOUND, Message,
@@ -77,7 +82,15 @@ struct Bus {
     /// The lock serializes concurrent startup attempts. Bus liveness is checked
     /// through the weak sender, not by whether this handle remains present.
     dispatcher: Mutex<Option<JoinHandle<()>>>,
+    /// Taps on every admitted message, bus-wide, so an upload through an
+    /// egress handle passes the same observers as a producer's publish.
+    /// Empty outside the demo; see [`ChannelFeed::on_publish`].
+    observers: Mutex<Vec<PublishObserver>>,
 }
+
+/// A demo-transport affordance: a closure every admitted message is shown
+/// to, on the publisher's thread, with its topic and bytes.
+pub type PublishObserver = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
 
 impl Bus {
     /// Starts the dispatcher if it is not already running.
@@ -195,6 +208,7 @@ impl ChannelAdapter {
             next_id: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             dispatcher: Mutex::new(None),
+            observers: Mutex::new(Vec::new()),
         });
         let feed = ChannelFeed {
             bus: Arc::clone(&bus),
@@ -244,6 +258,12 @@ impl ChannelFeed {
     /// False counts a full or disconnected inbound queue. True acknowledges
     /// only bus admission, not receipt by any subscriber or publication to storage.
     pub fn publish(&self, topic: &str, bytes: Vec<u8>) -> bool {
+        // Snapshot under the lock, call outside it (the module's lock
+        // discipline). The copy of the bytes exists only while someone is
+        // observing: the message's own buffer goes onto the queue, and
+        // `try_send` keeps it on success, so the observers need their own.
+        let observers: Vec<PublishObserver> = self.bus.observers.lock().unwrap().clone();
+        let observed = (!observers.is_empty()).then(|| bytes.clone());
         let queued = self
             .tx
             .try_send(Message {
@@ -255,8 +275,27 @@ impl ChannelFeed {
             .is_ok();
         if !queued {
             self.bus.refused.fetch_add(1, Ordering::Relaxed);
+            return false;
         }
-        queued
+        if let Some(bytes) = observed {
+            for observer in &observers {
+                observer(topic, &bytes);
+            }
+        }
+        true
+    }
+
+    /// Register a bus-wide tap: `observer` is called synchronously, on the
+    /// publisher's thread, after every successful admission from any feed or
+    /// egress handle on this bus, with the topic and the bytes as published.
+    /// A refused message is not observed. Observers run outside every bus
+    /// lock, in registration order, and cannot be removed; they must return
+    /// promptly and must not panic. This is a demo-transport affordance:
+    /// the demo bus uses it to see an echoed upload without a subscription
+    /// of its own. A real transport has no equivalent and nothing in the
+    /// ingest path depends on it.
+    pub fn on_publish(&self, observer: PublishObserver) {
+        self.bus.observers.lock().unwrap().push(observer);
     }
 
     /// How many messages this bus's inbound queue refused, over its whole
@@ -540,6 +579,40 @@ mod tests {
             ("marketdata/upload/cvi", &b"<doc/>"[..])
         );
         let _ = feed;
+    }
+
+    /// The observer is a bus-wide tap: a producer's publish and an egress
+    /// upload (a different feed handle on the same bus) both reach it, on
+    /// the publisher's thread, with the topic and bytes as published. No
+    /// subscription exists here, so the dispatcher never starts: the tap
+    /// fires on admission, not on delivery.
+    #[test]
+    fn a_publish_observer_sees_the_topic_and_bytes_of_every_admitted_message() {
+        let (adapter, feed) = ChannelAdapter::new("demo_bus");
+        type Seen = Vec<(String, Vec<u8>)>;
+        let seen: Arc<Mutex<Seen>> = Arc::default();
+        feed.on_publish(Arc::new({
+            let seen = Arc::clone(&seen);
+            move |topic, bytes| {
+                seen.lock()
+                    .unwrap()
+                    .push((topic.to_string(), bytes.to_vec()))
+            }
+        }));
+        assert!(feed.publish("marketdata/x/NOTIFY", b"<a/>".to_vec()));
+        adapter
+            .egress()
+            .unwrap()
+            .upload("marketdata/y/NOTIFY", b"<b/>".to_vec())
+            .unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                ("marketdata/x/NOTIFY".to_string(), b"<a/>".to_vec()),
+                ("marketdata/y/NOTIFY".to_string(), b"<b/>".to_vec()),
+            ],
+            "both doors onto the bus pass the observer, synchronously"
+        );
     }
 
     #[test]

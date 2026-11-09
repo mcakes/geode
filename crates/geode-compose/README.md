@@ -26,7 +26,7 @@ Current crate boundaries:
 | `collector` | `collector_settings`/`CollectorSettings`: `[collector] memory_limit` from `app.toml`, an opt-in: unset by default, so the collector leaves DuckDB's own default, as the app does. A finite 512MB limit made DuckDB abort the collector with an internal assertion on large CSV loads (`docs/perf.md`, 2026-10-04); a value can be set once the overnight footprint measurement chooses one. A value that is not a number and a DuckDB size unit (`B`…`TB`, `KiB`…`TiB`, any case) warns at `app.collector.memory_limit` and sets no limit. |
 | `paths` | Where the store and the configuration layers live on disk: `db_path` (`data.db_path`, then the demo directory, then the platform directory), `config_dirs` (reads `GEODE_DESK_CONFIG`, `APPDATA`, `HOME`) and its pure core `user_config_dir`. |
 | `demo` | Generated inputs and builtin configuration for `--demo`: the temp directory (`demo_dir`), the emitted sources (`ensure_emitted`: risk CSVs in `src/`, scenario CSVs in `scenario/` beside it so the risk glob never matches one), the compiled-in demo config layer (`layer`, including `positions.toml` and the five `demo_scenario_<dataset>` sources over `scenario/`), and `DemoPositions` (`demo_positions`), the demo position system. |
-| `demo_bus` | Background document publishing for `--demo`: CVI, dividend and option-chain producers publishing through `ChannelAdapter` and the normal document writers and parsers. `spawn_default` is the bus both binaries run: the three producers over the demo underlyings, a 5 s cadence, 2 s jitter, seed 42. |
+| `demo_bus` | Background document publishing for `--demo`: CVI, dividend, option-chain and rate-curve producers publishing through `ChannelAdapter` and the normal document writers and parsers. `spawn_default` is the bus both binaries run: the four producers over the demo underlyings, a 5 s cadence, 2 s jitter, seed 42, with the feed's rate-curve observer registered so echoed uploads seed the producer. |
 | `demo_series` | Deterministic one-minute bars for the demo fetch sources `demo_kdb` (with a catalogue) and `demo_rest` (without). |
 | `demo_hanweck` | Demo vol history (`DemoHanweck`, `demo_hanweck`): the `surface`, `realized` and `varswap` tables behind the `hanweck_*` history sources over `vol_surface`, `realized_vol` and `varswap`. History side only; `point` is the pure daily close. |
 | `demo_refdb` | Demo mode's reference database (`DemoRefDb`, `demo_refdb`): the `underlyings` table behind the `refdb` snapshot source. Snapshot side only. |
@@ -59,6 +59,19 @@ returns `None` to skip a publish: the chain producer prices off the latest
 CVI document the CVI producer stored for that underlying (`cvi_next`,
 `chain_next`) and skips until there is one. The same adapter accepts
 configured uploads, whose bus messages follow subscription ingestion.
+
+The rate-curve producer stands in for the prod pipeline's repo, box and
+funding curves. Its keys are `<underlying>/<series>` pairs, one topic level
+each, so it publishes on `marketdata/ratecurve/<underlying>/<series>/NOTIFY`
+and the `sophis` target's `rate_curve = "marketdata/ratecurve/{key}/NOTIFY"`
+renders an upload onto the same topic. `rate_curve_next` continues a pair
+from the newest curve in `LatestRateCurves`, which `rate_curve_observer`
+fills from every rate-curve message the bus admits through
+`ChannelFeed::on_publish`, the producer's own publishes and echoed uploads
+alike, so an upload is the base of the next publish rather than overwritten
+by it. A message that does not parse is ignored there; the `ratecurve_sim`
+source reports it. `demo_producers` builds the list over a fresh, unobserved
+store; `demo_producers_over` takes the shared one `spawn_default` registers.
 
 Document producers run asynchronously through the normal subscription path;
 data need not be available in the first frame. Demo series use fixed weekday

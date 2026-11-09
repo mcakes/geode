@@ -311,6 +311,9 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
          [opra_sim]\nadapter = \"demo_bus\"\ndataset = \"option_chain\"\n\
          document = \"option_chain\"\ntopics = [\"marketdata/chain/*/NOTIFY\"]\n\
          coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
+         [ratecurve_sim]\nadapter = \"demo_bus\"\ndataset = \"rate_curve\"\n\
+         document = \"rate_curve\"\ntopics = [\"marketdata/ratecurve/*/*/NOTIFY\"]\n\
+         coalesce = \"500ms\"\nsource_time = \"receive\"\npriority = \"latest_other\"\n\
          [demo_kdb]\nadapter = \"demo_kdb\"\ndataset = \"series\"\n\
          [demo_rest]\nadapter = \"demo_rest\"\ndataset = \"series\"\n\
          [refdb]\nadapter = \"demo_refdb\"\ndataset = \"underlyings\"\n\
@@ -328,15 +331,19 @@ pub fn layer(source_dir: &Path) -> Vec<LayerDoc> {
         source_dir.join("*.csv").to_string_lossy(),
         scenario_sources
     );
-    // The `sophis` target publishes both document kinds through the same
-    // adapter as their subscribed sources. Per-key NOTIFY addresses route
-    // uploads back to those sources for an echo; an address off the
-    // subscribed `*/NOTIFY` patterns would upload with no echo. Builtin
+    // The `sophis` target publishes the three uploadable document kinds
+    // through the same adapter as their subscribed sources. Per-key NOTIFY
+    // addresses route uploads back to those sources for an echo; an address
+    // off the subscribed NOTIFY patterns would upload with no echo. A rate
+    // curve's `{key}` renders as `<underlying>/<series>`, the two levels
+    // `ratecurve_sim` subscribes to and the demo producer publishes on, so
+    // the echo also seeds the producer's next curve for that pair. Builtin
     // documents are exempt from the config-version check, so this generated
     // document needs no header.
     let egress = "[sophis]\nadapter = \"demo_bus\"\n\
          [sophis.documents]\ncvi_params = \"marketdata/cvi/{key}/NOTIFY\"\n\
-         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n"
+         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n\
+         rate_curve = \"marketdata/ratecurve/{key}/NOTIFY\"\n"
         .to_string();
     // Moves go to the demo position system, which rewrites the risk CSVs
     // the `demo` source polls (`DemoPositions`).
@@ -397,13 +404,16 @@ mod tests {
     fn every_demo_subscription_pattern_matches_its_producers_notify_topics() {
         let layer = layer(Path::new("/tmp/src"));
         let sources = layer.iter().find(|d| d.name == "sources").unwrap();
-        for (prefix, source) in [
-            ("marketdata/cvi/", "cvi"),
-            ("marketdata/dividend/", "dividend"),
-            ("marketdata/chain/", "opra_sim"),
+        // Rate-curve keys are two levels, `<underlying>/<series>`, so that
+        // producer's sample key carries both.
+        for (prefix, key, source) in [
+            ("marketdata/cvi/", "SPX", "cvi"),
+            ("marketdata/dividend/", "SPX", "dividend"),
+            ("marketdata/chain/", "SPX", "opra_sim"),
+            ("marketdata/ratecurve/", "SPX/repo", "ratecurve_sim"),
         ] {
             let patterns = topics_of(sources, source);
-            let topic = format!("{prefix}SPX/NOTIFY");
+            let topic = format!("{prefix}{key}/NOTIFY");
             assert!(
                 patterns
                     .iter()
@@ -474,10 +484,12 @@ mod tests {
         assert_eq!(kept, spec);
     }
 
-    /// The `sophis` target preserves both document kinds and their per-key
-    /// addresses through config parsing and resolves against `demo_bus`.
+    /// The `sophis` target preserves all three document kinds and their
+    /// per-key addresses through config parsing and resolves against
+    /// `demo_bus`. The rate-curve address renders `{key}` as
+    /// `<underlying>/<series>`, the producer's own topic for that pair.
     #[test]
-    fn the_demo_layers_egress_doc_reads_two_documents_for_sophis_and_resolves_against_demo_bus() {
+    fn the_demo_layers_egress_doc_reads_three_documents_for_sophis_and_resolves_against_demo_bus() {
         let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
         let egress = docs.iter().find(|d| d.name == "egress").unwrap();
         assert_eq!(egress.table["sophis"]["adapter"].as_str(), Some("demo_bus"));
@@ -488,6 +500,10 @@ mod tests {
         assert_eq!(
             egress.table["sophis"]["documents"]["dividend_schedule"].as_str(),
             Some("marketdata/dividend/{key}/NOTIFY")
+        );
+        assert_eq!(
+            egress.table["sophis"]["documents"]["rate_curve"].as_str(),
+            Some("marketdata/ratecurve/{key}/NOTIFY")
         );
 
         let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
@@ -514,8 +530,17 @@ mod tests {
                     "dividend_schedule".to_string(),
                     "marketdata/dividend/{key}/NOTIFY".to_string()
                 ),
+                (
+                    "rate_curve".to_string(),
+                    "marketdata/ratecurve/{key}/NOTIFY".to_string()
+                ),
             ],
             "documents keep TOML order"
+        );
+        assert_eq!(
+            specs[0].address("rate_curve", &["SPX".to_string(), "repo".to_string()]),
+            Some("marketdata/ratecurve/SPX/repo/NOTIFY".to_string()),
+            "a two-part key renders as two topic levels"
         );
 
         let mut adapters = geode_data::adapter::AdapterRegistry::default();
@@ -559,8 +584,8 @@ mod tests {
         );
         assert_eq!(
             sources.len(),
-            21,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+            22,
+            "demo, cvi, dividend, opra_sim, ratecurve_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
              hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
              scenario datasets' sources + five term reports' sources"
         );
@@ -594,8 +619,8 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            21,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+            22,
+            "demo, cvi, dividend, opra_sim, ratecurve_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
              hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
              scenario datasets' sources + five term reports' sources"
         );
@@ -630,12 +655,43 @@ mod tests {
         assert!(d.is_empty(), "{d:?}");
         assert_eq!(
             sources.len(),
-            21,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+            22,
+            "demo, cvi, dividend, opra_sim, ratecurve_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
              hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
              scenario datasets' sources + five term reports' sources"
         );
         assert!(sources.iter().any(|s| s.name == "opra_sim"));
+    }
+
+    /// The rate-curve source subscribes to both key levels of the
+    /// producer's topics (`<underlying>/<series>`), declares its document
+    /// kind, coalescing and priority like the other bus sources, and parses
+    /// with the rest without diagnostics.
+    #[test]
+    fn the_demo_layer_declares_the_rate_curve_source() {
+        let docs = layer(std::path::Path::new("/tmp/geode-demo/100-42/src"));
+        let sources = docs.iter().find(|d| d.name == "sources").unwrap();
+        let curves = &sources.table["ratecurve_sim"];
+        assert_eq!(curves["adapter"].as_str(), Some("demo_bus"));
+        assert_eq!(curves["dataset"].as_str(), Some("rate_curve"));
+        assert_eq!(curves["document"].as_str(), Some("rate_curve"));
+        let topics = curves["topics"].as_array().unwrap();
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics[0].as_str(), Some("marketdata/ratecurve/*/*/NOTIFY"));
+        assert_eq!(curves["coalesce"].as_str(), Some("500ms"));
+        assert_eq!(curves["source_time"].as_str(), Some("receive"));
+        assert_eq!(curves["priority"].as_str(), Some("latest_other"));
+
+        let config = geode_core::config::Config::load(&geode_core::config::ConfigSources {
+            builtin: layer(std::path::Path::new("/tmp/geode-demo/100-42/src")),
+            ..geode_core::config::ConfigSources::default()
+        });
+        let (schema, d) = geode_core::schema::SchemaSpec::from_doc(config.doc("datasets").unwrap());
+        assert!(d.is_empty(), "{d:?}");
+        let (sources, d) =
+            geode_data::source::SourceSpec::from_doc(config.doc("sources").unwrap(), &schema);
+        assert!(d.is_empty(), "{d:?}");
+        assert!(sources.iter().any(|s| s.name == "ratecurve_sim"));
     }
 
     /// Both timeseries sources resolve to the fetch shape over the demo
@@ -676,8 +732,8 @@ mod tests {
         );
         assert_eq!(
             sources.len(),
-            21,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+            22,
+            "demo, cvi, dividend, opra_sim, ratecurve_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
              hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
              scenario datasets' sources + five term reports' sources"
         );
@@ -840,8 +896,8 @@ mod tests {
         }
         assert_eq!(
             sources.len(),
-            21,
-            "demo, cvi, dividend, opra_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
+            22,
+            "demo, cvi, dividend, opra_sim, ratecurve_sim, demo_kdb, demo_rest, refdb, hanweck_surface, \
              hanweck_realized, hanweck_varswap, hanweck_ssr, hanweck_spotvol_cov + four \
              scenario datasets' sources + five term reports' sources"
         );

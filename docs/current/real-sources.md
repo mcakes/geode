@@ -54,8 +54,8 @@ method returns a fresh handle per call, or `None` when the adapter lacks it.
 
 | Capability | `Adapter` method → trait | Owning worker | Configured in | Simulator today |
 |---|---|---|---|---|
-| Subscribed documents | `subscription()` → `Subscription` (+ optional `Recovery`) | `SubscriptionWorker` (`ingest/subscribe.rs`), one per source | `sources.toml` (`topics`, `document`) | `ChannelAdapter` `demo_bus` fed by `geode-compose`'s `demo_bus` |
-| Uploads | `egress()` → `Egress` | One egress worker per target (`egress.rs`) | `egress.toml` | `ChannelAdapter` `demo_bus` (publishes back onto the bus) |
+| Subscribed documents | `subscription()` → `Subscription` (+ optional `Recovery`) | `SubscriptionWorker` (`ingest/subscribe.rs`), one per source | `sources.toml` (`topics`, `document`) | `ChannelAdapter` `demo_bus` fed by `geode-compose`'s `demo_bus`: CVI, dividend, option-chain and rate-curve producers (`RateCurveGenerator`: prod repo, box and funding curves) |
+| Uploads | `egress()` → `Egress` | One egress worker per target (`egress.rs`) | `egress.toml` | `ChannelAdapter` `demo_bus` (publishes back onto the bus; an echoed `rate_curve` upload seeds the rate-curve producer's next curve for that pair) |
 | History series | `fetch()` → `Fetch` | `FetchWorker` (`ingest/fetch.rs`), one per source | `sources.toml` over a `series` dataset | `DemoSeries` (`demo_kdb`, `demo_rest`) |
 | Reference tables | `snapshot()` → `SnapshotQuery` | `SnapshotWorker` (`ingest/snapshot.rs`), one per source | `sources.toml` (`table`, `poll_interval`) | `DemoRefDb` (`demo_refdb`) |
 | Keyed history | `history()` → `HistoryQuery` | `HistoryWorker` (`ingest/history.rs`), one per source | `sources.toml` (`table`) over a `history` dataset | `DemoHanweck` (`demo_hanweck`) |
@@ -201,19 +201,33 @@ directory is deleted (see
 ### Subscribed market-data documents
 
 **For:** CVI parameters (`cvi_params`), dividend schedules
-(`dividend_schedule`) and option chains (`option_chain`), each a whole XML
-document replaced per key. The market-data panels (`cvi`, `dividend`) and the
-vol slice viewer read them.
+(`dividend_schedule`), option chains (`option_chain`) and rate curves
+(`rate_curve`: the prod repo, box and funding curves per underlying), each a
+whole XML document replaced per key. The market-data panels (`cvi`,
+`dividend`) and the vol slice viewer read them; no tile reads rate curves
+yet.
 
 **Simulator:** a `ChannelAdapter` named `demo_bus`
 ([`channel.rs`](../../crates/geode-data/src/adapter/channel.rs)), fed by the
 producers in [`demo_bus.rs`](../../crates/geode-compose/src/demo_bus.rs) using
-`geode-demo-data`'s `CviGenerator`, `DividendGenerator` and `ChainGenerator`.
-Producers serialize through the same `DocumentKind::write` the real path
-would parse, and publish on `marketdata/{cvi,dividend,chain}/<key>/NOTIFY`.
-The demo layer generates three sources over it: `[cvi]`, `[dividend]`,
-`[opra_sim]`, each `topics = ["marketdata/<kind>/*/NOTIFY"]`,
-`coalesce = "500ms"`, `source_time = "receive"`. Enabled only by `--demo`.
+`geode-demo-data`'s `CviGenerator`, `DividendGenerator`, `ChainGenerator`
+and `RateCurveGenerator`. Producers serialize through the same
+`DocumentKind::write` the real path would parse, and publish on
+`marketdata/{cvi,dividend,chain}/<underlying>/NOTIFY` and
+`marketdata/ratecurve/<underlying>/<series>/NOTIFY` (a rate-curve key is
+two parts, so its topic is two levels). The demo layer generates four
+sources over it: `[cvi]`, `[dividend]`, `[opra_sim]`, each
+`topics = ["marketdata/<kind>/*/NOTIFY"]`, and `[ratecurve_sim]` with
+`topics = ["marketdata/ratecurve/*/*/NOTIFY"]`; all `coalesce = "500ms"`,
+`source_time = "receive"`. Enabled only by `--demo`.
+
+The rate-curve producer continues each (underlying, series) from the newest
+curve the bus has seen for it: `ChannelFeed::on_publish` (a tap called on
+the publisher's thread after each admission, a demo-transport affordance
+with no real-transport equivalent) feeds an observer that parses rate-curve
+messages into a shared map the producer reads. An uploaded `rate_curve`
+echoed by the `sophis` target therefore seeds the next publish for that
+pair rather than being overwritten by the seeded walk.
 
 **Seam:** implement `Subscription` and return it from
 `Adapter::subscription()`:
@@ -307,13 +321,16 @@ cannot carry a wildcard. Mapping NOTIFY → GET topics is the shim's job.
 
 **For:** sending an edited CVI or dividend document to the system of record
 (Sophis in the desk's terms) from a market-data panel, with a y/n confirm and
-an echo check.
+an echo check, and publishing a calibrated rate curve (`rate_curve`).
 
 **Simulator:** the `demo_bus` `ChannelAdapter`'s `Egress::upload`, which
 publishes the bytes onto the bus at the address. The demo `egress.toml`
-target `[sophis]` addresses `marketdata/cvi/{key}/NOTIFY` and
-`marketdata/dividend/{key}/NOTIFY`, so the upload returns through the
-subscription as the echo. Option chains have no upload target.
+target `[sophis]` addresses `marketdata/cvi/{key}/NOTIFY`,
+`marketdata/dividend/{key}/NOTIFY` and `marketdata/ratecurve/{key}/NOTIFY`
+(`{key}` renders a two-part key as `<underlying>/<series>`), so the upload
+returns through the subscription as the echo; a rate-curve echo also seeds
+the demo producer's next curve for that pair. Option chains have no upload
+target.
 
 **Seam:** implement `Egress::upload(target, bytes)` and return it from
 `Adapter::egress()`. `target` is the expanded address; `bytes` are already

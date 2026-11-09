@@ -1,7 +1,7 @@
 # geode-demo-data
 
-Seeded risk batches, CSV fixtures, and synthetic CVI, dividend and
-option-chain documents. Risk batches use one vector per column; document
+Seeded risk batches, CSV fixtures, and synthetic CVI, dividend,
+option-chain and rate-curve documents. Risk batches use one vector per column; document
 generators return `geode_core::document::DocumentRows`. The workspace
 dependencies are `geode-core` and `geode-pricing`, a calculation leaf whose
 stand-in vol model prices the option chains. The application supplies document
@@ -21,6 +21,7 @@ for startup, caching, and ingestion ownership.
 | `documents::cvi` | Fixed CVI axes and per-key walks for node parameters, ATM volatility, and skew. |
 | `documents::dividend` | Per-key schedules with repeated dates, stable generated IDs, amount walks, status promotions, and appended rows. |
 | `documents::chain` | `ChainGenerator`: one option-chain document per `(underlying, expiry)`, rotating through twelve monthly expiries per underlying and priced off the latest CVI document through `geode_pricing::DemoVolModel`. |
+| `documents::rate_curve` | `RateCurveGenerator`: one rate-curve document per `(underlying, series)` for `repo`, `box` and `funding` on the sixty-tenor `monthly_to_5y` grid, continued from a caller-supplied document (an echoed upload) or from its own seeded level. |
 
 ## Risk and file fixtures
 
@@ -126,6 +127,23 @@ vol and bid are both NaN and the quote carries its ask alone, so the far
 call wing of the near expiries is one-sided. The quote time is the `now`
 the caller passes.
 
+Rate curves stand in for the prod pipeline's repo, box and funding curves,
+one document per `(underlying, series)` keyed `[underlying, series]`, with
+`SERIES` naming the three and `keys()` pairing every underlying with each
+as `<underlying>/<series>`. Every curve sits on the `monthly_to_5y` grid
+(`grid()`: sixty tenors, 1/12 through 5.0 years) and carries one `value`
+per tenor as a decimal rate (0.005 is 50 bp), with `published_time` the
+`now` the caller passes as RFC 3339 text. A pair's base curve is a hashed
+level (repo 0.3–0.8%, box 4.2–5.0%, funding 4.0–4.8%) plus a slope of at
+most ±20 bp over five years. `next_document` takes an optional document to
+continue from: with one, the new curve is that document's values
+interpolated onto the grid (linear between its tenors, flat beyond them)
+moved by at most one drift step (`DRIFT_BP`, 1 bp, as a parallel shift
+plus a tilt); without one, the base curve plus the pair's own walk, bounded
+at ±25 bp. Every draw is a function of the seed, anchor, pair and publish
+count, so two generators built alike publish alike. A document without a
+`tenor`/`value` pair of equal, nonzero length is treated as absent.
+
 ## Demo configuration
 
 The application loads [examples/demo-config](../../examples/demo-config) below
@@ -137,6 +155,11 @@ desk and user configuration. Its files declare:
   `opra_sim` source from the demo bus's `marketdata/chain/*/NOTIFY` topics,
   coalescing per key over 500 ms like the CVI and dividend sources. Chains
   are subscribed only; the demo egress target does not upload them.
+  `rate_curve` (key `underlying_ref, series`, axis `tenor`) is filled by
+  the generated `ratecurve_sim` source from
+  `marketdata/ratecurve/*/*/NOTIFY`, one topic level per key part, and the
+  `sophis` target uploads it to `marketdata/ratecurve/{key}/NOTIFY`, so an
+  upload echoes back and seeds the producer's next curve for that pair.
 - `views.toml`: the default `tree` view and a 100-column `wide` view.
 - `dimensions.toml` and `groupings.toml`: book-to-desk mapping, the
   `region` classification over `underlying_ref` (`SMI` and `KOSPI2` left

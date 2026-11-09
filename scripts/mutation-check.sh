@@ -18353,6 +18353,28 @@ run_mutation "vol chain bus: the CVI producer stores what it publishes" \
   '        .clear();' \
   geode-compose the_cvi_producer_stores_what_it_publishes
 
+# ---- Demo rate curves ---- The prod repo, box and funding curves on the
+# bus. An upload echoed through `sophis` must seed the producer's next
+# curve for that pair, or the demo would publish over an edit at once.
+
+run_mutation "demo rate curves: the producer continues from an echoed upload" \
+  crates/geode-compose/src/demo_bus.rs \
+  '        .get(&(underlying.to_string(), series.to_string()))' \
+  '        .get(&("mutant".to_string(), "no such pair".to_string()))' \
+  geode-compose the_rate_curve_producer_continues_from_an_echoed_upload
+
+run_mutation "demo rate curves: the observer keeps a curve under its own key" \
+  crates/geode-compose/src/demo_bus.rs \
+  '            .insert((underlying.clone(), series.clone()), rows);' \
+  '            .insert((series.clone(), underlying.clone()), rows);' \
+  geode-compose the_rate_curve_observer_stores_parsed_curves_and_ignores_the_rest
+
+run_mutation "channel bus: an admitted message reaches every publish observer" \
+  crates/geode-data/src/adapter/channel.rs \
+  '                observer(topic, &bytes);' \
+  '                let _ = (topic, &bytes, observer);' \
+  geode-data a_publish_observer_sees_the_topic_and_bytes_of_every_admitted_message
+
 # ---- Tile stacks ---- A stack paints only its active member. Focus, close,
 # move, restoration and drop operations keep that member and the stack's
 # bookkeeping consistent.
@@ -39184,9 +39206,16 @@ run_mutation "demo recovery: the CVI source subscribes to NOTIFY only" \
 # a bare address uploads with no echo back to the dividend source.
 run_mutation "demo recovery: dividend egress addresses the NOTIFY topic" \
   crates/geode-compose/src/demo.rs \
-  '         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n"' \
-  '         dividend_schedule = \"marketdata/dividend/{key}\"\n"' \
+  '         dividend_schedule = \"marketdata/dividend/{key}/NOTIFY\"\n\' \
+  '         dividend_schedule = \"marketdata/dividend/{key}\"\n\' \
   geode-app an_uploaded_dividend_document_echoes_through_the_real_data_service
+# A rate curve's two-part key must render as two topic levels, or the upload
+# lands off the producer's topic and the `*/*/NOTIFY` subscription alike.
+run_mutation "demo recovery: rate-curve egress addresses the pair's NOTIFY topic" \
+  crates/geode-compose/src/demo.rs \
+  '         rate_curve = \"marketdata/ratecurve/{key}/NOTIFY\"\n"' \
+  '         rate_curve = \"marketdata/ratecurve/{key}\"\n"' \
+  geode-compose the_demo_layers_egress_doc_reads_three_documents_for_sophis_and_resolves_against_demo_bus
 # A scenario axis enumerates alternative states: a level whose grouping omits
 # one would sum across states and show a plausible wrong total.
 run_mutation "axis: a prefix omitting a scenario axis is non-attributable" \
