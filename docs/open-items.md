@@ -1219,6 +1219,19 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   producer's continuation from its own publishes (the last curve interpolated,
   plus a shift and a tilt) has no band, so a long run can drift to implausible
   levels, where its fresh-start path clamps its wander.
+- `check_against` does not cross-check that a `kalman_fit.series` or a
+  `source.series` names a series its input or dataset emits, so a misspelt
+  series passes validation and fails at run time.
+- A variadic input whose own stage failed its fields also yields a spurious
+  "takes at least one Raster input" diagnostic beside the real one.
+- Duplicate entries in a variadic `inputs` list are accepted, which would
+  publish a series twice.
+- The `strike_window` and `min_strikes` refusals have no tests of their own.
+- `implied_rates` indexes the forward series by the parity tenor count without
+  a bounds check, so a malformed `TermPoints` from a non-demo engine fails the
+  request through panic containment rather than with a named error.
+- The unconsumed-draft publish refusal (`a_publish_draft_for_a_fit_no_raster_reads_is_refused`)
+  has no mutation entry.
 
 ## Tooling, tests and the mutation harness
 
