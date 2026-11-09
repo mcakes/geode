@@ -1878,8 +1878,8 @@ label = "skew"
     }
 
     /// The production roster exposes `underlying_ref`-based launch state for
-    /// every accepted panel (the builtin CVI and dividend here) and the vol
-    /// slice viewer, registers
+    /// every accepted panel (the builtin CVI and dividend here), the vol
+    /// slice viewer and the calibration tile, registers
     /// the two Open in Nemo row actions and Move LHU, names every column those open on
     /// in `context_columns`, and startup hands that list to the data
     /// handle. Exercising startup's registration path checks that shared
@@ -1922,7 +1922,8 @@ label = "skew"
                 "spot_ladder",
                 "by_maturity",
                 "rho",
-                "volslice"
+                "volslice",
+                "calibration"
             ]
         );
         let ids: Vec<&str> = roster.actions().iter().map(|a| a.id()).collect();
@@ -1959,16 +1960,20 @@ label = "skew"
                 "{kind}"
             );
         }
-        // The slice viewer restores one underlying, not a display key.
-        let state = roster
-            .factory("volslice")
-            .unwrap()
-            .launch_state(&spx)
-            .expect("a state for an underlying");
-        assert_eq!(
-            state.get("underlying"),
-            Some(&toml::Value::String("SPX".into()))
-        );
+        // The slice viewer and the calibration tile restore one underlying,
+        // not a display key.
+        for kind in ["volslice", "calibration"] {
+            let state = roster
+                .factory(kind)
+                .unwrap()
+                .launch_state(&spx)
+                .expect("a state for an underlying");
+            assert_eq!(
+                state.get("underlying"),
+                Some(&toml::Value::String("SPX".into())),
+                "{kind}"
+            );
+        }
         assert_eq!(
             bridge.handle.context_columns(),
             vec![
