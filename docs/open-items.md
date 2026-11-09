@@ -1252,3 +1252,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
 - Two tiling `should_panic` tests fail under `cargo test --release` *(unverified)*.
 - Missing harness entries: the confirm bar buttons' redundant `flex_none`; the back
   button's `step_back` guard and registrations.
+- Two stale harness entries whose replacement no longer compiles at the anchor
+  site, a `BUILD` verdict `--anchors-only` cannot see (it checks only that the
+  anchor text is present once): "vol chain generator: prices use the expiry's
+  own time" (`crates/geode-demo-data/src/documents.rs`; the replacement names
+  `curve_date`, which the file does not define) and "catalog refresh: a stopped
+  service is retried" (`crates/geode-app/src/bridge.rs`; the replacement passes
+  `window` where the site has `&app`). Re-anchor each to a replacement that
+  compiles, or retire it.
