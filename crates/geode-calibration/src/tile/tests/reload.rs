@@ -153,6 +153,20 @@ fn a_config_push_with_a_changed_stage_marks_it_stale_and_keeps_the_rest(
     );
     assert_eq!(h.footer(&vcx), "parity · 09:30:15 · ok");
 
+    // The run that answered before the push answers again (a late
+    // delivery under its tag): it was computed over the old definition,
+    // so it is dropped and the stale cards stand as they are.
+    h.deliver(
+        &mut vcx,
+        Delivery::Calibration(run_outcome(KEY, tag, vec![result("repo_fit", "late")])),
+    );
+    assert_eq!(
+        h.card_tone(&vcx, "repo_fit"),
+        Tone::Stale,
+        "a late run never clears a mark"
+    );
+    assert_eq!(h.card_status(&vcx, "repo_fit"), "09:30:15 · ok");
+
     // The next outcome for a stale stage replaces the mark; the rest of
     // the stale set waits for its own.
     h.press(&mut vcx, "r");

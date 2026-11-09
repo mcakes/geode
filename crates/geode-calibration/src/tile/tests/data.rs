@@ -13,7 +13,7 @@ use geode_core::calibration::{
     BUILTIN_CALIBRATION, CalibrationOutcome, REQUEST_STAGE, RunAction, StagePayload, StageResult,
     StageStatus,
 };
-use geode_core::document::test_support::snapshot_of_documents;
+use geode_core::document::test_support::{snapshot_of_documents, snapshot_of_documents_at};
 use geode_core::document::{Column, DocumentRows, Value, join_key};
 use geode_core::link::{Group, Membership, Posting, underlying_scope};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
@@ -117,9 +117,26 @@ pub(super) fn rates_doc(u: &str, series: &str) -> DocumentRows {
     }
 }
 
+/// The source time each dataset's fixture answer reports in its
+/// provenance: the chain newest, the dividends oldest.
+fn source_time(dataset: &str) -> &'static str {
+    match dataset {
+        "option_chain" => "2026-11-09T15:30:00Z",
+        "dividend_schedule" => "2026-11-09T07:00:00Z",
+        "rate_curve" => "2026-11-09T09:00:00Z",
+        other => panic!("no fixture for {other}"),
+    }
+}
+
 /// The snapshot the data tier answers a prefix read of `dataset` under
-/// `u` with: every document of the underlying, contiguous.
+/// `u` with: every document of the underlying, contiguous, with the
+/// dataset's source time (`source_time`) in the provenance.
 fn snapshot_for(dataset: &str, u: &str) -> Snapshot {
+    snapshot_at(dataset, u, source_time(dataset))
+}
+
+/// `snapshot_for` with the source time `as_of` in the provenance.
+pub(super) fn snapshot_at(dataset: &str, u: &str, as_of: &str) -> Snapshot {
     let schema = demo_schema();
     let ds = schema.dataset(dataset).expect("a demo dataset");
     let docs: Vec<DocumentRows> = match dataset {
@@ -129,7 +146,7 @@ fn snapshot_for(dataset: &str, u: &str) -> Snapshot {
         other => panic!("no fixture for {other}"),
     };
     let refs: Vec<&DocumentRows> = docs.iter().collect();
-    snapshot_of_documents(ds, &refs, |_| {})
+    snapshot_of_documents_at(ds, &refs, Some(as_of), |_| {})
 }
 
 pub(super) fn docs(reqs: &[Request]) -> Vec<&DocumentParams> {
@@ -258,12 +275,16 @@ impl Harness {
     }
 
     /// `answer_all`, beginning with a batch already taken from the channel.
+    /// Bounded: a tile that keeps asking past `MAX_READS` answers is a
+    /// broken sequence, and the harness has no per-test timeout, so the
+    /// test fails rather than spins.
     pub(super) fn answer_all_from(
         &self,
         vcx: &mut gpui::VisualTestContext,
         reqs: Vec<Request>,
         u: &str,
     ) -> (Vec<Asked>, Vec<Request>) {
+        const MAX_READS: usize = 16;
         let mut asked = Vec::new();
         let mut others = Vec::new();
         let mut batch = reqs;
@@ -274,8 +295,18 @@ impl Harness {
                 Some(a) => asked.push(a),
                 None => return (asked, others),
             }
+            assert!(
+                asked.len() < MAX_READS,
+                "the tile asked more than {MAX_READS} document reads in one sequence: {asked:?}"
+            );
             batch = self.requests();
         }
+    }
+
+    /// The header's source time run, `{dataset} HH:MM`, if any document
+    /// is in hand.
+    pub(super) fn header_time(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+        self.tile.read_with(vcx, |t, _| t.header_time())
     }
 
     /// A loaded tile: every source answered and the run's request taken.
@@ -668,6 +699,57 @@ fn a_scope_flip_clears_results_and_requeries(cx: &mut gpui::TestAppContext) {
     assert_eq!(runs[0].underlying, "NDX");
     assert!(runs[0].tag > spx_tag);
     assert_eq!(runs[0].inputs[0].rows[0].key[0], "NDX");
+}
+
+/// The header's time is the newest source publication among the documents
+/// in hand, named by its dataset: none until a source answers, the chain's
+/// once every source is in, and a republished curve newer than the chain
+/// takes it over. A scope flip to another underlying clears it with the
+/// documents, until that underlying's own arrive.
+#[gpui::test]
+fn the_header_shows_the_newest_source_time_and_clears_on_a_flip(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, Some(builtin_config()), None);
+    h.follow_a(&mut vcx);
+    h.flip_to(&mut vcx, "SPX");
+    assert_eq!(h.header_time(&vcx), None, "nothing in hand yet");
+    h.answer_next(&mut vcx, "SPX").0.expect("the chain");
+    assert_eq!(
+        h.header_time(&vcx).as_deref(),
+        Some("option_chain 15:30"),
+        "the first answer's time shows at once"
+    );
+    let (asked, after) = h.answer_all(&mut vcx, "SPX");
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert_eq!(calibrates(&after).len(), 1, "{after:?}");
+    assert_eq!(
+        h.header_time(&vcx).as_deref(),
+        Some("option_chain 15:30"),
+        "the chain is the newest of the three"
+    );
+
+    // The curve republishes, newer than the chain: it takes the header.
+    h.publish(&mut vcx, "rate_curve", &["SPX"]);
+    let reqs = h.requests();
+    let rates = docs(&reqs)[0];
+    assert_eq!(rates.dataset, "rate_curve");
+    h.answer_doc(
+        &mut vcx,
+        rates.tag,
+        snapshot_at("rate_curve", "SPX", "2026-11-09T16:05:00Z"),
+    );
+    assert_eq!(h.header_time(&vcx).as_deref(), Some("rate_curve 16:05"));
+    let reqs = h.requests();
+    assert_eq!(
+        calibrates(&reqs).len(),
+        1,
+        "the set completes again: {reqs:?}"
+    );
+
+    // Another underlying: SPX's documents go, and its time with them.
+    h.flip_to(&mut vcx, "NDX");
+    assert_eq!(h.header_time(&vcx), None, "the flip cleared it");
+    h.load(&mut vcx, "NDX");
+    assert_eq!(h.header_time(&vcx).as_deref(), Some("option_chain 15:30"));
 }
 
 /// A run the data handle refuses (its queue full) is a status notice; the

@@ -225,6 +225,9 @@ struct Header {
     /// The source stages' datasets, sorted and distinct: the health chip's
     /// question.
     datasets: Vec<String>,
+    /// The newest source publication time among the documents in hand,
+    /// `{dataset} HH:MM` (`data::refresh_times`); `None` with no document.
+    time: Option<geode_tile::header::TimeRun>,
 }
 
 /// A config finding as a header notice: an Error is danger, a Warning
@@ -773,6 +776,12 @@ impl CalibrationTile {
         self.header.counts.clone()
     }
 
+    /// The header's source time run, as painted: `{dataset} HH:MM`.
+    #[cfg(test)]
+    pub(crate) fn header_time(&self) -> Option<String> {
+        self.header.time.as_ref().map(|t| t.text().to_string())
+    }
+
     /// The body placeholder's text, `None` while a pipeline is shown.
     #[cfg(test)]
     pub(crate) fn body_text(&self) -> Option<&'static str> {
@@ -862,6 +871,7 @@ impl Render for CalibrationTile {
             |t: &mut CalibrationTile, notice, cx| t.notice_pressed(notice, cx),
         ));
         cluster.links = links;
+        cluster.times = self.header.time.iter().cloned().collect();
         cluster.health = self.health.chip();
         cluster.close = self.close.clone();
         cluster.menu = Some(MenuTrigger {

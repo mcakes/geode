@@ -126,9 +126,14 @@ The header: `Calibration · {underlying}` (the followed group's single
 underlying, else the tile's own), a muted `{n} stages · {k} fits` for the
 shown pipeline (`k` counts its `kalman_fit` stages), then the shared
 cluster: the mode icon, the config's findings as notices (a dropped
-pipeline is a warning, a structural error danger), link chips, the health
-chip for the source stages' datasets, the `⋯` trigger (which opens the
-action menu, as `.` does) and the shell's ×. The menu hangs from the
+pipeline is a warning, a structural error danger), the newest source
+publication time among the documents in hand as `{dataset} HH:MM` on the
+display clock (`Sources::times`, from each answer's provenance; rebuilt
+when a source answers, cleared with the documents on a flip or a pipeline
+switch, and dropped with a source a push removes; never painted stale in
+this part — the per-card `stale_after` timer is Part 3's), link chips, the
+health chip for the source stages' datasets, the `⋯` trigger (which opens
+the action menu, as `.` does) and the shell's ×. The menu hangs from the
 header's right edge (one a right press opened hangs from the pointer in
 the body instead); an armed y/n question asks on its own bar under the
 header, whole at any tile width, with Yes and No buttons.
@@ -161,7 +166,10 @@ right a hint row (`h j k l` move, `/` filter, `r` run, `shift+r` run all,
 `p` publish, `c` connect, `x` disconnect, `a` add, `d` delete, `.`
 menu; `enter` keep and `escape` revert while the field is up), each chord resolved
 against the live keymap on a `Chords` change and omitted while its verb
-is unbound.
+is unbound. In a narrow tile the hints give way first: the text keeps its
+content up to `FOOTER_TEXT_SHARE` (70%) of the footer and the hint row,
+holding the rest, clips at its right edge; past that share the text
+truncates.
 
 ## Keys
 
@@ -193,7 +201,10 @@ Under `mode == insert` (the filter field; the add picker's name field; an
 armed question, whose prompt holds the keyboard as a field does) `enter`
 commits, `escape` cancels and `up`/`down` step; under `mode == menu` with
 `popup == actions` `enter` picks, `escape` closes and `.` toggles; with
-`popup == list` (the connect, disconnect and kind lists, fieldless) `enter`
+`popup == list` (the connect, disconnect and kind lists, fieldless: no
+fuzzy filter and no tab completion, since each holds ten rows or fewer;
+only the add picker's name field takes typing, and `tab` is reserved there
+so `Root` cannot cycle focus out of it) `enter`
 picks and `escape` discards, the steps being the shared `tilelist` ones
 (`j`/`k` and the arrows), and `.` is not bound there: a verb reaching the
 tile by the palette closes the list before it runs. A pointer press on a

@@ -28,6 +28,7 @@ use gpui::prelude::*;
 use gpui::{
     App, Div, DragMoveEvent, ElementId, Entity, Hsla, MouseButton, MouseDownEvent, PathBuilder,
     Pixels, ScrollWheelEvent, SharedString, Stateful, WeakEntity, Window, canvas, div, point, px,
+    relative,
 };
 use gpui_component::input::Input;
 use gpui_component::theme::Theme;
@@ -58,6 +59,10 @@ const DISC_SIDES: usize = 12;
 /// the dot that marks it at rest, the size of an edge's end disc.
 const PORT_W: f32 = 10.0;
 const PORT_DOT: f32 = 5.0;
+
+/// The most of the footer the text line takes before it truncates; the
+/// hint row has the rest and clips first in a narrow tile.
+const FOOTER_TEXT_SHARE: f32 = 0.7;
 
 /// The footer hints, each verb's chords then its word, in the fixed order
 /// the row reads: what the graph does first, the verbs after. A verb the
@@ -471,6 +476,11 @@ impl CalibrationTile {
     /// The footer: the filter field while it is up, else the model's
     /// line; the hint row at the right either way, for whatever holds the
     /// keys (the filter, a picker list, the name field, else the graph).
+    /// In a narrow tile the hints give way first: the text keeps its
+    /// content up to `FOOTER_TEXT_SHARE` of the footer and the hint row,
+    /// taking the rest, clips at its right; past that share the text
+    /// truncates. The filter field keeps the flexible slot instead, since
+    /// a field must have room to type in.
     pub(super) fn render_footer(&self, model: Option<&GraphModel>, theme: &Theme) -> Div {
         let id = self.id.0;
         let muted = theme.muted_foreground;
@@ -495,8 +505,8 @@ impl CalibrationTile {
                 .child(Input::new(&field.input).appearance(false).w_full())
                 .into_any_element(),
             None => div()
-                .flex_1()
-                .min_w_0()
+                .flex_shrink_0()
+                .max_w(relative(FOOTER_TEXT_SHARE))
                 .truncate()
                 .debug_selector(move || format!("calibration-footer-text-{id}"))
                 .child(model.map(|m| m.footer.clone()).unwrap_or_default())
@@ -517,7 +527,9 @@ impl CalibrationTile {
             .child(left)
             .child(
                 h_flex()
-                    .flex_none()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_end()
                     .gap_2()
                     .items_center()
                     .overflow_hidden()

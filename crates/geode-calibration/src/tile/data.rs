@@ -26,6 +26,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Instant;
 
+use chrono::{DateTime, Utc};
 use geode_core::calibration::{
     CalibrationOutcome, CalibrationRequest, Pipeline, REQUEST_STAGE, RunAction, RunMode, Stage,
     StageInput, StageKind, StageName, StageStatus,
@@ -34,8 +35,10 @@ use geode_core::clock::Clock;
 use geode_core::document::{DocumentRows, documents_from_snapshot, join_key};
 use geode_core::link::{Group, underlying_of};
 use geode_core::query::{DocumentParams, QueryKey, QueryOutcome};
+use geode_core::snapshot::Snapshot;
 use geode_shell::frame::{FrameVersions, PublicationWatch};
 use geode_tile::following::{Arrival, DeferredDoor, Delivered, FrameDoor, Promotion, Unanswered};
+use geode_tile::header::TimeRun;
 use geode_tile::notice::Notice;
 use gpui::{App, Context};
 
@@ -59,6 +62,12 @@ pub(super) struct Sources {
     /// One publication watch per source stage, on its dataset under the
     /// underlying.
     pub watches: Vec<(StageName, PublicationWatch)>,
+    /// The source time of each source's documents in hand, with its
+    /// dataset: the snapshot's provenance for that dataset, which a
+    /// document read reports as its partition's publication time. The
+    /// header shows the newest (`refresh_times`). A source whose answer
+    /// carried no parseable time has no entry.
+    pub times: BTreeMap<StageName, (String, DateTime<Utc>)>,
     /// Each source's watch revision when it was last asked; a watch past
     /// its entry is a source to ask again.
     asked: BTreeMap<StageName, u64>,
@@ -147,6 +156,20 @@ fn reconcile(
         stale,
         sources_changed,
     }
+}
+
+/// The source time a document read of `dataset` reports: the snapshot's
+/// provenance entry for the dataset, parsed. `None` when the answer names
+/// no time or one that does not parse; such a source shows no time.
+fn source_time_of(snapshot: &Snapshot, dataset: &str) -> Option<DateTime<Utc>> {
+    snapshot
+        .provenance()
+        .datasets
+        .iter()
+        .find(|f| f.dataset == dataset)
+        .and_then(|f| f.as_of.as_deref())
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&Utc))
 }
 
 /// The notice while no underlying is set: the group's, when following.
@@ -253,6 +276,26 @@ impl CalibrationTile {
         self.refresh_menu(cx);
     }
 
+    /// The header's time: the newest source time among the documents in
+    /// hand, as `{dataset} HH:MM` on the display clock; none with no
+    /// document. Rebuilt when a source answers, when the documents are
+    /// cleared and when a config push drops or changes a source, never in
+    /// render. The time never reads stale here: the per-card `stale_after`
+    /// timer is Part 3's (`docs/open-items.md`).
+    fn refresh_times(&mut self, cx: &App) {
+        let clock = self.clock(cx);
+        self.header.time =
+            self.sources
+                .times
+                .values()
+                .max_by_key(|(_, at)| *at)
+                .map(|(dataset, at)| TimeRun {
+                    label: format!("{dataset} {}", clock.hm(*at)).into(),
+                    stale_label: None,
+                    stale: false,
+                });
+    }
+
     /// The factory stored a new config (the bridge's startup push or a
     /// reload). The pipeline is read again by name and compared, stage by
     /// stage, with the definition the results in hand were computed over
@@ -268,6 +311,9 @@ impl CalibrationTile {
     /// series changed or a source was added, since the documents in hand
     /// are the old source's: at once when shown, else on the next show.
     /// The push itself submits no run; the next publication or `r` runs.
+    /// A run still out when a stage went stale is forgotten (its tag
+    /// dropped), since its answer was computed over the old definition and
+    /// would repaint the stale card as current.
     ///
     /// A pipeline the reader dropped compares nothing: the held graph and
     /// its results stand under the finding's notice (`graph_pipeline`),
@@ -297,6 +343,13 @@ impl CalibrationTile {
                     result.status = StageStatus::Stale;
                 }
             }
+            // A run out now was computed over the old definition: its
+            // answer would repaint a stale card as current. The tag is
+            // forgotten, so the late answer is dropped; the next
+            // publication or `r` runs over the new definition.
+            if !found.stale.is_empty() {
+                self.last_run_tag = None;
+            }
             // A source gone takes its documents and its wait with it: a
             // wait on a stage the pipeline lacks would hold every run.
             let sources: BTreeSet<StageName> = source_stages(&new)
@@ -304,14 +357,17 @@ impl CalibrationTile {
                 .map(|(stage, _)| stage)
                 .collect();
             self.sources.rows.retain(|s, _| sources.contains(s));
+            self.sources.times.retain(|s, _| sources.contains(s));
             self.sources.pending.retain(|s| sources.contains(s));
             self.sources.asked.retain(|s, _| sources.contains(s));
             // A changed source's documents in hand are the old source's:
             // they go and the source waits, so no run reads them.
             for stage in &found.sources_changed {
                 self.sources.rows.remove(stage);
+                self.sources.times.remove(stage);
                 self.sources.pending.insert(stage.clone());
             }
+            self.refresh_times(cx);
             ask = !found.sources_changed.is_empty();
             if self
                 .cursor
@@ -355,8 +411,10 @@ impl CalibrationTile {
     fn clear_loaded(&mut self, cx: &mut Context<Self>) {
         self.results.clear();
         self.sources.rows.clear();
+        self.sources.times.clear();
         self.sources.pending.clear();
         self.sources.asked.clear();
+        self.refresh_times(cx);
         self.last_run_tag = None;
         self.last_user_tag = None;
         self.run_notice = None;
@@ -547,9 +605,11 @@ impl CalibrationTile {
                     notices: Vec::new(),
                 }
             }
+            // A queue refusal is a status notice, as the run's is: nothing
+            // broke, the next change retries.
             Err(refusal) => {
                 self.fetch = Fetch::Idle;
-                self.read_notices.push(Notice::danger(format!(
+                self.read_notices.push(Notice::status(format!(
                     "document request refused: {refusal}"
                 )));
             }
@@ -605,6 +665,12 @@ impl CalibrationTile {
         else {
             return;
         };
+        // The answer's source time, read before the rows are decoded.
+        let source_time = outcome
+            .snapshot
+            .as_ref()
+            .ok()
+            .and_then(|s| source_time_of(s, &dataset));
         let decoded = outcome.snapshot.and_then(|s| {
             let config = self.shared.config.borrow().clone();
             let schema = config
@@ -622,6 +688,7 @@ impl CalibrationTile {
             // a document the store no longer has.
             Ok(docs) if docs.is_empty() => {
                 self.sources.rows.remove(&stage);
+                self.sources.times.remove(&stage);
                 notices.push(Notice::status(format!(
                     "{dataset} has no document for {underlying}"
                 )));
@@ -630,10 +697,19 @@ impl CalibrationTile {
                 self.sources
                     .rows
                     .insert(stage.clone(), docs.into_iter().map(Arc::new).collect());
+                match source_time {
+                    Some(at) => {
+                        self.sources.times.insert(stage.clone(), (dataset, at));
+                    }
+                    None => {
+                        self.sources.times.remove(&stage);
+                    }
+                }
                 self.sources.pending.remove(&stage);
             }
             Err(e) => notices.push(Notice::danger(format!("{stage}: {e}"))),
         }
+        self.refresh_times(cx);
         if let Some(next) = queue.pop_front() {
             match self.ask(&underlying, &next.1, tag, cx) {
                 Ok(()) => {
@@ -645,8 +721,9 @@ impl CalibrationTile {
                         notices,
                     }
                 }
+                // A queue refusal is a status notice, as the run's is.
                 Err(refusal) => {
-                    notices.push(Notice::danger(format!(
+                    notices.push(Notice::status(format!(
                         "{}: document request refused: {refusal}",
                         next.0
                     )));

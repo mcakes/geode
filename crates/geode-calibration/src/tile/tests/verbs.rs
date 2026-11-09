@@ -395,6 +395,12 @@ fn p_is_refused_while_publish_is_held_or_in_flight_or_absent(cx: &mut gpui::Test
             Vec::new(),
         )),
     );
+    assert!(
+        h.notices(&vcx)
+            .contains(&"publish sent no documents".to_string()),
+        "an answer with nothing to upload says so: {:?}",
+        h.notices(&vcx)
+    );
     h.press(&mut vcx, "p");
     assert!(h.confirm_text(&vcx).is_some());
     h.press(&mut vcx, "n");
@@ -506,6 +512,33 @@ fn an_upload_result_is_a_notice_and_updates_the_publish_card(cx: &mut gpui::Test
         h.card_status_full(&vcx, "publish"),
         "09:30:15 · 2 series",
         "one document down: no time on the card"
+    );
+    assert_eq!(h.notices(&vcx).len(), 2);
+
+    // A fourth publish answered while the third's uploads are still out:
+    // the third's late success is not this publish's and counts for
+    // nothing; only the fourth's own two land the time.
+    let old = h.publish_two(&mut vcx);
+    let ups = h.publish_two(&mut vcx);
+    assert_ne!(old, ups);
+    h.deliver(&mut vcx, upload_answer(old[0], Ok(())));
+    assert!(
+        h.notices(&vcx).is_empty(),
+        "a late upload of the last publish is dropped: {:?}",
+        h.notices(&vcx)
+    );
+    h.deliver(&mut vcx, upload_answer(ups[0], Ok(())));
+    assert_eq!(
+        h.card_status_full(&vcx, "publish"),
+        "09:30:15 · 2 series",
+        "one of this publish's two landed: the late one did not count"
+    );
+    h.deliver(&mut vcx, upload_answer(ups[1], Ok(())));
+    assert!(
+        h.card_status_full(&vcx, "publish")
+            .starts_with("09:30:15 · 2 series · uploaded "),
+        "{}",
+        h.card_status_full(&vcx, "publish")
     );
     assert_eq!(h.notices(&vcx).len(), 2);
 }

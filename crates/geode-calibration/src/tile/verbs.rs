@@ -365,7 +365,9 @@ impl CalibrationTile {
 
     /// The publish's answer landed (its stages already merged): one
     /// upload per document to the target the publish was armed for, each
-    /// under the next upload tag. A refused upload is a notice at once.
+    /// under the next upload tag. A refused upload is a notice at once; an
+    /// answer carrying no document is a status notice, since nothing goes
+    /// out and the card would otherwise say nothing of it.
     pub(super) fn publish_answered(
         &mut self,
         rows: Option<Vec<DocumentRows>>,
@@ -374,11 +376,19 @@ impl CalibrationTile {
         let Some(Publishing { target, document }) = self.publishing.take() else {
             return;
         };
+        // The uploads still out are the last publish's: forgotten, so a
+        // late answer of theirs is dropped by the tag check rather than
+        // counted toward this publish's `uploaded`.
+        self.uploads.clear();
         let rows = rows.unwrap_or_default();
         self.uploading = Uploading {
             expected: rows.len(),
             ..Uploading::default()
         };
+        if rows.is_empty() {
+            self.upload_notices
+                .push(Notice::status("publish sent no documents"));
+        }
         // The last publish's time is the last publish's: the card drops it
         // with this answer (the caller rebuilds the model) and earns it
         // again only when every one of these documents lands.

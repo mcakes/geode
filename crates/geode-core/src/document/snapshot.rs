@@ -253,9 +253,23 @@ pub mod test_support {
     /// the given order, its key and attributes repeated on each row. Utf8
     /// columns are dictionary-encoded, as a live read returns them. `edit`
     /// may drop, retype or reorder a column before the snapshot is built.
+    /// The provenance is empty: see [`snapshot_of_documents_at`] for an
+    /// answer carrying its source time.
     pub fn snapshot_of_documents(
         ds: &DatasetSpec,
         docs: &[&DocumentRows],
+        edit: impl FnOnce(&mut Vec<(ColumnMeta, TestColumn)>),
+    ) -> Snapshot {
+        snapshot_of_documents_at(ds, docs, None, edit)
+    }
+
+    /// [`snapshot_of_documents`] with the dataset's source time in the
+    /// provenance (`as_of`, RFC 3339), as a live document read reports its
+    /// partition's publication time; `None` leaves the provenance empty.
+    pub fn snapshot_of_documents_at(
+        ds: &DatasetSpec,
+        docs: &[&DocumentRows],
+        as_of: Option<&str>,
         edit: impl FnOnce(&mut Vec<(ColumnMeta, TestColumn)>),
     ) -> Snapshot {
         let mut columns: Vec<(ColumnMeta, TestColumn)> = Vec::new();
@@ -290,7 +304,18 @@ pub mod test_support {
             ));
         }
         edit(&mut columns);
-        Snapshot::for_tests(columns, 0)
+        let provenance = match as_of {
+            Some(t) => crate::snapshot::Provenance {
+                datasets: vec![crate::snapshot::Freshness {
+                    dataset: ds.name.clone(),
+                    as_of: Some(t.to_string()),
+                    generation: None,
+                }],
+                as_of_request: None,
+            },
+            None => crate::snapshot::Provenance::default(),
+        };
+        Snapshot::for_tests_with_provenance(columns, 0, provenance)
     }
 }
 

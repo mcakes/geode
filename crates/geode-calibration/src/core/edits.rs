@@ -331,7 +331,10 @@ pub fn would_read(
         }
     }
     let mut value = Table::new();
-    value.insert("config_version".into(), Value::Integer(1));
+    value.insert(
+        "config_version".into(),
+        Value::Integer(geode_core::config::CONFIG_VERSION),
+    );
     value.insert("pipelines".into(), Value::Table(pipelines_table.clone()));
     value.insert(
         "stages".into(),

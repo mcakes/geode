@@ -253,7 +253,9 @@ mod tests {
         assert_eq!(fit(0.0, 550.0, 90.0, 400.0), 240.0);
         // Before the left edge: the card's left edge meets the viewport's.
         assert_eq!(fit(300.0, 110.0, 90.0, 400.0), 110.0);
-        // Wider than the viewport: the left edge wins.
+        // Wider than the viewport: the card's right edge meets the
+        // viewport's and its left edge runs off screen (the scroll of 150
+        // shows 150..550 of a card spanning 50..550).
         assert_eq!(fit(0.0, 50.0, 500.0, 400.0), 150.0);
     }
 }
