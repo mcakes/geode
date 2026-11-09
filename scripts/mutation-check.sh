@@ -44196,6 +44196,17 @@ run_mutation "calibration edits: delete strips consumers" \
   geode-calibration \
   delete_edits_remove_the_stage_and_strip_every_consumer_in_one_batch
 
+# Every tile edit is read by the reader before it is queued; one it would
+# refuse (parity short of its one input) must be a notice and nothing
+# written, or the reload drops the pipeline and the tile holds a graph it
+# can no longer edit. Taking every verdict as Ok queues the refused edit.
+run_mutation "calibration edits: an edit the reader would refuse is not queued" \
+  crates/geode-calibration/src/tile/verbs.rs \
+  '        match verdict {' \
+  '        match verdict.or_else(|_: Diagnostic| Ok::<(), Diagnostic>(())) {' \
+  geode-calibration \
+  x_removes_the_chosen_input
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
