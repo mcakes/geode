@@ -5,6 +5,7 @@
 //! per frame.
 
 pub mod layout;
+pub mod menu;
 pub mod model;
 
 #[cfg(test)]

@@ -95,7 +95,7 @@ fn source_stages(pipeline: &Pipeline) -> Vec<(StageName, String)> {
 }
 
 /// The notice while no underlying is set: the group's, when following.
-fn no_underlying(following: Option<Group>) -> String {
+pub(super) fn no_underlying(following: Option<Group>) -> String {
     match following {
         Some(g) => format!("no underlying in {}", g.letter()),
         None => "no underlying".to_string(),
@@ -134,7 +134,7 @@ impl CalibrationTile {
         config.as_ref().and_then(|c| self.pipeline_in(c)).cloned()
     }
 
-    fn clock(&self, cx: &App) -> Clock {
+    pub(super) fn clock(&self, cx: &App) -> Clock {
         cx.try_global::<geode_shell::clock::AppClock>()
             .map(|c| c.0)
             .unwrap_or_else(|| Clock::machine().0)
@@ -185,6 +185,8 @@ impl CalibrationTile {
         });
         self.chrome = Chrome::prepare(self.id.0, &model);
         self.model = Some(Rc::new(model));
+        // An open menu's rows promise what the results allow.
+        self.refresh_menu(cx);
     }
 
     pub(crate) fn requery(&mut self, cx: &mut Context<Self>) {
@@ -196,9 +198,10 @@ impl CalibrationTile {
         self.requery_sources(None, arrival, cx);
     }
 
-    /// Forget the last underlying's documents and results. A run still out
-    /// for it is no longer this tile's: its tags are forgotten, so its
-    /// answer is dropped.
+    /// Forget the last underlying's documents and results. A run, publish
+    /// or upload still out for it is no longer this tile's: its tags are
+    /// forgotten, so its answer is dropped, and the verbs' notices about
+    /// it leave with it.
     fn clear_loaded(&mut self) {
         self.results.clear();
         self.sources.rows.clear();
@@ -209,6 +212,79 @@ impl CalibrationTile {
         self.run_notice = None;
         self.run_due = false;
         self.fetch = Fetch::Idle;
+        self.publishing = None;
+        self.uploads.clear();
+        self.verb_notice = None;
+        self.upload_notices.clear();
+    }
+
+    /// `:pipeline <name>`: show another pipeline of the document. What was
+    /// loaded belonged to the old one, so the results, the documents and
+    /// the watches go, the question and the menu close, a cursor the new
+    /// pipeline lacks is dropped, and a shown tile asks the new sources.
+    pub(super) fn switch_pipeline(
+        &mut self,
+        name: String,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let known = {
+            let config = self.shared.config.borrow();
+            config
+                .as_ref()
+                .is_some_and(|c| c.pipelines.pipelines.iter().any(|p| p.name == name))
+        };
+        if !known {
+            return Err(format!("unknown pipeline '{name}'"));
+        }
+        if self.pipeline_name.as_deref() == Some(name.as_str()) {
+            return Ok(());
+        }
+        self.pipeline_name = Some(name);
+        let _ = geode_tile::confirm::withdraw(self, cx);
+        self.close_menu(cx);
+        self.clear_loaded();
+        self.loaded_for = None;
+        self.sources.watches.clear();
+        let keep = self
+            .pipeline()
+            .is_some_and(|p| self.cursor.as_deref().is_some_and(|c| p.stage(c).is_some()));
+        if !keep {
+            self.cursor = None;
+        }
+        self.refresh(cx);
+        if self.visible {
+            self.requery(cx);
+        }
+        cx.notify();
+        Ok(())
+    }
+
+    /// The request for `action` over `pipeline` and every source's
+    /// documents in hand, under the next tag. Every request of either lane
+    /// takes the next value, so no two answers share a tag.
+    pub(super) fn request(
+        &mut self,
+        pipeline: Pipeline,
+        underlying: String,
+        action: RunAction,
+    ) -> CalibrationRequest {
+        let inputs: Vec<StageInput> = source_stages(&pipeline)
+            .into_iter()
+            .map(|(stage, _)| StageInput {
+                rows: self.sources.rows.get(&stage).cloned().unwrap_or_default(),
+                stage,
+            })
+            .collect();
+        self.run_tag += 1;
+        CalibrationRequest {
+            key: self.key(),
+            tag: self.run_tag,
+            submitted: Instant::now(),
+            pipeline,
+            underlying,
+            inputs,
+            action,
+        }
     }
 
     /// Ask the sources in `only` (every source when `None`), plus any still
@@ -485,24 +561,8 @@ impl CalibrationTile {
         if !self.sources.pending.is_empty() {
             return false;
         }
-        let inputs: Vec<StageInput> = source_stages(&pipeline)
-            .into_iter()
-            .map(|(stage, _)| StageInput {
-                rows: self.sources.rows.get(&stage).cloned().unwrap_or_default(),
-                stage,
-            })
-            .collect();
-        self.run_tag += 1;
-        let tag = self.run_tag;
-        let request = CalibrationRequest {
-            key: self.key(),
-            tag,
-            submitted: Instant::now(),
-            pipeline,
-            underlying,
-            inputs,
-            action: RunAction::Run { from },
-        };
+        let request = self.request(pipeline, underlying, RunAction::Run { from });
+        let tag = request.tag;
         let sent = match self.shared.data.calibrate(request) {
             Ok(()) => {
                 self.last_run_tag = Some(tag);
@@ -519,36 +579,52 @@ impl CalibrationTile {
         sent
     }
 
-    /// A run's answer. Only the latest request of its lane is listened
-    /// for: a `Run` outcome must carry the tag of the last run submitted,
-    /// any other action the tag of the last user action, so a late run can
-    /// never be mistaken for a publish answer, nor another tile's for this
-    /// one's. The synthetic `request` stage is a refused or failed request:
-    /// its reason is a header notice, never a card. Otherwise the stages
-    /// delivered replace their results and every other card stands.
+    /// A run's or a publish's answer. Only the latest request of its lane
+    /// is listened for: a `Run` outcome must carry the tag of the last run
+    /// submitted, any other action the tag of the last user action, so a
+    /// late run can never be mistaken for a publish answer, nor another
+    /// tile's for this one's. The synthetic `request` stage is a refused or
+    /// failed request: its reason is a header notice, never a card.
+    /// Otherwise the stages delivered replace their results and every
+    /// other card stands. A publish's answer then sends its rows on; rows
+    /// on any other action are not a publish's and go nowhere.
     pub fn deliver_calibration(&mut self, outcome: CalibrationOutcome, cx: &mut Context<Self>) {
-        let expected = match &outcome.action {
+        let CalibrationOutcome {
+            key,
+            tag,
+            action,
+            stages,
+            publish_rows,
+            ..
+        } = outcome;
+        let expected = match &action {
             RunAction::Run { .. } => self.last_run_tag,
             _ => self.last_user_tag,
         };
-        if outcome.key != self.key() || expected != Some(outcome.tag) {
+        if key != self.key() || expected != Some(tag) {
             return;
         }
-        let request_failed = match outcome.stages.as_slice() {
+        let request_failed = match stages.as_slice() {
             [only] if only.name == REQUEST_STAGE => Some(match &only.status {
                 StageStatus::Failed(reason) => reason.clone(),
                 _ => only.summary.clone(),
             }),
             _ => None,
         };
+        let failed = request_failed.is_some();
         match request_failed {
             Some(reason) => self.run_notice = Some(Notice::danger(reason)),
             None => {
                 self.run_notice = None;
-                for stage in outcome.stages {
+                for stage in stages {
                     self.results.insert(stage.name.clone(), stage);
                 }
             }
+        }
+        if let RunAction::Publish { .. } = action {
+            // A failed publish has nothing to send; the flight is over
+            // either way.
+            self.publish_answered(if failed { None } else { publish_rows }, cx);
         }
         self.rebuild_model(cx);
         cx.notify();

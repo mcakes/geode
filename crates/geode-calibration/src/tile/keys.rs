@@ -208,12 +208,14 @@ impl CalibrationTile {
         cx.notify();
     }
 
-    /// Whether the filter field holds window focus: the shell's insert
-    /// branch routes bare keys to it only while it does.
+    /// Whether the filter field or an armed question holds window focus:
+    /// the shell's insert branch routes bare keys to it only while one
+    /// does.
     pub fn holds_focus(&self, window: &Window, cx: &gpui::App) -> bool {
         self.filter_field
             .as_ref()
             .is_some_and(|f| f.input.read(cx).focus_handle(cx).is_focused(window))
+            || self.confirm.as_ref().is_some_and(|c| c.holds_focus(window))
     }
 }
 

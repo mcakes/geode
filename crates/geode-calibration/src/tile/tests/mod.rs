@@ -5,6 +5,7 @@
 mod data;
 mod harness;
 mod keys;
+mod verbs;
 
 use geode_shell::keymap::KeyContext;
 use harness::{Harness, builtin_config, open_with, restored, warned_config};

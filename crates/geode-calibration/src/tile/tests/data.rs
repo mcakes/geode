@@ -26,7 +26,7 @@ use geode_shell::tiling::{TileId, WorkspaceIx};
 use super::harness::{Harness, builtin_config, config_from, demo_schema, open_with, restored};
 use crate::core::model::Tone;
 
-const KEY: QueryKey = QueryKey(Harness::TILE);
+pub(super) const KEY: QueryKey = QueryKey(Harness::TILE);
 const EMITTER: TileId = TileId(9);
 
 /// One document read as asked: its dataset, key and tag.
@@ -105,7 +105,7 @@ fn dividends_doc(u: &str) -> DocumentRows {
     }
 }
 
-fn rates_doc(u: &str, series: &str) -> DocumentRows {
+pub(super) fn rates_doc(u: &str, series: &str) -> DocumentRows {
     DocumentRows {
         key: vec![u.into(), series.into()],
         attributes: vec![(
@@ -132,7 +132,7 @@ fn snapshot_for(dataset: &str, u: &str) -> Snapshot {
     snapshot_of_documents(ds, &refs, |_| {})
 }
 
-fn docs(reqs: &[Request]) -> Vec<&DocumentParams> {
+pub(super) fn docs(reqs: &[Request]) -> Vec<&DocumentParams> {
     reqs.iter()
         .filter_map(|r| match r {
             Request::Document(p) => Some(p),
@@ -141,7 +141,7 @@ fn docs(reqs: &[Request]) -> Vec<&DocumentParams> {
         .collect()
 }
 
-fn calibrates(reqs: &[Request]) -> Vec<&geode_core::calibration::CalibrationRequest> {
+pub(super) fn calibrates(reqs: &[Request]) -> Vec<&geode_core::calibration::CalibrationRequest> {
     reqs.iter()
         .filter_map(|r| match r {
             Request::Calibrate(p) => Some(p),
@@ -150,7 +150,7 @@ fn calibrates(reqs: &[Request]) -> Vec<&geode_core::calibration::CalibrationRequ
         .collect()
 }
 
-fn result(name: &str, summary: &str) -> StageResult {
+pub(super) fn result(name: &str, summary: &str) -> StageResult {
     StageResult {
         name: name.into(),
         status: StageStatus::Ok,
@@ -161,7 +161,7 @@ fn result(name: &str, summary: &str) -> StageResult {
     }
 }
 
-fn run_outcome(key: QueryKey, tag: u64, stages: Vec<StageResult>) -> CalibrationOutcome {
+pub(super) fn run_outcome(key: QueryKey, tag: u64, stages: Vec<StageResult>) -> CalibrationOutcome {
     CalibrationOutcome {
         key,
         tag,
@@ -248,7 +248,11 @@ impl Harness {
 
     /// Answer every read in the sequence for `u`; returns what was asked, in
     /// order, and every other request the tile made along the way.
-    fn answer_all(&self, vcx: &mut gpui::VisualTestContext, u: &str) -> (Vec<Asked>, Vec<Request>) {
+    pub(super) fn answer_all(
+        &self,
+        vcx: &mut gpui::VisualTestContext,
+        u: &str,
+    ) -> (Vec<Asked>, Vec<Request>) {
         let reqs = self.requests();
         self.answer_all_from(vcx, reqs, u)
     }
@@ -275,7 +279,7 @@ impl Harness {
     }
 
     /// A loaded tile: every source answered and the run's request taken.
-    fn load(&self, vcx: &mut gpui::VisualTestContext, u: &str) -> u64 {
+    pub(super) fn load(&self, vcx: &mut gpui::VisualTestContext, u: &str) -> u64 {
         let (asked, after) = self.answer_all(vcx, u);
         assert_eq!(asked.len(), 3, "{asked:?}");
         let runs = calibrates(&after);
@@ -283,7 +287,7 @@ impl Harness {
         runs[0].tag
     }
 
-    fn card_status(&self, vcx: &gpui::VisualTestContext, stage: &str) -> String {
+    pub(super) fn card_status(&self, vcx: &gpui::VisualTestContext, stage: &str) -> String {
         self.tile.read_with(vcx, |t, _| {
             let model = t.model().expect("a pipeline is shown");
             model
@@ -308,7 +312,7 @@ impl Harness {
         })
     }
 
-    fn footer(&self, vcx: &gpui::VisualTestContext) -> String {
+    pub(super) fn footer(&self, vcx: &gpui::VisualTestContext) -> String {
         self.tile.read_with(vcx, |t, _| {
             t.model().map(|m| m.footer.to_string()).unwrap_or_default()
         })
@@ -322,7 +326,7 @@ impl Harness {
         })
     }
 
-    fn result_names(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
+    pub(super) fn result_names(&self, vcx: &gpui::VisualTestContext) -> Vec<String> {
         self.tile.read_with(vcx, |t, _| t.result_names())
     }
 

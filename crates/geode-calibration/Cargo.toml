@@ -13,6 +13,9 @@ bench = false
 # geode-tile the shared header and notices, and DataHandle is the module's
 # interface to geode-data.
 [dependencies]
+# The instant an upload landed (`Utc::now`); every displayed time still
+# goes through `geode_core::clock::Clock`.
+chrono = "0.4.42"
 geode-core.workspace = true
 geode-shell.workspace = true
 geode-tile.workspace = true
@@ -22,9 +25,6 @@ gpui-component.workspace = true
 toml = "1.1.4"
 
 [dev-dependencies]
-# Tests build `ran_at` instants; the crate itself reads times only through
-# `geode_core::clock::Clock`.
-chrono = "0.4.42"
 geode-core = { workspace = true, features = ["test-support"] }
 geode-shell = { workspace = true, features = ["test-support"] }
 geode-data = { path = "../geode-data", features = ["test-support"] }

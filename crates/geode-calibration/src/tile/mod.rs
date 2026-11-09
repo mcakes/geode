@@ -9,7 +9,9 @@
 //! underlying, and in the graph model (`core::model`) when the pipeline,
 //! the results, the waiting sources or the cursor change, never in render.
 //! The data flow (the source reads, the runs and their answers) is `data`,
-//! the cursor keys and the filter `keys`, the body and footer `paint`.
+//! the cursor keys and the filter `keys`, the body and footer `paint`,
+//! the run and publish verbs with the y/n bar `verbs`, the `.` action
+//! menu `menu`, and the `:` line's vocabulary `crate::commands`.
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -21,26 +23,34 @@ use geode_shell::actions::ActionId;
 use geode_shell::diagnostics::Diagnostics;
 use geode_shell::frame::FrameRef;
 use geode_shell::keymap::KeyContext;
-use geode_shell::module::{CloseHandle, StackHandle, UploadDelivery};
+use geode_shell::module::{CloseHandle, StackHandle};
+use geode_shell::shell::scale;
 use geode_shell::tiling::TileId;
+use geode_tile::confirm::{self, Confirm};
 use geode_tile::following::FollowingQuery;
-use geode_tile::header::{Cluster, HealthWatch, MenuTrigger, Mode, link_chips};
+use geode_tile::header::{Cluster, HEADER_HEIGHT, HealthWatch, MenuTrigger, Mode, link_chips};
+use geode_tile::menu::MenuIds;
 use geode_tile::motion;
 use geode_tile::notice::{self, Dismissals, Notice};
 use gpui::prelude::*;
 use gpui::{App, Context, ElementId, SharedString, Window, div};
 use gpui_component::{ActiveTheme as _, h_flex, v_flex};
 
+use crate::commands::{self, Command};
 use crate::content::{ACTIONS, CalibrationConfig, Shared};
 use crate::core::layout::Move;
 use crate::core::model::GraphModel;
 use data::{Fetch, Sources};
 use keys::{FilterField, Viewport};
+use menu::MenuState;
 use paint::{Chrome, Hints};
+use verbs::{Pending, Publishing, Uploads};
 
 mod data;
 mod keys;
+mod menu;
 mod paint;
+mod verbs;
 
 /// The key context of the tile's picker fields, where `tab` completes.
 pub const PICKER_CONTEXT: &str = "calibration_picker";
@@ -82,6 +92,23 @@ pub struct CalibrationTile {
     /// The last run's refusal or request failure; cleared by the next run
     /// that goes out or answers.
     run_notice: Option<Notice>,
+    /// The last verb's refusal (`verbs::refuse`), replaced by the next
+    /// and cleared when a verb goes out.
+    verb_notice: Option<Notice>,
+    /// The uploads' answers since the last publish went out.
+    upload_notices: Vec<Notice>,
+    /// The armed y/n question: a publish, or (with the editors) a delete.
+    confirm: Option<Confirm<Pending>>,
+    /// The publish out now, with where its rows go; `None` between.
+    publishing: Option<Publishing>,
+    /// The tag of the last upload sent; every upload takes the next value.
+    upload_tag: u64,
+    /// The uploads out, by tag.
+    uploads: Uploads,
+    /// The `.` action menu while it is up.
+    menu: Option<MenuState>,
+    /// The menu's element names, formatted once.
+    menu_ids: MenuIds,
     /// The source reads under the flip barrier: one tag per sequence.
     following: FollowingQuery<()>,
     fetch: Fetch,
@@ -187,10 +214,11 @@ impl CalibrationTile {
             }
         })
         .detach();
-        // The footer names live chords: re-resolved on a keymap reload,
-        // never per frame.
+        // The footer and the menu name live chords: re-resolved on a
+        // keymap reload, never per frame.
         cx.observe_global::<geode_shell::tips::Chords>(|this, cx| {
             this.hints = Hints::resolve(cx);
+            this.rehint_menu(cx);
             cx.notify();
         })
         .detach();
@@ -208,6 +236,14 @@ impl CalibrationTile {
             notices: Vec::new(),
             read_notices: Vec::new(),
             run_notice: None,
+            verb_notice: None,
+            upload_notices: Vec::new(),
+            confirm: None,
+            publishing: None,
+            upload_tag: 0,
+            uploads: Uploads::new(),
+            menu: None,
+            menu_ids: menu::menu_ids(id.0),
             following: FollowingQuery::new(),
             fetch: Fetch::Idle,
             last_following: None,
@@ -306,13 +342,16 @@ impl CalibrationTile {
         self.rebuild_model(cx);
     }
 
-    /// Every notice the header reports, the config's first: what paint
-    /// filters through the dismissals and what `escape` dismisses.
+    /// Every notice the header reports, the config's first, then the
+    /// reads', the runs', the verbs' and the uploads': what paint filters
+    /// through the dismissals and what `escape` dismisses.
     fn all_notices(&self) -> Vec<Notice> {
         self.notices
             .iter()
             .chain(&self.read_notices)
             .chain(&self.run_notice)
+            .chain(&self.verb_notice)
+            .chain(&self.upload_notices)
             .cloned()
             .collect()
     }
@@ -328,26 +367,40 @@ impl CalibrationTile {
         cx.notify();
     }
 
-    /// `insert` while the filter field holds the keys, else `normal`.
+    /// `insert` while the filter field or an armed question holds the
+    /// keys (the shell then routes bare keys to the focused element),
+    /// `menu` while the action menu is up, else `normal`.
     fn mode(&self) -> &'static str {
-        if self.filter_field.is_some() {
+        if self.filter_field.is_some() || self.confirm.is_some() {
             "insert"
+        } else if self.menu.is_some() {
+            "menu"
         } else {
             "normal"
         }
     }
 
     /// No `.counts()`: the tile has no counted motion, and the stage
-    /// jumps are `g N` chords, so a bare digit is nothing here.
+    /// jumps are `g N` chords, so a bare digit is nothing here. With the
+    /// menu up, `popup == actions` names it and `tilelist` lets the
+    /// shell's shared `j`/`k` and arrows step it.
     pub fn key_context(&self) -> KeyContext {
-        KeyContext::new(crate::KIND).pair("mode", self.mode())
+        let ctx = KeyContext::new(crate::KIND).pair("mode", self.mode());
+        if self.menu.is_some() {
+            ctx.pair("popup", "actions").tilelist()
+        } else {
+            ctx
+        }
     }
 
     /// `true` for this module's own registered actions, which the tile
     /// owns whether or not it carries them out yet: a bound key is never
-    /// the shell's. The shell's shared `motion::*` steps are taken as the
-    /// cursor keys, so the palette's motions move the cursor too.
-    /// Anything else falls through to the shell.
+    /// the shell's; and, while the menu is up, for the shell's shared menu
+    /// steps. The shell's shared `motion::*` steps are taken as the cursor
+    /// keys, so the palette's motions move the cursor too. Anything else
+    /// falls through to the shell. A verb other than the menu's own closes
+    /// the menu first, and any verb but `cancel` reaching the tile past an
+    /// armed question (the palette) answers it no.
     pub fn dispatch(
         &mut self,
         action: &ActionId,
@@ -355,23 +408,38 @@ impl CalibrationTile {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if let Some(m) = motion::parse(action, count) {
-            let step = match m {
-                motion::Motion::Cols(n) if n < 0 => Move::Left,
-                motion::Motion::Cols(_) => Move::Right,
-                motion::Motion::Rows { by, .. } if by < 0 => Move::Up,
-                motion::Motion::Rows { .. } => Move::Down,
-                _ => return false,
-            };
-            self.move_cursor(step, cx);
-            return true;
-        }
         let verb = match action.0.as_str() {
+            motion::MENU_DOWN if self.menu.is_some() => "list_down",
+            motion::MENU_UP if self.menu.is_some() => "list_up",
             id if ACTIONS.iter().any(|(a, _)| *a == id) => &id["calibration::".len()..],
-            _ => return false,
+            _ => {
+                let Some(m) = motion::parse(action, count) else {
+                    return false;
+                };
+                let step = match m {
+                    motion::Motion::Cols(n) if n < 0 => Move::Left,
+                    motion::Motion::Cols(_) => Move::Right,
+                    motion::Motion::Rows { by, .. } if by < 0 => Move::Up,
+                    motion::Motion::Rows { .. } => Move::Down,
+                    _ => return false,
+                };
+                confirm::cancel(self, window, cx);
+                self.close_menu(cx);
+                self.move_cursor(step, cx);
+                return true;
+            }
         };
         #[cfg(test)]
         self.dispatch_log.push(action.clone());
+        if !matches!(
+            verb,
+            "menu" | "menu_pick" | "cancel" | "list_down" | "list_up"
+        ) {
+            self.close_menu(cx);
+        }
+        if verb != "cancel" {
+            confirm::cancel(self, window, cx);
+        }
         match verb {
             "cursor_left" => self.move_cursor(Move::Left, cx),
             "cursor_right" => self.move_cursor(Move::Right, cx),
@@ -380,11 +448,37 @@ impl CalibrationTile {
             "filter" => self.open_filter(window, cx),
             "commit" => self.commit_filter(window, cx),
             "relayout" => self.relayout(cx),
-            // `escape` peels: the filter field first; last in line, with
-            // nothing else to cancel, it dismisses the header's notices,
-            // and is handled only when it did.
+            "run_from" => self.run_from_cursor(cx),
+            "run_all" => {
+                if let Err(reason) = self.run_verb(None, cx) {
+                    self.refuse(reason, cx);
+                }
+            }
+            "publish" => {
+                if let Err(reason) = self.publish_verb(window, cx) {
+                    self.refuse(reason, cx);
+                }
+            }
+            "menu" => self.toggle_menu(window, cx),
+            "menu_pick" => self.pick_highlighted(window, cx),
+            "list_down" => {
+                self.step_menu(1, cx);
+            }
+            "list_up" => {
+                self.step_menu(-1, cx);
+            }
+            // `escape` peels: an armed question, the filter field, the
+            // menu; last in line, with nothing else to cancel, it
+            // dismisses the header's notices, and is handled only when it
+            // did.
             "cancel" => {
+                if confirm::cancel(self, window, cx) {
+                    return true;
+                }
                 if self.cancel_filter(window, cx) {
+                    return true;
+                }
+                if self.close_menu(cx) {
                     return true;
                 }
                 if !self.dismissed.dismiss_all(&self.all_notices()) {
@@ -397,41 +491,51 @@ impl CalibrationTile {
                     self.jump(n, cx);
                 }
             }
-            // The runs, the menu and the edits take their verbs as the
-            // data flow's verbs and the editors arrive.
+            // The edits take their verbs as the editors arrive.
             _ => {}
         }
         true
     }
 
-    /// The `:` line: `layout` places the graph again from the home
-    /// scroll. Every other line is refused.
+    /// The `:` line (`crate::commands`): `run [stage]`, `publish`,
+    /// `pipeline <name>` and `layout`. A refusal is the line's answer.
     pub fn command(
         &mut self,
         line: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
-        match line.trim() {
-            "layout" => {
+        match commands::parse(line)? {
+            Command::Layout => {
                 self.relayout(cx);
                 Ok(())
             }
-            _ => Err(format!("unknown command: {line}")),
+            Command::Run(from) => self.run_verb(from, cx),
+            Command::Publish => self.publish_verb(window, cx),
+            Command::Pipeline(name) => self.switch_pipeline(name, cx),
         }
     }
 
-    pub fn completions(&self, line: &str, _cursor: usize) -> Vec<String> {
-        ["layout"]
-            .into_iter()
-            .filter(|c| c.starts_with(line.trim_start()))
-            .map(str::to_string)
-            .collect()
-    }
-
-    /// A publish's echo. No publish is asked yet.
-    pub fn deliver_upload(&mut self, outcome: UploadDelivery, _cx: &mut Context<Self>) {
-        let _ = outcome;
+    /// The verbs, then the shown pipeline's stages after `run` and the
+    /// document's pipelines after `pipeline`.
+    pub fn completions(&self, line: &str, cursor: usize) -> Vec<String> {
+        let config = self.shared.config.borrow();
+        let pipelines: Vec<String> = config
+            .as_ref()
+            .map(|c| {
+                c.pipelines
+                    .pipelines
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let stages: Vec<String> = config
+            .as_ref()
+            .and_then(|c| self.pipeline_in(c))
+            .map(|p| p.stages.iter().map(|s| s.name.clone()).collect())
+            .unwrap_or_default();
+        commands::completions(line, cursor, &stages, &pipelines)
     }
 
     pub fn set_stack(&mut self, stack: Option<StackHandle>, cx: &mut Context<Self>) {
@@ -573,11 +677,13 @@ impl Render for CalibrationTile {
             selector: self.menu_selector.clone(),
             tip_selector: SharedString::new_static("tip-calibration-menu"),
             action: "calibration::menu",
-            open: false,
-            // The trigger is painted so the header's tail has its final
-            // shape; it opens nothing until the action menu exists, and
-            // is wired to it then.
-            on_press: Rc::new(|_, _| {}),
+            open: self.menu.is_some(),
+            on_press: {
+                let tile = tile.clone();
+                Rc::new(move |window, cx| {
+                    tile.update(cx, |t, cx| t.toggle_menu(window, cx));
+                })
+            },
         });
         let header = geode_tile::header::frame(
             self.stack.as_ref().and_then(|s| s.marker(theme, self.id)),
@@ -586,6 +692,13 @@ impl Render for CalibrationTile {
             theme,
         )
         .debug_selector(move || format!("calibration-header-{id}"));
+        // The menu hangs from the header's right edge; the question asks
+        // on its own bar under the header, whole at any tile width.
+        let menu = self.render_menu(&tile, cx);
+        let question = self
+            .confirm
+            .as_ref()
+            .map(|c| confirm::bar(c, &tile, move || format!("calibration-confirm-{id}"), theme));
         let body = if let Some(model) = &self.model {
             self.render_graph(&tile, model, theme, window)
         } else {
@@ -602,14 +715,32 @@ impl Render for CalibrationTile {
                 )
         };
         let footer = self.render_footer(self.model.as_deref(), theme);
-        v_flex()
+        let root = v_flex()
             .size_full()
             .bg(theme.background)
             .text_color(theme.foreground)
             .debug_selector(move || format!("calibration-{id}"))
-            .child(header)
+            .child(
+                div()
+                    .relative()
+                    .w_full()
+                    .flex_none()
+                    .child(header)
+                    .when_some(menu, |el, m| {
+                        el.child(
+                            div()
+                                .absolute()
+                                .right_0()
+                                .top(scale::design(HEADER_HEIGHT))
+                                .child(m),
+                        )
+                    }),
+            )
+            .children(question)
             .child(body)
-            .child(footer)
+            .child(footer);
+        // A pointer press anywhere on the tile answers an armed question no.
+        confirm::cancel_on_press(root, self.confirm.is_some(), &tile)
     }
 }
 

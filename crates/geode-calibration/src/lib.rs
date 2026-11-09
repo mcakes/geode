@@ -5,6 +5,7 @@
 //! run goes through the data tier's calibration door and comes back as a
 //! delivery.
 
+pub mod commands;
 pub mod content;
 pub mod core;
 pub mod tile;

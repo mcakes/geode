@@ -29,8 +29,8 @@ use crate::tile::{CalibrationTile, TITLE};
 /// Registered actions and their palette titles. Every one is bound in
 /// [`DEFAULT_KEYMAP`]; the palette lists them all. The ids are fixed here
 /// so a binding, a menu row and a footer hint can name a verb before it
-/// does anything: a verb the tile does not yet carry out consumes its key
-/// and changes nothing.
+/// does anything: a verb the tile does not yet carry out (the editors)
+/// consumes its key and changes nothing.
 pub const ACTIONS: &[(&str, &str)] = &[
     ("calibration::cursor_left", "Cursor to an input"),
     ("calibration::cursor_right", "Cursor to a consumer"),
@@ -102,7 +102,7 @@ context = "calibration && mode == normal"
 "shift+l" = "calibration::relayout"
 "r" = "calibration::run_from"
 "shift+r" = "calibration::run_all"
-"shift+p" = "calibration::publish"
+"p" = "calibration::publish"
 "c" = "calibration::connect"
 "shift+c" = "calibration::disconnect"
 "a" = "calibration::add"

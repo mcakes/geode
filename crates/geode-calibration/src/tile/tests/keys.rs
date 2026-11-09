@@ -16,7 +16,7 @@ fn open(cx: &mut gpui::TestAppContext, cursor: Option<&str>) -> (Harness, gpui::
 }
 
 impl Harness {
-    fn cursor(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
+    pub(super) fn cursor(&self, vcx: &gpui::VisualTestContext) -> Option<String> {
         self.tile
             .read_with(vcx, |t, _| t.cursor().map(str::to_string))
     }
