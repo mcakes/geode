@@ -12312,8 +12312,8 @@ run_mutation "objectdialog: row_for_path bounds the item index" \
 # A path from another object never flags this draft's rows.
 run_mutation "objectdialog: row_for_path is scoped to this object" \
   crates/geode-shell/src/shell/objectdialog/mod.rs \
-  '        let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;' \
-  '        let rest = path.strip_prefix(&format!("{doc}.")).and_then(|r| r.split_once('"'"'.'"'"')).map(|(_, r)| r)?;' \
+  '        let rest = path.strip_prefix(&format!("{head}.{}.", self.name))?;' \
+  '        let rest = path.strip_prefix(&format!("{head}.")).and_then(|r| r.split_once('"'"'.'"'"')).map(|(_, r)| r)?;' \
   geode-shell \
   row_for_path_matches_a_field_by_key_and_a_list_item_by_index
 
@@ -43735,6 +43735,40 @@ run_mutation "volviews: a refused column survives a save" \
   geode-shell \
   a_refused_column_is_carried_raw_and_written_in_place
 
+# ---- Calibration stages dialog: the stages table and the draft's own paths ----
+#
+# `calibration.toml` keeps its stages one level down (`[stages.<name>]`),
+# the one document whose objects are not top-level keys; the dialog's
+# writer resolves the container through `config::object_table`. Its
+# validator runs the document's reader over the whole merged document and
+# keeps only the draft's own findings.
+
+# The write's container: a stage put at the top level is a key the reader
+# ignores, and the test reads the file for `[stages.chain]`.
+run_mutation "objectdialog: calibration stages are written under the stages table" \
+  crates/geode-shell/src/shell/objectdialog/mod.rs \
+  '    match geode_core::config::object_table(doc) {
+        None => {
+            document[name] = item;' \
+  '    match None::<&str> {
+        None => {
+            document[name] = item;' \
+  geode-shell \
+  a_stage_edit_is_written_under_the_stages_table
+
+# The reader reports every stage of the document; without the filter the
+# draft would show another stage's broken knots as its own.
+run_mutation "calibration dialog: validation keeps only the draft's own paths" \
+  crates/geode-shell/src/shell/objectdialog/calibration.rs \
+  '    diags.retain(|d| {
+        d.path
+            .as_deref()
+            .is_some_and(|p| p == exact || p.starts_with(&own))
+    });' \
+  '    let _ = (&exact, &own);' \
+  geode-shell \
+  a_calibration_draft_validates_through_from_doc_and_keeps_only_its_own_paths
+
 # The shipped tabs a move crosses are copied into the user file first:
 # the file can only carry an order among tabs it holds, and crossing none
 # the rewrite would order nothing the merge can see.
@@ -44124,6 +44158,20 @@ run_mutation "calibration publish: y sends the publish action" \
   '            Pending::Publish { .. } => {}' \
   geode-calibration \
   p_arms_the_confirm_bar_and_y_publishes_from_the_filter
+
+# ---- Calibration tile: the dialog door ----
+
+# A held, dropped pipeline is painted but is not in the configuration the
+# dialog edits; offering its stage would open the editor on an object the
+# reader refused. The live pipeline alone names an object.
+run_mutation "calibration tile: a dropped pipeline offers no config object" \
+  crates/geode-calibration/src/tile/mod.rs \
+  '        let pipeline = self.pipeline()?;
+        pipeline.stage(cursor)?;' \
+  '        let pipeline = self.graph_pipeline()?;
+        pipeline.stage(cursor)?;' \
+  geode-calibration \
+  a_dropped_pipeline_keeps_the_last_graph_and_enter_opens_nothing
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
