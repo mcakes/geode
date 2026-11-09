@@ -1119,6 +1119,8 @@ targets at startup: a stage naming a dataset that is not a document
 dataset, or a publish naming a target `egress.toml` lacks, drops its
 pipeline with an Error that names the layer which supplied the stage.
 
+## VolMonitor
+
 `[volwatch]` in `app.toml` configures the VolMonitor tile (see
 [VolMonitor](features.md#volmonitor)) and `vol_views.toml` declares
 its tabs. All three `[volwatch]` keys and the tabs are hot: a reload that
