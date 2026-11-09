@@ -11550,6 +11550,15 @@ run_mutation "schema/document: dimensions outside the key are dropped, not silen
   '    let _ = &unkeyed;' \
   geode-core a_document_dimension_outside_the_key_is_dropped
 
+# A prefix answer holds every document under the prefix; without the
+# key-tuple comparison every row joins the first document and two
+# expiries decode as one chain.
+run_mutation "core documents: a prefix snapshot splits by key" \
+  crates/geode-core/src/document/snapshot.rs \
+  '            Some((last, _, hi)) if *last == key => *hi = row + 1,' \
+  '            Some((_, _, hi)) => *hi = row + 1,' \
+  geode-core documents_from_snapshot_splits_a_prefix_snapshot_by_key_tuple
+
 # `Scope::applicable_to` drops selections for columns the dataset lacks
 # and reports them to the caller.
 run_mutation "scope: applicable_to drops a selection on a column the dataset lacks" \
@@ -21467,33 +21476,33 @@ run_mutation "pricer storage: legs need not follow their package" \
   '            let follows = true;' \
   geode-pricer a_hostile_document_is_refused_with_a_reason
 
+# The decoding itself is `geode_core::document::documents_from_snapshot`;
+# the wrapper decides what a zero-row answer and another sheet's answer
+# mean for a sheet.
 run_mutation "pricer storage: a zero-row answer decodes as a document" \
   crates/geode-pricer/src/core/storage.rs \
-  '    if snapshot.rows() == 0 {
-        return Ok(None);
-    }
-    let mut out = DocumentRows {' \
-  '    let mut out = DocumentRows {' \
+  '        0 => Ok(None),' \
+  '        0 => Err(format!("no document named {name}")),' \
   geode-pricer a_zero_row_answer_is_no_document
 
-run_mutation "pricer storage: the decoder skips the i64 column-type refusal" \
-  crates/geode-pricer/src/core/storage.rs \
+run_mutation "core documents: the decoder skips the i64 column-type refusal" \
+  crates/geode-core/src/document/snapshot.rs \
   '            if snapshot.i64_column(name).is_none() {
                 return Err(format!("column '"'"'{name}'"'"' is not i64"));' \
   '            if false {
                 return Err(format!("column '"'"'{name}'"'"' is not i64"));' \
-  geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+  geode-core a_missing_wrong_typed_or_null_column_is_refused_by_name
 
-run_mutation "pricer storage: the decoder skips the utf8 column-type refusal" \
-  crates/geode-pricer/src/core/storage.rs \
+run_mutation "core documents: the decoder skips the utf8 column-type refusal" \
+  crates/geode-core/src/document/snapshot.rs \
   '            if snapshot.str_column(name).is_none() && snapshot.dict_column(name).is_none() {' \
   '            if false {' \
-  geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
+  geode-core a_missing_wrong_typed_or_null_column_is_refused_by_name
 
 run_mutation "pricer storage: an answer for another sheet installs under this name" \
   crates/geode-pricer/src/core/storage.rs \
-  '                Column::Utf8(v) if v.iter().all(|k| k == name) => continue,' \
-  '                Column::Utf8(_) => continue,' \
+  '        1 if docs[0].key == [name] => Ok(docs.pop()),' \
+  '        1 => Ok(docs.pop()),' \
   geode-pricer a_missing_or_wrong_typed_column_is_refused_by_name
 
 # A line's payout currency is saved and reloaded; a dropped one would
@@ -44051,6 +44060,26 @@ run_mutation "calibration model: a held publish paints its gate edge" \
                 EdgeTone::Quiet' \
   geode-calibration \
   cards_carry_tone_time_and_summary_from_results
+
+# ---- Calibration tile: data flow ----
+
+# A source whose read failed stays pending; without the gate the run goes
+# out with that source's documents missing.
+run_mutation "calibration data: a run waits for every source" \
+  crates/geode-calibration/src/tile/data.rs \
+  '        if !self.sources.pending.is_empty() {' \
+  '        if false {' \
+  geode-calibration \
+  a_failed_source_read_is_a_notice_and_no_run_goes_out
+
+# Only the last run's tag is listened for; accepting any tag once a run
+# was submitted lets an older run's answer paint the cards.
+run_mutation "calibration data: a stale outcome is dropped" \
+  crates/geode-calibration/src/tile/data.rs \
+  '        if outcome.key != self.key() || expected != Some(outcome.tag) {' \
+  '        if outcome.key != self.key() || expected.is_none() {' \
+  geode-calibration \
+  a_stale_or_foreign_calibration_outcome_is_ignored
 
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
