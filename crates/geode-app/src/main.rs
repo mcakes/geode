@@ -108,6 +108,8 @@ fn main() {
             // context overrides Root focus cycling while the popup is active.
             geode_timeseries::init(cx);
             geode_volslice::init(cx);
+            // The calibration tile's picker fields keep tab for completion.
+            geode_calibration::init(cx);
             // The classifications grid keeps its own keys from the table.
             geode_classifications::init(cx);
             // The watchlist grid likewise.
@@ -331,6 +333,7 @@ fn add_bridge_modules(roster: &mut ModuleRoster, bridge: &bridge::Bridge) {
     }
     roster.add(Box::new(bridge.timeseries.clone()));
     roster.add(Box::new(bridge.volslice.clone()));
+    roster.add(Box::new(bridge.calibration.clone()));
     roster.add(Box::new(bridge.classifications.clone()));
     roster.add(Box::new(bridge.watchlist.clone()));
     roster.add(Box::new(bridge.volwatch.clone()));
@@ -1271,6 +1274,55 @@ label = "skew"
         assert!(
             docs.iter()
                 .any(|d| d.file.to_string_lossy() == "<module:volslice>")
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// The production roster hosts the calibration tile beside the vol
+    /// slice viewer: its kind gets an add-tile row, its actions register
+    /// and its fragment splices in.
+    #[gpui::test]
+    fn the_roster_lists_calibration_and_registers_its_actions(cx: &mut gpui::TestAppContext) {
+        use geode_shell::actions::ActionId;
+        let dir = tempfile::tempdir().unwrap();
+        let (config, _) = ShellServices::config_and_builtin(ConfigSources {
+            builtin: builtin_layer(Some(dir.path())),
+            ..ConfigSources::default()
+        });
+        let setup = bridge::data_setup(
+            &config,
+            dir.path().join("geode.duckdb"),
+            geode_data::adapter::AdapterRegistry::default(),
+            geode_data::PricerRegistry::default(),
+            geode_data::VolModelRegistry::default(),
+            geode_data::CalibratorRegistry::default(),
+        )
+        .unwrap();
+        let bridge =
+            cx.update(|cx| bridge::start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let mut roster = ModuleRoster::new();
+        add_bridge_modules(&mut roster, &bridge);
+        assert!(roster.kinds().contains(&"calibration"));
+        let mut registry = ActionRegistry::default();
+        register_add_actions(&mut registry, &roster.titled_kinds());
+        roster.register_actions(&mut registry);
+        assert_eq!(
+            registry
+                .get(&ActionId("tile::add_calibration".to_string()))
+                .expect("the calibration kind gets an add-tile row")
+                .title,
+            "Calibration: Split"
+        );
+        assert!(
+            registry
+                .get(&ActionId("calibration::run_all".to_string()))
+                .is_some()
+        );
+        let (docs, diags) = roster.keymap_fragments();
+        assert!(diags.is_empty(), "{diags:?}");
+        assert!(
+            docs.iter()
+                .any(|d| d.file.to_string_lossy() == "<module:calibration>")
         );
         bridge.handle.shutdown();
     }

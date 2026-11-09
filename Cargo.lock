@@ -2516,6 +2516,7 @@ dependencies = [
  "async-channel",
  "chrono",
  "geode-blotter",
+ "geode-calibration",
  "geode-classifications",
  "geode-compose",
  "geode-core",
@@ -2562,6 +2563,19 @@ dependencies = [
  "gpui-pre",
  "toml 1.1.4+spec-1.1.0",
  "tracing",
+]
+
+[[package]]
+name = "geode-calibration"
+version = "0.1.0"
+dependencies = [
+ "geode-core",
+ "geode-data",
+ "geode-shell",
+ "geode-tile",
+ "gpui-component",
+ "gpui-pre",
+ "toml 1.1.4+spec-1.1.0",
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ members = [
     "crates/geode-marketdata",
     "crates/geode-chart",
     "crates/geode-timeseries",
+    "crates/geode-calibration",
     "crates/geode-volslice",
     "crates/geode-scenario",
     "crates/geode-classifications",
@@ -45,6 +46,7 @@ geode-tile = { path = "crates/geode-tile" }
 geode-pricing = { path = "crates/geode-pricing" }
 geode-chart = { path = "crates/geode-chart" }
 geode-timeseries = { path = "crates/geode-timeseries" }
+geode-calibration = { path = "crates/geode-calibration" }
 geode-volslice = { path = "crates/geode-volslice" }
 geode-scenario = { path = "crates/geode-scenario" }
 geode-classifications = { path = "crates/geode-classifications" }

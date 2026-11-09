@@ -47,6 +47,9 @@ geode-scenario.workspace = true
 geode-timeseries.workspace = true
 # The vol slice viewer's factory shares the bridge's DataHandle.
 geode-volslice.workspace = true
+# The calibration graph tile's factory shares the bridge's DataHandle and takes
+# the read pipeline document at startup and on every reload.
+geode-calibration.workspace = true
 geode-classifications.workspace = true
 # The watchlist factory takes the bridge's config snapshot and refresh hook.
 geode-watchlist.workspace = true

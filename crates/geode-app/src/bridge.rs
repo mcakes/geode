@@ -5,13 +5,14 @@
 
 use crate::watchlists::{WatchlistCache, fold_watchlists, object_provenance, scopes_and_named};
 use geode_blotter::BlotterFactory;
+use geode_calibration::{CalibrationConfig, CalibrationFactory};
 use geode_core::colour::NamedColours;
 use geode_core::config::{
     Config, DIMENSIONS_DOC, Diagnostic, Layer, Severity, VOL_VIEWS_DOC, load_views,
 };
 use geode_core::dimensions::DerivedDimensions;
 use geode_core::document::DocumentKind;
-use geode_core::egress_config;
+use geode_core::egress_config::{self, EgressSpec};
 use geode_core::named::NamedExpressions;
 use geode_core::panel::{KindActionRegistry, PANELS_DOC, PanelSpec, load_panels, refusal};
 use geode_core::query::{AsOf, CatalogParams, DistinctOutcome, ReferenceOutcome, ReferenceParams};
@@ -87,14 +88,10 @@ pub struct DataSetup {
     /// `[volwatch]` as read at startup, pushed whole to the factory.
     pub volwatch_settings: VolwatchSettings,
     /// The `calibration` document's pipelines, read and checked against
-    /// the schema and the egress targets at startup, for the calibration
-    /// tile's factory. The factory does not exist yet; the lint expectation
-    /// fails the build the moment a reader appears, so it is removed then.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "read by the calibration tile's factory")
-    )]
-    pub calibration_pipelines: geode_core::calibration::Pipelines,
+    /// the schema and the egress targets at startup, with that schema,
+    /// the targets and the findings: pushed whole to the calibration
+    /// tile's factory.
+    pub calibration: CalibrationConfig,
     /// The accepted market-data panels in `panels` document order, and an
     /// Error per refused panel for the shell's config section.
     pub panels: Vec<PanelSpec>,
@@ -126,6 +123,7 @@ pub(crate) const MODULE_KINDS: &[&str] = &[
     "blotter",
     "timeseries",
     "volslice",
+    "calibration",
     "classifications",
     "watchlist",
     "volwatch",
@@ -233,6 +231,56 @@ fn load_scenarios_from_config(
     (accepted, diags)
 }
 
+/// The `calibration` document read and checked against `schema` (the one
+/// the service serves) and `egress` (the targets as declared), as the
+/// calibration tile's factory takes it: at startup and on every reload.
+/// No document means no pipelines. `from_doc`'s structural problems are
+/// Errors; a stage over a dataset the schema lacks or a target egress does
+/// not declare drops its pipeline with a Warning. Both kinds ride in the
+/// config's `diagnostics`, for the log and the tile's header alike.
+pub fn calibration_config(
+    config: &Config,
+    schema: &Arc<SchemaSpec>,
+    egress: &[EgressSpec],
+) -> CalibrationConfig {
+    let (pipelines, diagnostics) = match config.doc(geode_core::calibration::CALIBRATION_DOC) {
+        Some(doc) => {
+            let (pipelines, mut diagnostics) = geode_core::calibration::from_doc(doc);
+            let (pipelines, mut d) =
+                geode_core::calibration::check_against(pipelines, schema, egress);
+            // The pure check cannot know which layer supplied the stage it
+            // refused; its paths are keys of the document.
+            for diag in &mut d {
+                if diag.layer.is_none() {
+                    diag.layer = diag
+                        .path
+                        .as_deref()
+                        .and_then(|p| config.explain(geode_core::calibration::CALIBRATION_DOC, p));
+                }
+            }
+            diagnostics.extend(d);
+            (pipelines, diagnostics)
+        }
+        None => (geode_core::calibration::Pipelines::default(), Vec::new()),
+    };
+    CalibrationConfig {
+        pipelines: Arc::new(pipelines),
+        schema: schema.clone(),
+        egress: Arc::new(
+            egress
+                .iter()
+                .map(|spec| {
+                    (
+                        spec.name.clone(),
+                        spec.documents.iter().map(|(doc, _)| doc.clone()).collect(),
+                    )
+                })
+                .collect(),
+        ),
+        diagnostics: Arc::new(diagnostics),
+    }
+}
+
 /// Build setup when both datasets and views documents are present. Empty
 /// parsed definitions still produce Some with any diagnostics; missing either
 /// document returns None. Adapters, pricers, vol models and calibration
@@ -271,27 +319,9 @@ pub fn data_setup(
     // and the egress targets as declared, before `resolve` consumes the
     // specs. A bad builtin or desk document is reported here at startup,
     // as a bad `vol_views` is; no document means no pipelines.
-    let calibration_pipelines = match config.doc(geode_core::calibration::CALIBRATION_DOC) {
-        Some(doc) => {
-            let (pipelines, d) = geode_core::calibration::from_doc(doc);
-            diagnostics.extend(d);
-            let (pipelines, mut d) =
-                geode_core::calibration::check_against(pipelines, &service.schema, &egress_specs);
-            // The pure check cannot know which layer supplied the stage it
-            // refused; its paths are keys of the document.
-            for diag in &mut d {
-                if diag.layer.is_none() {
-                    diag.layer = diag
-                        .path
-                        .as_deref()
-                        .and_then(|p| config.explain(geode_core::calibration::CALIBRATION_DOC, p));
-                }
-            }
-            diagnostics.extend(d);
-            pipelines
-        }
-        None => geode_core::calibration::Pipelines::default(),
-    };
+    let calibration_pipelines =
+        calibration_config(config, &Arc::new(service.schema.clone()), &egress_specs);
+    diagnostics.extend(calibration_pipelines.diagnostics.iter().cloned());
     let (egress, d) = geode_data::egress::resolve(egress_specs, &service.adapters);
     diagnostics.extend(d);
     // Resolve the one position service the same way: an unknown adapter, or
@@ -447,7 +477,7 @@ pub fn data_setup(
         config: service,
         views,
         dimensions,
-        calibration_pipelines,
+        calibration: calibration_pipelines,
         colours,
         diagnostics,
         local_datasets,
@@ -897,6 +927,10 @@ pub struct Bridge {
     /// The vol slice viewer's factory, sharing the data handle. Its expiry
     /// colors come from the theme, so no reload reaches it.
     pub volslice: Rc<geode_volslice::VolsliceFactory>,
+    /// The calibration tile's factory, sharing the handle. Retained so
+    /// every reload pushes it the pipelines read against the schema the
+    /// service serves and the egress targets as declared.
+    pub calibration: Rc<CalibrationFactory>,
     /// The classifications factory, sharing the handle. Retained so every
     /// reload pushes it the dimensions, schema, views and layers it reads.
     pub classifications: Rc<geode_classifications::ClassificationsFactory>,
@@ -1122,6 +1156,10 @@ pub fn start(
         setup.colours.clone(),
     ));
     let volslice = Rc::new(geode_volslice::VolsliceFactory::new(handle.clone()));
+    // Pushed its startup config now, before any tile is restored; every
+    // reload pushes the next one.
+    let calibration = Rc::new(CalibrationFactory::new(handle.clone()));
+    calibration.set_config(setup.calibration, cx);
     let volwatch = Rc::new(
         VolwatchFactory::new(handle.clone(), setup.volwatch_settings.clone())
             .with_dims(setup.dimensions.clone()),
@@ -1198,6 +1236,7 @@ pub fn start(
         scenario_cells,
         timeseries,
         volslice,
+        calibration,
         classifications,
         watchlist,
         volwatch,
@@ -1688,6 +1727,10 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
         let watchlist = bridge.watchlist.clone();
         let watchlist_cache = watchlist_cache.clone();
         let startup_schema = bridge.schema.clone();
+        let calibration = bridge.calibration.clone();
+        // The same startup schema, shared the way the calibration config
+        // carries it.
+        let calibration_schema: Arc<SchemaSpec> = Arc::new((*bridge.schema).clone());
         let diagnostics = diagnostics.clone();
         let scenarios = bridge.scenarios.clone();
         let scenario_views = bridge.scenario_views.clone();
@@ -1695,7 +1738,23 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
         move |app, event: &ShellEvent, cx| match event {
             ShellEvent::ConfigReloaded => {
                 let config = app.read(cx).config();
+                // The calibration pipelines first: they need no views doc,
+                // and a reload without one must still reach the open
+                // tiles. Read against the schema the service serves (a
+                // stage over a dataset awaiting restart is dropped here as
+                // at startup) and the egress targets as the reloaded
+                // document declares them; that reader's own findings were
+                // the startup read's to report.
+                let (egress_specs, _) = config
+                    .doc("egress")
+                    .map(|doc| egress_config::from_doc(doc, &calibration_schema))
+                    .unwrap_or_default();
+                let next_calibration =
+                    calibration_config(config, &calibration_schema, &egress_specs);
+                let calibration_diags: Vec<Diagnostic> =
+                    next_calibration.diagnostics.iter().cloned().collect();
                 if config.doc("views").is_none() {
+                    calibration.set_config(next_calibration, cx);
                     return;
                 }
                 // Use the same presentation-aware view loader as startup,
@@ -1800,12 +1859,14 @@ pub fn attach(bridge: &Bridge, app: &Entity<ShellApp>, cx: &mut App) {
                 // diagnostics can now be updated through cx.
                 classifications.set_config(classification_config, cx);
                 watchlist.set_config(watchlist_config, cx);
+                calibration.set_config(next_calibration, cx);
                 watchlist_cache.set_definitions(folded, &app, cx);
                 let reload_diags: Vec<Diagnostic> = presentation_diags
                     .into_iter()
                     .chain(colour_diags)
                     .chain(pin_diags)
                     .chain(watchlist_diags)
+                    .chain(calibration_diags)
                     .chain(handoff)
                     .collect();
                 if !reload_diags.is_empty() {
@@ -2961,6 +3022,7 @@ role = "key"
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -8633,7 +8695,7 @@ h = 480.0
         );
         assert_eq!(d.path.as_deref(), Some("app.calibration.engine"));
         assert!(
-            setup.calibration_pipelines.pipelines.is_empty(),
+            setup.calibration.pipelines.pipelines.is_empty(),
             "no calibration document, no pipelines"
         );
 
@@ -8672,7 +8734,8 @@ h = 480.0
         let dir = tempfile::tempdir().unwrap();
         let setup = demo_setup(dir.path(), None);
         let names: Vec<&str> = setup
-            .calibration_pipelines
+            .calibration
+            .pipelines
             .pipelines
             .iter()
             .map(|p| p.name.as_str())
@@ -8709,7 +8772,8 @@ h = 480.0
         )
         .unwrap();
         let names: Vec<&str> = setup
-            .calibration_pipelines
+            .calibration
+            .pipelines
             .pipelines
             .iter()
             .map(|p| p.name.as_str())
@@ -8735,6 +8799,189 @@ h = 480.0
             Some(Layer::Desk),
             "the layer is filled in from provenance"
         );
+    }
+
+    /// The demo `datasets` document, whose `option_chain`,
+    /// `dividend_schedule` and `rate_curve` are the document datasets the
+    /// builtin pipeline reads and publishes.
+    const DEMO_DATASETS: &str = include_str!("../../../examples/demo-config/datasets.toml");
+
+    /// A `sophis` target accepting the rate curve the builtin pipeline
+    /// publishes, as the demo layer declares it.
+    const SOPHIS_EGRESS: &str =
+        "[sophis]\nadapter = \"demo_bus\"\n[sophis.documents]\nrate_curve = \"ratecurve/{key}\"\n";
+
+    /// The calibration factory holds its config from startup, before any
+    /// tile is restored: the builtin pipeline, clean against the demo
+    /// schema and the demo target, with that schema and the targets.
+    #[gpui::test]
+    fn startup_pushes_the_calibration_config(cx: &mut gpui::TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let setup = demo_setup(dir.path(), None);
+        let bridge =
+            cx.update(|cx| start(setup, FindStyle::default(), Duration::from_secs(60), cx));
+        let config = bridge.calibration.config().expect("pushed at startup");
+        let names: Vec<&str> = config
+            .pipelines
+            .pipelines
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["implied_forwards"]);
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
+        assert!(
+            config
+                .schema
+                .dataset("option_chain")
+                .is_some_and(|d| d.is_document()),
+            "the startup schema"
+        );
+        assert!(
+            config
+                .egress
+                .iter()
+                .any(|(name, docs)| name == "sophis" && docs.iter().any(|d| d == "rate_curve")),
+            "{:?}",
+            config.egress
+        );
+        bridge.handle.shutdown();
+    }
+
+    /// The `ConfigReloaded` observer pushes the calibration factory the
+    /// pipelines read from the reloaded config against the schema the
+    /// service serves: a user document adding a pipeline reaches the open
+    /// tiles, and a stage over a dataset the schema lacks is dropped with
+    /// its finding carried in the config.
+    #[gpui::test]
+    fn a_config_reload_pushes_the_calibration_config(cx: &mut gpui::TestAppContext) {
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(
+            user.path().join("calibration.toml"),
+            "config_version = 1\n[pipelines.second]\n\
+             [stages.chain2]\npipeline = \"second\"\nkind = \"source\"\ndataset = \"option_chain\"\n\
+             [pipelines.third]\n\
+             [stages.nope]\npipeline = \"third\"\nkind = \"source\"\ndataset = \"nope\"\n",
+        )
+        .unwrap();
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("views", SLIM_VIEW).unwrap(),
+                LayerDoc::builtin("datasets", DEMO_DATASETS).unwrap(),
+                LayerDoc::builtin(
+                    geode_core::calibration::CALIBRATION_DOC,
+                    geode_core::calibration::BUILTIN_CALIBRATION,
+                )
+                .unwrap(),
+                LayerDoc::builtin("egress", SOPHIS_EGRESS).unwrap(),
+            ],
+            desk: None,
+            user: Some(user.path().to_path_buf()),
+        });
+        let schema = SchemaSpec::from_doc(services.config.doc("datasets").unwrap()).0;
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = Bridge {
+            schema: Rc::new(schema),
+            ..test_bridge(handle)
+        };
+        assert!(
+            bridge.calibration.config().is_none(),
+            "fixture: built with nothing pushed"
+        );
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let config = bridge.calibration.config().expect("the reload pushed one");
+        let names: Vec<&str> = config
+            .pipelines
+            .pipelines
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["implied_forwards", "second"]);
+        assert_eq!(config.diagnostics.len(), 1, "{:?}", config.diagnostics);
+        assert!(
+            config.diagnostics[0]
+                .message
+                .contains("pipeline 'third' dropped"),
+            "{}",
+            config.diagnostics[0].message
+        );
+        assert_eq!(config.diagnostics[0].layer, Some(Layer::User));
+        assert!(
+            config.egress.iter().any(|(name, _)| name == "sophis"),
+            "{:?}",
+            config.egress
+        );
+    }
+
+    /// A reload of a config without a `views` document still reaches the
+    /// calibration factory: the observer pushes it before the views gate.
+    #[gpui::test]
+    fn a_config_reload_without_views_still_pushes_the_calibration_config(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let services = test_shell_services_with_sources(ConfigSources {
+            builtin: vec![
+                LayerDoc::builtin("datasets", DEMO_DATASETS).unwrap(),
+                LayerDoc::builtin(
+                    geode_core::calibration::CALIBRATION_DOC,
+                    geode_core::calibration::BUILTIN_CALIBRATION,
+                )
+                .unwrap(),
+                LayerDoc::builtin("egress", SOPHIS_EGRESS).unwrap(),
+            ],
+            desk: None,
+            user: None,
+        });
+        assert!(
+            services.config.doc("views").is_none(),
+            "fixture: no views doc"
+        );
+        let schema = SchemaSpec::from_doc(services.config.doc("datasets").unwrap()).0;
+        let window = open_test_window(cx, services);
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let (handle, _rx) = DataHandle::for_tests();
+        let bridge = Bridge {
+            schema: Rc::new(schema),
+            ..test_bridge(handle)
+        };
+        let app = app_of(window, cx);
+        cx.update(|cx| attach(&bridge, &app, cx));
+        let shell = window.root(&mut vcx).unwrap().read_with(&vcx, |root, _| {
+            root.view().clone().downcast::<ShellView>().unwrap()
+        });
+        vcx.update(|_, cx| {
+            shell
+                .read(cx)
+                .app()
+                .clone()
+                .update(cx, |_, cx| cx.emit(ShellEvent::ConfigReloaded));
+        });
+        vcx.run_until_parked();
+        let config = bridge
+            .calibration
+            .config()
+            .expect("pushed without a views doc");
+        assert_eq!(config.pipelines.pipelines.len(), 1);
+        assert!(config.diagnostics.is_empty(), "{:?}", config.diagnostics);
     }
 
     /// Verify setup carries every local dataset name and excludes non-local ones.
@@ -8813,6 +9060,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -8934,6 +9182,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -9342,6 +9591,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -9471,6 +9721,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -9545,6 +9796,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -9625,6 +9877,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -9698,6 +9951,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -9804,6 +10058,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -10028,6 +10283,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -10120,6 +10376,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -10212,6 +10469,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -10330,6 +10588,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -10439,6 +10698,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -10515,6 +10775,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -10670,6 +10931,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -10751,6 +11013,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),
@@ -11451,6 +11714,7 @@ h = 480.0
                 NamedColours::default(),
             )),
             volslice: Rc::new(geode_volslice::VolsliceFactory::new(handle.clone())),
+            calibration: Rc::new(CalibrationFactory::new(handle.clone())),
             watchlist: Rc::new(geode_watchlist::WatchlistFactory::new()),
             volwatch: Rc::new(VolwatchFactory::new(
                 handle.clone(),

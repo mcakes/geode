@@ -68,9 +68,9 @@ lives there. The menu and popover implementations live in `geode-shell`,
 which also uses them for its row menu; `geode-tile` re-exports them for tiles.
 
 Feature crates such as `geode-blotter`, `geode-marketdata`,
-`geode-timeseries`, `geode-volslice`, `geode-classifications`,
-`geode-watchlist`, `geode-volwatch`, `geode-scenario`, and `geode-pricer`
-implement the shell's module contract and may ask the data service through
+`geode-timeseries`, `geode-volslice`, `geode-calibration`,
+`geode-classifications`, `geode-watchlist`, `geode-volwatch`,
+`geode-scenario`, and `geode-pricer` implement the shell's module contract and may ask the data service through
 `DataHandle` (the watchlist tile asks nothing: its lists arrive through
 `WatchlistGlobal`; the VolMonitor tile reads the same global and asks a vol
 board, a tenor listing and a vega query). They do not depend on sibling

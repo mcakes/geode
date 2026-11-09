@@ -366,6 +366,20 @@ insert` (the underlying picker's field) it binds `enter`, `escape` and
 difference chooser) `enter` and `escape`, its steps being the shared ones.
 Its normal-mode `escape` is `volslice::cancel`, which dismisses the footer
 notice when there is nothing else to cancel.
+The calibration fragment binds its verbs under `mode == normal`: `h`/`l`
+and the arrows walk the graph's edges (to an input, to a consumer), `j`/`k`
+the stages of one depth, the bare digits `1`..`9` jump to a stage (its key
+context does not opt into counts), `/` filters stages (beating the shell's
+find inside the tile), `r`/`shift+r` run from the cursor or the whole
+pipeline, `shift+p` publishes, `c`/`shift+c` connect and disconnect an
+input, `a`/`d` add and delete a stage, `shift+l` relays out the graph and
+`.` opens the action menu. Under `mode == insert` (the filter and the
+picker fields) it binds `enter`, `escape` and `up`/`down`
+(`calibration::list_down`/`list_up`); under `mode == menu` with `popup ==
+actions` `enter`, `escape` and `.`, and with `popup == list` `enter` and
+`escape`, the steps being the shared ones. Its normal-mode `escape` is
+`calibration::cancel`, which dismisses the header's notices when there is
+nothing else to cancel.
 The classifications fragment binds its label verbs under `mode == normal`
 (`i`/`enter` edit with the caret at the end, `shift+i` edit with the label
 selected, `x`/`d d` clear, `o`/`shift+o` add a value, `s` cycle the label
