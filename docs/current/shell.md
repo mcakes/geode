@@ -2106,7 +2106,13 @@ the action acts on the focused tile, so a request from any other tile would
 act on the wrong one, and is dropped with a `geode::shell` debug line. The
 Calibration tile's `⋯` menu `Open stage` row uses it to run
 `config::calibration`, whose binding `enter` resolves in the shell before the
-tile sees the key.
+tile sees the key. The tile's `a` relies on the drain order as well: it holds
+the seeded new stage as `pending_add`, requests `config::calibration`, and
+clears the seed on its own next frame notification, which is sound only
+because the shell's frame observer is registered before any tile's
+(`ShellView::new`, ahead of the first occupant) and so reads
+`config_object` and dispatches the request in the same notification, before
+the tile's observer runs.
 
 Setting an object whose winning copy comes from the desk or builtin layer
 forks it as an object-dialog edit does: the shadowed copy is recorded in the

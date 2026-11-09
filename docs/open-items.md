@@ -1256,6 +1256,20 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   recomputed when a config push rebuilds the model mid-drag; the drop asks
   `can_feed` again over the pipeline as it then stands, so a drop onto a
   card the reload made ineligible queues nothing and says nothing.
+- The source cards' `stale_after` timer is Part 3's: the header shows the
+  newest source publication time, never stale, and no card time turns
+  italic past `stale_after`. `stale_after` is `blotter.stale_after` in
+  `app.toml`, threaded by the bridge into each factory, so the timer needs
+  a `CalibrationFactory` setter, a bridge reload hook, a `StaleTimer` on
+  the tile and a stale flag per source card on the model.
+- Two tile edits inside the write window (the debounce, the write and the
+  reload) compose over the pre-write graph: `validated` and `connect_edit`
+  read the pushed `sources`, not `sources` plus the frame's pending batch,
+  so a second pick within the window overwrites the first (whole-object
+  tables). A fix folds the pending edits into `sources` before validating.
+- Per-frame nits: `all_notices()` clones every notice into a `Vec` on each
+  render, and the body's `on_mouse_move` runs an entity update per pointer
+  move even when nothing changes.
 
 ### Display checks
 

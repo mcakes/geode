@@ -4227,8 +4227,10 @@ tile picker and from an `underlying_ref` row through the launch context
 session record is), and it follows a link group: the followed group's single underlying
 is the tile's, else its own. The header reads `Calibration · <underlying>`
 and, while a pipeline is shown, a muted `<n> stages · <k> fits`, then the
-shared cluster (the mode icon, the config's findings as notices, link chips,
-the health chip for the source stages' datasets, `⋯` and ×). The pipeline
+shared cluster (the mode icon, the config's findings as notices, the newest
+source publication time among the documents in hand as `<dataset> HH:MM`,
+cleared with the documents on a flip and never painted stale in this part,
+link chips, the health chip for the source stages' datasets, `⋯` and ×). The pipeline
 shown is the session's `pipeline`, else the document's first; `:pipeline
 <name>` switches (`unknown pipeline '<name>'` otherwise), dropping the old
 pipeline's results, documents and watches and a cursor the new one lacks.
@@ -4291,8 +4293,11 @@ publish is refused while one is in flight rather than run twice. A run is
 refused with a warning notice while no underlying is loaded (`no
 underlying`, or `no underlying in A` when following), while a source is owed
 (`waiting for a, b`), with no cursor for `r` (`no stage under the cursor`)
-and when the data handle's queue is full (`calibration queue full`; the
-documents stay, so the next change retries). Only the latest request of
+and, on the publish route (`y`, `:publish`), when the data handle's queue is
+full (`calibration queue full`); on the run route (`r`, `shift+r`, `:run`,
+an on-input run) the same refusal is a status notice, since nothing was
+asked of the trader. Either way the documents stay, so the next change
+retries. Only the latest request of
 each lane is listened for: a `Run` outcome must carry the last run's tag, a
 publish the last user action's, so a late run is never read as a publish
 answer, and another tile's outcome is dropped. The stages an outcome
@@ -4338,7 +4343,10 @@ that is gone moves to the first card in layout order — and the sources are
 asked again only when a source stage's dataset or series changed or a
 source was added, at once when shown and on the next show when hidden,
 the changed source waiting meanwhile. The push itself submits no run; the
-next publication or `r` does. A push that drops the shown pipeline (a stage
+next publication or `r` does, and so does the completion of the re-read a
+source change caused, which runs the pipeline as any arrival does under
+`on_input`. A run still out when a stage went stale is forgotten, so its
+late answer cannot repaint the stale card as current. A push that drops the shown pipeline (a stage
 the reader refused) keeps the last valid graph and its results on screen
 under the finding's notice, the cursor still walking it, while the runs, the
 publish and the edits read the live pipeline alone and so refuse (`no
@@ -4454,8 +4462,10 @@ keeps the last valid graph under the finding's notice (above). An engine
 `Failed` is the card's danger tone with the reason and its downstream in
 the same action `Skipped`, a publish among them; the next run that
 succeeds replaces both. A `Held` publish is the warning tone, the dashed gate edge and `p`
-refused with the reason. A full queue is a status notice and nothing is
-lost: the documents stay and the next publication, `r` or reload retries.
+refused with the reason. A full queue is a status notice on the run route
+and on a document read, and a warning notice on the publish route (the
+verb's refusal); either way nothing is lost: the documents stay and the
+next publication, `r` or reload retries.
 A hidden tile keeps its reads (their answers land) and submits no run; a
 run that completed while hidden goes out once on show, and a source
 changed while hidden is asked on show. A restart begins the demo engine's
