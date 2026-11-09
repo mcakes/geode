@@ -152,6 +152,19 @@ pub fn can_feed(pipeline: &Pipeline, from: &str, stage: &str) -> bool {
         .any(|(name, _)| name == from)
 }
 
+/// Every stage `from` may be connected to: `{ s | can_feed(from, s) }`.
+/// Computed once when a port drag starts, so the cards' drop tests read a
+/// set instead of asking `can_feed` (which builds the candidate list) on
+/// every frame of the drag.
+pub fn drop_targets(pipeline: &Pipeline, from: &str) -> BTreeSet<StageName> {
+    pipeline
+        .stages
+        .iter()
+        .filter(|s| can_feed(pipeline, from, &s.name))
+        .map(|s| s.name.clone())
+        .collect()
+}
+
 /// The stage a reader finding is about, from its key path: `stages.<name>`
 /// and `stages.<name>.<key>…` name `<name>`; a document- or pipeline-level
 /// path names none. The tile keeps the stage beside the notice it paints,
@@ -680,6 +693,28 @@ mod tests {
         assert!(!can_feed(&p, "implied_rates", "repo_fit"), "no open port");
         assert!(!can_feed(&p, "publish", "publish"));
         assert!(!can_feed(&p, "box_curve", "nope"));
+
+        // The drop targets are exactly the stages `can_feed` says yes to,
+        // for every stage of the builtin as a drag source.
+        for from in p.stages.iter().map(|s| s.name.clone()) {
+            let expected: BTreeSet<StageName> = p
+                .stages
+                .iter()
+                .filter(|s| can_feed(&p, &from, &s.name))
+                .map(|s| s.name.clone())
+                .collect();
+            assert_eq!(drop_targets(&p, &from), expected, "{from}");
+        }
+        assert_eq!(
+            drop_targets(&p, "box_curve"),
+            BTreeSet::from(["publish".to_string()]),
+            "the one open raster port"
+        );
+        assert!(
+            drop_targets(&p, "chain").is_empty(),
+            "documents feed no open port"
+        );
+        assert!(drop_targets(&p, "nope").is_empty());
 
         assert_eq!(stage_of_path("stages.repo_fit.knots"), Some("repo_fit"));
         assert_eq!(stage_of_path("stages.parity.inputs.0"), Some("parity"));

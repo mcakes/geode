@@ -265,6 +265,7 @@ fn the_wheel_scrolls_an_overflowing_graph_and_clamps(cx: &mut gpui::TestAppConte
     h.draw(&mut vcx);
     let (max_x, max_y) = h.max_scroll(&vcx);
     assert!(max_x > 0.0, "the columns overflow: {max_x}");
+    assert!(max_y > 0.0, "the rows overflow: {max_y}");
     assert_eq!(h.offset(&vcx), (0.0, 0.0));
     let body = vcx.debug_bounds("calibration-graph-7").unwrap();
     let at = body.center();
@@ -335,8 +336,31 @@ fn dragging_a_port_onto_an_eligible_card_queues_the_connect_edit(cx: &mut gpui::
     assert!(h.notices(&vcx).is_empty());
     assert_eq!(
         h.cursor(&vcx).as_deref(),
+        Some("publish"),
+        "the cursor lands on the consumer, where c + enter leaves it"
+    );
+}
+
+/// `escape` during a live drag ends it through the keymap's `cancel`, as
+/// it dismisses any topmost surface: no drag, no preview, and the release
+/// that follows queues nothing. The press is spent on the drag alone.
+#[gpui::test]
+fn escape_ends_a_live_port_drag(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_spx(cx, open_publish_config(), Some("parity"));
+    let target = drag_port_over(&mut vcx, "box_curve", "publish");
+    assert!(vcx.update(|_, cx| cx.has_active_drag()));
+    assert!(h.painted_preview(&vcx).is_some());
+    h.press(&mut vcx, "escape");
+    assert_eq!(h.dispatched(), ["calibration::cancel"]);
+    assert!(!vcx.update(|_, cx| cx.has_active_drag()), "the drag ended");
+    assert_eq!(h.painted_preview(&vcx), None, "the preview left with it");
+    up(&mut vcx, target, MouseButton::Left);
+    assert!(h.config_edits(&mut vcx).is_empty(), "nothing queued");
+    assert!(h.notices(&vcx).is_empty());
+    assert_eq!(
+        h.cursor(&vcx).as_deref(),
         Some("box_curve"),
-        "the press on the port is a press on its card: the cursor went there, and the drop moved it no further"
+        "the pressed card"
     );
 }
 

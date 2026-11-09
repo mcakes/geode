@@ -44209,15 +44209,20 @@ run_mutation "calibration edits: an edit the reader would refuse is not queued" 
 
 # ---- Calibration tile: pointer ----
 
-# A card's can_drop and the drop handler ask one eligibility question,
-# the connect picker's candidates. Answering yes to every drag lets a
-# source's port land on the publish card: the drop reaches the connect,
-# which refuses it as a notice the trader was never offered.
+# The cards' drop targets (computed once per drag) and the drop handler
+# ask one eligibility question, `can_feed`, the connect picker's
+# candidates. Answering yes to every pair lets a source's port land on
+# the publish card: the drop reaches the connect, which refuses it as a
+# notice the trader was never offered.
 run_mutation "calibration pointer: an ineligible drop queues nothing" \
-  crates/geode-calibration/src/tile/pointer.rs \
-  '    drag.tile == tile && pipeline.is_some_and(|p| can_feed(p, &drag.stage, stage))' \
-  '    let _ = (pipeline, tile, drag, stage);
-    true' \
+  crates/geode-calibration/src/core/edits.rs \
+  '    connect_candidates(pipeline, stage)
+        .iter()
+        .any(|(name, _)| name == from)
+}' \
+  '    let _ = (pipeline, from, stage);
+    true
+}' \
   geode-calibration \
   an_ineligible_card_refuses_the_drop
 

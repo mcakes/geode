@@ -170,6 +170,11 @@ pub struct CalibrationTile {
     /// The pipeline the model was built from (live or held), shared with
     /// each card's drop test so a frame clones a handle, not a pipeline.
     model_pipeline: Option<Rc<Pipeline>>,
+    /// The cards a live port drag may land on (`core::edits::drop_targets`
+    /// over the painted pipeline), computed once when the drag starts and
+    /// shared with each card's `can_drop` as a handle, so a frame of the
+    /// drag allocates nothing; `None` with no drag live.
+    drop_targets: Option<Rc<std::collections::BTreeSet<StageName>>>,
     model_version: u64,
     /// The element names and caption texts paint reads, rebuilt with the
     /// model.
@@ -305,6 +310,7 @@ impl CalibrationTile {
             run_due: false,
             model: None,
             model_pipeline: None,
+            drop_targets: None,
             model_version: 0,
             chrome: Chrome::default(),
             viewport: Viewport::default(),
@@ -632,6 +638,11 @@ impl CalibrationTile {
             // it dismisses the header's notices, and is handled only when
             // it did.
             "cancel" => {
+                // A live port drag is the topmost thing to dismiss: it
+                // ends, its preview with it, and the press stops there.
+                if self.cancel_drag(window, cx) {
+                    return true;
+                }
                 if confirm::cancel(self, window, cx) {
                     return true;
                 }

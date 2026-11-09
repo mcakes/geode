@@ -1241,6 +1241,11 @@ for the owner, or a ruling made on the owner's behalf that is still open to reve
   request through panic containment rather than with a named error.
 - The unconsumed-draft publish refusal (`a_publish_draft_for_a_fit_no_raster_reads_is_refused`)
   has no mutation entry.
+- A press on a calibration header notice both lands the cursor on the stage
+  the finding names and dismisses the notice, because `geode_tile::notice`
+  paints a notice as one pressable element whose only press is the dismiss;
+  a two-target notice (a text press that navigates, a × that dismisses) is
+  a `geode-tile` change.
 
 ## Tooling, tests and the mutation harness
 

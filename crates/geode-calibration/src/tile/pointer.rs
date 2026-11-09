@@ -35,7 +35,9 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 
 use super::CalibrationTile;
-use crate::core::edits::{can_feed, stage_of_path};
+use std::rc::Rc;
+
+use crate::core::edits::{can_feed, drop_targets, stage_of_path};
 use crate::core::menu::OPEN_STAGE;
 
 /// What a port drag carries: the tile it left and the stage whose output
@@ -76,7 +78,7 @@ impl CalibrationTile {
             return;
         }
         self.set_cursor(Some(stage.to_string()), cx);
-        if event.click_count >= 2 {
+        if event.click_count == 2 {
             self.frame
                 .request_action(ActionId(OPEN_STAGE.to_string()), cx);
         }
@@ -140,10 +142,36 @@ impl CalibrationTile {
     }
 
     /// A port drag passed gpui's threshold: the popups leave, as they do
-    /// for any verb but their own.
-    pub(super) fn drag_started(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// for any verb but their own, and the cards the drag may land on are
+    /// computed once (`drop_targets` over the painted pipeline) for every
+    /// card's `can_drop` to read through a handle, so no frame of the
+    /// drag asks `can_feed` again.
+    pub(super) fn drag_started(
+        &mut self,
+        drag: &PortDrag,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.close_picker(window, cx);
         self.close_menu(cx);
+        self.drop_targets = self
+            .model_pipeline
+            .as_deref()
+            .filter(|_| drag.tile == self.id)
+            .map(|p| Rc::new(drop_targets(p, &drag.stage)));
+        cx.notify();
+    }
+
+    /// `escape` during a live port drag: the drag ends (gpui would end it
+    /// only on a release), its preview and targets with it, and the press
+    /// is spent. `false` with no drag live.
+    pub(super) fn cancel_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !cx.has_active_drag() {
+            return false;
+        }
+        cx.stop_active_drag(window);
+        self.drag_ended(cx);
+        true
     }
 
     /// Every move of a live port drag over the window (`on_drag_move`
@@ -163,42 +191,56 @@ impl CalibrationTile {
         }
         let next = self
             .card_at(position, bounds)
-            .filter(|stage| self.eligible(drag, stage))
+            .filter(|stage| self.is_target(stage))
             .map(|stage| (drag.stage.to_string(), stage));
         self.set_preview(next, cx);
     }
 
     /// The drag ended somewhere other than a card that took it (a drop on
-    /// the empty body, a release off the tile, `escape`): the preview
-    /// leaves.
+    /// the empty body, a release off the tile, `escape`): the preview and
+    /// the targets leave.
     pub(super) fn drag_ended(&mut self, cx: &mut Context<Self>) {
+        if self.drop_targets.take().is_some() {
+            cx.notify();
+        }
         self.set_preview(None, cx);
     }
 
-    /// A buttonless move over the body with no drag live: a preview a
-    /// cancelled drag left behind goes.
+    /// A buttonless move over the body with no drag live: what a drag
+    /// that ended without a drop (a release off the window) left behind
+    /// goes.
     pub(super) fn pointer_moved(&mut self, cx: &mut Context<Self>) {
-        if self.preview_edge.is_some() && self.picker.is_none() && !cx.has_active_drag() {
-            self.set_preview(None, cx);
+        if (self.drop_targets.is_some() || (self.preview_edge.is_some() && self.picker.is_none()))
+            && !cx.has_active_drag()
+        {
+            self.drag_ended(cx);
         }
     }
 
-    /// [`eligible`] over the painted pipeline.
-    fn eligible(&self, drag: &PortDrag, stage: &str) -> bool {
-        eligible(self.model_pipeline.as_deref(), self.id, drag, stage)
+    /// Whether `stage`'s card is among the live drag's targets: the set
+    /// `drag_started` computed, read without asking `can_feed` again.
+    fn is_target(&self, stage: &str) -> bool {
+        self.drop_targets
+            .as_ref()
+            .is_some_and(|t| t.contains(stage))
     }
 
     /// `drag` released on `stage`'s card: the same connect the picker's
-    /// `enter` runs, once the card is eligible. A drop on a card that is
-    /// not (one `can_drop` refused, so this does not run; or a stale
-    /// pipeline under the drag) is nothing, since it was never offered.
+    /// `enter` runs, once the card is eligible — asked of `can_feed`
+    /// itself here, the truth the targets were built from. A drop on a
+    /// card that is not (one `can_drop` refused, so this does not run; or
+    /// a stale pipeline under the drag) is nothing, since it was never
+    /// offered. A connect that went out lands the cursor on the consumer,
+    /// where `c` + `enter` leaves it, so `x`, `d` and `enter` act on the
+    /// stage the edit landed on.
     pub(super) fn port_dropped(&mut self, stage: &str, drag: &PortDrag, cx: &mut Context<Self>) {
-        self.set_preview(None, cx);
-        if !self.eligible(drag, stage) {
+        self.drag_ended(cx);
+        if !eligible(self.model_pipeline.as_deref(), self.id, drag, stage) {
             return;
         }
-        if let Err(reason) = self.connect(stage, &drag.stage, cx) {
-            self.refuse(reason, cx);
+        match self.connect(stage, &drag.stage, cx) {
+            Ok(()) => self.set_cursor(Some(stage.to_string()), cx),
+            Err(reason) => self.refuse(reason, cx),
         }
     }
 
@@ -260,14 +302,10 @@ impl CalibrationTile {
 
 /// Whether `stage`'s card may take `drag`: the drag is `tile`'s own (a
 /// port from another tile is never eligible) and the dragged stage is a
-/// connect candidate of `stage` over `pipeline` (`can_feed`). The card's
-/// `can_drop` asks this at paint and the drop asks it again, so the two
-/// cannot disagree; with no pipeline nothing is eligible.
-pub(super) fn eligible(
-    pipeline: Option<&Pipeline>,
-    tile: TileId,
-    drag: &PortDrag,
-    stage: &str,
-) -> bool {
+/// connect candidate of `stage` over `pipeline` (`can_feed`). The drop
+/// asks this; the cards' `can_drop` read the set `drop_targets` built
+/// from the same `can_feed` when the drag started, so the two cannot
+/// disagree. With no pipeline nothing is eligible.
+fn eligible(pipeline: Option<&Pipeline>, tile: TileId, drag: &PortDrag, stage: &str) -> bool {
     drag.tile == tile && pipeline.is_some_and(|p| can_feed(p, &drag.stage, stage))
 }

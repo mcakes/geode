@@ -19,9 +19,10 @@
 //! wheel, a right press off the cards, the drag's moves and a drop off
 //! the cards; a right-press menu is hung from the pointer in the body.
 
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
-use geode_core::calibration::Pipeline;
+use geode_core::calibration::StageName;
 use geode_shell::tiling::TileId;
 use gpui::prelude::*;
 use gpui::{
@@ -39,7 +40,7 @@ use geode_shell::tips::{self, Chords, chord_for_preferring};
 
 use super::CalibrationTile;
 use super::keys::Viewport;
-use super::pointer::{PortDrag, eligible};
+use super::pointer::PortDrag;
 use crate::core::model::{EdgeModel, EdgeTone, GraphModel, Tone};
 
 /// The opacity of a card that fails the filter.
@@ -427,7 +428,7 @@ impl CalibrationTile {
                 CardHooks {
                     tile,
                     tile_id: self.id,
-                    pipeline: self.model_pipeline.as_ref().map(Rc::clone),
+                    targets: self.drop_targets.as_ref().map(Rc::clone),
                     rem,
                 },
             ));
@@ -538,7 +539,9 @@ impl CalibrationTile {
 struct CardHooks<'a> {
     tile: &'a Entity<CalibrationTile>,
     tile_id: TileId,
-    pipeline: Option<Rc<Pipeline>>,
+    /// The live drag's targets (`drag_started` computed them once); a
+    /// handle per card per frame, no set and no `can_feed` per frame.
+    targets: Option<Rc<BTreeSet<StageName>>>,
     rem: Pixels,
 }
 
@@ -564,7 +567,7 @@ fn render_card(
     let CardHooks {
         tile,
         tile_id,
-        pipeline,
+        targets,
         rem,
     } = hooks;
     v_flex()
@@ -616,12 +619,15 @@ fn render_card(
                 tile.update(cx, |t, cx| t.card_right_pressed(&stage, event, cx));
             }
         })
+        // gpui asks this of every card on every frame of a drag: a set
+        // lookup, nothing built.
         .can_drop({
             let stage = ids.stage.clone();
             move |value, _, _| {
-                value
-                    .downcast_ref::<PortDrag>()
-                    .is_some_and(|d| eligible(pipeline.as_deref(), tile_id, d, &stage))
+                value.downcast_ref::<PortDrag>().is_some_and(|d| {
+                    d.tile == tile_id
+                        && targets.as_ref().is_some_and(|t| t.contains(stage.as_ref()))
+                })
             }
         })
         .on_drop({
@@ -695,9 +701,9 @@ fn render_port(
             },
             {
                 let tile = tile.clone();
-                move |drag, _, window, cx| {
+                move |drag: &PortDrag, _, window, cx| {
                     cx.stop_propagation();
-                    tile.update(cx, |t, cx| t.drag_started(window, cx));
+                    tile.update(cx, |t, cx| t.drag_started(drag, window, cx));
                     cx.new(|_| drag.clone())
                 }
             },
