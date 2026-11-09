@@ -44031,6 +44031,27 @@ run_mutation "volwatch: book vega paints plain" \
   geode-volwatch \
   book_vega_heats_by_magnitude_so_a_large_short_book_is_as_hot_as_a_long_one
 
+# ---- Calibration tile: layout and graph model ----
+
+# Sorting by the document index alone is the identity: df_monotone would
+# stay below implied_rates although its one input sits at row 0.
+run_mutation "calibration layout: barycentre keeps a stage under its inputs" \
+  crates/geode-calibration/src/core/layout.rs \
+  '    keyed.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));' \
+  '    keyed.sort_by(|a, b| a.1.cmp(&b.1));' \
+  geode-calibration \
+  barycentre_order_puts_a_stage_under_its_inputs
+
+# The check into a held publish is the edge that explains the hold.
+run_mutation "calibration model: a held publish paints its gate edge" \
+  crates/geode-calibration/src/core/model.rs \
+  '            } else if gates {
+                EdgeTone::Gate' \
+  '            } else if gates {
+                EdgeTone::Quiet' \
+  geode-calibration \
+  cards_carry_tone_time_and_summary_from_results
+
 if [[ -n "$changed_ref" ]]; then
   echo "skipped $skipped entries whose files are unchanged since $changed_ref"
 fi
