@@ -12,6 +12,7 @@
 //! focus seam.
 
 pub mod apply;
+mod calibration;
 mod colours;
 mod dataset_columns;
 pub mod grouping_list;
@@ -54,6 +55,11 @@ pub enum Domain {
     /// The vol watchlist's tabs: one object per view, each an ordered list of
     /// measure columns chosen from a catalogue of families and datasets.
     VolViews,
+    /// The calibration pipelines' stages: one object per stage of
+    /// `calibration.toml`'s `stages` table (the document keeps them one
+    /// level down, `config::object_table`), each a kind with its ports and
+    /// parameters.
+    Calibration,
 }
 
 /// The current stage. Nested stages give Escape a previous stage to return to; mutable
@@ -174,17 +180,19 @@ impl Domain {
             Domain::Sources => sources::DOC,
             Domain::Colors => colours::DOC,
             Domain::VolViews => volviews::DOC,
+            Domain::Calibration => calibration::DOC,
         }
     }
 
     /// Every domain, for recognising [`Domain::already_open_notice`] strings.
-    pub const ALL: [Domain; 6] = [
+    pub const ALL: [Domain; 7] = [
         Domain::Views,
         Domain::Groupings,
         Domain::Schema,
         Domain::Sources,
         Domain::Colors,
         Domain::VolViews,
+        Domain::Calibration,
     ];
 
     /// The status notice for a request refused because this domain's dialog is
@@ -197,6 +205,7 @@ impl Domain {
             Domain::Sources => "sources is already open underneath",
             Domain::Colors => "colors is already open underneath",
             Domain::VolViews => "the VolMonitor views dialog is already open",
+            Domain::Calibration => "the Calibration stages dialog is already open",
         }
     }
 
@@ -209,6 +218,7 @@ impl Domain {
             Domain::Sources => "Sources",
             Domain::Colors => "Colors",
             Domain::VolViews => "VolMonitor views",
+            Domain::Calibration => "Calibration stages",
         }
     }
 
@@ -256,6 +266,7 @@ impl Domain {
             Domain::Sources => "sources",
             Domain::Colors => "colors",
             Domain::VolViews => "tabs",
+            Domain::Calibration => "stages",
         }
     }
 
@@ -276,6 +287,7 @@ impl Domain {
             Domain::Sources => |c, _, v| sources::summary(c, v),
             Domain::Colors => |_, _, v| colours::summary(v),
             Domain::VolViews => volviews::summary_in,
+            Domain::Calibration => calibration::summary_in,
         }
     }
 
@@ -290,7 +302,8 @@ impl Domain {
             | Domain::Schema
             | Domain::Sources
             | Domain::Colors
-            | Domain::VolViews => None,
+            | Domain::VolViews
+            | Domain::Calibration => None,
         }
     }
 
@@ -304,7 +317,8 @@ impl Domain {
             | Domain::Schema
             | Domain::Sources
             | Domain::Colors
-            | Domain::VolViews => None,
+            | Domain::VolViews
+            | Domain::Calibration => None,
         }
     }
 
@@ -327,7 +341,8 @@ impl Domain {
             | Domain::Groupings
             | Domain::Schema
             | Domain::Colors
-            | Domain::VolViews => None,
+            | Domain::VolViews
+            | Domain::Calibration => None,
         }
     }
 
@@ -341,16 +356,20 @@ impl Domain {
     }
 
     /// Whether the browse list keeps the merged document's order instead of
-    /// sorting by name. VolMonitor views alone: its objects are the watchlist's
+    /// sorting by name. VolMonitor views: its objects are the watchlist's
     /// tabs, which the tile paints and the digits pick in that order.
+    /// Calibration: a pipeline's stages read in document order, the
+    /// sources first, as the tile lays them out.
     pub fn keeps_document_order(self) -> bool {
-        matches!(self, Domain::VolViews)
+        matches!(self, Domain::VolViews | Domain::Calibration)
     }
 
     /// Whether `shift+j`/`shift+k` on the browse list move the selected
     /// object and write the new order. Only a domain whose document order
-    /// means something can offer it, so this is [`Self::keeps_document_order`]'s
-    /// domain and no other.
+    /// means something can offer it, so this is one of
+    /// [`Self::keeps_document_order`]'s domains: VolMonitor views alone, since a
+    /// stage's place in `calibration.toml` is not what the tile lays out
+    /// by (its inputs are).
     pub fn reorderable(self) -> bool {
         matches!(self, Domain::VolViews)
     }
@@ -371,12 +390,15 @@ impl Domain {
 
     /// Names reserved by syntax outside the domain's own document. Colors excludes
     /// `none` and `sign`, which already mean built-in formatting choices. VolMonitor views
-    /// excludes its document's own keys, which a view name would shadow. Other
+    /// excludes its document's own keys, which a view name would shadow.
+    /// Calibration excludes `request`, the one synthetic stage of an
+    /// outcome the engine never ran, which the reader refuses. Other
     /// domains have no additional reserved names.
     pub fn reserved_names(self) -> &'static [&'static str] {
         match self {
             Domain::Colors => &geode_core::colour::RESERVED_NAMES,
             Domain::VolViews => &["config_version", "default"],
+            Domain::Calibration => &[geode_core::calibration::REQUEST_STAGE],
             Domain::Views | Domain::Groupings | Domain::Schema | Domain::Sources => &[],
         }
     }
@@ -420,7 +442,8 @@ impl Domain {
         if config
             .layered_docs(self.doc())
             .iter()
-            .any(|layered| layered.table.keys().any(|k| self.names_collide(k, name)))
+            .filter_map(|layered| objects_in(&layered.table, self.doc()))
+            .any(|objects| objects.keys().any(|k| self.names_collide(k, name)))
         {
             return true;
         }
@@ -493,7 +516,11 @@ pub fn shadow_of(config: &Config, doc: &str, object: &str) -> Option<(Layer, tom
         .layered_docs(doc)
         .iter()
         .filter(|d| d.layer != Layer::User)
-        .filter_map(|d| d.table.get(object).map(|v| (d.layer, v.clone())))
+        .filter_map(|d| {
+            objects_in(&d.table, doc)?
+                .get(object)
+                .map(|v| (d.layer, v.clone()))
+        })
         .next_back()
 }
 
@@ -580,10 +607,10 @@ pub fn stale_override_keys(config: &Config) -> Vec<String> {
             let Some((doc, object)) = key.split_once('.') else {
                 return true;
             };
-            let user_has = config
-                .layered_docs(doc)
-                .iter()
-                .any(|d| d.layer == Layer::User && d.table.contains_key(object));
+            let user_has = config.layered_docs(doc).iter().any(|d| {
+                d.layer == Layer::User
+                    && objects_in(&d.table, doc).is_some_and(|t| t.contains_key(object))
+            });
             !user_has || shadow_of(config, doc, object).is_none()
         })
         .cloned()
@@ -669,7 +696,14 @@ fn derive_rows(
         );
     }
     for layered in config.layered_docs(doc) {
-        for (name, value) in &layered.table {
+        // The table holding the objects: the layer's root, or for a
+        // document that keeps them one level down (`calibration`'s
+        // `stages`) that table, so the container is never listed as the
+        // one object.
+        let Some(objects) = objects_in(&layered.table, doc) else {
+            continue;
+        };
+        for (name, value) in objects {
             if name == "config_version" {
                 continue;
             }
@@ -728,17 +762,62 @@ fn derive_rows(
     // workspace-wide); a name no layer defines sorts after them all.
     if domain.keeps_document_order()
         && let Some(merged) = config.doc(doc)
+        && let Some(objects) = objects_in(&merged.value, doc)
     {
-        let position = |name: &str| {
-            merged
-                .value
-                .keys()
-                .position(|k| k == name)
-                .unwrap_or(usize::MAX)
-        };
+        let position = |name: &str| objects.keys().position(|k| k == name).unwrap_or(usize::MAX);
         out.sort_by_key(|row| position(&row.name));
     }
     out
+}
+
+/// The table holding `doc`'s named objects within `table` — a layer's
+/// table or the merged document's value: the table itself, or for a
+/// document whose objects sit one level down
+/// (`geode_core::config::object_table`) that child table, `None` when the
+/// layer lacks it or holds a non-table there. Every reader of whole objects
+/// in this module goes through here or [`objects_in_mut`], so a list, a
+/// fork check and a sidecar entry agree on where an object lives.
+pub(super) fn objects_in<'a>(table: &'a toml::Table, doc: &str) -> Option<&'a toml::Table> {
+    match geode_core::config::object_table(doc) {
+        None => Some(table),
+        Some(container) => table.get(container).and_then(toml::Value::as_table),
+    }
+}
+
+/// [`objects_in`] for a write: the container is created when the layer
+/// lacks it, and a non-table value there is replaced, since the document's
+/// reader refuses it anyway.
+pub(super) fn objects_in_mut<'a>(table: &'a mut toml::Table, doc: &str) -> &'a mut toml::Table {
+    match geode_core::config::object_table(doc) {
+        None => table,
+        Some(container) => {
+            let entry = table
+                .entry(container.to_string())
+                .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            if !entry.is_table() {
+                *entry = toml::Value::Table(toml::Table::new());
+            }
+            entry
+                .as_table_mut()
+                .expect("a non-table container was replaced just above")
+        }
+    }
+}
+
+/// Remove `name` from the table holding `doc`'s objects in `table`. A
+/// removal never creates the container: a layer that lacks it holds
+/// nothing of the object's.
+pub(super) fn remove_object_in(table: &mut toml::Table, doc: &str, name: &str) {
+    match geode_core::config::object_table(doc) {
+        None => {
+            table.remove(name);
+        }
+        Some(container) => {
+            if let Some(objects) = table.get_mut(container).and_then(toml::Value::as_table_mut) {
+                objects.remove(name);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -805,6 +884,11 @@ impl Destination {
             // label, group and glyphs live in the view's own table).
             (Destination::Presentation, Domain::VolViews) => {
                 unreachable!("VolMonitor views has no Presentation-destined fields")
+            }
+            // Calibration joins the same list: every stage field is
+            // `Destination::Doc`; a stage has no presentation overlay.
+            (Destination::Presentation, Domain::Calibration) => {
+                unreachable!("Calibration has no Presentation-destined fields")
             }
             (Destination::DatasetPresentation, Domain::Schema) => {
                 geode_core::view::DATASET_PRESENTATION_DOC
@@ -2782,7 +2866,11 @@ impl Draft {
     /// label, or width fields. Diagnostics for other columns or object-level fields
     /// remain in the header while those rows are hidden.
     pub fn row_for_path(&self, doc: &str, path: &str) -> Option<EditRow> {
-        let rest = path.strip_prefix(&format!("{doc}.{}.", self.name))?;
+        // A reader spells an object's path from the table that holds it:
+        // `stages.<name>.<field>` for a calibration stage, the document's
+        // name for every document whose objects are top-level keys.
+        let head = geode_core::config::object_table(doc).unwrap_or(doc);
+        let rest = path.strip_prefix(&format!("{head}.{}.", self.name))?;
         if let Some(column) = self.column.as_deref() {
             let rest = rest.strip_prefix("columns.")?;
             let (raw_index, after) = rest.split_once('.')?;
@@ -2917,6 +3005,7 @@ impl Domain {
             Domain::Colors => colours::help(key),
             Domain::Schema => schema::help(key),
             Domain::VolViews => volviews::help(key),
+            Domain::Calibration => calibration::help(key),
         }
     }
 
@@ -2933,6 +3022,7 @@ impl Domain {
             Domain::Views | Domain::Schema => views::text_editable(key),
             Domain::Sources => sources::text_editable(key),
             Domain::VolViews => volviews::text_editable(key),
+            Domain::Calibration => calibration::text_editable(key),
         }
     }
 
@@ -2954,6 +3044,7 @@ impl Domain {
             Domain::Views | Domain::Schema => views::parse_text(key, text),
             Domain::Sources => sources::parse_text(key, text),
             Domain::VolViews => volviews::parse_text(key, text),
+            Domain::Calibration => calibration::parse_text(key, text),
         }
     }
 
@@ -2971,6 +3062,7 @@ impl Domain {
             Domain::Sources => sources::fields(config, object),
             Domain::Colors => colours::fields(config, object),
             Domain::VolViews => volviews::fields(config, object),
+            Domain::Calibration => calibration::fields(config, object),
         }
     }
 
@@ -2987,7 +3079,8 @@ impl Domain {
             | Domain::Groupings
             | Domain::Schema
             | Domain::Sources
-            | Domain::VolViews => self.fields(config, None),
+            | Domain::VolViews
+            | Domain::Calibration => self.fields(config, None),
         }
     }
 
@@ -3001,7 +3094,7 @@ impl Domain {
         };
         let source = config
             .doc(self.doc())
-            .and_then(|doc| doc.value.get(object))
+            .and_then(|doc| objects_in(&doc.value, self.doc())?.get(object))
             .and_then(|value| value.as_table())
             .cloned()
             .unwrap_or_default();
@@ -3046,6 +3139,8 @@ impl Domain {
             // The display-only Name row shows the name the prompt committed;
             // every other domain's empty shape has no row for the name.
             Domain::VolViews => volviews::new_fields(config, name),
+            // A new stage's inputs list leaves the stage itself out.
+            Domain::Calibration => calibration::new_fields(config, name),
             _ => self.fields(config, None),
         };
         let mut draft = Draft::new_object(name, fields, toml::Table::new());
@@ -3055,12 +3150,16 @@ impl Domain {
 
     /// A step of the selected row that the adapter refuses before the draft
     /// takes it, with the reason — a refusal the draft alone cannot judge
-    /// because it reads the layered configuration. VolMonitor views alone: turning
+    /// because it reads the layered configuration, or one the draft would
+    /// take into a shape its other rows no longer fit. VolMonitor views: turning
     /// `Default` off on the tab a lower layer's `default` names
-    /// (`volviews::step_refusal`). `None` lets the step proceed.
+    /// (`volviews::step_refusal`). Calibration: a stage's `kind`, whose
+    /// parameter rows would change under the draft
+    /// (`calibration::step_refusal`). `None` lets the step proceed.
     pub fn step_refusal(self, draft: &Draft, config: &Config) -> Option<String> {
         match self {
             Domain::VolViews => volviews::step_refusal(draft, config),
+            Domain::Calibration => calibration::step_refusal(draft, config),
             _ => None,
         }
     }
@@ -3080,6 +3179,7 @@ impl Domain {
             Domain::Sources => sources::to_table(draft, dest),
             Domain::Colors => colours::to_table(draft, dest),
             Domain::VolViews => volviews::to_table(draft, dest),
+            Domain::Calibration => calibration::to_table(draft, dest),
         }
     }
 
@@ -3098,6 +3198,7 @@ impl Domain {
                 Some(startup) => volviews::validate_with(draft, config, startup),
                 None => volviews::validate(draft, config),
             },
+            Domain::Calibration => calibration::validate(draft, config),
         }
     }
 }
@@ -3116,11 +3217,65 @@ impl Domain {
 /// indexing assignment renders either shape correctly — a `Table` gets
 /// its header, a `Value` gets `name = value` inline — without this
 /// function needing to know which one it was handed.
-pub(super) fn set_object(document: &mut toml_edit::DocumentMut, name: &str, item: toml_edit::Item) {
-    document[name] = item;
+///
+/// `doc` decides where the object goes: the document's top level, or for
+/// a document whose objects sit one level down
+/// (`geode_core::config::object_table`) under that table, created
+/// implicit when the file lacks it so the write prints `[stages.<name>]`
+/// and no bare `[stages]` header. A stage written at the top level would
+/// be a key the reader ignores.
+pub(super) fn set_object(
+    document: &mut toml_edit::DocumentMut,
+    doc: &str,
+    name: &str,
+    item: toml_edit::Item,
+) {
+    match geode_core::config::object_table(doc) {
+        None => {
+            document[name] = item;
+        }
+        Some(container) => {
+            let holder = document.entry(container).or_insert_with(|| {
+                let mut table = toml_edit::Table::new();
+                table.set_implicit(true);
+                toml_edit::Item::Table(table)
+            });
+            if holder.as_table_mut().is_none() {
+                let mut table = toml_edit::Table::new();
+                table.set_implicit(true);
+                *holder = toml_edit::Item::Table(table);
+            }
+            holder
+                .as_table_mut()
+                .expect("a non-table container was replaced just above")
+                .insert(name, item);
+        }
+    }
 }
 
-/// One object's item as the TOML text a write would produce.
+/// Remove `name` from `document`, the counterpart of [`set_object`]: from
+/// the top level, or from the table that holds `doc`'s objects. A removal
+/// never creates the container.
+pub(super) fn remove_object(document: &mut toml_edit::DocumentMut, doc: &str, name: &str) {
+    match geode_core::config::object_table(doc) {
+        None => {
+            document.remove(name);
+        }
+        Some(container) => {
+            if let Some(holder) = document.get_mut(container).and_then(|h| h.as_table_mut()) {
+                holder.remove(name);
+            }
+        }
+    }
+}
+
+/// One object's item as the TOML text a write would produce at the top
+/// level — the canonical text of an object on its own, which the
+/// overrides sidecar records and compares (`override_entry`, `drift_of`)
+/// and the adapters' validators parse back as a one-object layer. Not
+/// where the document keeps it: that is the writer's concern
+/// ([`set_object`]), and a canonical text that moved with the container
+/// would make every recorded sidecar entry stale.
 ///
 /// Goes through a `DocumentMut` rather than `Table::to_string`, which is
 /// not the same thing and quietly loses work: a bare table renders only
@@ -3129,7 +3284,7 @@ pub(super) fn set_object(document: &mut toml_edit::DocumentMut, name: &str, item
 /// header path to appear at all.
 pub fn object_text(name: &str, item: toml_edit::Item) -> String {
     let mut document = toml_edit::DocumentMut::new();
-    set_object(&mut document, name, item);
+    document[name] = item;
     document.to_string()
 }
 

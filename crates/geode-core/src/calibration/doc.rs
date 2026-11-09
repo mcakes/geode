@@ -15,7 +15,7 @@ use crate::schema::SchemaSpec;
 use std::collections::{BTreeMap, BTreeSet};
 use toml::{Table, Value};
 
-const KINDS: &[&str] = &[
+pub const KINDS: &[&str] = &[
     "source",
     "parity_fit",
     "implied_rates",
@@ -24,8 +24,8 @@ const KINDS: &[&str] = &[
     "rasterize",
     "publish",
 ];
-const CHECKS: &[&str] = &["monotone_df"];
-const GRIDS: &[&str] = &["monthly_to_5y"];
+pub const CHECKS: &[&str] = &["monotone_df"];
+pub const GRIDS: &[&str] = &["monthly_to_5y"];
 
 fn diagnostic(
     severity: Severity,

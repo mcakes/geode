@@ -22,6 +22,7 @@
 //! unscoped tile ignores `scope`. Publication watches narrow `data` to the
 //! datasets/documents a consumer reads; other counters retain their contracts.
 
+use crate::actions::ActionId;
 pub use crate::frame_ref::FrameRef;
 pub use crate::link::BoardWatch;
 use crate::link::{GroupLane, Links};
@@ -334,6 +335,9 @@ pub struct Frame {
     /// awaiting the shell's frame observer. A module cannot reach the
     /// shell's config batch, so it queues here instead of writing.
     pending_config_edits: Vec<ConfigEdit>,
+    /// Named actions tiles asked the shell to run, in arrival order,
+    /// awaiting the shell's frame observer (see [`Frame::request_action`]).
+    requested_actions: Vec<(TileId, ActionId)>,
     /// What the shell's drain told each tile about its config edits, in
     /// arrival order, until that tile takes them. Frame-wide rather than per
     /// lane: a tile keeps its notices across a pin or unpin.
@@ -379,6 +383,7 @@ impl Frame {
             pending_persist: None,
             pending_link_chooser: None,
             pending_config_edits: Vec::new(),
+            requested_actions: Vec::new(),
             tile_notices: Vec::new(),
             bar_cache: RefCell::new(None),
             barrier: None,
@@ -860,6 +865,26 @@ impl Frame {
     /// Drain queued config edits for the shell's frame observer.
     pub fn take_pending_config_edits(&mut self) -> Vec<ConfigEdit> {
         std::mem::take(&mut self.pending_config_edits)
+    }
+
+    /// Ask the shell to run the named `action` for `tile`, as a key bound
+    /// to it in that tile would: a tile cannot hold the shell view (the
+    /// shell hosts it, and a module never names `ShellView`), and no other
+    /// route carries a tile's request for one of the shell's own actions
+    /// (`config::calibration`, opened from a menu row). Moves no version:
+    /// the request is not frame state, and the notification carrying it
+    /// opens no flip. The shell's frame observer drains it, like config
+    /// edits, and runs it only when `tile` is the focused tile — the
+    /// action acts on the focused tile, so a request from any other would
+    /// act on the wrong one; such a request is dropped there.
+    pub fn request_action(&mut self, tile: TileId, action: ActionId) {
+        self.requested_actions.push((tile, action));
+    }
+
+    /// Drain the requested actions for the shell's frame observer, in
+    /// arrival order.
+    pub fn take_requested_actions(&mut self) -> Vec<(TileId, ActionId)> {
+        std::mem::take(&mut self.requested_actions)
     }
 
     /// Record a notice for `tile`. Does not notify: the shell posts from a

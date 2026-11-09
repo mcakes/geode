@@ -1,8 +1,8 @@
 # Configuration dialogs
 
-The object dialogs edit Views, Groupings, Sources, Colors and VolMonitor views (the
-VolMonitor's tabs), and inspect Schema. They share a pure draft model and
-a GPUI adapter. See
+The object dialogs edit Views, Groupings, Sources, Colors, VolMonitor views (the
+VolMonitor's tabs) and Calibration stages, and inspect Schema. They share a
+pure draft model and a GPUI adapter. See
 [configuration](configuration.md) for layer merging, file writes, and reload
 acceptance; this guide describes what editing adds to those contracts.
 
@@ -372,6 +372,81 @@ every draft this dialog holds passes through — stage entry and the rebuild
 after a failed write's revert — so the warning does not vanish mid-edit. A
 dataset the live schema lacks too is the resolver's to refuse; a restart
 would not paint it.
+
+## The Calibration stages dialog
+
+`Domain::Calibration` edits `calibration.toml`'s stages (`config::calibration`,
+`Edit calibration stages…`; `enter` and the `⋯` menu's `Open stage` on a
+Calibration tile). Its objects are the `stages` table's entries, which the
+document keeps one level down (`[stages.<name>]`), so the scaffold resolves
+the table that holds a document's objects through
+`geode_core::config::object_table` (`Some("stages")` for this document,
+`None` for every other) wherever it lists, forks, records or writes a whole
+object: the browse rows, the name gate, the fork and sidecar checks, the
+draft's source, the in-memory fold of the pending batch, removal and the
+file write (`set_object` creates the container implicit, so a stage is
+written as `[stages.<name>]` and never a top-level `[<name>]`, which the
+reader would ignore). A diagnostic's path is spelled from that table too
+(`stages.<name>.<field>`), and the row matcher accepts it. The overrides
+sidecar keys a forked stage `calibration.<name>`. The browse list keeps
+document order (the sources first, as the tile lays them out) and is not
+reorderable; a stage's place in the file is not what the tile lays out by.
+The name `request` is reserved, as the reader reserves it.
+
+Opened from a tile whose cursor is on a stage of a valid pipeline
+(`TileContent::config_object` names the document and the stage), the dialog
+opens at that stage's Edit screen (`render::open_edit`): `open`, then the
+edit stage when the derived browse rows hold a row of that name; a name no
+row has stays on Browse with the first row selected, and Back or Escape
+walks the usual ladder from Edit to Browse. Over a tile whose cursor names
+nothing (no cursor, a cursor the pipeline lacks, or a pipeline the reader
+dropped and the tile is holding), and from the palette, it opens on Browse.
+The tile asks for the action through `Frame::request_action` (see
+[shell](shell.md#the-config-door)), the one route a tile has to a shell
+action; the shell runs it only for the focused tile.
+
+The rows are the stage's `Pipeline` (a choice over the document's
+pipelines), its `Kind` (a choice over the seven kinds) and its `Inputs`, then
+the kind's parameters. `Inputs` is one ordered list of the pipeline's other
+stages with no catalogue: ticked rows are the stages this one reads, in port
+order, first; `space` includes, `shift+j`/`shift+k` reorder, and an input the
+pipeline lacks stays ticked so it can be unticked. The last ticked input
+cannot be unticked (the shared rule for a definition list); tick the new one
+first. The parameters follow the kind the table held when the edit opened:
+
+| Kind | Parameter rows |
+|---|---|
+| `source` | `Dataset` (a choice over the schema's document datasets), `Series` (text, empty for none) |
+| `parity_fit` | `Min strikes` (a whole number, stepped or typed), `Strike window` (text `low, high`, low < high) |
+| `implied_rates` | none |
+| `check` | `Check` (`monotone_df`) |
+| `kalman_fit` | `Series` (`repo` or `box`), `Knots` (text: two or more strictly ascending numbers), `Process noise` (a positive number), `Measurement noise` (`spread` or a positive number) |
+| `rasterize` | `Grid` (`monthly_to_5y`) |
+| `publish` | `Document` (a choice over the document datasets), `Target` (a choice over `egress.toml`'s targets) |
+
+Floats and number lists are text rows, since the dialog's `Number` field is
+integer only; `parse_text` applies the reader's own rules before a value is
+committed, and the writer spells what parsed as numbers (`knots = [0.5, 1.0,
+2.0]`). A value the pickers do not offer (a hand-written word, a dataset the
+schema no longer declares) is added as the row's own option rather than read
+as the first one. The writer starts from the stage's table and keeps keys it
+does not model (`basis`); it clears every kind's parameter keys before
+writing the current kind's, so a table holds one kind's parameters. Stepping
+`Kind` is refused before the draft takes it (`Domain::step_refusal`: `delete
+and re-add the stage to change its kind`): the parameter rows were derived
+from the kind when the stage opened, so a change would leave rows of the old
+kind under the new one. A new stage from the dialog's own naming prompt
+opens as a `source` of the first pipeline over the first document dataset,
+with the pipeline's stages unticked.
+
+Validation runs the document's reader (`from_doc`, then `check_against` over
+the schema and the egress targets) on the merged document with this draft's
+table in the stage's place and keeps the findings whose path is the stage's
+(`stages.<name>` or under it): the other stages' findings are theirs, and the
+pipeline's drop a bad stage causes is said at the stage's own field. A
+finding that the reader attributes to another stage of the pipeline (a
+consumer whose port no longer fits) is therefore not shown here; the tile's
+header notice names it after the write.
 
 ## Validation and persistence
 

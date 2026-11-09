@@ -807,7 +807,7 @@ fn services_with_vol_views_and_a_tile_showing(tab: &str) -> ShellServices {
 /// A shell over `services` with one focused "rec" tile, then `action`
 /// dispatched and a frame drawn — [`dialog_test_shell_with`] with a tile
 /// under the dialog, which that helper never has.
-fn dialog_test_shell_over_a_tile(
+pub(super) fn dialog_test_shell_over_a_tile(
     cx: &mut gpui::TestAppContext,
     services: ShellServices,
     action: &str,

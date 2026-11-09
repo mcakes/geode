@@ -810,6 +810,37 @@ pub(in crate::shell) fn open_column(
     cx.notify();
 }
 
+/// Open the object dialog on `domain` at `object`'s Edit screen
+/// (`config::calibration` over a tile whose cursor is on a stage): [`open`],
+/// then the edit stage when the browse rows `open` derived hold a row of
+/// that name. A name no row has — the tile's cursor named a stage the
+/// document has since lost — stays on Browse, the first row selected, as
+/// `open` leaves it. Nothing happens when `open` itself did nothing (the
+/// domain's dialog is already open underneath).
+pub fn open_edit(
+    view: &mut ShellView,
+    domain: Domain,
+    object: &str,
+    window: &mut Window,
+    cx: &mut Context<ShellView>,
+) {
+    open(view, domain, window, cx);
+    let listed = view.object_dialog.as_ref().is_some_and(|state| {
+        state.domain == domain
+            && state.stage == Stage::Browse
+            && state.rows.position(|row| row.name == object).is_some()
+    });
+    if !listed {
+        return;
+    }
+    enter_edit_stage(view, object, None, cx);
+    // `open` synchronized the shared input for Browse; the edit stage needs
+    // its own pass, as `open_column`'s does.
+    view.refresh_dialog_rows(cx);
+    dialog::sync_dialog_text(view, window, cx);
+    cx.notify();
+}
+
 /// the dataset of the browse row under the cursor, for `n` on Sources — `None` on every
 /// other domain, or with no row (an empty list, or a keystroke racing the modal
 /// closing).
@@ -2440,7 +2471,11 @@ fn removal_edits(
                 .config
                 .layered_docs(doc)
                 .iter()
-                .any(|layered| layered.layer == Layer::User && layered.table.contains_key(&name))
+                .any(|layered| {
+                    layered.layer == Layer::User
+                        && super::objects_in(&layered.table, doc)
+                            .is_some_and(|objects| objects.contains_key(&name))
+                })
         })
         .collect();
     if touched.is_empty() {
@@ -4253,6 +4288,13 @@ fn section_header_text(domain: Domain, own: bool) -> (&'static str, &'static str
         (Domain::VolViews, false) => ("AVAILABLE — `space` adds", "available"),
         (Domain::Groupings, _) => (
             "DIMENSIONS — `space` includes · `shift+j` / `shift+k` reorder",
+            "members",
+        ),
+        // A stage's inputs are one list of the pipeline's other stages,
+        // ticked when read and in port order, with no catalogue
+        // (`calibration.rs`'s module doc), so only the first arm is reached.
+        (Domain::Calibration, _) => (
+            "INPUTS — `space` includes · `shift+j` / `shift+k` reorder",
             "members",
         ),
         // None of Schema, Sources or Colors has an `OrderedList` field at

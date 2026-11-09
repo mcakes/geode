@@ -70,6 +70,23 @@ fn order_follows_layers(doc_name: &str) -> bool {
     doc_name == "vol_views"
 }
 
+/// The top-level table under which a document keeps its named objects, or
+/// `None` when they are the document's own top-level keys. `calibration`
+/// alone: its stages are `[stages.<name>]`, one level down (the document is
+/// atomic at depth 2 for that reason). The invariant every reader and
+/// writer of whole objects holds: the container of an object is resolved
+/// through this function, never spelled at a call site, so a list, a fork
+/// check, a sidecar entry and a file write all find the same table. A
+/// writer that put a calibration stage at the top level would write a key
+/// the reader ignores with a warning, and a lister that read the top level
+/// would offer the `stages` table itself as the one object.
+pub fn object_table(doc_name: &str) -> Option<&'static str> {
+    match doc_name {
+        "calibration" => Some("stages"),
+        _ => None,
+    }
+}
+
 /// Merge layer docs in slice order (callers pass Builtin → Desk → User).
 pub fn merge_docs(name: &str, layered: &[LayerDoc]) -> MergedDoc {
     let mut out = MergedDoc::default();
@@ -176,6 +193,17 @@ mod tests {
             name: name.to_string(),
             file: format!("{}/{name}.toml", layer.name()).into(),
             table: text.parse().unwrap(),
+        }
+    }
+
+    /// `calibration` keeps its objects under `stages`; every other document
+    /// keeps them at the top level, including the one other depth-2
+    /// document, whose second level is a dimension's values, not objects.
+    #[test]
+    fn object_table_names_the_calibration_stages_table_only() {
+        assert_eq!(object_table("calibration"), Some("stages"));
+        for doc in ["views", "vol_views", "value_colors", "sources", "colors"] {
+            assert_eq!(object_table(doc), None, "{doc}");
         }
     }
 

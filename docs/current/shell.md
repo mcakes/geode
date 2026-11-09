@@ -2094,6 +2094,20 @@ a tile becomes one write and one reload, and a later edit to the same object
 replaces an earlier one. The write reaches tiles through the reload it causes;
 queuing moves no frame version.
 
+A tile asks for one of the shell's own actions the same way: a module cannot
+hold the shell view, and no other route carries a tile's request for a named
+action (pages hold a `ShellActions` handle; tiles do not). `FrameRef::request_action`
+queues `(tile, action)` on the frame (`Frame::request_action`; a handle bound
+to no tile asks nothing) and notifies. The shell's frame observer drains the
+queue right after the config edits and runs each request through the same
+`dispatch` a bound key takes, so the shell's arms and then the tile's own
+`dispatch` are consulted in the usual order — but only for the focused tile:
+the action acts on the focused tile, so a request from any other tile would
+act on the wrong one, and is dropped with a `geode::shell` debug line. The
+Calibration tile's `⋯` menu `Open stage` row uses it to run
+`config::calibration`, whose binding `enter` resolves in the shell before the
+tile sees the key.
+
 Setting an object whose winning copy comes from the desk or builtin layer
 forks it as an object-dialog edit does: the shadowed copy is recorded in the
 user `overrides.toml` sidecar in the same batch, so drift and the `r` revert

@@ -359,6 +359,14 @@ pub fn register_builtin_actions(reg: &mut ActionRegistry) {
         "Edit VolMonitor views…",
         "Configuration",
     );
+    // Edit the calibration pipelines' stages: kind, inputs and parameters.
+    // Over a calibration tile the dialog opens on the cursor's stage.
+    action(
+        reg,
+        "config::calibration",
+        "Edit calibration stages…",
+        "Configuration",
+    );
     // Edit the groupings assigned to the nine Control-digit slots.
     action(reg, "config::groupings", "Edit groupings…", "Configuration");
     // Manage saved scopes in the Scope dialog, the cursor on its saved scopes

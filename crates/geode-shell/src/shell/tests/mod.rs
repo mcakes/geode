@@ -781,6 +781,7 @@ pub(super) fn config_with_mod(mod_key: &str) -> Config {
 mod adhoc_grouping;
 mod asof;
 mod autosize;
+mod calibration_dialog;
 mod chrome_and_dialogs;
 mod close;
 mod commandline;

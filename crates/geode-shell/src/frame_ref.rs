@@ -15,6 +15,7 @@
 
 use gpui::{App, AppContext, Context, Entity};
 
+use crate::actions::ActionId;
 use crate::frame::{ConfigEdit, Frame, FrameView, FrameViewMut};
 use crate::tiling::{TileId, WorkspaceIx};
 
@@ -73,6 +74,21 @@ impl FrameRef {
         }
         self.entity.update(cx, |f, cx| {
             f.queue_config_edits(edits);
+            cx.notify();
+        });
+    }
+
+    /// Ask the shell to run `action` for this handle's tile, as a key bound
+    /// to it in the tile would (`Frame::request_action`), and wake the
+    /// shell's drain. A handle bound to no tile asks nothing: the shell
+    /// runs a requested action only for the focused tile, and there is no
+    /// tile here to be it.
+    pub fn request_action(&self, action: ActionId, cx: &mut App) {
+        let Some(tile) = self.tile else {
+            return;
+        };
+        self.entity.update(cx, |f, cx| {
+            f.request_action(tile, action);
             cx.notify();
         });
     }

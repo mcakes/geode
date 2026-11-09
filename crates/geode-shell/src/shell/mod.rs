@@ -1541,6 +1541,28 @@ impl ShellView {
                 });
             }
         }
+        // A tile's request for one of the shell's own actions (a menu row
+        // that opens a dialog) runs here, through the same `dispatch` a
+        // bound key takes, so the shell's arms and the tile's own
+        // `dispatch` are consulted in the same order. Only the focused tile's
+        // request runs: the action acts on the focused tile, so a request
+        // from any other tile would act on the wrong one.
+        let requested = frame.update(cx, |f, _| f.take_requested_actions());
+        if !requested.is_empty() {
+            let focused = self.workspace(cx).focused_tile();
+            for (tile, action) in requested {
+                if Some(tile) == focused {
+                    self.dispatch(&action, None, window, cx);
+                } else {
+                    tracing::debug!(
+                        target: "geode::shell",
+                        tile = tile.0,
+                        action = %action.0,
+                        "dropped an action requested by a tile that is not focused"
+                    );
+                }
+            }
+        }
         // Emitters compose over their lane or followed group, which move
         // without the tile hearing it. After this observer: the pull reads
         // tiles and writes the frame.

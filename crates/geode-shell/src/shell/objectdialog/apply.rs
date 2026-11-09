@@ -187,10 +187,10 @@ pub(super) fn docs_with_object(
     {
         match value {
             Some(value) => {
-                existing.table.insert(object.to_string(), value);
+                super::objects_in_mut(&mut existing.table, doc).insert(object.to_string(), value);
             }
             None => {
-                existing.table.remove(object);
+                super::remove_object_in(&mut existing.table, doc, object);
             }
         }
         return docs;
@@ -206,7 +206,7 @@ pub(super) fn docs_with_object(
         "config_version".to_string(),
         toml::Value::Integer(CONFIG_VERSION),
     );
-    table.insert(object.to_string(), value);
+    super::objects_in_mut(&mut table, doc).insert(object.to_string(), value);
     docs.push(LayerDoc {
         layer: Layer::User,
         name: doc.to_string(),
@@ -610,7 +610,7 @@ fn fork_record(
     let winner = config
         .layered_docs(doc)
         .iter()
-        .filter(|d| d.table.contains_key(name))
+        .filter(|d| super::objects_in(&d.table, doc).is_some_and(|t| t.contains_key(name)))
         .map(|d| d.layer)
         .next_back()?;
     if winner == Layer::User {
@@ -683,7 +683,7 @@ fn owner_in(config: &Config, doc: &str, name: &str) -> Owner {
     let holders: Vec<Layer> = config
         .layered_docs(doc)
         .iter()
-        .filter(|d| d.table.contains_key(name))
+        .filter(|d| super::objects_in(&d.table, doc).is_some_and(|t| t.contains_key(name)))
         .map(|d| d.layer)
         .collect();
     match holders.last() {
@@ -1149,10 +1149,15 @@ fn run_writes(
             for (object, value) in objects {
                 match value {
                     Some(value) => {
-                        super::set_object(document, &object, super::toml_value_to_item(&value));
+                        super::set_object(
+                            document,
+                            doc,
+                            &object,
+                            super::toml_value_to_item(&value),
+                        );
                     }
                     None => {
-                        document.remove(&object);
+                        super::remove_object(document, doc, &object);
                     }
                 }
             }

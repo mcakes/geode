@@ -533,9 +533,12 @@ so each keeps its comments.
 `calibration.toml`: a `pipelines` table of named pipelines and a `stages`
 table of named stages, each stage naming the `pipeline` it belongs to. A
 pipeline is a DAG of stages over one underlying; its edges are the ordered
-`inputs` lists and nothing else. Stages are top-level objects rather than
-nested under their pipeline so the object dialog, provenance badges and
-layer merging treat them like every other document's objects. The stage
+`inputs` lists and nothing else. Stages are named objects of one `stages`
+table rather than nested under their pipeline, so provenance badges and
+layer merging treat them like every other document's objects; the object
+dialog lists and writes them under that table
+(`geode_core::config::object_table`, `Some("stages")` for this document
+alone, see [configuration dialogs](configuration-dialogs.md#the-calibration-stages-dialog)). The stage
 name `request` is reserved (`engine::REQUEST_STAGE`): it names the single
 synthetic stage of an outcome the engine never produced (a refused,
 missing-engine, errored or panicked request), which a tile shows as a

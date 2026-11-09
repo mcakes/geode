@@ -54,7 +54,11 @@ table with both keys. An entry of `"none"` clears a lower layer's color.
 the builtin ones or replaces one pipeline or one stage whole; a replaced
 stage inherits none of the lower layer's fields, so a user stage that omits
 a required field is an error on the user layer, not a silent fallback to the
-builtin value.
+builtin value. The stages are the document's objects for the object dialog
+and the module config door, which find them under `stages` through
+`config::object_table` (`None` for every other document, whose objects are
+its top-level keys); a stage written at the top level would be a key the
+reader ignores.
 
 ```toml
 [underlying_ref]

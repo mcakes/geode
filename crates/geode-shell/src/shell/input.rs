@@ -473,6 +473,27 @@ impl ShellView {
             objectdialog::render::open(self, objectdialog::Domain::Colors, window, cx);
         } else if action.0 == "config::vol_views" {
             objectdialog::render::open(self, objectdialog::Domain::VolViews, window, cx);
+        } else if action.0 == "config::calibration" {
+            // Over a calibration tile whose cursor is on a stage, open at
+            // that stage's Edit screen; otherwise browse the stages.
+            let shown = self
+                .workspace(cx)
+                .focused_tile()
+                .and_then(|t| self.occupants.get(&t))
+                .and_then(|o| o.content.config_object(cx))
+                .filter(|object| object.doc == geode_core::calibration::CALIBRATION_DOC);
+            match shown {
+                Some(object) => objectdialog::render::open_edit(
+                    self,
+                    objectdialog::Domain::Calibration,
+                    &object.name,
+                    window,
+                    cx,
+                ),
+                None => {
+                    objectdialog::render::open(self, objectdialog::Domain::Calibration, window, cx)
+                }
+            }
         } else if action.0 == "config::view_column" {
             // Pull the focused tile's columns now; the list keeps this copy.
             choicedialog::open_columns(self, objectdialog::Domain::Views, window, cx);
