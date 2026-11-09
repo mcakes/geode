@@ -179,6 +179,7 @@ impl CalibrationTile {
             filter: self.filter.as_deref(),
             // The connect picker's proposal, once it exists.
             preview_edge: None,
+            uploaded_at: self.uploaded_at,
             layout: placed,
             clock: self.clock(cx),
             version: self.model_version,
@@ -201,8 +202,10 @@ impl CalibrationTile {
     /// Forget the last underlying's documents and results. A run, publish
     /// or upload still out for it is no longer this tile's: its tags are
     /// forgotten, so its answer is dropped, and the verbs' notices about
-    /// it leave with it.
-    fn clear_loaded(&mut self) {
+    /// it leave with it. A question armed over it is withdrawn, never
+    /// answered: `y` must not publish another underlying than the one the
+    /// question named. The menu's rows were about it too.
+    fn clear_loaded(&mut self, cx: &mut Context<Self>) {
         self.results.clear();
         self.sources.rows.clear();
         self.sources.pending.clear();
@@ -214,8 +217,12 @@ impl CalibrationTile {
         self.fetch = Fetch::Idle;
         self.publishing = None;
         self.uploads.clear();
+        self.uploading = Default::default();
+        self.uploaded_at = None;
         self.verb_notice = None;
         self.upload_notices.clear();
+        let _ = geode_tile::confirm::withdraw(self, cx);
+        self.close_menu(cx);
     }
 
     /// `:pipeline <name>`: show another pipeline of the document. What was
@@ -240,9 +247,7 @@ impl CalibrationTile {
             return Ok(());
         }
         self.pipeline_name = Some(name);
-        let _ = geode_tile::confirm::withdraw(self, cx);
-        self.close_menu(cx);
-        self.clear_loaded();
+        self.clear_loaded(cx);
         self.loaded_for = None;
         self.sources.watches.clear();
         let keep = self
@@ -306,7 +311,7 @@ impl CalibrationTile {
             // under, so only a change the tile follows asks again rather
             // than every frame notification; the tag moves, so a late
             // answer for the old underlying is stale.
-            self.clear_loaded();
+            self.clear_loaded(cx);
             self.loaded_for = None;
             self.sources.watches.clear();
             self.read_notices = vec![Notice::status(no_underlying(following))];
@@ -320,7 +325,7 @@ impl CalibrationTile {
         let sources = source_stages(&pipeline);
         let mut only = only;
         if self.loaded_for.as_deref() != Some(u.as_str()) {
-            self.clear_loaded();
+            self.clear_loaded(cx);
             self.loaded_for = Some(u.clone());
             only = None;
         }

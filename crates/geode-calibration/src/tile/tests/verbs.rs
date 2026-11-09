@@ -21,6 +21,7 @@ use super::data::{KEY, calibrates, docs, rates_doc, result, run_outcome};
 use super::harness::{Harness, builtin_config, config_from, open_with, restored};
 use crate::content::CalibrationConfig;
 use crate::core::menu::{NEXT_CHANGE, OPEN_STAGE};
+use crate::core::model::{EdgeTone, Tone};
 use crate::tile::data::QUEUE_FULL;
 
 const HELD: &str = "df_monotone: 1 violation";
@@ -157,6 +158,32 @@ impl Harness {
         vcx.simulate_click(at, MouseModifiers::default());
         vcx.run_until_parked();
         self.draw(vcx);
+    }
+
+    /// A card's whole status line, as the tooltip and the footer show it.
+    fn card_status_full(&self, vcx: &gpui::VisualTestContext, stage: &str) -> String {
+        self.tile.read_with(vcx, |t, _| {
+            t.model()
+                .expect("a pipeline is shown")
+                .cards
+                .iter()
+                .find(|c| c.stage == stage)
+                .unwrap_or_else(|| panic!("{stage} has no card"))
+                .status_full
+                .to_string()
+        })
+    }
+
+    /// The painted tone of the edge `from` -> `to`, `None` with no such
+    /// edge.
+    fn edge_tone(&self, vcx: &gpui::VisualTestContext, from: &str, to: &str) -> Option<EdgeTone> {
+        self.tile.read_with(vcx, |t, _| {
+            t.model()?
+                .edges
+                .iter()
+                .find(|e| e.from == from && e.to == to)
+                .map(|e| e.tone)
+        })
     }
 
     /// `p`, `y`, the publish answered with two documents: the tags of the
@@ -386,15 +413,16 @@ fn p_is_refused_while_publish_is_held_or_in_flight_or_absent(cx: &mut gpui::Test
 }
 
 /// An upload's answer is a notice naming the document, its key, the
-/// target and the time; a success puts that time on the publish card, a
-/// failure leaves the card and says what failed; a stale or foreign tag is
-/// dropped.
+/// target and the time. The publish card trails the time only once every
+/// document of the publish has landed; a failure keeps it off the card and
+/// says what failed; the engine's words on the card are never touched; a
+/// stale or foreign tag is dropped.
 #[gpui::test]
 fn an_upload_result_is_a_notice_and_updates_the_publish_card(cx: &mut gpui::TestAppContext) {
     let (h, mut vcx) = open_spx(cx, None);
     h.load(&mut vcx, "SPX");
     let ups = h.publish_two(&mut vcx);
-    assert_eq!(h.card_status(&vcx, "publish"), "09:30:15 · 2 series");
+    assert_eq!(h.card_status_full(&vcx, "publish"), "09:30:15 · 2 series");
 
     h.deliver(&mut vcx, upload_answer(ups[0], Ok(())));
     let notices = h.notices(&vcx);
@@ -405,9 +433,9 @@ fn an_upload_result_is_a_notice_and_updates_the_publish_card(cx: &mut gpui::Test
     assert_eq!(text, "uploaded rate_curve SPX/repo to sophis");
     assert!(is_hms(time), "{time}");
     assert_eq!(
-        h.card_status(&vcx, "publish"),
-        format!("{time} \u{b7} uploaded"),
-        "the card shows the last upload"
+        h.card_status_full(&vcx, "publish"),
+        "09:30:15 · 2 series",
+        "one of two landed: no time on the card yet"
     );
 
     h.deliver(&mut vcx, upload_answer(ups[1], Err("sophis is down")));
@@ -418,10 +446,11 @@ fn an_upload_result_is_a_notice_and_updates_the_publish_card(cx: &mut gpui::Test
         "upload rate_curve SPX/box to sophis failed: sophis is down"
     );
     assert_eq!(
-        h.card_status(&vcx, "publish"),
-        format!("{time} \u{b7} uploaded"),
-        "a failed upload leaves the card"
+        h.card_status_full(&vcx, "publish"),
+        "09:30:15 · 2 series",
+        "a failed upload keeps the time off the card"
     );
+    assert_eq!(h.card_tone(&vcx, "publish"), Tone::Plain);
 
     // Stale or another tile's: dropped.
     h.deliver(&mut vcx, upload_answer(ups[1] + 7, Ok(())));
@@ -438,6 +467,111 @@ fn an_upload_result_is_a_notice_and_updates_the_publish_card(cx: &mut gpui::Test
     // `escape` dismisses the failure; the status stays.
     h.press(&mut vcx, "escape");
     assert_eq!(h.notices(&vcx).len(), 1);
+
+    // A second publish, every document landing: the card trails the time
+    // after the engine's words, which stand.
+    let ups = h.publish_two(&mut vcx);
+    assert!(
+        h.notices(&vcx).is_empty(),
+        "a new publish clears the last one's upload notices"
+    );
+    h.deliver(&mut vcx, upload_answer(ups[0], Ok(())));
+    h.deliver(&mut vcx, upload_answer(ups[1], Ok(())));
+    let notices = h.notices(&vcx);
+    assert_eq!(notices.len(), 2, "{notices:?}");
+    let (_, time) = notices[1].rsplit_once(' ').unwrap();
+    assert!(is_hms(time), "{time}");
+    let full = h.card_status_full(&vcx, "publish");
+    assert_eq!(full, format!("09:30:15 · 2 series · uploaded {time}"));
+    assert_ne!(
+        h.card_status(&vcx, "publish"),
+        full,
+        "the long line is cut for the card and whole in the tooltip"
+    );
+    assert_eq!(h.result_names(&vcx), vec!["publish"], "no result was added");
+}
+
+/// A late upload success never lifts a hold. After the publish answers
+/// and its uploads are out, the pipeline runs again and the engine holds
+/// the publish; the uploads then landing trail their time on the card,
+/// but the result is the engine's: the card is held, its gate paints and
+/// `p` is still refused.
+#[gpui::test]
+fn a_late_upload_never_rewrites_a_held_publish(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_spx(cx, Some("publish"));
+    h.load(&mut vcx, "SPX");
+    let ups = h.publish_two(&mut vcx);
+    h.press(&mut vcx, "shift-r");
+    let reqs = h.requests();
+    let runs = calibrates(&reqs);
+    assert_eq!(runs.len(), 1, "{reqs:?}");
+    h.deliver(
+        &mut vcx,
+        Delivery::Calibration(run_outcome(KEY, runs[0].tag, vec![held("publish", HELD)])),
+    );
+    assert_eq!(h.card_tone(&vcx, "publish"), Tone::Held);
+
+    h.deliver(&mut vcx, upload_answer(ups[0], Ok(())));
+    h.deliver(&mut vcx, upload_answer(ups[1], Ok(())));
+    assert_eq!(
+        h.card_tone(&vcx, "publish"),
+        Tone::Held,
+        "the engine's result stands"
+    );
+    let full = h.card_status_full(&vcx, "publish");
+    assert!(
+        full.starts_with(&format!("09:30:15 · {HELD} · uploaded ")),
+        "{full}"
+    );
+    assert_eq!(
+        h.edge_tone(&vcx, "df_monotone", "publish"),
+        Some(EdgeTone::Gate),
+        "the gate still paints"
+    );
+    h.press(&mut vcx, "p");
+    assert_eq!(h.confirm_text(&vcx), None);
+    assert!(
+        h.notices(&vcx)
+            .contains(&format!("publish is held: {HELD}")),
+        "{:?}",
+        h.notices(&vcx)
+    );
+    assert!(calibrates(&h.requests()).is_empty());
+}
+
+/// A question armed over SPX dies with SPX: the followed group's scope
+/// moving to NDX withdraws it unanswered, and `y` afterwards publishes
+/// nothing, even once NDX's sources are in and its run has gone out.
+#[gpui::test]
+fn a_publish_question_dies_with_its_underlying(cx: &mut gpui::TestAppContext) {
+    let (h, mut vcx) = open_with(cx, Some(builtin_config()), None);
+    h.follow_a(&mut vcx);
+    h.flip_to(&mut vcx, "SPX");
+    h.load(&mut vcx, "SPX");
+    h.press(&mut vcx, "p");
+    assert_eq!(
+        h.confirm_text(&vcx).as_deref(),
+        Some("Publish repo, box for SPX to sophis? y/n")
+    );
+    let keys_before = h.dispatched().len();
+
+    h.flip_to(&mut vcx, "NDX");
+    assert_eq!(h.title(&vcx), "Calibration \u{b7} NDX");
+    assert_eq!(h.confirm_text(&vcx), None, "withdrawn with SPX");
+    assert_eq!(h.key_context(&vcx), normal());
+    let (asked, after) = h.answer_all(&mut vcx, "NDX");
+    assert_eq!(asked.len(), 3);
+    let runs = calibrates(&after);
+    assert_eq!(runs.len(), 1, "{after:?}");
+    assert_eq!(runs[0].underlying, "NDX");
+    assert_eq!(runs[0].action, RunAction::Run { from: None });
+
+    h.press(&mut vcx, "y");
+    let reqs = h.requests();
+    assert!(reqs.is_empty(), "y publishes nothing: {reqs:?}");
+    assert_eq!(h.confirm_text(&vcx), None);
+    assert_eq!(h.dispatched().len(), keys_before, "y reached no binding");
+    assert!(h.notices(&vcx).is_empty(), "{:?}", h.notices(&vcx));
 }
 
 /// `.` opens the menu: the verbs in order with their live chords, the

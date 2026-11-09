@@ -44116,7 +44116,11 @@ run_mutation "calibration publish: a held publish stage refuses p" \
 # submission leaves the bar answered and nothing sent.
 run_mutation "calibration publish: y sends the publish action" \
   crates/geode-calibration/src/tile/verbs.rs \
-  '            Pending::Publish { target, document } => self.submit_publish(target, document, cx),' \
+  '            Pending::Publish {
+                target,
+                document,
+                underlying,
+            } => self.submit_publish(target, document, underlying, cx),' \
   '            Pending::Publish { .. } => {}' \
   geode-calibration \
   p_arms_the_confirm_bar_and_y_publishes_from_the_filter

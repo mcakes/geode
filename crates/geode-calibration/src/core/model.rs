@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use chrono::{DateTime, Utc};
 use geode_core::calibration::{Pipeline, StageKind, StageName, StageResult, StageStatus};
 use geode_core::clock::Clock;
 use geode_shell::palette::fuzzy_match;
@@ -109,6 +110,12 @@ pub struct ModelInput<'a> {
     pub filter: Option<&'a str>,
     /// An edge the connect picker proposes: `(input, reader)`.
     pub preview_edge: Option<(&'a str, &'a str)>,
+    /// When the last publish's every document landed at its target: the
+    /// publish card's status line ends `· uploaded HH:MM:SS`. `None` until
+    /// one did, after a failed upload, or after a flip. An upload never
+    /// rewrites the engine's result: only an outcome changes a stage's
+    /// result, so a held publish stays held, uploaded or not.
+    pub uploaded_at: Option<DateTime<Utc>>,
     pub layout: Layout,
     pub clock: Clock,
     pub version: u64,
@@ -122,6 +129,7 @@ pub fn build(input: ModelInput<'_>) -> GraphModel {
         cursor,
         filter,
         preview_edge,
+        uploaded_at,
         layout,
         clock,
         version,
@@ -139,6 +147,12 @@ pub fn build(input: ModelInput<'_>) -> GraphModel {
         let result = results.get(name);
         let is_waiting = waiting.contains(name);
         let status_full = status_text(result, is_waiting, &clock);
+        let status_full = match (uploaded_at, &stage.kind) {
+            (Some(at), StageKind::Publish { .. }) => {
+                format!("{status_full} \u{b7} uploaded {}", clock.hms(at))
+            }
+            _ => status_full,
+        };
         cards.push(CardModel {
             stage: card.stage.clone(),
             title: card.stage.clone().into(),
@@ -347,6 +361,7 @@ mod tests {
         cursor: Option<&'a str>,
         filter: Option<&'a str>,
         preview_edge: Option<(&'a str, &'a str)>,
+        uploaded_at: Option<DateTime<Utc>>,
     }
 
     impl<'a> Scene<'a> {
@@ -358,6 +373,7 @@ mod tests {
                 cursor: None,
                 filter: None,
                 preview_edge: None,
+                uploaded_at: None,
             }
         }
 
@@ -369,6 +385,7 @@ mod tests {
                 cursor: self.cursor,
                 filter: self.filter,
                 preview_edge: self.preview_edge,
+                uploaded_at: self.uploaded_at,
                 layout: layout_of(self.pipeline),
                 clock: Clock::utc(),
                 version: 7,
@@ -390,6 +407,51 @@ mod tests {
             .iter()
             .find(|e| e.from == from && e.to == to)
             .unwrap_or_else(|| panic!("no edge {from} -> {to}"))
+    }
+
+    /// The upload time rides the publish card's status after the engine's
+    /// words and touches no other card and no tone: a held publish stays
+    /// held, so the gate it paints and the refusal `p` gives stand.
+    #[test]
+    fn an_upload_time_trails_the_publish_status_without_changing_it() {
+        use chrono::TimeZone as _;
+        let p = builtin_pipeline();
+        let mut scene = Scene::new(&p);
+        scene.results = results(vec![result(
+            "publish",
+            StageStatus::Held("df_monotone: 1 violation".into()),
+            true,
+            "held by df_monotone",
+        )]);
+        let before = scene.build();
+        scene.uploaded_at = Some(Utc.with_ymd_and_hms(2026, 11, 9, 9, 31, 0).unwrap());
+        let after = scene.build();
+        let publish = card(&after, "publish");
+        assert_eq!(
+            publish.status_full.as_ref(),
+            "09:30:15 · held by df_monotone · uploaded 09:31:00"
+        );
+        assert_eq!(publish.tone, Tone::Held, "the engine's status stands");
+        assert_eq!(
+            edge(&after, "df_monotone", "publish").tone,
+            EdgeTone::Gate,
+            "and so does its gate"
+        );
+        assert_eq!(
+            card(&before, "publish").status_full.as_ref(),
+            "09:30:15 · held by df_monotone"
+        );
+        for (b, a) in before.cards.iter().zip(&after.cards) {
+            if b.stage != "publish" {
+                assert_eq!(b, a, "{} is untouched", b.stage);
+            }
+        }
+        // With no result the time still names the upload.
+        scene.results.clear();
+        assert_eq!(
+            card(&scene.build(), "publish").status_full.as_ref(),
+            "not run · uploaded 09:31:00"
+        );
     }
 
     #[test]

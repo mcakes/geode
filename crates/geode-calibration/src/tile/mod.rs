@@ -44,7 +44,7 @@ use data::{Fetch, Sources};
 use keys::{FilterField, Viewport};
 use menu::MenuState;
 use paint::{Chrome, Hints};
-use verbs::{Pending, Publishing, Uploads};
+use verbs::{Pending, Publishing, Uploading, Uploads};
 
 mod data;
 mod keys;
@@ -105,6 +105,11 @@ pub struct CalibrationTile {
     upload_tag: u64,
     /// The uploads out, by tag.
     uploads: Uploads,
+    /// How the last publish's uploads have answered.
+    uploading: Uploading,
+    /// When the last publish's every document landed: the model trails it
+    /// on the publish card. Never written into `results`.
+    uploaded_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The `.` action menu while it is up.
     menu: Option<MenuState>,
     /// The menu's element names, formatted once.
@@ -242,6 +247,8 @@ impl CalibrationTile {
             publishing: None,
             upload_tag: 0,
             uploads: Uploads::new(),
+            uploading: Uploading::default(),
+            uploaded_at: None,
             menu: None,
             menu_ids: menu::menu_ids(id.0),
             following: FollowingQuery::new(),

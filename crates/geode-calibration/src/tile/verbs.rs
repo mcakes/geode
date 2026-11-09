@@ -13,18 +13,25 @@
 //! twice. The checks run again at `y`, since an answer may land between
 //! the ask and the answer.
 //!
+//! A question is armed over one underlying and one publish stage: the
+//! payload carries both, `y` compares them with what the tile holds then,
+//! and a flip of underlying or pipeline withdraws the question outright
+//! (`data::clear_loaded`), so `y` can never publish for an underlying the
+//! question did not name.
+//!
 //! Refusals are a warning notice in the header (replacing the last verb's,
 //! cleared when a verb goes out); upload answers are status and danger
-//! notices kept until the next publish; the publish card takes the time
-//! of the last upload that landed.
+//! notices kept until the next publish. An upload never rewrites a stage's
+//! result (only an outcome does, so a held publish stays held and keeps
+//! refusing `p`): the tile counts the uploads of the last publish and,
+//! once every one landed, hands the time to the model, which trails it on
+//! the publish card after the engine's words.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use geode_core::calibration::{
-    Pipeline, PublishSource, RunAction, Stage, StageKind, StageName, StagePayload, StageResult,
-    StageStatus,
+    Pipeline, PublishSource, RunAction, Stage, StageKind, StageName, StageStatus,
 };
 use geode_core::document::DocumentRows;
 use geode_data::UploadParams;
@@ -40,16 +47,16 @@ use crate::core::menu::{NO_CURSOR, NO_PIPELINE};
 /// What an armed y/n asks. Public only because it is the public
 /// `CalibrationTile`'s `ConfirmHost` payload; its fields stay private.
 pub enum Pending {
+    /// `Publish {series} for {underlying} to {target}?`: the underlying,
+    /// document and target the question named, each checked again at `y`.
     Publish {
         target: String,
         document: String,
+        underlying: String,
     },
     /// `Delete {stage} and its {n} edges?`; armed by the delete verb.
     #[allow(dead_code, reason = "the delete verb arms it")]
-    Delete {
-        stage: StageName,
-        edges: usize,
-    },
+    Delete { stage: StageName, edges: usize },
 }
 
 /// The publish out now: where its rows go when the answer comes.
@@ -67,6 +74,23 @@ pub(super) struct UploadSent {
 /// The uploads out, by tag; an answer under no tag here is stale or
 /// another tile's.
 pub(super) type Uploads = BTreeMap<u64, UploadSent>;
+
+/// The last publish's uploads: how many documents it had to send and how
+/// each answered. `uploaded_at` is set only when every one succeeded; a
+/// failure or a refusal keeps it unset, so the card never says `uploaded`
+/// over a document that did not land.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Uploading {
+    expected: usize,
+    succeeded: usize,
+    failed: usize,
+}
+
+impl Uploading {
+    fn complete(&self) -> bool {
+        self.expected > 0 && self.failed == 0 && self.succeeded == self.expected
+    }
+}
 
 /// What `p` would do now.
 struct PublishPlan {
@@ -244,6 +268,7 @@ impl CalibrationTile {
             Pending::Publish {
                 target: plan.target,
                 document: plan.document,
+                underlying: plan.underlying,
             },
             prompt,
             window,
@@ -253,12 +278,19 @@ impl CalibrationTile {
         Ok(())
     }
 
-    /// `y`: the checks run again, and the publish stage must still send
-    /// `document` to `target` (a reload under the question may have
-    /// changed it); then the publish goes out on the user lane under the
-    /// next tag, remembered as the publish in flight. The last publish's
-    /// upload notices leave with it.
-    fn submit_publish(&mut self, target: String, document: String, cx: &mut Context<Self>) {
+    /// `y`: the checks run again, and the publish must still send
+    /// `document` to `target` for `underlying` (a reload or a flip under
+    /// the question may have changed one; a flip also withdraws the
+    /// question, so this is the second line); then the publish goes out
+    /// on the user lane under the next tag, remembered as the publish in
+    /// flight. The last publish's upload notices and count leave with it.
+    fn submit_publish(
+        &mut self,
+        target: String,
+        document: String,
+        underlying: String,
+        cx: &mut Context<Self>,
+    ) {
         let plan = match self.publish_plan(cx) {
             Ok(plan) => plan,
             Err(reason) => {
@@ -266,6 +298,16 @@ impl CalibrationTile {
                 return;
             }
         };
+        if plan.underlying != underlying {
+            self.refuse(
+                format!(
+                    "the question named {underlying}; the tile now shows {}: ask again",
+                    plan.underlying
+                ),
+                cx,
+            );
+            return;
+        }
         if plan.target != target || plan.document != document {
             self.refuse(
                 format!(
@@ -295,6 +337,7 @@ impl CalibrationTile {
                     document: plan.document,
                 });
                 self.upload_notices.clear();
+                self.uploading = Uploading::default();
                 self.verb_notice = None;
             }
             Err(_) => self.refuse(QUEUE_FULL, cx),
@@ -313,7 +356,12 @@ impl CalibrationTile {
         let Some(Publishing { target, document }) = self.publishing.take() else {
             return;
         };
-        for rows in rows.unwrap_or_default() {
+        let rows = rows.unwrap_or_default();
+        self.uploading = Uploading {
+            expected: rows.len(),
+            ..Uploading::default()
+        };
+        for rows in rows {
             self.upload_tag += 1;
             let tag = self.upload_tag;
             let key = display_key(&rows.key);
@@ -334,18 +382,24 @@ impl CalibrationTile {
                         },
                     );
                 }
-                Err(refusal) => self.upload_notices.push(Notice::danger(format!(
-                    "upload {document} {key} to {target} refused: {refusal}"
-                ))),
+                Err(refusal) => {
+                    self.uploading.failed += 1;
+                    self.upload_notices.push(Notice::danger(format!(
+                        "upload {document} {key} to {target} refused: {refusal}"
+                    )));
+                }
             }
         }
         cx.notify();
     }
 
     /// An upload's answer: a status notice naming the document, its key,
-    /// the target and the time, and the publish card takes that time; or
-    /// a danger notice with what failed, the card left as it was. An
-    /// answer under a tag not out, or another tile's, is dropped.
+    /// the target and the time, and, once every document of the publish
+    /// has landed, that time trails the publish card's status; or a danger
+    /// notice with what failed, which keeps the time off the card. The
+    /// engine's result is never touched: only an outcome changes a stage's
+    /// result, so a publish held since is still held. An answer under a tag
+    /// not out, or another tile's, is dropped.
     pub fn deliver_upload(&mut self, u: UploadDelivery, cx: &mut Context<Self>) {
         if u.key != self.key() {
             return;
@@ -355,34 +409,25 @@ impl CalibrationTile {
         };
         match u.result {
             Ok(()) => {
-                let now = Utc::now();
+                let now: DateTime<Utc> = Utc::now();
                 let time = self.clock(cx).hms(now);
                 self.upload_notices.push(Notice::status(format!(
                     "uploaded {} {} to {} {time}",
                     sent.document, sent.key, u.target
                 )));
-                let publish = self
-                    .pipeline()
-                    .and_then(|p| publish_stage(&p).map(|(s, _, _)| s.name.clone()));
-                if let Some(name) = publish {
-                    self.results.insert(
-                        name.clone(),
-                        StageResult {
-                            name,
-                            status: StageStatus::Ok,
-                            ran_at: Some(now),
-                            elapsed: Duration::ZERO,
-                            summary: "uploaded".into(),
-                            payload: StagePayload::PublishReady,
-                        },
-                    );
+                self.uploading.succeeded += 1;
+                if self.uploading.complete() {
+                    self.uploaded_at = Some(now);
                     self.rebuild_model(cx);
                 }
             }
-            Err(e) => self.upload_notices.push(Notice::danger(format!(
-                "upload {} {} to {} failed: {e}",
-                sent.document, sent.key, u.target
-            ))),
+            Err(e) => {
+                self.uploading.failed += 1;
+                self.upload_notices.push(Notice::danger(format!(
+                    "upload {} {} to {} failed: {e}",
+                    sent.document, sent.key, u.target
+                )));
+            }
         }
         cx.notify();
     }
@@ -403,7 +448,11 @@ impl ConfirmHost for CalibrationTile {
 
     fn confirmed(&mut self, pending: Pending, _window: &mut Window, cx: &mut Context<Self>) {
         match pending {
-            Pending::Publish { target, document } => self.submit_publish(target, document, cx),
+            Pending::Publish {
+                target,
+                document,
+                underlying,
+            } => self.submit_publish(target, document, underlying, cx),
             // The delete verb arrives with the editors.
             Pending::Delete { .. } => {}
         }

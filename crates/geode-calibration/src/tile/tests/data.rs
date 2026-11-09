@@ -300,7 +300,7 @@ impl Harness {
         })
     }
 
-    fn card_tone(&self, vcx: &gpui::VisualTestContext, stage: &str) -> Tone {
+    pub(super) fn card_tone(&self, vcx: &gpui::VisualTestContext, stage: &str) -> Tone {
         self.tile.read_with(vcx, |t, _| {
             t.model()
                 .expect("a pipeline is shown")
@@ -344,7 +344,7 @@ impl Harness {
     }
 
     /// The emitter emits into A, then the tile follows A.
-    fn follow_a(&self, vcx: &mut gpui::VisualTestContext) {
+    pub(super) fn follow_a(&self, vcx: &mut gpui::VisualTestContext) {
         self.link(
             vcx,
             EMITTER,
@@ -365,7 +365,7 @@ impl Harness {
 
     /// The emitter names `u` in group A's scope; the shell enrolls the
     /// follower under its own reading, as `extend_flip` does.
-    fn flip_to(&self, vcx: &mut gpui::VisualTestContext, u: &str) {
+    pub(super) fn flip_to(&self, vcx: &mut gpui::VisualTestContext, u: &str) {
         let bound = FrameRef::for_tile(
             self.frame.clone(),
             WorkspaceIx::FIRST,

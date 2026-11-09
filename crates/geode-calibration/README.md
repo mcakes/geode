@@ -194,12 +194,18 @@ run's does and then sends `publish_rows` on, one `UploadParams { key,
 tag, target, document, rows }` per document under the tile's own upload
 counter. Rows on any other action's outcome go nowhere. Each upload's
 answer is a notice: `uploaded {document} {key} to {target} {HH:MM:SS}`
-(the key's parts joined with `/`, the time through the app clock), and the
-publish card's status becomes `{HH:MM:SS} · uploaded`; a failure is
-`upload {document} {key} to {target} failed: {reason}` and leaves the
-card. An answer under a tag not out, or another tile's, is dropped. A
-change of underlying or pipeline forgets the publish and uploads in
-flight with the rest.
+(the key's parts joined with `/`, the time through the app clock); once
+every document of the publish has landed, the publish card's status line
+ends `· uploaded {HH:MM:SS}` after the engine's words. A failure is
+`upload {document} {key} to {target} failed: {reason}` and keeps the time
+off the card. An upload never rewrites the stage's result: only an
+outcome does, so a publish the engine has since held is still held, still
+paints its gate and still refuses `p`. An answer under a tag not out, or
+another tile's, is dropped. The question is armed over one underlying,
+document and target, all three checked again at `y`; a change of
+underlying or pipeline withdraws an armed question unanswered, closes the
+menu and forgets the publish and uploads in flight with the rest, so `y`
+can never publish for an underlying the question did not name.
 
 The session table holds `underlying`, `pipeline` and `cursor`, each while
 set. A record without `pipeline` means the config's first pipeline, and
@@ -246,6 +252,14 @@ once the tile knows which that is it saves the name. The launch table
   must carry the last run's tag, a publish the last user action's, so a
   late run is never read as a publish answer; `publish_rows` are read only
   off a `Publish` outcome.
+- Only an outcome changes a stage's result. An upload's answer counts
+  toward the last publish and, when every document landed, hands the time
+  to the model (`ModelInput::uploaded_at`), which trails it on the publish
+  card; it never writes into the results.
+- A question armed over one underlying dies with it: `clear_loaded`
+  withdraws the confirm (and closes the menu) on an underlying flip and a
+  pipeline switch, and `y` compares the question's underlying, document
+  and target with the tile's before anything goes out.
 - A verb other than the menu's own closes the menu before it runs; any
   verb but `cancel` reaching the tile past an armed question answers it
   no, as a pointer press anywhere on the tile does.
